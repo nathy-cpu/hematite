@@ -4,6 +4,7 @@
 //! Built entirely with the standard Rust library.
 
 pub mod btree;
+pub mod catalog;
 pub mod error;
 pub mod storage;
 
