@@ -49,6 +49,7 @@ impl Page {
 }
 
 /// Main storage engine interface
+#[derive(Debug)]
 pub struct StorageEngine {
     file_manager: file_manager::FileManager,
     buffer_pool: buffer_pool::BufferPool,

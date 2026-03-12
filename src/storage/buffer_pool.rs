@@ -3,6 +3,7 @@
 use crate::storage::{Page, PageId};
 use std::collections::{HashMap, VecDeque};
 
+#[derive(Debug)]
 pub struct BufferPool {
     capacity: usize,
     pages: HashMap<PageId, Page>,

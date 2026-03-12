@@ -6,6 +6,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
+#[derive(Debug)]
 pub struct FileManager {
     file: File,
     next_page_id: u32,
