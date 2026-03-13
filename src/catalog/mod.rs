@@ -14,6 +14,7 @@ pub use table::Table;
 pub use types::{DataType, Value};
 
 /// Catalog manager for all database objects
+#[derive(Debug)]
 pub struct Catalog {
     storage: StorageEngine,
     schema_page_id: PageId,

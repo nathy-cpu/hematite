@@ -185,7 +185,19 @@ impl StorageEngine {
 
         // Find space in the page (simplified - just append)
         if header.row_count < MAX_ROWS_PER_PAGE as u32 {
-            let offset = 64 + (header.row_count as usize * serialized_row.len()); // Header + existing rows
+            // Calculate current offset by reading existing rows to find the end
+            let mut offset = 64; // Start after header
+            for _ in 0..header.row_count {
+                // Read row length for existing row
+                if offset + 4 <= PAGE_SIZE {
+                    let existing_row_length =
+                        self.read_row_length(&page.data[offset..offset + 4])?;
+                    offset += 4 + existing_row_length;
+                } else {
+                    break;
+                }
+            }
+
             if offset + serialized_row.len() <= PAGE_SIZE {
                 page.data[offset..offset + serialized_row.len()].copy_from_slice(&serialized_row);
                 header.row_count += 1;

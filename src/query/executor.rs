@@ -362,6 +362,80 @@ mod tests {
     use crate::catalog::types::{DataType, Value};
 
     #[test]
+    fn test_select_executor_debug() -> Result<()> {
+        println!("=== Starting Select Executor Debug Test ===");
+
+        let mut catalog = Schema::new();
+
+        // Create test table
+        let columns = vec![
+            Column::new(
+                crate::catalog::ColumnId::new(1),
+                "id".to_string(),
+                DataType::Integer,
+            )
+            .primary_key(true),
+            Column::new(
+                crate::catalog::ColumnId::new(2),
+                "name".to_string(),
+                DataType::Text,
+            ),
+        ];
+        catalog.create_table("users".to_string(), columns)?;
+
+        let mut storage = StorageEngine::new(":memory:".to_string())?;
+        // Create table in storage as well
+        storage.create_table("users")?;
+
+        // Add some test data
+        println!("✓ Inserting row 1");
+        storage.insert_into_table(
+            "users",
+            vec![Value::Integer(1), Value::Text("Alice".to_string())],
+        )?;
+        println!("✓ Inserting row 2");
+        storage.insert_into_table(
+            "users",
+            vec![Value::Integer(2), Value::Text("Bob".to_string())],
+        )?;
+        println!("✓ Inserting row 3");
+        storage.insert_into_table(
+            "users",
+            vec![Value::Integer(3), Value::Text("Charlie".to_string())],
+        )?;
+
+        // Debug: Read all rows directly from storage
+        println!("✓ Reading all rows from storage...");
+        let all_rows = storage.read_from_table("users")?;
+        println!("✓ Found {} rows in storage", all_rows.len());
+        for (i, row) in all_rows.iter().enumerate() {
+            println!("✓ Row {}: {:?}", i, row);
+        }
+
+        let mut ctx = ExecutionContext::new(&catalog, &mut storage);
+
+        let statement = SelectStatement {
+            columns: vec![SelectItem::Column("id".to_string())],
+            from: TableReference::Table("users".to_string()),
+            where_clause: None,
+        };
+
+        let mut executor = SelectExecutor::new(statement);
+        let result = executor.execute(&mut ctx)?;
+
+        println!("✓ Query result columns: {:?}", result.columns);
+        println!("✓ Query result rows: {}", result.rows.len());
+        for (i, row) in result.rows.iter().enumerate() {
+            println!("✓ Query row {}: {:?}", i, row);
+        }
+
+        assert_eq!(result.columns, vec!["id"]);
+        assert_eq!(result.rows.len(), 3); // 3 simulated rows
+        println!("✓ SUCCESS: Select executor test passed");
+        Ok(())
+    }
+
+    #[test]
     fn test_select_executor() -> Result<()> {
         let mut catalog = Schema::new();
 
@@ -382,6 +456,22 @@ mod tests {
         catalog.create_table("users".to_string(), columns)?;
 
         let mut storage = StorageEngine::new(":memory:".to_string())?;
+        // Create table in storage as well
+        storage.create_table("users")?;
+
+        // Add some test data
+        storage.insert_into_table(
+            "users",
+            vec![Value::Integer(1), Value::Text("Alice".to_string())],
+        )?;
+        storage.insert_into_table(
+            "users",
+            vec![Value::Integer(2), Value::Text("Bob".to_string())],
+        )?;
+        storage.insert_into_table(
+            "users",
+            vec![Value::Integer(3), Value::Text("Charlie".to_string())],
+        )?;
         let mut ctx = ExecutionContext::new(&catalog, &mut storage);
 
         let statement = SelectStatement {
@@ -419,6 +509,8 @@ mod tests {
         catalog.create_table("users".to_string(), columns)?;
 
         let mut storage = StorageEngine::new(":memory:".to_string())?;
+        // Create table in storage as well
+        storage.create_table("users")?;
         let mut ctx = ExecutionContext::new(&catalog, &mut storage);
 
         let statement = InsertStatement {
