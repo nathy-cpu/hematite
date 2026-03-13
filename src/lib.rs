@@ -8,6 +8,7 @@ pub mod catalog;
 pub mod error;
 pub mod parser;
 pub mod query;
+pub mod sql;
 pub mod storage;
 
 pub use btree::tree::BTreeManager;
@@ -16,4 +17,7 @@ pub use error::{HematiteError, Result};
 pub use parser::parser::Parser;
 pub use parser::{ast::*, Lexer};
 pub use query::{ExecutionContext, QueryExecutor, QueryPlanner, QueryResult};
-pub use storage::{Database, StorageEngine};
+pub use sql::{
+    Connection, Database, Hematite, PreparedStatement, ResultSet, Row, StatementResult, Transaction,
+};
+pub use storage::{Database as StorageDatabase, StorageEngine};

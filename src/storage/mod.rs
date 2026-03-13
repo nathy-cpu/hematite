@@ -94,6 +94,11 @@ impl StorageEngine {
         let page_id = self.file_manager.allocate_page()?;
         Ok(page_id)
     }
+
+    pub fn flush(&mut self) -> Result<()> {
+        self.file_manager.flush()?;
+        Ok(())
+    }
 }
 
 /// High-level database interface
@@ -108,7 +113,7 @@ impl Database {
     }
 
     pub fn close(&mut self) -> Result<()> {
-        self.storage.file_manager.flush()?;
+        self.storage.flush()?;
         Ok(())
     }
 }

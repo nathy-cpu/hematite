@@ -2,7 +2,7 @@
 
 use crate::error::{HematiteError, Result};
 use crate::parser::ast::*;
-use crate::parser::lexer::{Lexer, Token};
+use crate::parser::lexer::Token;
 
 pub struct Parser {
     tokens: Vec<Token>,

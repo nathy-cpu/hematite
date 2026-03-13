@@ -1,9 +1,8 @@
 //! Query optimizer for improving query execution plans
 
-use crate::catalog::{Schema, Table};
-use crate::error::{HematiteError, Result};
-use crate::parser::ast::*;
-use crate::query::planner::{ColumnAccess, IndexUsage, QueryPlan, SelectAnalysis};
+use crate::catalog::Schema;
+use crate::error::Result;
+use crate::query::planner::{QueryPlan, SelectAnalysis};
 
 #[derive(Debug, Clone)]
 pub struct QueryOptimizer {
@@ -130,7 +129,7 @@ impl SelectOptimizations {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::types::{DataType, Value};
+    use crate::catalog::types::DataType;
 
     #[test]
     fn test_query_optimizer() -> Result<()> {

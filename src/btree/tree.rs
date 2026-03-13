@@ -1,6 +1,6 @@
 //! B-tree operations and management
 
-use crate::btree::{BTreeIndex, BTreeKey, BTreeNode, BTreeValue, NodeType};
+use crate::btree::{BTreeIndex, BTreeNode, NodeType};
 use crate::error::{HematiteError, Result};
 use crate::storage::{Page, PageId, StorageEngine};
 
@@ -148,7 +148,7 @@ impl TreeStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{StorageEngine, PAGE_SIZE};
+    use crate::btree::{BTreeKey, BTreeValue};
 
     #[test]
     fn test_btree_key_comparison() {

@@ -11,6 +11,7 @@ pub enum HematiteError {
     InvalidSchema(String),
     ParseError(String),
     StorageError(String),
+    InternalError(String),
 }
 
 impl fmt::Display for HematiteError {
@@ -23,6 +24,7 @@ impl fmt::Display for HematiteError {
             HematiteError::InvalidSchema(msg) => write!(f, "Invalid schema: {}", msg),
             HematiteError::ParseError(msg) => write!(f, "Parse error: {}", msg),
             HematiteError::StorageError(msg) => write!(f, "Storage error: {}", msg),
+            HematiteError::InternalError(msg) => write!(f, "Internal error: {}", msg),
         }
     }
 }

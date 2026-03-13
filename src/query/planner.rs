@@ -1,10 +1,10 @@
 //! Query planning and optimization
 
-use crate::catalog::{Catalog, DataType, Schema, Table};
-use crate::error::{HematiteError, Result};
+use crate::catalog::{Schema, Table};
+use crate::error::Result;
 use crate::parser::ast::*;
 use crate::query::executor::{CreateExecutor, InsertExecutor, QueryExecutor, SelectExecutor};
-use std::collections::HashMap;
+use crate::HematiteError;
 
 pub struct QueryPlan {
     pub executor: Box<dyn QueryExecutor>,
@@ -171,7 +171,7 @@ impl QueryPlanner {
         Ok(accessed_columns)
     }
 
-    fn estimate_table_rows(&self, table: &Table) -> usize {
+    fn estimate_table_rows(&self, _table: &Table) -> usize {
         // For now, return a fixed estimate (in a real implementation, this would use statistics)
         1000
     }

@@ -1,6 +1,6 @@
 //! Query execution engine for processing SQL statements
 
-use crate::catalog::{Column, DataType, Schema, Table, TableId, Value};
+use crate::catalog::{Column, DataType, Schema, Table, Value};
 use crate::error::{HematiteError, Result};
 use crate::parser::ast::*;
 use crate::storage::StorageEngine;
@@ -12,19 +12,19 @@ pub struct QueryResult {
 }
 
 #[derive(Debug)]
-pub struct ExecutionContext {
+pub struct ExecutionContext<'a> {
     pub catalog: Schema,
-    pub storage: StorageEngine,
+    pub storage: &'a StorageEngine,
 }
 
-impl ExecutionContext {
-    pub fn new(catalog: Schema, storage: StorageEngine) -> Self {
+impl<'a> ExecutionContext<'a> {
+    pub fn new(catalog: Schema, storage: &'a StorageEngine) -> Self {
         Self { catalog, storage }
     }
 }
 
 pub trait QueryExecutor {
-    fn execute(&mut self, ctx: &mut ExecutionContext) -> Result<QueryResult>;
+    fn execute(&mut self, ctx: &mut ExecutionContext<'_>) -> Result<QueryResult>;
 }
 
 #[derive(Debug, Clone)]
@@ -167,7 +167,7 @@ impl QueryExecutor for SelectExecutor {
             TableReference::Table(name) => name.clone(),
         };
 
-        let table = ctx.catalog.get_table_by_name(&table_name).ok_or_else(|| {
+        let _table = ctx.catalog.get_table_by_name(&table_name).ok_or_else(|| {
             HematiteError::ParseError(format!("Table '{}' not found", table_name))
         })?;
 
@@ -227,7 +227,7 @@ impl InsertExecutor {
     }
 
     fn validate_values(&self, table: &Table) -> Result<()> {
-        for (row_idx, value_row) in self.statement.values.iter().enumerate() {
+        for (_row_idx, value_row) in self.statement.values.iter().enumerate() {
             for (col_idx, value_expr) in value_row.iter().enumerate() {
                 if col_idx < self.statement.columns.len() {
                     let col_name = &self.statement.columns[col_idx];
@@ -381,7 +381,7 @@ mod tests {
         catalog.create_table("users".to_string(), columns)?;
 
         let storage = StorageEngine::new(":memory:".to_string())?;
-        let mut ctx = ExecutionContext::new(catalog, storage);
+        let mut ctx = ExecutionContext::new(catalog, &storage);
 
         let statement = SelectStatement {
             columns: vec![SelectItem::Column("id".to_string())],
@@ -418,7 +418,7 @@ mod tests {
         catalog.create_table("users".to_string(), columns)?;
 
         let storage = StorageEngine::new(":memory:".to_string())?;
-        let mut ctx = ExecutionContext::new(catalog, storage);
+        let mut ctx = ExecutionContext::new(catalog, &storage);
 
         let statement = InsertStatement {
             table: "users".to_string(),
@@ -441,7 +441,7 @@ mod tests {
     fn test_create_executor() -> Result<()> {
         let catalog = Schema::new();
         let storage = StorageEngine::new(":memory:".to_string())?;
-        let mut ctx = ExecutionContext::new(catalog, storage);
+        let mut ctx = ExecutionContext::new(catalog, &storage);
 
         let statement = CreateStatement {
             table: "test_table".to_string(),
