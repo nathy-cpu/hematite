@@ -2,7 +2,7 @@
 
 use crate::btree::{BTreeKey, BTreeValue, NodeType, BTREE_ORDER};
 use crate::error::{HematiteError, Result};
-use crate::storage::{Page, PageId, PAGE_SIZE, StorageEngine};
+use crate::storage::{Page, PageId, StorageEngine, PAGE_SIZE};
 
 pub const MAX_KEYS: usize = BTREE_ORDER - 1;
 pub const MAX_CHILDREN: usize = BTREE_ORDER;
@@ -46,13 +46,16 @@ impl BTreeNode {
         let node_type = match page.data[0] {
             0 => NodeType::Internal,
             1 => NodeType::Leaf,
-            _ => return Err(HematiteError::CorruptedData("Invalid node type".to_string())),
+            _ => {
+                return Err(HematiteError::CorruptedData(
+                    "Invalid node type".to_string(),
+                ))
+            }
         };
 
         // Read key count from next 4 bytes
-        let key_count = u32::from_le_bytes([
-            page.data[1], page.data[2], page.data[3], page.data[4]
-        ]) as usize;
+        let key_count =
+            u32::from_le_bytes([page.data[1], page.data[2], page.data[3], page.data[4]]) as usize;
 
         let mut node = match node_type {
             NodeType::Internal => Self::new_internal(page.id),
@@ -65,7 +68,7 @@ impl BTreeNode {
         for _ in 0..key_count {
             let key_len = u16::from_le_bytes([page.data[offset], page.data[offset + 1]]) as usize;
             offset += 2;
-            
+
             let key_data = page.data[offset..offset + key_len].to_vec();
             offset += key_len;
             node.keys.push(BTreeKey::new(key_data));
@@ -75,8 +78,10 @@ impl BTreeNode {
         if matches!(node_type, NodeType::Internal) {
             for _ in 0..key_count + 1 {
                 let child_id = u32::from_le_bytes([
-                    page.data[offset], page.data[offset + 1], 
-                    page.data[offset + 2], page.data[offset + 3]
+                    page.data[offset],
+                    page.data[offset + 1],
+                    page.data[offset + 2],
+                    page.data[offset + 3],
                 ]);
                 offset += 4;
                 node.children.push(PageId::new(child_id));
@@ -86,9 +91,10 @@ impl BTreeNode {
         // Read values for leaf nodes
         if matches!(node_type, NodeType::Leaf) {
             for _ in 0..key_count {
-                let value_len = u16::from_le_bytes([page.data[offset], page.data[offset + 1]]) as usize;
+                let value_len =
+                    u16::from_le_bytes([page.data[offset], page.data[offset + 1]]) as usize;
                 offset += 2;
-                
+
                 let value_data = page.data[offset..offset + value_len].to_vec();
                 offset += value_len;
                 node.values.push(BTreeValue::new(value_data));
@@ -119,7 +125,7 @@ impl BTreeNode {
             let key_len = (key.data.len() as u16).to_le_bytes();
             page.data[offset..offset + 2].copy_from_slice(&key_len);
             offset += 2;
-            
+
             page.data[offset..offset + key.data.len()].copy_from_slice(&key.data);
             offset += key.data.len();
         }
@@ -138,7 +144,7 @@ impl BTreeNode {
                 let value_len = (value.data.len() as u16).to_le_bytes();
                 page.data[offset..offset + 2].copy_from_slice(&value_len);
                 offset += 2;
-                
+
                 page.data[offset..offset + value.data.len()].copy_from_slice(&value.data);
                 offset += value.data.len();
             }
@@ -194,20 +200,33 @@ impl BTreeNode {
     }
 
     pub fn insert_leaf(&mut self, key: BTreeKey, value: BTreeValue) -> Result<()> {
-        let pos = self.keys.iter().position(|k| k >= &key).unwrap_or(self.keys.len());
+        let pos = self
+            .keys
+            .iter()
+            .position(|k| k >= &key)
+            .unwrap_or(self.keys.len());
         self.keys.insert(pos, key);
         self.values.insert(pos, value);
         Ok(())
     }
 
     pub fn insert_internal(&mut self, key: BTreeKey, child_page_id: PageId) -> Result<()> {
-        let pos = self.keys.iter().position(|k| k >= &key).unwrap_or(self.keys.len());
+        let pos = self
+            .keys
+            .iter()
+            .position(|k| k >= &key)
+            .unwrap_or(self.keys.len());
         self.keys.insert(pos, key);
         self.children.insert(pos + 1, child_page_id);
         Ok(())
     }
 
-    pub fn split_leaf(&mut self, storage: &mut StorageEngine, new_key: BTreeKey, new_value: BTreeValue) -> Result<(BTreeKey, PageId)> {
+    pub fn split_leaf(
+        &mut self,
+        storage: &mut StorageEngine,
+        new_key: BTreeKey,
+        new_value: BTreeValue,
+    ) -> Result<(BTreeKey, PageId)> {
         // Insert the new key/value first
         self.insert_leaf(new_key, new_value)?;
 
@@ -235,7 +254,12 @@ impl BTreeNode {
         Ok((split_key, new_page_id))
     }
 
-    pub fn split_internal(&mut self, storage: &mut StorageEngine, new_key: BTreeKey, new_child: PageId) -> Result<(BTreeKey, PageId)> {
+    pub fn split_internal(
+        &mut self,
+        storage: &mut StorageEngine,
+        new_key: BTreeKey,
+        new_child: PageId,
+    ) -> Result<(BTreeKey, PageId)> {
         // Insert the new key/child first
         self.insert_internal(new_key, new_child)?;
 
@@ -260,6 +284,126 @@ impl BTreeNode {
         storage.write_page(new_page)?;
 
         Ok((split_key, new_page_id))
+    }
+
+    // Delete operations
+    pub fn delete_from_leaf(&mut self, key: &BTreeKey) -> Result<Option<BTreeValue>> {
+        if self.node_type != NodeType::Leaf {
+            return Err(HematiteError::StorageError("Not a leaf node".to_string()));
+        }
+
+        for (i, k) in self.keys.iter().enumerate() {
+            if k == key {
+                let value = self.values.remove(i);
+                self.keys.remove(i);
+                return Ok(Some(value));
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn delete_from_internal(&mut self, key: &BTreeKey) -> Result<(bool, Option<BTreeKey>)> {
+        if self.node_type != NodeType::Internal {
+            return Err(HematiteError::StorageError(
+                "Not an internal node".to_string(),
+            ));
+        }
+
+        // Find the child that might contain the key
+        let child_index = self.find_child_index(key);
+
+        // For now, we'll implement a simplified deletion
+        // In a full implementation, we'd need to handle borrowing and merging
+        Ok((false, None))
+    }
+
+    pub fn find_child_index(&self, key: &BTreeKey) -> usize {
+        for (i, k) in self.keys.iter().enumerate() {
+            if key < k {
+                return i;
+            }
+        }
+        self.keys.len()
+    }
+
+    pub fn can_merge_with(&self, other: &BTreeNode) -> bool {
+        self.keys.len() + other.keys.len() <= MAX_KEYS
+    }
+
+    pub fn merge_leaf(&mut self, other: &mut BTreeNode) -> Result<()> {
+        if self.node_type != NodeType::Leaf || other.node_type != NodeType::Leaf {
+            return Err(HematiteError::StorageError(
+                "Can only merge leaf nodes".to_string(),
+            ));
+        }
+
+        if !self.can_merge_with(other) {
+            return Err(HematiteError::StorageError(
+                "Nodes cannot be merged".to_string(),
+            ));
+        }
+
+        self.keys.append(&mut other.keys);
+        self.values.append(&mut other.values);
+        Ok(())
+    }
+
+    pub fn merge_internal(&mut self, other: &mut BTreeNode, separator_key: BTreeKey) -> Result<()> {
+        if self.node_type != NodeType::Internal || other.node_type != NodeType::Internal {
+            return Err(HematiteError::StorageError(
+                "Can only merge internal nodes".to_string(),
+            ));
+        }
+
+        if !self.can_merge_with(other) {
+            return Err(HematiteError::StorageError(
+                "Nodes cannot be merged".to_string(),
+            ));
+        }
+
+        self.keys.push(separator_key);
+        self.keys.append(&mut other.keys);
+        self.children.append(&mut other.children);
+        Ok(())
+    }
+
+    pub fn borrow_from_sibling(
+        &mut self,
+        sibling: &mut BTreeNode,
+        is_left_sibling: bool,
+    ) -> Result<Option<BTreeKey>> {
+        if self.node_type != NodeType::Leaf || sibling.node_type != NodeType::Leaf {
+            return Err(HematiteError::StorageError(
+                "Can only borrow from leaf siblings".to_string(),
+            ));
+        }
+
+        if sibling.keys.len() <= (MAX_KEYS / 2) {
+            return Ok(None); // Sibling doesn't have enough keys to borrow
+        }
+
+        if is_left_sibling {
+            // Borrow from left sibling (take the last key)
+            let key = sibling.keys.pop().unwrap();
+            let value = sibling.values.pop().unwrap();
+            self.keys.insert(0, key.clone());
+            self.values.insert(0, value);
+            Ok(Some(key))
+        } else {
+            // Borrow from right sibling (take the first key)
+            let key = sibling.keys.remove(0);
+            let value = sibling.values.remove(0);
+            self.keys.push(key.clone());
+            self.values.push(value);
+            Ok(Some(key))
+        }
+    }
+
+    pub fn is_underflow(&self) -> bool {
+        match self.node_type {
+            NodeType::Leaf => self.keys.len() < (MAX_KEYS / 2),
+            NodeType::Internal => self.keys.len() < ((MAX_KEYS - 1) / 2),
+        }
     }
 }
 
