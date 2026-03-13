@@ -21,7 +21,7 @@ pub enum Token {
     Not,
     Null,
     Default,
-    
+
     // Operators
     Equal,
     NotEqual,
@@ -31,14 +31,14 @@ pub enum Token {
     GreaterThanOrEqual,
     And,
     Or,
-    
+
     // Punctuation
     Comma,
     Semicolon,
     LeftParen,
     RightParen,
     Asterisk,
-    
+
     // Literals
     Identifier(String),
     StringLiteral(String),
@@ -62,17 +62,17 @@ impl Lexer {
             tokens: Vec::new(),
         }
     }
-    
+
     pub fn tokenize(&mut self) -> Result<()> {
         while self.position < self.input.len() {
             self.skip_whitespace();
-            
+
             if self.position >= self.input.len() {
                 break;
             }
-            
+
             let ch = self.current_char();
-            
+
             // Handle identifiers and keywords
             if ch.is_alphabetic() || ch == '_' {
                 self.read_identifier()?;
@@ -90,14 +90,14 @@ impl Lexer {
                 self.read_operator_or_punctuation()?;
             }
         }
-        
+
         Ok(())
     }
-    
+
     pub fn get_tokens(&self) -> &[Token] {
         &self.tokens
     }
-    
+
     fn skip_whitespace(&mut self) {
         while self.position < self.input.len() {
             let ch = self.current_char();
@@ -107,18 +107,18 @@ impl Lexer {
             self.position += 1;
         }
     }
-    
+
     fn current_char(&self) -> char {
         self.input.chars().nth(self.position).unwrap_or('\0')
     }
-    
+
     fn peek_char(&self) -> Option<char> {
         self.input.chars().nth(self.position + 1)
     }
-    
+
     fn read_identifier(&mut self) -> Result<()> {
         let start = self.position;
-        
+
         while self.position < self.input.len() {
             let ch = self.current_char();
             if ch.is_alphanumeric() || ch == '_' {
@@ -127,7 +127,7 @@ impl Lexer {
                 break;
             }
         }
-        
+
         let identifier = &self.input[start..self.position];
         let token = match identifier.to_uppercase().as_str() {
             "SELECT" => Token::Select,
@@ -148,15 +148,15 @@ impl Lexer {
             "DEFAULT" => Token::Default,
             _ => Token::Identifier(identifier.to_string()),
         };
-        
+
         self.tokens.push(token);
         Ok(())
     }
-    
+
     fn read_string_literal(&mut self) -> Result<()> {
         self.position += 1; // Skip opening quote
         let start = self.position;
-        
+
         while self.position < self.input.len() {
             let ch = self.current_char();
             if ch == '\'' {
@@ -172,19 +172,23 @@ impl Lexer {
                 self.position += 1;
             }
         }
-        
-        Err(HematiteError::ParseError("Unterminated string literal".to_string()))
+
+        Err(HematiteError::ParseError(
+            "Unterminated string literal".to_string(),
+        ))
     }
-    
+
     fn read_number(&mut self) -> Result<()> {
         let start = self.position;
         let mut has_decimal = false;
-        
+
         while self.position < self.input.len() {
             let ch = self.current_char();
             if ch == '.' {
                 if has_decimal {
-                    return Err(HematiteError::ParseError("Invalid number format".to_string()));
+                    return Err(HematiteError::ParseError(
+                        "Invalid number format".to_string(),
+                    ));
                 }
                 has_decimal = true;
                 self.position += 1;
@@ -194,20 +198,21 @@ impl Lexer {
                 break;
             }
         }
-        
+
         let number_str = &self.input[start..self.position];
-        let number = number_str.parse::<f64>()
+        let number = number_str
+            .parse::<f64>()
             .map_err(|_| HematiteError::ParseError("Invalid number".to_string()))?;
-        
+
         if has_decimal {
             self.tokens.push(Token::NumberLiteral(number));
         } else {
             self.tokens.push(Token::NumberLiteral(number as f64));
         }
-        
+
         Ok(())
     }
-    
+
     fn read_operator_or_punctuation(&mut self) -> Result<()> {
         let ch = self.current_char();
         let token = match ch {
@@ -257,9 +262,14 @@ impl Lexer {
             '(' => Token::LeftParen,
             ')' => Token::RightParen,
             '*' => Token::Asterisk,
-            _ => return Err(HematiteError::ParseError(format!("Unexpected character: {}", ch))),
+            _ => {
+                return Err(HematiteError::ParseError(format!(
+                    "Unexpected character: {}",
+                    ch
+                )))
+            }
         };
-        
+
         self.position += 1;
         self.tokens.push(token);
         Ok(())
@@ -269,28 +279,28 @@ impl Lexer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_simple_select() -> Result<()> {
         let mut lexer = Lexer::new("SELECT * FROM users".to_string());
         lexer.tokenize()?;
-        
+
         let expected = vec![
             Token::Select,
             Token::Asterisk,
             Token::From,
             Token::Identifier("users".to_string()),
         ];
-        
+
         assert_eq!(lexer.get_tokens(), &expected);
         Ok(())
     }
-    
+
     #[test]
     fn test_insert_statement() -> Result<()> {
         let mut lexer = Lexer::new("INSERT INTO users (id, name) VALUES (1, 'John')".to_string());
         lexer.tokenize()?;
-        
+
         let expected = vec![
             Token::Insert,
             Token::Into,
@@ -307,16 +317,17 @@ mod tests {
             Token::StringLiteral("John".to_string()),
             Token::RightParen,
         ];
-        
+
         assert_eq!(lexer.get_tokens(), &expected);
         Ok(())
     }
-    
+
     #[test]
     fn test_create_table() -> Result<()> {
-        let mut lexer = Lexer::new("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)".to_string());
+        let mut lexer =
+            Lexer::new("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)".to_string());
         lexer.tokenize()?;
-        
+
         let expected = vec![
             Token::Create,
             Token::Table,
@@ -331,7 +342,7 @@ mod tests {
             Token::Text,
             Token::RightParen,
         ];
-        
+
         assert_eq!(lexer.get_tokens(), &expected);
         Ok(())
     }

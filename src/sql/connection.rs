@@ -1,6 +1,6 @@
 //! SQL connection and statement interface
 
-use crate::catalog::Schema;
+use crate::catalog::{Column, ColumnId, DataType, Schema};
 use crate::error::{HematiteError, Result};
 use crate::parser::{Lexer, Parser};
 use crate::query::{ExecutionContext, QueryPlanner, QueryResult};
@@ -17,11 +17,37 @@ impl Connection {
     pub fn new(database_path: &str) -> Result<Self> {
         let mut storage = StorageEngine::new(database_path.to_string())?;
 
-        // For now, create a new schema each time (in-memory database)
-        // In a real implementation, we would load/save schema from storage
-        let schema = Arc::new(Mutex::new(Schema::new()));
+        // Load existing schema from storage
+        let schema = Self::load_schema(&mut storage)?;
 
         Ok(Self { storage, schema })
+    }
+
+    fn load_schema(storage: &mut StorageEngine) -> Result<Arc<Mutex<Schema>>> {
+        // Load schema from existing table metadata
+        let mut schema = Schema::new();
+
+        // Get table metadata from storage engine
+        let table_metadata = storage.get_table_metadata();
+
+        // Reconstruct schema from table metadata
+        for (table_name, _metadata) in table_metadata {
+            // Create a placeholder table with basic columns
+            // In a real implementation, we would persist column definitions
+            let columns = vec![
+                Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer)
+                    .primary_key(true),
+                Column::new(ColumnId::new(2), "data".to_string(), DataType::Text),
+            ];
+
+            // Create the table in the schema
+            if let Err(_) = schema.create_table(table_name.clone(), columns) {
+                // If table creation fails, skip it
+                continue;
+            }
+        }
+
+        Ok(Arc::new(Mutex::new(schema)))
     }
 
     pub fn close(&mut self) -> Result<()> {
@@ -38,12 +64,15 @@ impl Connection {
         let statement = parser.parse()?;
 
         // Create execution context
-        let schema = self
-            .schema
-            .lock()
-            .map_err(|_| HematiteError::InternalError("Schema lock error".to_string()))?;
-        let schema_clone = schema.clone();
-        let mut ctx = ExecutionContext::new(&schema_clone, &mut self.storage);
+        let schema = {
+            let schema_guard = self
+                .schema
+                .lock()
+                .map_err(|_| HematiteError::InternalError("Schema lock error".to_string()))?;
+            schema_guard.clone()
+        };
+
+        let mut ctx = ExecutionContext::new(&schema, &mut self.storage);
 
         // Plan and execute query
         let planner = QueryPlanner::new(schema.clone());
@@ -54,11 +83,13 @@ impl Connection {
         let result = executor.execute(&mut ctx)?;
 
         // Update schema if it was modified
-        *self
-            .schema
-            .lock()
-            .map_err(|_| HematiteError::InternalError("Schema lock error".to_string()))? =
-            ctx.catalog;
+        {
+            let mut schema_guard = self
+                .schema
+                .lock()
+                .map_err(|_| HematiteError::InternalError("Schema lock error".to_string()))?;
+            *schema_guard = ctx.catalog;
+        }
 
         Ok(result)
     }
@@ -112,11 +143,13 @@ impl PreparedStatement {
         let result = executor.execute(&mut ctx)?;
 
         // Update schema if it was modified
-        *connection
-            .schema
-            .lock()
-            .map_err(|_| HematiteError::InternalError("Schema lock error".to_string()))? =
-            ctx.catalog;
+        {
+            let mut schema_guard = connection
+                .schema
+                .lock()
+                .map_err(|_| HematiteError::InternalError("Schema lock error".to_string()))?;
+            *schema_guard = ctx.catalog;
+        }
 
         Ok(result)
     }

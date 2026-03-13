@@ -91,11 +91,16 @@ impl StorageEngine {
         let file_manager = file_manager::FileManager::new(path)?;
         let buffer_pool = buffer_pool::BufferPool::new(100); // 100 pages in memory
 
-        Ok(Self {
+        let mut engine = Self {
             file_manager,
             buffer_pool,
             table_metadata: std::collections::HashMap::new(),
-        })
+        };
+
+        // Load existing table metadata
+        engine.load_table_metadata()?;
+
+        Ok(engine)
     }
 
     pub fn read_page(&mut self, page_id: PageId) -> Result<Page> {
@@ -128,7 +133,130 @@ impl StorageEngine {
     }
 
     pub fn flush(&mut self) -> Result<()> {
+        self.save_table_metadata()?;
         self.file_manager.flush()?;
+        Ok(())
+    }
+
+    // Table metadata persistence
+    fn load_table_metadata(&mut self) -> Result<()> {
+        // Try to read table metadata from a special page (e.g., page 1)
+        if let Ok(page) = self.file_manager.read_page(PageId::new(1)) {
+            // Check if this page contains table metadata
+            if page.data.len() >= 4 {
+                let metadata_size =
+                    u32::from_le_bytes([page.data[0], page.data[1], page.data[2], page.data[3]])
+                        as usize;
+
+                if metadata_size > 0 && metadata_size + 4 <= PAGE_SIZE {
+                    let metadata_bytes = &page.data[4..4 + metadata_size];
+                    let metadata_str =
+                        String::from_utf8(metadata_bytes.to_vec()).map_err(|_| {
+                            HematiteError::StorageError("Invalid metadata encoding".to_string())
+                        })?;
+
+                    // Parse metadata (simple JSON-like format)
+                    self.parse_table_metadata(&metadata_str)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn get_table_metadata(&self) -> &std::collections::HashMap<String, TableMetadata> {
+        &self.table_metadata
+    }
+
+    fn save_table_metadata(&mut self) -> Result<()> {
+        // Serialize table metadata
+        let metadata_str = self.serialize_table_metadata()?;
+        let metadata_bytes = metadata_str.as_bytes();
+
+        if metadata_bytes.len() > PAGE_SIZE - 4 {
+            return Err(HematiteError::StorageError(
+                "Table metadata too large".to_string(),
+            ));
+        }
+
+        // Create or update metadata page
+        let mut page = Page::new(PageId::new(1));
+
+        // Write metadata size
+        let size_bytes = (metadata_bytes.len() as u32).to_le_bytes();
+        page.data[0..4].copy_from_slice(&size_bytes);
+
+        // Write metadata data
+        page.data[4..4 + metadata_bytes.len()].copy_from_slice(metadata_bytes);
+
+        // Write page to disk
+        self.file_manager.write_page(&page)?;
+
+        Ok(())
+    }
+
+    fn serialize_table_metadata(&self) -> Result<String> {
+        let mut result = String::new();
+
+        for (name, metadata) in &self.table_metadata {
+            if !result.is_empty() {
+                result.push(';');
+            }
+            result.push_str(&format!(
+                "{}:{},{},{}",
+                name,
+                metadata.root_page_id.as_u32(),
+                metadata.row_count,
+                metadata.next_row_id
+            ));
+        }
+
+        Ok(result)
+    }
+
+    fn parse_table_metadata(&mut self, metadata_str: &str) -> Result<()> {
+        if metadata_str.is_empty() {
+            return Ok(());
+        }
+
+        for entry in metadata_str.split(';') {
+            if entry.is_empty() {
+                continue;
+            }
+
+            let parts: Vec<&str> = entry.split(':').collect();
+            if parts.len() != 2 {
+                continue;
+            }
+
+            let table_name = parts[0];
+            let values: Vec<&str> = parts[1].split(',').collect();
+            if values.len() != 3 {
+                continue;
+            }
+
+            let root_page_id = PageId::new(
+                values[0]
+                    .parse::<u32>()
+                    .map_err(|_| HematiteError::StorageError("Invalid page ID".to_string()))?,
+            );
+            let row_count = values[1]
+                .parse::<u64>()
+                .map_err(|_| HematiteError::StorageError("Invalid row count".to_string()))?;
+            let next_row_id = values[2]
+                .parse::<u64>()
+                .map_err(|_| HematiteError::StorageError("Invalid next row ID".to_string()))?;
+
+            self.table_metadata.insert(
+                table_name.to_string(),
+                TableMetadata {
+                    name: table_name.to_string(),
+                    root_page_id,
+                    row_count,
+                    next_row_id,
+                },
+            );
+        }
+
         Ok(())
     }
 

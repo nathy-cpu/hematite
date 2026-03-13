@@ -19,7 +19,7 @@ impl DataType {
             DataType::Float => 8,
         }
     }
-    
+
     pub fn name(&self) -> &'static str {
         match self {
             DataType::Integer => "INTEGER",
@@ -49,7 +49,7 @@ impl Value {
             Value::Null => DataType::Text, // NULL can be any type
         }
     }
-    
+
     pub fn is_compatible_with(&self, data_type: DataType) -> bool {
         match (self, data_type) {
             (Value::Integer(_), DataType::Integer) => true,
@@ -60,35 +60,35 @@ impl Value {
             _ => false,
         }
     }
-    
+
     pub fn as_integer(&self) -> Option<i32> {
         match self {
             Value::Integer(i) => Some(*i),
             _ => None,
         }
     }
-    
+
     pub fn as_text(&self) -> Option<&str> {
         match self {
             Value::Text(s) => Some(s),
             _ => None,
         }
     }
-    
+
     pub fn as_boolean(&self) -> Option<bool> {
         match self {
             Value::Boolean(b) => Some(*b),
             _ => None,
         }
     }
-    
+
     pub fn as_float(&self) -> Option<f64> {
         match self {
             Value::Float(f) => Some(*f),
             _ => None,
         }
     }
-    
+
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
     }

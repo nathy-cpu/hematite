@@ -38,7 +38,7 @@ impl FileManager {
     fn write_header(&mut self) -> Result<()> {
         self.file.seek(SeekFrom::Start(0))?;
         self.file.write_all(&[0; 64])?; // 64-byte header
-        self.next_page_id = 1; // Start page IDs from 1 (page 0 is header)
+        self.next_page_id = 2; // Start page IDs from 2 (page 0 is header, page 1 is metadata)
         Ok(())
     }
 
@@ -48,8 +48,14 @@ impl FileManager {
         self.file.read_exact(&mut header)?;
 
         // For now, just calculate next page ID from file size
+        // Account for page 0 (header) and page 1 (metadata) being reserved
         let file_size = self.file.metadata()?.len();
-        self.next_page_id = ((file_size - 64) / PAGE_SIZE as u64) as u32 + 1;
+        if file_size <= 64 {
+            self.next_page_id = 2; // Only header exists
+        } else {
+            let data_pages = ((file_size - 64) / PAGE_SIZE as u64) as u32;
+            self.next_page_id = if data_pages <= 1 { 2 } else { data_pages + 1 };
+        }
         Ok(())
     }
 

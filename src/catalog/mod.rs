@@ -26,9 +26,8 @@ impl Catalog {
         let schema_page_id = storage.allocate_page()?;
         let mut schema_page = crate::storage::Page::new(schema_page_id);
 
-        let schema = Schema::new();
+        let mut schema = Schema::new();
         schema.serialize(&mut schema_page.data)?;
-
         storage.write_page(schema_page)?;
 
         Ok(Self {
