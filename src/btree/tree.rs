@@ -1,7 +1,7 @@
 //! B-tree operations and management
 
 use crate::btree::{BTreeIndex, BTreeNode, NodeType};
-use crate::error::{HematiteError, Result};
+use crate::error::Result;
 use crate::storage::{Page, PageId, StorageEngine};
 use std::sync::{Arc, Mutex};
 
@@ -32,16 +32,9 @@ impl BTreeManager {
         let _page = self.storage.lock().unwrap().read_page(root_page_id)?;
         let _node = BTreeNode::from_page(_page)?; // Will error if invalid
 
-        // Create a new BTreeIndex with the same storage
-        // Note: This is a workaround since we can't clone StorageEngine
-        // In a real implementation, we might use Arc<RefCell<StorageEngine>> or similar
-        let mut new_storage = StorageEngine::new("_test.db".to_string())?; // Temporary workaround
-        let index = BTreeIndex::new(new_storage, root_page_id);
-
-        // For now, we'll return an error until we fix the storage engine ownership issue
-        Err(HematiteError::StorageError(
-            "open_tree needs storage engine refactoring".to_string(),
-        ))
+        // Create a BTreeIndex with the shared storage engine
+        let index = BTreeIndex::from_shared_storage(self.storage.clone(), root_page_id);
+        Ok(index)
     }
 
     pub fn delete_tree(&mut self, root_page_id: PageId) -> Result<()> {
@@ -57,18 +50,17 @@ impl BTreeManager {
         match node.node_type {
             NodeType::Leaf => {
                 // Leaf nodes have no children, just deallocate the page
-                // Note: In a real implementation, we'd add the page back to a free list
+                self.storage.lock().unwrap().deallocate_page(page_id)?;
             }
             NodeType::Internal => {
                 // Recursively delete all children
                 for child_page_id in node.children {
                     self.delete_tree_recursive(child_page_id)?;
                 }
+                // Deallocate the internal node page
+                self.storage.lock().unwrap().deallocate_page(page_id)?;
             }
         }
-
-        // Deallocate the current page
-        // Note: In a real implementation, we'd add the page back to a free list
         Ok(())
     }
 

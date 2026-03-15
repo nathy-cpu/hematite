@@ -10,6 +10,7 @@ use std::path::Path;
 pub struct FileManager {
     file: File,
     next_page_id: u32,
+    free_pages: Vec<PageId>,
 }
 
 impl FileManager {
@@ -23,6 +24,7 @@ impl FileManager {
         let mut manager = Self {
             file,
             next_page_id: 0,
+            free_pages: Vec::new(),
         };
 
         // Initialize if file is empty
@@ -81,18 +83,32 @@ impl FileManager {
     }
 
     pub fn allocate_page(&mut self) -> Result<PageId> {
-        let page_id = PageId::new(self.next_page_id);
-        self.next_page_id += 1;
+        // Try to reuse a free page first
+        if let Some(free_page_id) = self.free_pages.pop() {
+            Ok(free_page_id)
+        } else {
+            // Allocate new page
+            let page_id = PageId::new(self.next_page_id);
+            self.next_page_id += 1;
 
-        // Initialize the new page with zeros
-        let page = Page::new(page_id);
-        self.write_page(&page)?;
+            // Initialize new page with zeros
+            let page = Page::new(page_id);
+            self.write_page(&page)?;
 
-        Ok(page_id)
+            Ok(page_id)
+        }
     }
 
     pub fn flush(&mut self) -> Result<()> {
         self.file.sync_all()?;
+        Ok(())
+    }
+
+    pub fn deallocate_page(&mut self, page_id: PageId) -> Result<()> {
+        // Add to free list for reuse
+        if !self.free_pages.contains(&page_id) {
+            self.free_pages.push(page_id);
+        }
         Ok(())
     }
 }

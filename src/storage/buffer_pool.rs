@@ -65,6 +65,18 @@ impl BufferPool {
         self.lru_order.clear();
     }
 
+    pub fn remove(&mut self, page_id: PageId) -> Option<Page> {
+        if let Some(page) = self.pages.remove(&page_id) {
+            // Remove from LRU order
+            if let Some(pos) = self.lru_order.iter().position(|&id| id == page_id) {
+                self.lru_order.remove(pos);
+            }
+            Some(page)
+        } else {
+            None
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.pages.len()
     }

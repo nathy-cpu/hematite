@@ -132,6 +132,14 @@ impl StorageEngine {
         Ok(page_id)
     }
 
+    pub fn deallocate_page(&mut self, page_id: PageId) -> Result<()> {
+        // Remove from buffer pool
+        self.buffer_pool.remove(page_id);
+        // Mark as free in file manager
+        self.file_manager.deallocate_page(page_id)?;
+        Ok(())
+    }
+
     pub fn flush(&mut self) -> Result<()> {
         self.save_table_metadata()?;
         self.file_manager.flush()?;
@@ -141,25 +149,46 @@ impl StorageEngine {
     // Table metadata persistence
     fn load_table_metadata(&mut self) -> Result<()> {
         // Try to read table metadata from a special page (e.g., page 1)
-        if let Ok(page) = self.file_manager.read_page(PageId::new(1)) {
-            // Check if this page contains table metadata
-            if page.data.len() >= 4 {
-                let metadata_size =
-                    u32::from_le_bytes([page.data[0], page.data[1], page.data[2], page.data[3]])
-                        as usize;
+        match self.file_manager.read_page(PageId::new(1)) {
+            Ok(page) => {
+                // Check if this page contains table metadata
+                if page.data.len() >= 4 {
+                    // First check if this might be a B-tree page by looking for magic number
+                    if page.data.len() >= 9 && &page.data[0..4] == b"BTRE" {
+                        // This is a B-tree page, not table metadata, skip it
+                        return Ok(());
+                    }
 
-                if metadata_size > 0 && metadata_size + 4 <= PAGE_SIZE {
-                    let metadata_bytes = &page.data[4..4 + metadata_size];
-                    let metadata_str =
-                        String::from_utf8(metadata_bytes.to_vec()).map_err(|_| {
-                            HematiteError::StorageError("Invalid metadata encoding".to_string())
-                        })?;
+                    // Check if page is all zeros (newly allocated)
+                    if page.data.iter().all(|&b| b == 0) {
+                        // This is a fresh page, no metadata yet
+                        return Ok(());
+                    }
 
-                    // Parse metadata (simple JSON-like format)
-                    self.parse_table_metadata(&metadata_str)?;
+                    let metadata_size = u32::from_le_bytes([
+                        page.data[0],
+                        page.data[1],
+                        page.data[2],
+                        page.data[3],
+                    ]) as usize;
+
+                    if metadata_size > 0 && metadata_size + 4 <= PAGE_SIZE {
+                        let metadata_bytes = &page.data[4..4 + metadata_size];
+                        let metadata_str =
+                            String::from_utf8(metadata_bytes.to_vec()).map_err(|_| {
+                                HematiteError::StorageError("Invalid metadata encoding".to_string())
+                            })?;
+
+                        // Parse metadata (simple JSON-like format)
+                        self.parse_table_metadata(&metadata_str)?;
+                    }
                 }
             }
+            Err(_) => {
+                // Page doesn't exist or can't be read, that's ok for new databases
+            }
         }
+
         Ok(())
     }
 
