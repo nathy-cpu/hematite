@@ -247,7 +247,9 @@ impl BTreeNode {
         self.values.pop();
 
         // Write both nodes
-        self.to_page(&mut storage.read_page(self.page_id)?)?;
+        let mut current_page = storage.read_page(self.page_id)?;
+        self.to_page(&mut current_page)?;
+        storage.write_page(current_page)?;
         new_node.to_page(&mut new_page)?;
         storage.write_page(new_page)?;
 
@@ -279,7 +281,9 @@ impl BTreeNode {
         self.keys.pop();
 
         // Write both nodes
-        self.to_page(&mut storage.read_page(self.page_id)?)?;
+        let mut current_page = storage.read_page(self.page_id)?;
+        self.to_page(&mut current_page)?;
+        storage.write_page(current_page)?;
         new_node.to_page(&mut new_page)?;
         storage.write_page(new_page)?;
 

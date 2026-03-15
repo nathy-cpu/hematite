@@ -32,7 +32,7 @@ impl BTreeManager {
         // Create a new BTreeIndex with the same storage
         // Note: This is a workaround since we can't clone StorageEngine
         // In a real implementation, we might use Arc<RefCell<StorageEngine>> or similar
-        let mut new_storage = StorageEngine::new(":memory:".to_string())?; // Temporary workaround
+        let mut new_storage = StorageEngine::new("_test.db".to_string())?; // Temporary workaround
         let index = BTreeIndex::new(new_storage, root_page_id);
 
         // For now, we'll return an error until we fix the storage engine ownership issue

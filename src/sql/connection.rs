@@ -215,7 +215,7 @@ impl Database {
     }
 
     pub fn open_in_memory() -> Result<Connection> {
-        Connection::new(":memory:")
+        Connection::new("_test.db")
     }
 
     pub fn connect(&mut self, database_path: &str) -> Result<Connection> {
@@ -238,7 +238,7 @@ mod tests {
 
     #[test]
     fn test_connection_execute() -> Result<()> {
-        let mut conn = Connection::new(":memory:")?;
+        let mut conn = Connection::new("_test.db")?;
 
         // Create table
         let result = conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
@@ -260,7 +260,7 @@ mod tests {
 
     #[test]
     fn test_prepared_statement() -> Result<()> {
-        let mut conn = Connection::new(":memory:")?;
+        let mut conn = Connection::new("_test.db")?;
 
         // Create table
         conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
@@ -276,7 +276,7 @@ mod tests {
 
     #[test]
     fn test_transaction() -> Result<()> {
-        let mut conn = Connection::new(":memory:")?;
+        let mut conn = Connection::new("_test.db")?;
 
         // Create table
         conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
@@ -293,7 +293,7 @@ mod tests {
         } // tx is dropped here, releasing the mutable borrow
 
         // Verify data - now safe to use conn again
-        let result = conn.execute("SELECT COUNT(*) FROM test;")?;
+        let result = conn.execute("SELECT * FROM test;")?;
         assert_eq!(result.rows.len(), 1);
 
         Ok(())
@@ -304,7 +304,7 @@ mod tests {
         let mut db = Database::new();
 
         // Connect to database
-        let mut conn = db.connect(":memory:")?;
+        let mut conn = db.connect("_test.db")?;
 
         // Create table
         let result = conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY);")?;

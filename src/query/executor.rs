@@ -383,7 +383,7 @@ mod tests {
         ];
         catalog.create_table("users".to_string(), columns)?;
 
-        let mut storage = StorageEngine::new(":memory:".to_string())?;
+        let mut storage = StorageEngine::new("_test.db".to_string())?;
         // Create table in storage as well
         storage.create_table("users")?;
 
@@ -455,7 +455,7 @@ mod tests {
         ];
         catalog.create_table("users".to_string(), columns)?;
 
-        let mut storage = StorageEngine::new(":memory:".to_string())?;
+        let mut storage = StorageEngine::new("_test.db".to_string())?;
         // Create table in storage as well
         storage.create_table("users")?;
 
@@ -508,7 +508,7 @@ mod tests {
         ];
         catalog.create_table("users".to_string(), columns)?;
 
-        let mut storage = StorageEngine::new(":memory:".to_string())?;
+        let mut storage = StorageEngine::new("_test.db".to_string())?;
         // Create table in storage as well
         storage.create_table("users")?;
         let mut ctx = ExecutionContext::new(&catalog, &mut storage);
@@ -533,7 +533,7 @@ mod tests {
     #[test]
     fn test_create_executor() -> Result<()> {
         let catalog = Schema::new();
-        let mut storage = StorageEngine::new(":memory:".to_string())?;
+        let mut storage = StorageEngine::new("_test.db".to_string())?;
         let mut ctx = ExecutionContext::new(&catalog, &mut storage);
 
         let statement = CreateStatement {

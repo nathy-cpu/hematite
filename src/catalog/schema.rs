@@ -25,6 +25,14 @@ impl Schema {
     }
 
     pub fn create_table(&mut self, name: String, columns: Vec<Column>) -> Result<TableId> {
+        // Check for duplicate table name
+        if self.table_names.contains_key(&name) {
+            return Err(HematiteError::ParseError(format!(
+                "Table '{}' already exists",
+                name
+            )));
+        }
+
         // Validate column names are unique
         let mut column_names = std::collections::HashSet::new();
         for col in &columns {
