@@ -1,35 +1,37 @@
 //! B-tree index implementation
 
-use crate::btree::{BTreeKey, BTreeValue, NodeType, node};
+use crate::btree::{node, BTreeKey, BTreeValue, NodeType};
 use crate::error::{HematiteError, Result};
 use crate::storage::{Page, PageId, StorageEngine};
+use std::sync::{Arc, Mutex};
 
 /// Main B-tree index interface
 pub struct BTreeIndex {
-    storage: StorageEngine,
+    storage: Arc<Mutex<StorageEngine>>,
     root_page_id: PageId,
 }
 
 impl BTreeIndex {
     pub fn new(storage: StorageEngine, root_page_id: PageId) -> Self {
         Self {
-            storage,
+            storage: Arc::new(Mutex::new(storage)),
             root_page_id,
         }
     }
 
-    pub fn new_with_init(mut storage: StorageEngine) -> Result<Self> {
-        // Allocate a page for the root
-        let root_page_id = storage.allocate_page()?;
+    pub fn new_with_init(storage: StorageEngine) -> Result<Self> {
+        // Allocate a page for root
+        let storage_arc = Arc::new(Mutex::new(storage));
+        let root_page_id = storage_arc.lock().unwrap().allocate_page()?;
 
         // Initialize as empty leaf node
-        let mut root_page = storage.read_page(root_page_id)?;
+        let mut root_page = storage_arc.lock().unwrap().read_page(root_page_id)?;
         let root_node = node::BTreeNode::new_leaf(root_page_id);
         root_node.to_page(&mut root_page)?;
-        storage.write_page(root_page)?;
+        storage_arc.lock().unwrap().write_page(root_page)?;
 
         Ok(Self {
-            storage,
+            storage: storage_arc,
             root_page_id,
         })
     }
@@ -38,7 +40,7 @@ impl BTreeIndex {
         let mut current_page_id = self.root_page_id;
 
         loop {
-            let page = self.storage.read_page(current_page_id)?;
+            let page = self.storage.lock().unwrap().read_page(current_page_id)?;
             let node = node::BTreeNode::from_page(page)?;
 
             match node.search(key) {
@@ -69,7 +71,7 @@ impl BTreeIndex {
         key: BTreeKey,
         value: BTreeValue,
     ) -> Result<Option<(BTreeKey, PageId)>> {
-        let mut page = self.storage.read_page(page_id)?;
+        let mut page = self.storage.lock().unwrap().read_page(page_id)?;
         let mut node = node::BTreeNode::from_page(page.clone())?;
 
         match node.node_type {
@@ -77,11 +79,12 @@ impl BTreeIndex {
                 if node.keys.len() < node::MAX_KEYS {
                     node.insert_leaf(key, value)?;
                     node.to_page(&mut page)?;
-                    self.storage.write_page(page)?;
+                    self.storage.lock().unwrap().write_page(page)?;
                     Ok(None)
                 } else {
                     // Leaf split needed
-                    let (new_key, new_page_id) = node.split_leaf(&mut self.storage, key, value)?;
+                    let (new_key, new_page_id) =
+                        node.split_leaf(&mut self.storage.lock().unwrap(), key, value)?;
                     Ok(Some((new_key, new_page_id)))
                 }
             }
@@ -93,17 +96,20 @@ impl BTreeIndex {
                     if node.keys.len() < node::MAX_KEYS {
                         node.insert_internal(split_key, split_page_id)?;
                         node.to_page(&mut page)?;
-                        self.storage.write_page(page)?;
+                        self.storage.lock().unwrap().write_page(page)?;
                         Ok(None)
                     } else {
                         // Internal split needed
-                        let (new_key, new_page_id) =
-                            node.split_internal(&mut self.storage, split_key, split_page_id)?;
+                        let (new_key, new_page_id) = node.split_internal(
+                            &mut self.storage.lock().unwrap(),
+                            split_key,
+                            split_page_id,
+                        )?;
                         Ok(Some((new_key, new_page_id)))
                     }
                 } else {
                     node.to_page(&mut page)?;
-                    self.storage.write_page(page)?;
+                    self.storage.lock().unwrap().write_page(page)?;
                     Ok(None)
                 }
             }
@@ -111,7 +117,7 @@ impl BTreeIndex {
     }
 
     fn create_new_root(&mut self, key: BTreeKey, right_page_id: PageId) -> Result<()> {
-        let new_root_page_id = self.storage.allocate_page()?;
+        let new_root_page_id = self.storage.lock().unwrap().allocate_page()?;
         let mut new_root_page = Page::new(new_root_page_id);
 
         let mut new_root = node::BTreeNode::new_internal(new_root_page_id);
@@ -120,7 +126,7 @@ impl BTreeIndex {
         new_root.children.push(right_page_id);
 
         node::BTreeNode::to_page(&new_root, &mut new_root_page)?;
-        self.storage.write_page(new_root_page)?;
+        self.storage.lock().unwrap().write_page(new_root_page)?;
 
         self.root_page_id = new_root_page_id;
         Ok(())
@@ -138,14 +144,14 @@ impl BTreeIndex {
     }
 
     fn delete_recursive(&mut self, page_id: PageId, key: &BTreeKey) -> Result<Option<BTreeValue>> {
-        let mut page = self.storage.read_page(page_id)?;
+        let mut page = self.storage.lock().unwrap().read_page(page_id)?;
         let mut node = node::BTreeNode::from_page(page.clone())?;
 
         let result = match node.node_type {
             NodeType::Leaf => {
                 let value = node.delete_from_leaf(key)?;
                 node.to_page(&mut page)?;
-                self.storage.write_page(page)?;
+                self.storage.lock().unwrap().write_page(page)?;
                 value
             }
             NodeType::Internal => {
@@ -161,7 +167,7 @@ impl BTreeIndex {
                 }
 
                 node.to_page(&mut page)?;
-                self.storage.write_page(page)?;
+                self.storage.lock().unwrap().write_page(page)?;
                 deleted_value
             }
         };
@@ -170,7 +176,7 @@ impl BTreeIndex {
     }
 
     fn check_root_underflow(&mut self) -> Result<Option<PageId>> {
-        let page = self.storage.read_page(self.root_page_id)?;
+        let page = self.storage.lock().unwrap().read_page(self.root_page_id)?;
         let node = node::BTreeNode::from_page(page)?;
 
         if node.keys.is_empty() && !node.children.is_empty() {
@@ -182,7 +188,7 @@ impl BTreeIndex {
     }
 
     fn is_child_underflow(&mut self, child_page_id: PageId) -> Result<bool> {
-        let page = self.storage.read_page(child_page_id)?;
+        let page = self.storage.lock().unwrap().read_page(child_page_id)?;
         let node = node::BTreeNode::from_page(page)?;
         Ok(node.is_underflow())
     }
@@ -220,11 +226,11 @@ impl BTreeIndex {
         child_index: usize,
         left_sibling_id: PageId,
     ) -> Result<bool> {
-        let mut left_page = self.storage.read_page(left_sibling_id)?;
+        let mut left_page = self.storage.lock().unwrap().read_page(left_sibling_id)?;
         let mut left_sibling = node::BTreeNode::from_page(left_page.clone())?;
 
         let child_id = parent.children[child_index];
-        let mut child_page = self.storage.read_page(child_id)?;
+        let mut child_page = self.storage.lock().unwrap().read_page(child_id)?;
         let mut child_node = node::BTreeNode::from_page(child_page.clone())?;
 
         if let Some(borrowed_key) = child_node.borrow_from_sibling(&mut left_sibling, true)? {
@@ -234,8 +240,8 @@ impl BTreeIndex {
             // Write back changes
             left_sibling.to_page(&mut left_page)?;
             child_node.to_page(&mut child_page)?;
-            self.storage.write_page(left_page)?;
-            self.storage.write_page(child_page)?;
+            self.storage.lock().unwrap().write_page(left_page)?;
+            self.storage.lock().unwrap().write_page(child_page)?;
 
             Ok(true)
         } else {
@@ -249,11 +255,11 @@ impl BTreeIndex {
         child_index: usize,
         right_sibling_id: PageId,
     ) -> Result<bool> {
-        let mut right_page = self.storage.read_page(right_sibling_id)?;
+        let mut right_page = self.storage.lock().unwrap().read_page(right_sibling_id)?;
         let mut right_sibling = node::BTreeNode::from_page(right_page.clone())?;
 
         let child_id = parent.children[child_index];
-        let mut child_page = self.storage.read_page(child_id)?;
+        let mut child_page = self.storage.lock().unwrap().read_page(child_id)?;
         let mut child_node = node::BTreeNode::from_page(child_page.clone())?;
 
         if let Some(borrowed_key) = child_node.borrow_from_sibling(&mut right_sibling, false)? {
@@ -263,8 +269,8 @@ impl BTreeIndex {
             // Write back changes
             right_sibling.to_page(&mut right_page)?;
             child_node.to_page(&mut child_page)?;
-            self.storage.write_page(right_page)?;
-            self.storage.write_page(child_page)?;
+            self.storage.lock().unwrap().write_page(right_page)?;
+            self.storage.lock().unwrap().write_page(child_page)?;
 
             Ok(true)
         } else {
@@ -280,10 +286,10 @@ impl BTreeIndex {
         let left_sibling_id = parent.children[child_index - 1];
         let child_id = parent.children[child_index];
 
-        let mut left_page = self.storage.read_page(left_sibling_id)?;
+        let mut left_page = self.storage.lock().unwrap().read_page(left_sibling_id)?;
         let mut left_sibling = node::BTreeNode::from_page(left_page.clone())?;
 
-        let mut child_page = self.storage.read_page(child_id)?;
+        let mut child_page = self.storage.lock().unwrap().read_page(child_id)?;
         let mut child_node = node::BTreeNode::from_page(child_page.clone())?;
 
         let separator_key = parent.keys.remove(child_index - 1);
@@ -305,7 +311,7 @@ impl BTreeIndex {
 
         // Write back changes
         left_sibling.to_page(&mut left_page)?;
-        self.storage.write_page(left_page)?;
+        self.storage.lock().unwrap().write_page(left_page)?;
         // Note: child_page becomes unused and could be deallocated
 
         Ok(())
@@ -319,10 +325,10 @@ impl BTreeIndex {
         let child_id = parent.children[child_index];
         let right_sibling_id = parent.children[child_index + 1];
 
-        let mut child_page = self.storage.read_page(child_id)?;
+        let mut child_page = self.storage.lock().unwrap().read_page(child_id)?;
         let mut child_node = node::BTreeNode::from_page(child_page.clone())?;
 
-        let mut right_page = self.storage.read_page(right_sibling_id)?;
+        let mut right_page = self.storage.lock().unwrap().read_page(right_sibling_id)?;
         let mut right_sibling = node::BTreeNode::from_page(right_page.clone())?;
 
         let separator_key = parent.keys.remove(child_index);
@@ -344,7 +350,7 @@ impl BTreeIndex {
 
         // Write back changes
         child_node.to_page(&mut child_page)?;
-        self.storage.write_page(child_page)?;
+        self.storage.lock().unwrap().write_page(child_page)?;
         // Note: right_page becomes unused and could be deallocated
 
         Ok(())

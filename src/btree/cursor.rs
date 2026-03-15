@@ -3,10 +3,11 @@
 use crate::btree::{BTreeKey, BTreeNode, BTreeValue, NodeType};
 use crate::error::{HematiteError, Result};
 use crate::storage::{PageId, StorageEngine};
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
 pub struct BTreeCursor {
-    storage: StorageEngine,
+    storage: Arc<Mutex<StorageEngine>>,
     stack: Vec<CursorFrame>,
     at_end: bool,
 }
@@ -21,7 +22,7 @@ struct CursorFrame {
 impl BTreeCursor {
     pub fn new(storage: StorageEngine, root_page_id: PageId) -> Result<Self> {
         let mut cursor = Self {
-            storage,
+            storage: Arc::new(Mutex::new(storage)),
             stack: Vec::new(),
             at_end: false,
         };
@@ -37,7 +38,7 @@ impl BTreeCursor {
         let mut current_page_id = root_page_id;
 
         loop {
-            let page = self.storage.read_page(current_page_id)?;
+            let page = self.storage.lock().unwrap().read_page(current_page_id)?;
             let node = BTreeNode::from_page(page)?;
 
             let node_type = node.node_type;

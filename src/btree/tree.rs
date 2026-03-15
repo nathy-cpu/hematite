@@ -3,30 +3,33 @@
 use crate::btree::{BTreeIndex, BTreeNode, NodeType};
 use crate::error::{HematiteError, Result};
 use crate::storage::{Page, PageId, StorageEngine};
+use std::sync::{Arc, Mutex};
 
 pub struct BTreeManager {
-    storage: StorageEngine,
+    storage: Arc<Mutex<StorageEngine>>,
 }
 
 impl BTreeManager {
     pub fn new(storage: StorageEngine) -> Self {
-        Self { storage }
+        Self {
+            storage: Arc::new(Mutex::new(storage)),
+        }
     }
 
     pub fn create_tree(&mut self) -> Result<PageId> {
-        let root_page_id = self.storage.allocate_page()?;
+        let root_page_id = self.storage.lock().unwrap().allocate_page()?;
         let mut root_page = Page::new(root_page_id);
 
         let root_node = BTreeNode::new_leaf(root_page_id);
         BTreeNode::to_page(&root_node, &mut root_page)?;
 
-        self.storage.write_page(root_page)?;
+        self.storage.lock().unwrap().write_page(root_page)?;
         Ok(root_page_id)
     }
 
     pub fn open_tree(&mut self, root_page_id: PageId) -> Result<BTreeIndex> {
         // Verify that the root page exists and is a valid B-tree node
-        let _page = self.storage.read_page(root_page_id)?;
+        let _page = self.storage.lock().unwrap().read_page(root_page_id)?;
         let _node = BTreeNode::from_page(_page)?; // Will error if invalid
 
         // Create a new BTreeIndex with the same storage
@@ -48,7 +51,7 @@ impl BTreeManager {
     }
 
     fn delete_tree_recursive(&mut self, page_id: PageId) -> Result<()> {
-        let page = self.storage.read_page(page_id)?;
+        let page = self.storage.lock().unwrap().read_page(page_id)?;
         let node = BTreeNode::from_page(page)?;
 
         match node.node_type {
@@ -70,7 +73,7 @@ impl BTreeManager {
     }
 
     pub fn validate_tree(&mut self, root_page_id: PageId) -> Result<bool> {
-        let page = self.storage.read_page(root_page_id)?;
+        let page = self.storage.lock().unwrap().read_page(root_page_id)?;
         let root_node = BTreeNode::from_page(page)?;
 
         self.validate_node_recursive(&root_node)
@@ -100,7 +103,7 @@ impl BTreeManager {
 
                 // Recursively validate children
                 for child_page_id in &node.children {
-                    let page = self.storage.read_page(*child_page_id)?;
+                    let page = self.storage.lock().unwrap().read_page(*child_page_id)?;
                     let child_node = BTreeNode::from_page(page)?;
 
                     if !self.validate_node_recursive(&child_node)? {
@@ -114,7 +117,7 @@ impl BTreeManager {
     }
 
     pub fn get_tree_stats(&mut self, root_page_id: PageId) -> Result<TreeStats> {
-        let page = self.storage.read_page(root_page_id)?;
+        let page = self.storage.lock().unwrap().read_page(root_page_id)?;
         let root_node = BTreeNode::from_page(page)?;
 
         let mut stats = TreeStats::default();
@@ -141,7 +144,7 @@ impl BTreeManager {
                 stats.internal_nodes += 1;
 
                 for child_page_id in &node.children {
-                    let page = self.storage.read_page(*child_page_id)?;
+                    let page = self.storage.lock().unwrap().read_page(*child_page_id)?;
                     let child_node = BTreeNode::from_page(page)?;
                     self.collect_stats_recursive(&child_node, stats, depth + 1)?;
                 }
