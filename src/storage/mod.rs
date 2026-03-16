@@ -628,7 +628,7 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{Page, PageId};
+    use std::fs;
 
     #[test]
     fn test_page_creation() {
@@ -666,5 +666,258 @@ mod tests {
 
         let result = Page::from_bytes(page_id, data);
         assert!(result.is_err());
+    }
+
+    // StorageEngine Integration Tests
+    #[test]
+    fn test_storage_engine_creation() -> Result<()> {
+        let test_path = "_test_storage.db";
+
+        // Clean up any existing test file
+        let _ = fs::remove_file(test_path);
+
+        let storage = StorageEngine::new(test_path)?;
+        assert_eq!(storage.get_table_metadata().len(), 0);
+
+        // Clean up
+        fs::remove_file(test_path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_page_allocation_and_deallocation() -> Result<()> {
+        let test_path = "_test_storage_alloc.db";
+        let _ = fs::remove_file(test_path);
+
+        let mut storage = StorageEngine::new(test_path)?;
+
+        // Allocate pages
+        let page_id1 = storage.allocate_page()?;
+        let page_id2 = storage.allocate_page()?;
+
+        assert_ne!(page_id1, page_id2);
+        assert!(page_id1.as_u32() >= 2); // Should start after header pages
+        assert!(page_id2.as_u32() > page_id1.as_u32());
+
+        // Write and read pages
+        let mut page = Page::new(page_id1);
+        page.data[0..4].copy_from_slice(&[1, 2, 3, 4]);
+        storage.write_page(page)?;
+
+        let read_page = storage.read_page(page_id1)?;
+        assert_eq!(read_page.data[0..4], [1, 2, 3, 4]);
+
+        // Deallocate page
+        storage.deallocate_page(page_id1)?;
+
+        // Clean up
+        fs::remove_file(test_path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_buffer_pool_caching() -> Result<()> {
+        let test_path = "_test_storage_cache.db";
+        let _ = fs::remove_file(test_path);
+
+        let mut storage = StorageEngine::new(test_path)?;
+        let page_id = storage.allocate_page()?;
+
+        // Write page
+        let mut page = Page::new(page_id);
+        page.data[0..4].copy_from_slice(&[42, 42, 42, 42]);
+        storage.write_page(page)?;
+
+        // Read page multiple times (should use cache)
+        for _ in 0..5 {
+            let read_page = storage.read_page(page_id)?;
+            assert_eq!(read_page.data[0..4], [42, 42, 42, 42]);
+        }
+
+        // Clean up
+        fs::remove_file(test_path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_table_operations() -> Result<()> {
+        let test_path = "_test_storage_table.db";
+        let _ = fs::remove_file(test_path);
+
+        let mut storage = StorageEngine::new(test_path)?;
+
+        // Create table
+        storage.create_table("users")?;
+        assert!(storage.table_exists("users"));
+        assert!(!storage.table_exists("nonexistent"));
+
+        // Insert data
+        use crate::catalog::Value;
+        let row = vec![
+            Value::Integer(1),
+            Value::Text("Alice".to_string()),
+            Value::Boolean(true),
+        ];
+        storage.insert_into_table("users", row.clone())?;
+
+        // Read data
+        let rows = storage.read_from_table("users")?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], row);
+
+        // Check metadata
+        let metadata = storage.get_table_metadata();
+        assert!(metadata.contains_key("users"));
+        let table_meta = &metadata["users"];
+        assert_eq!(table_meta.row_count, 1);
+        assert_eq!(table_meta.next_row_id, 2);
+
+        // Clean up
+        fs::remove_file(test_path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_table_metadata_persistence() -> Result<()> {
+        let test_path = "_test_storage_persist.db";
+        let _ = fs::remove_file(test_path);
+
+        // Create table and insert data
+        {
+            let mut storage = StorageEngine::new(test_path)?;
+            storage.create_table("test_table")?;
+
+            use crate::catalog::Value;
+            let row = vec![Value::Integer(123), Value::Text("test".to_string())];
+            storage.insert_into_table("test_table", row)?;
+
+            storage.flush()?; // Ensure metadata is written
+        }
+
+        // Reopen and verify metadata persists
+        {
+            let mut storage = StorageEngine::new(test_path)?;
+            assert!(storage.table_exists("test_table"));
+
+            let metadata = storage.get_table_metadata();
+            let table_meta = &metadata["test_table"];
+            assert_eq!(table_meta.row_count, 1);
+            assert_eq!(table_meta.next_row_id, 2);
+
+            // Verify data is still accessible
+            let rows = storage.read_from_table("test_table")?;
+            assert_eq!(rows.len(), 1);
+        }
+
+        // Clean up
+        fs::remove_file(test_path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_row_serialization_roundtrip() -> Result<()> {
+        let test_path = "_test_storage_serial.db";
+        let _ = fs::remove_file(test_path);
+
+        let mut storage = StorageEngine::new(test_path)?;
+        storage.create_table("test")?;
+
+        use crate::catalog::Value;
+        let original_rows = vec![
+            vec![
+                Value::Integer(42),
+                Value::Text("hello".to_string()),
+                Value::Boolean(true),
+                Value::Float(3.14),
+                Value::Null,
+            ],
+            vec![
+                Value::Integer(-100),
+                Value::Text("world".to_string()),
+                Value::Boolean(false),
+                Value::Float(-2.71),
+            ],
+        ];
+
+        // Insert rows
+        for row in &original_rows {
+            storage.insert_into_table("test", row.clone())?;
+        }
+
+        // Read rows back
+        let read_rows = storage.read_from_table("test")?;
+        assert_eq!(read_rows.len(), original_rows.len());
+
+        for (original, read) in original_rows.iter().zip(read_rows.iter()) {
+            assert_eq!(original, read);
+        }
+
+        // Clean up
+        fs::remove_file(test_path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_error_scenarios() -> Result<()> {
+        let test_path = "_test_storage_error.db";
+        let _ = fs::remove_file(test_path);
+
+        let mut storage = StorageEngine::new(test_path)?;
+
+        // Test duplicate table creation
+        storage.create_table("duplicate_test")?;
+        let result = storage.create_table("duplicate_test");
+        assert!(result.is_err());
+
+        // Test operations on nonexistent table
+        use crate::catalog::Value;
+        let result = storage.insert_into_table("nonexistent", vec![Value::Integer(1)]);
+        assert!(result.is_err());
+
+        let result = storage.read_from_table("nonexistent");
+        assert!(result.is_err());
+
+        // Test invalid page operations
+        let invalid_page_id = PageId::new(999999);
+        let result = storage.read_page(invalid_page_id);
+        assert!(result.is_err());
+
+        // Clean up
+        fs::remove_file(test_path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_page_header_operations() -> Result<()> {
+        let test_path = "_test_storage_header.db";
+        let _ = fs::remove_file(test_path);
+
+        let mut storage = StorageEngine::new(test_path)?;
+        let page_id = storage.allocate_page()?;
+
+        // Create page with header
+        let mut page = Page::new(page_id);
+        let header = TablePageHeader {
+            page_type: PageType::TableData,
+            row_count: 5,
+            next_page_id: PageId::new(10),
+            prev_page_id: PageId::new(20),
+        };
+
+        storage.write_page_header(&mut page, &header)?;
+        storage.write_page(page)?;
+
+        // Read and verify header
+        let read_page = storage.read_page(page_id)?;
+        let read_header = storage.read_page_header(&read_page)?;
+
+        assert_eq!(read_header.page_type, PageType::TableData);
+        assert_eq!(read_header.row_count, 5);
+        assert_eq!(read_header.next_page_id, PageId::new(10));
+        assert_eq!(read_header.prev_page_id, PageId::new(20));
+
+        // Clean up
+        fs::remove_file(test_path)?;
+        Ok(())
     }
 }
