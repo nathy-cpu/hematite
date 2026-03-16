@@ -317,3 +317,229 @@ impl Column {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::types::{DataType, Value};
+
+    #[test]
+    fn test_column_creation() {
+        let column = Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer);
+
+        assert_eq!(column.id.as_u32(), 1);
+        assert_eq!(column.name, "id");
+        assert_eq!(column.data_type, DataType::Integer);
+        assert!(column.nullable);
+        assert!(!column.primary_key);
+        assert!(column.default_value.is_none());
+    }
+
+    #[test]
+    fn test_column_builder() {
+        let column = Column::new(ColumnId::new(1), "name".to_string(), DataType::Text)
+            .nullable(false)
+            .primary_key(true)
+            .default_value(Value::Text("default".to_string()));
+
+        assert!(!column.nullable);
+        assert!(column.primary_key);
+        assert_eq!(
+            column.default_value,
+            Some(Value::Text("default".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_column_validation() {
+        // Test valid values
+        let int_column = Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer);
+        assert!(int_column.validate_value(&Value::Integer(42)));
+        assert!(int_column.validate_value(&Value::Null)); // NULL is allowed by default
+
+        let non_null_int_column =
+            Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer).nullable(false);
+        assert!(non_null_int_column.validate_value(&Value::Integer(42)));
+        assert!(!non_null_int_column.validate_value(&Value::Null)); // NULL not allowed
+
+        // Test type compatibility
+        assert!(!int_column.validate_value(&Value::Text("not an integer".to_string())));
+        assert!(!int_column.validate_value(&Value::Boolean(true)));
+        assert!(!int_column.validate_value(&Value::Float(3.14)));
+
+        let text_column = Column::new(ColumnId::new(2), "name".to_string(), DataType::Text);
+        assert!(text_column.validate_value(&Value::Text("hello".to_string())));
+        assert!(!text_column.validate_value(&Value::Integer(42)));
+    }
+
+    #[test]
+    fn test_column_default_values() {
+        // Column with explicit default
+        let column_with_default =
+            Column::new(ColumnId::new(1), "status".to_string(), DataType::Text)
+                .default_value(Value::Text("active".to_string()));
+        assert_eq!(
+            column_with_default.get_default_or_null(),
+            Value::Text("active".to_string())
+        );
+
+        // Nullable column without default
+        let nullable_column =
+            Column::new(ColumnId::new(2), "description".to_string(), DataType::Text).nullable(true);
+        assert_eq!(nullable_column.get_default_or_null(), Value::Null);
+
+        // Non-nullable column without default (should get type default)
+        let non_null_int_column =
+            Column::new(ColumnId::new(3), "count".to_string(), DataType::Integer).nullable(false);
+        assert_eq!(non_null_int_column.get_default_or_null(), Value::Integer(0));
+
+        let non_null_text_column =
+            Column::new(ColumnId::new(4), "name".to_string(), DataType::Text).nullable(false);
+        assert_eq!(
+            non_null_text_column.get_default_or_null(),
+            Value::Text(String::new())
+        );
+
+        let non_null_bool_column =
+            Column::new(ColumnId::new(5), "active".to_string(), DataType::Boolean).nullable(false);
+        assert_eq!(
+            non_null_bool_column.get_default_or_null(),
+            Value::Boolean(false)
+        );
+
+        let non_null_float_column =
+            Column::new(ColumnId::new(6), "price".to_string(), DataType::Float).nullable(false);
+        assert_eq!(
+            non_null_float_column.get_default_or_null(),
+            Value::Float(0.0)
+        );
+    }
+
+    #[test]
+    fn test_column_size() {
+        let int_column = Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer);
+        assert_eq!(int_column.size(), 4);
+
+        let text_column = Column::new(ColumnId::new(2), "name".to_string(), DataType::Text);
+        assert_eq!(text_column.size(), 255);
+
+        let bool_column = Column::new(ColumnId::new(3), "active".to_string(), DataType::Boolean);
+        assert_eq!(bool_column.size(), 1);
+
+        let float_column = Column::new(ColumnId::new(4), "price".to_string(), DataType::Float);
+        assert_eq!(float_column.size(), 8);
+    }
+
+    #[test]
+    fn test_column_serialization_roundtrip() -> Result<(), crate::error::HematiteError> {
+        let original = Column::new(
+            ColumnId::new(42),
+            "test_column".to_string(),
+            DataType::Integer,
+        )
+        .nullable(false)
+        .primary_key(true)
+        .default_value(Value::Integer(123));
+
+        let mut buffer = Vec::new();
+        original.serialize(&mut buffer)?;
+
+        let mut offset = 0;
+        let deserialized = Column::deserialize(&buffer, &mut offset)?;
+
+        assert_eq!(original.id, deserialized.id);
+        assert_eq!(original.name, deserialized.name);
+        assert_eq!(original.data_type, deserialized.data_type);
+        assert_eq!(original.nullable, deserialized.nullable);
+        assert_eq!(original.primary_key, deserialized.primary_key);
+        assert_eq!(original.default_value, deserialized.default_value);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_column_serialization_no_default() -> Result<(), crate::error::HematiteError> {
+        let original = Column::new(ColumnId::new(1), "simple".to_string(), DataType::Boolean);
+
+        let mut buffer = Vec::new();
+        original.serialize(&mut buffer)?;
+
+        let mut offset = 0;
+        let deserialized = Column::deserialize(&buffer, &mut offset)?;
+
+        assert_eq!(original.default_value, deserialized.default_value);
+        assert!(deserialized.default_value.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_column_serialization_text_default() -> Result<(), crate::error::HematiteError> {
+        let original = Column::new(ColumnId::new(1), "message".to_string(), DataType::Text)
+            .default_value(Value::Text("hello world".to_string()));
+
+        let mut buffer = Vec::new();
+        original.serialize(&mut buffer)?;
+
+        let mut offset = 0;
+        let deserialized = Column::deserialize(&buffer, &mut offset)?;
+
+        assert_eq!(
+            deserialized.default_value,
+            Some(Value::Text("hello world".to_string()))
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_column_serialization_null_default() -> Result<(), crate::error::HematiteError> {
+        let original = Column::new(ColumnId::new(1), "optional".to_string(), DataType::Integer)
+            .default_value(Value::Null);
+
+        let mut buffer = Vec::new();
+        original.serialize(&mut buffer)?;
+
+        let mut offset = 0;
+        let deserialized = Column::deserialize(&buffer, &mut offset)?;
+
+        assert_eq!(deserialized.default_value, Some(Value::Null));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_column_deserialization_errors() {
+        let buffer = vec![]; // Empty buffer
+        let mut offset = 0;
+        assert!(Column::deserialize(&buffer, &mut offset).is_err());
+
+        let buffer = vec![1, 2, 3]; // Too short for column ID
+        let mut offset = 0;
+        assert!(Column::deserialize(&buffer, &mut offset).is_err());
+    }
+
+    #[test]
+    fn test_column_clone() {
+        let original = Column::new(ColumnId::new(1), "test".to_string(), DataType::Text)
+            .nullable(false)
+            .primary_key(true)
+            .default_value(Value::Text("default".to_string()));
+
+        let cloned = original.clone();
+        assert_eq!(original.id, cloned.id);
+        assert_eq!(original.name, cloned.name);
+        assert_eq!(original.data_type, cloned.data_type);
+        assert_eq!(original.nullable, cloned.nullable);
+        assert_eq!(original.primary_key, cloned.primary_key);
+        assert_eq!(original.default_value, cloned.default_value);
+    }
+
+    #[test]
+    fn test_column_debug() {
+        let column = Column::new(ColumnId::new(1), "test".to_string(), DataType::Integer);
+        let debug_str = format!("{:?}", column);
+        assert!(debug_str.contains("Column"));
+        assert!(debug_str.contains("test"));
+    }
+}
