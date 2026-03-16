@@ -59,10 +59,23 @@ impl StorageEngine {
 
     pub fn allocate_page(&mut self) -> Result<PageId> {
         let page_id = self.file_manager.allocate_page()?;
+
+        // Never allocate page 0 (reserved for database header)
+        if page_id == crate::catalog::DatabaseHeader::HEADER_PAGE_ID {
+            return self.allocate_page(); // Recursive call to get next page
+        }
+
         Ok(page_id)
     }
 
     pub fn deallocate_page(&mut self, page_id: PageId) -> Result<()> {
+        // Never deallocate page 0 (reserved for database header)
+        if page_id == crate::catalog::DatabaseHeader::HEADER_PAGE_ID {
+            return Err(crate::error::HematiteError::StorageError(
+                "Cannot deallocate database header page".to_string(),
+            ));
+        }
+
         // Remove from buffer pool
         self.buffer_pool.remove(page_id);
         // Mark as free in file manager
@@ -298,6 +311,33 @@ impl StorageEngine {
 
     pub fn read_page_header(&self, page: &Page) -> Result<crate::storage::TablePageHeader> {
         self.table_manager.read_page_header(page)
+    }
+
+    // Helper methods for database header and B-tree operations
+    pub fn read_database_header(&mut self) -> Result<crate::catalog::DatabaseHeader> {
+        let page = self.read_page(crate::catalog::DatabaseHeader::HEADER_PAGE_ID)?;
+        crate::catalog::DatabaseHeader::deserialize(&page)
+    }
+
+    pub fn write_database_header(&mut self, header: &crate::catalog::DatabaseHeader) -> Result<()> {
+        let mut page = Page::new(crate::catalog::DatabaseHeader::HEADER_PAGE_ID);
+        header.serialize(&mut page)?;
+        self.write_page(page)?;
+        Ok(())
+    }
+
+    pub fn create_empty_btree(&mut self) -> Result<PageId> {
+        use crate::btree::BTreeNode;
+
+        let root_page_id = self.allocate_page()?;
+        let root_node = BTreeNode::new_leaf(root_page_id);
+
+        // Create a fresh page and write the node to it
+        let mut root_page = Page::new(root_page_id);
+        BTreeNode::to_page(&root_node, &mut root_page)?;
+
+        self.write_page(root_page)?;
+        Ok(root_page_id)
     }
 }
 

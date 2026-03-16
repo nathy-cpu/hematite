@@ -5,8 +5,7 @@ pub mod index;
 pub mod node;
 pub mod tree;
 
-use crate::btree::index::BTreeIndex;
-
+pub use index::BTreeIndex;
 pub use node::BTreeNode;
 
 pub const BTREE_ORDER: usize = 100; // Maximum children per node
