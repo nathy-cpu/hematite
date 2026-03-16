@@ -6,9 +6,6 @@ pub mod node;
 pub mod tree;
 
 use crate::btree::index::BTreeIndex;
-use crate::btree::tree::BTreeManager;
-use crate::error::Result;
-use crate::storage::StorageEngine;
 
 pub use node::BTreeNode;
 
@@ -72,7 +69,11 @@ impl BTreeValue {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::btree::index::BTreeIndex;
+    use crate::btree::tree::BTreeManager;
+    use crate::btree::{BTreeKey, BTreeValue};
+    use crate::error::Result;
+    use crate::storage::StorageEngine;
 
     #[test]
     fn test_btree_insert_and_search() -> Result<()> {

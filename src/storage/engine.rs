@@ -1,0 +1,313 @@
+//! Main storage engine implementation
+
+use crate::error::Result;
+use crate::storage::table::{PageOperations, TableManager};
+use crate::storage::{
+    buffer_pool::BufferPool, file_manager::FileManager, Page, PageId, TableMetadata,
+};
+use std::path::Path;
+
+/// Main storage engine interface
+#[derive(Debug)]
+pub struct StorageEngine {
+    file_manager: FileManager,
+    buffer_pool: BufferPool,
+    table_manager: TableManager,
+}
+
+impl StorageEngine {
+    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let file_manager = FileManager::new(path)?;
+        let buffer_pool = BufferPool::new(100); // 100 pages in memory
+        let table_manager = TableManager::new();
+
+        // Load existing table metadata
+        {
+            let mut engine = Self {
+                file_manager,
+                buffer_pool,
+                table_manager,
+            };
+            engine.load_table_metadata()?;
+            Ok(engine)
+        }
+    }
+
+    pub fn read_page(&mut self, page_id: PageId) -> Result<Page> {
+        // Try to get from buffer pool first
+        let page = if let Some(page) = self.buffer_pool.get(page_id) {
+            page.clone()
+        } else {
+            // Read from file
+            let page = self.file_manager.read_page(page_id)?;
+            // Cache in buffer pool
+            self.buffer_pool.put(page.clone());
+            page
+        };
+        Ok(page)
+    }
+
+    pub fn write_page(&mut self, page: Page) -> Result<()> {
+        // Write to file
+        self.file_manager.write_page(&page)?;
+
+        // Update buffer pool
+        self.buffer_pool.put(page);
+
+        Ok(())
+    }
+
+    pub fn allocate_page(&mut self) -> Result<PageId> {
+        let page_id = self.file_manager.allocate_page()?;
+        Ok(page_id)
+    }
+
+    pub fn deallocate_page(&mut self, page_id: PageId) -> Result<()> {
+        // Remove from buffer pool
+        self.buffer_pool.remove(page_id);
+        // Mark as free in file manager
+        self.file_manager.deallocate_page(page_id)?;
+        Ok(())
+    }
+
+    pub fn flush(&mut self) -> Result<()> {
+        self.save_table_metadata()?;
+        self.file_manager.flush()?;
+        Ok(())
+    }
+
+    // Table metadata persistence
+    fn load_table_metadata(&mut self) -> Result<()> {
+        // Try to read table metadata from a special page (e.g., page 1)
+        match self.file_manager.read_page(PageId::new(1)) {
+            Ok(page) => {
+                // Check if this page contains table metadata
+                if page.data.len() >= 4 {
+                    // First check if this might be a B-tree page by looking for magic number
+                    if page.data.len() >= 9 && &page.data[0..4] == b"BTRE" {
+                        // This is a B-tree page, not table metadata, skip it
+                        return Ok(());
+                    }
+
+                    // Check if page is all zeros (newly allocated)
+                    if page.data.iter().all(|&b| b == 0) {
+                        // This is a fresh page, no metadata yet
+                        return Ok(());
+                    }
+
+                    let metadata_size = u32::from_le_bytes([
+                        page.data[0],
+                        page.data[1],
+                        page.data[2],
+                        page.data[3],
+                    ]) as usize;
+
+                    if metadata_size > 0 && metadata_size + 4 <= crate::storage::PAGE_SIZE {
+                        let metadata_bytes = &page.data[4..4 + metadata_size];
+                        let metadata_str =
+                            String::from_utf8(metadata_bytes.to_vec()).map_err(|_| {
+                                crate::error::HematiteError::StorageError(
+                                    "Invalid metadata encoding".to_string(),
+                                )
+                            })?;
+
+                        // Parse metadata
+                        self.table_manager.parse_metadata(&metadata_str)?;
+                    }
+                }
+            }
+            Err(_) => {
+                // Page doesn't exist or can't be read, that's ok for new databases
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn get_table_metadata(&self) -> &std::collections::HashMap<String, TableMetadata> {
+        self.table_manager.get_all_metadata()
+    }
+
+    fn save_table_metadata(&mut self) -> Result<()> {
+        // Serialize table metadata
+        let metadata_str = self.table_manager.serialize_metadata()?;
+        let metadata_bytes = metadata_str.as_bytes();
+
+        if metadata_bytes.len() > crate::storage::PAGE_SIZE - 4 {
+            return Err(crate::error::HematiteError::StorageError(
+                "Table metadata too large".to_string(),
+            ));
+        }
+
+        // Create or update metadata page
+        let mut page = Page::new(PageId::new(1));
+
+        // Write metadata size
+        let size_bytes = (metadata_bytes.len() as u32).to_le_bytes();
+        page.data[0..4].copy_from_slice(&size_bytes);
+
+        // Write metadata data
+        page.data[4..4 + metadata_bytes.len()].copy_from_slice(metadata_bytes);
+
+        // Write page to disk
+        self.file_manager.write_page(&page)?;
+
+        Ok(())
+    }
+
+    // Proper table operations using page-based storage
+    pub fn create_table(&mut self, table_name: &str) -> Result<()> {
+        // Allocate root page for the table
+        let root_page_id = self.allocate_page()?;
+
+        // Initialize table metadata
+        self.table_manager.create_table(table_name, root_page_id)?;
+
+        // Initialize root page as empty table data page
+        let mut root_page = Page::new(root_page_id);
+        let header = crate::storage::TablePageHeader {
+            page_type: crate::storage::PageType::TableData,
+            row_count: 0,
+            next_page_id: PageId::invalid(),
+            prev_page_id: PageId::invalid(),
+        };
+        self.table_manager
+            .write_page_header(&mut root_page, &header)?;
+        self.write_page(root_page)?;
+
+        Ok(())
+    }
+
+    pub fn insert_into_table(
+        &mut self,
+        table_name: &str,
+        row: Vec<crate::catalog::Value>,
+    ) -> Result<()> {
+        let root_page_id = {
+            let metadata = self
+                .table_manager
+                .get_table_metadata(table_name)
+                .ok_or_else(|| {
+                    crate::error::HematiteError::StorageError(format!(
+                        "Table '{}' does not exist",
+                        table_name
+                    ))
+                })?;
+            metadata.root_page_id
+        };
+
+        // For now, simple implementation: serialize row and write to root page
+        // In a real implementation, this would use B-tree for efficient storage
+        let mut page = self.read_page(root_page_id)?;
+        let mut header = self.table_manager.read_page_header(&page)?;
+
+        // Serialize the row
+        let serialized_row = crate::storage::serialization::RowSerializer::serialize(&row)?;
+
+        // Find space in the page (simplified - just append)
+        if header.row_count < crate::storage::MAX_ROWS_PER_PAGE as u32 {
+            // Calculate current offset by reading existing rows to find the end
+            let mut offset = 64; // Start after header
+            for _ in 0..header.row_count {
+                // Read row length for existing row
+                if offset + 4 <= crate::storage::PAGE_SIZE {
+                    let existing_row_length =
+                        crate::storage::serialization::RowSerializer::read_row_length(
+                            &page.data[offset..offset + 4],
+                        )?;
+                    offset += 4 + existing_row_length;
+                } else {
+                    break;
+                }
+            }
+
+            if offset + serialized_row.len() <= crate::storage::PAGE_SIZE {
+                page.data[offset..offset + serialized_row.len()].copy_from_slice(&serialized_row);
+                header.row_count += 1;
+                self.table_manager.write_page_header(&mut page, &header)?;
+                self.write_page(page)?;
+
+                // Update metadata
+                if let Some(metadata) = self.table_manager.get_table_metadata_mut(table_name) {
+                    metadata.row_count += 1;
+                    metadata.next_row_id += 1;
+                }
+
+                Ok(())
+            } else {
+                Err(crate::error::HematiteError::StorageError(
+                    "Page full - need page splitting".to_string(),
+                ))
+            }
+        } else {
+            Err(crate::error::HematiteError::StorageError(
+                "Page full - need page splitting".to_string(),
+            ))
+        }
+    }
+
+    pub fn read_from_table(&mut self, table_name: &str) -> Result<Vec<Vec<crate::catalog::Value>>> {
+        let metadata = self
+            .table_manager
+            .get_table_metadata(table_name)
+            .ok_or_else(|| {
+                crate::error::HematiteError::StorageError(format!(
+                    "Table '{}' does not exist",
+                    table_name
+                ))
+            })?;
+
+        let page = self.read_page(metadata.root_page_id)?;
+        let header = self.table_manager.read_page_header(&page)?;
+
+        let mut rows = Vec::new();
+        let mut offset = 64; // Start after header
+
+        for _ in 0..header.row_count {
+            // Read row length
+            let row_length = crate::storage::serialization::RowSerializer::read_row_length(
+                &page.data[offset..offset + 4],
+            )?;
+            offset += 4;
+
+            if offset + row_length <= crate::storage::PAGE_SIZE {
+                let row_data = &page.data[offset..offset + row_length];
+                let row = crate::storage::serialization::RowSerializer::deserialize(row_data)?;
+                rows.push(row);
+                offset += row_length;
+            } else {
+                break;
+            }
+        }
+
+        Ok(rows)
+    }
+
+    pub fn table_exists(&self, table_name: &str) -> bool {
+        self.table_manager.table_exists(table_name)
+    }
+
+    // Helper methods for page operations
+    pub fn write_page_header(
+        &self,
+        page: &mut Page,
+        header: &crate::storage::TablePageHeader,
+    ) -> Result<()> {
+        self.table_manager.write_page_header(page, header)
+    }
+
+    pub fn read_page_header(&self, page: &Page) -> Result<crate::storage::TablePageHeader> {
+        self.table_manager.read_page_header(page)
+    }
+}
+
+// Implement PageOperations trait for StorageEngine
+impl PageOperations for StorageEngine {
+    fn read_page(&mut self, page_id: PageId) -> Result<Page> {
+        self.read_page(page_id)
+    }
+
+    fn write_page(&mut self, page: Page) -> Result<()> {
+        self.write_page(page)
+    }
+}
