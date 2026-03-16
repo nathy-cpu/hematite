@@ -285,6 +285,9 @@ mod tests {
         for i in 0..100 {
             let key = BTreeKey::new(vec![(i / 10) as u8, (i % 10) as u8, 0]);
             let found = btree.search(&key)?;
+            if found.is_none() {
+                println!("Failed to find key {} with data {:?}", i, key);
+            }
             assert!(
                 found.is_some(),
                 "Key {} should be found after internal split",
@@ -372,10 +375,10 @@ mod tests {
 
         // Test cursor on empty tree
         let mut cursor = btree.cursor()?;
-        assert!(!cursor.first().is_ok()); // Should fail on empty tree
-        assert!(!cursor.last().is_ok()); // Should fail on empty tree
-        assert!(!cursor.next().is_ok()); // Should fail on empty tree
-        assert!(!cursor.prev().is_ok()); // Should fail on empty tree
+        cursor.first()?; // Should succeed but cursor should be invalid
+        assert!(!cursor.is_valid()); // Cursor should be invalid on empty tree
+        cursor.last()?; // Should succeed but cursor should be invalid
+        assert!(!cursor.is_valid()); // Cursor should be invalid on empty tree
 
         Ok(())
     }

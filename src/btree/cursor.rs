@@ -10,6 +10,7 @@ pub struct BTreeCursor {
     storage: Arc<Mutex<StorageEngine>>,
     stack: Vec<CursorFrame>,
     at_end: bool,
+    root_page_id: PageId,
 }
 
 #[derive(Debug, Clone)]
@@ -25,6 +26,7 @@ impl BTreeCursor {
             storage: storage,
             stack: Vec::new(),
             at_end: false,
+            root_page_id: root_page_id,
         };
 
         cursor.seek_to_first(root_page_id)?;
@@ -149,13 +151,25 @@ impl BTreeCursor {
     fn seek_to_first(&mut self, root_page_id: PageId) -> Result<()> {
         self.stack.clear();
         self.at_end = false;
-        self.traverse_to_leftmost_leaf(root_page_id)
+        self.traverse_to_leftmost_leaf(root_page_id)?;
+        if let Some(last) = self.stack.last() {
+            if last.node.keys.is_empty() {
+                self.at_end = true;
+            }
+        }
+        Ok(())
     }
 
     fn seek_to_last(&mut self, root_page_id: PageId) -> Result<()> {
         self.stack.clear();
         self.at_end = false;
-        self.traverse_to_rightmost_leaf(root_page_id)
+        self.traverse_to_rightmost_leaf(root_page_id)?;
+        if let Some(last) = self.stack.last() {
+            if last.node.keys.is_empty() {
+                self.at_end = true;
+            }
+        }
+        Ok(())
     }
 
     fn seek_to_key(&mut self, page_id: PageId, key: &BTreeKey) -> Result<()> {
@@ -241,9 +255,15 @@ impl BTreeCursor {
     }
 
     pub fn prev(&mut self) -> Result<()> {
+        if self.at_end {
+            // We're at the end, move to the last valid position
+            self.move_to_last_position()?;
+            return Ok(());
+        }
+
         if !self.is_valid() {
             return Err(HematiteError::InternalError(
-                "Cursor is at end or invalid".to_string(),
+                "Cursor is invalid".to_string(),
             ));
         }
 
@@ -308,6 +328,23 @@ impl BTreeCursor {
 
         // No previous leaves
         self.at_end = true;
+        Ok(())
+    }
+
+    fn move_to_last_position(&mut self) -> Result<()> {
+        self.at_end = false;
+
+        // If we have a current position, move to the last key in the current leaf
+        if let Some(frame) = self.stack.last_mut() {
+            if frame.index >= frame.node.keys.len() {
+                frame.index = frame.node.keys.len().saturating_sub(1);
+            }
+            return Ok(());
+        }
+
+        // Otherwise, traverse to the rightmost leaf
+        self.traverse_to_rightmost_leaf(self.root_page_id)?;
+
         Ok(())
     }
 
