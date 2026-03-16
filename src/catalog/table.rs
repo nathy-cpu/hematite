@@ -1,9 +1,10 @@
 //! Table definitions for database tables
 
 use super::column::Column;
+use super::ids::TableId;
 use super::types::Value;
-use super::TableId;
-use crate::error::{HematiteError, Result};
+use crate::HematiteError;
+use crate::Result;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -242,10 +243,10 @@ impl Table {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::catalog::types::{DataType, Value};
-    use crate::catalog::TableId;
-    use crate::catalog::{Column, ColumnId};
-    use crate::HematiteError;
+    use crate::catalog::{ColumnId, TableId};
+    use crate::Column;
     use crate::Table;
 
     fn create_test_columns() -> Vec<Column> {
@@ -257,7 +258,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_creation() -> Result<(), HematiteError> {
+    fn test_table_creation() -> Result<()> {
         let columns = create_test_columns();
         let table = Table::new(
             TableId::new(1),
@@ -308,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_get_column_by_name() -> Result<(), HematiteError> {
+    fn test_table_get_column_by_name() -> Result<()> {
         let columns = create_test_columns();
         let table = Table::new(
             TableId::new(1),
@@ -332,7 +333,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_get_column_index() -> Result<(), HematiteError> {
+    fn test_table_get_column_index() -> Result<()> {
         let columns = create_test_columns();
         let table = Table::new(
             TableId::new(1),
@@ -350,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_validate_row() -> Result<(), HematiteError> {
+    fn test_table_validate_row() -> Result<()> {
         let columns = create_test_columns();
         let table = Table::new(
             TableId::new(1),
@@ -391,7 +392,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_get_primary_key_values() -> Result<(), HematiteError> {
+    fn test_table_get_primary_key_values() -> Result<()> {
         let columns = vec![
             Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer).primary_key(true),
             Column::new(ColumnId::new(2), "name".to_string(), DataType::Text),
@@ -424,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_get_primary_key_values_invalid() -> Result<(), HematiteError> {
+    fn test_table_get_primary_key_values_invalid() -> Result<()> {
         let columns = create_test_columns();
         let table = Table::new(
             TableId::new(1),
@@ -442,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_row_size() -> Result<(), HematiteError> {
+    fn test_table_row_size() -> Result<()> {
         let columns = vec![
             Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer).primary_key(true),
             Column::new(ColumnId::new(2), "name".to_string(), DataType::Text),
@@ -463,7 +464,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_serialization_roundtrip() -> Result<(), HematiteError> {
+    fn test_table_serialization_roundtrip() -> Result<()> {
         let columns = create_test_columns();
         let original = Table::new(
             TableId::new(42),
@@ -501,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_serialization_multiple_primary_keys() -> Result<(), HematiteError> {
+    fn test_table_serialization_multiple_primary_keys() -> Result<()> {
         let columns = vec![
             Column::new(ColumnId::new(1), "user_id".to_string(), DataType::Integer)
                 .primary_key(true),
@@ -541,7 +542,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_clone() -> Result<(), HematiteError> {
+    fn test_table_clone() -> Result<()> {
         let columns = create_test_columns();
         let original = Table::new(
             TableId::new(1),
@@ -570,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_debug() -> Result<(), HematiteError> {
+    fn test_table_debug() -> Result<()> {
         let columns = create_test_columns();
         let table = Table::new(
             TableId::new(1),

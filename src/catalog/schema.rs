@@ -1,9 +1,10 @@
 //! Schema management for database metadata
 
 use super::column::Column;
+use super::ids::TableId;
 use super::table::Table;
-use super::TableId;
-use crate::error::{HematiteError, Result};
+use crate::error::HematiteError;
+use crate::Result;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -254,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn test_duplicate_table_name() {
+    fn test_duplicate_table_name() -> Result<()> {
         let mut schema = Schema::new();
 
         let columns = vec![
@@ -267,10 +268,12 @@ mod tests {
 
         let result = schema.create_table("users".to_string(), columns);
         assert!(result.is_err());
+
+        Ok(())
     }
 
     #[test]
-    fn test_duplicate_column_names() {
+    fn test_duplicate_column_names() -> Result<()> {
         let mut schema = Schema::new();
 
         let columns = vec![
@@ -284,6 +287,8 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("Duplicate column name"));
+
+        Ok(())
     }
 
     #[test]
