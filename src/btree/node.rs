@@ -539,15 +539,22 @@ impl BTreeNode {
 
         // Split keys and values - median key moves up to parent
         let split_pos = self.keys.len() / 2;
-        let split_key = self.keys[split_pos].clone();
 
         // Move keys AFTER the median to the right node
         new_node.keys = self.keys.split_off(split_pos + 1);
         new_node.values = self.values.split_off(split_pos + 1);
 
-        // Remove the median key from left node (it moves up to parent)
-        self.keys.pop();
-        self.values.pop();
+        // In B+ tree, the split key should be the FIRST key of the right node
+        // BUT the original key stays in the leaf (we don't pop it)
+        let split_key = if new_node.keys.is_empty() {
+            // Edge case: if right node is empty, use the last key from left
+            self.keys.last().unwrap().clone()
+        } else {
+            new_node.keys[0].clone()
+        };
+
+        // NOTE: In B+ tree, we DON'T remove the split key from the leaf
+        // All keys must remain in leaf nodes. The split_key is just copied up.
 
         // Write both nodes
         let mut current_page = storage.read_page(self.page_id)?;

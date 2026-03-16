@@ -275,14 +275,14 @@ mod tests {
         let mut btree = BTreeIndex::new_with_init(storage)?;
 
         // Insert many keys to cause internal node splits
-        for i in 0..100 {
+        for i in 0..1000 {
             let key = BTreeKey::new(vec![(i / 10) as u8, (i % 10) as u8, 0]);
             let value = BTreeValue::new(vec![i as u8, 0, 0]);
             btree.insert(key, value)?;
         }
 
         // Verify tree integrity after internal splits
-        for i in 0..100 {
+        for i in 0..1000 {
             let key = BTreeKey::new(vec![(i / 10) as u8, (i % 10) as u8, 0]);
             let found = btree.search(&key)?;
             if found.is_none() {
