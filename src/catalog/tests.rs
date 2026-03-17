@@ -1460,3 +1460,260 @@ mod tests {
         assert_eq!(cloned.as_text(), Some("hello"));
     }
 }
+
+// Tests for the new SQLite-style catalog implementation
+#[cfg(test)]
+mod catalog_new_tests {
+    use crate::catalog::catalog_new::Catalog;
+    use crate::catalog::column::Column;
+    use crate::catalog::ids::{ColumnId, TableId};
+    use crate::catalog::types::DataType;
+    use crate::error::Result;
+    use std::fs;
+
+    #[test]
+    fn test_catalog_new_database() -> Result<()> {
+        let test_path = "_test_new_catalog.db";
+        let _ = fs::remove_file(test_path);
+
+        {
+            let mut catalog = Catalog::open_or_create(test_path)?;
+
+            // Should start with empty schema
+            assert_eq!(catalog.list_tables()?.len(), 0);
+
+            // Create a table
+            let columns = vec![
+                Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer)
+                    .primary_key(true),
+                Column::new(ColumnId::new(2), "name".to_string(), DataType::Text),
+            ];
+
+            let table_id = catalog.create_table("users", columns)?;
+            assert_eq!(catalog.list_tables()?.len(), 1);
+
+            let table = catalog.get_table(table_id)?.unwrap();
+            assert_eq!(table.name, "users");
+        } // catalog is dropped here
+
+        // Reopen and verify persistence
+        {
+            let _catalog = Catalog::open_or_create(test_path)?;
+
+            // TODO: This will work once B-tree loading is implemented in Phase 3
+            // assert_eq!(catalog.list_tables()?.len(), 1);
+        }
+
+        // Clean up
+        fs::remove_file(test_path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_catalog_table_operations() -> Result<()> {
+        let test_path = "_test_table_ops.db";
+        let _ = fs::remove_file(test_path);
+
+        let mut catalog = Catalog::open_or_create(test_path)?;
+
+        // Create multiple tables
+        let columns1 = vec![
+            Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer).primary_key(true),
+            Column::new(ColumnId::new(2), "email".to_string(), DataType::Text),
+        ];
+
+        let columns2 = vec![
+            Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer).primary_key(true),
+            Column::new(ColumnId::new(2), "title".to_string(), DataType::Text),
+        ];
+
+        let users_id = catalog.create_table("users", columns1)?;
+        let posts_id = catalog.create_table("posts", columns2)?;
+
+        // Test retrieval
+        let users = catalog.get_table(users_id)?.unwrap();
+        assert_eq!(users.name, "users");
+        assert_eq!(users.column_count(), 2);
+
+        let posts = catalog.get_table_by_name("posts")?.unwrap();
+        assert_eq!(posts.id, posts_id);
+        assert_eq!(posts.column_count(), 2);
+
+        // Test listing
+        let tables = catalog.list_tables()?;
+        assert_eq!(tables.len(), 2);
+
+        // Test dropping
+        catalog.drop_table(users_id)?;
+        assert_eq!(catalog.list_tables()?.len(), 1);
+        assert!(catalog.get_table(users_id)?.is_none());
+
+        // Clean up
+        fs::remove_file(test_path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_catalog_duplicate_table() -> Result<()> {
+        let test_path = "_test_duplicate.db";
+        let _ = fs::remove_file(test_path);
+
+        let mut catalog = Catalog::open_or_create(test_path)?;
+
+        let columns = vec![
+            Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer).primary_key(true),
+        ];
+
+        // Create first table
+        catalog.create_table("users", columns.clone())?;
+
+        // Try to create duplicate - should fail
+        let result = catalog.create_table("users", columns);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("already exists"));
+
+        // Clean up
+        fs::remove_file(test_path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_catalog_new_methods() -> Result<()> {
+        let test_path = "_test_new_methods.db";
+        let _ = fs::remove_file(test_path);
+
+        let mut catalog = Catalog::open_or_create(test_path)?;
+
+        // Create a table
+        let columns = vec![
+            Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer).primary_key(true),
+            Column::new(ColumnId::new(2), "name".to_string(), DataType::Text),
+        ];
+
+        let table_id = catalog.create_table("users", columns)?;
+
+        // Test table existence methods
+        assert!(catalog.table_exists("users"));
+        assert!(catalog.table_exists_by_id(table_id));
+        assert!(!catalog.table_exists("nonexistent"));
+        assert!(!catalog.table_exists_by_id(TableId::new(999)));
+
+        // Test root page management
+        let root_page = crate::storage::PageId::new(42);
+        catalog.set_table_root_page(table_id, root_page)?;
+
+        let retrieved_page = catalog.get_table_root_page(table_id)?.unwrap();
+        assert_eq!(retrieved_page, root_page);
+
+        // Test table statistics
+        let stats = catalog.get_table_stats(table_id)?.unwrap();
+        assert_eq!(stats.id, table_id);
+        assert_eq!(stats.name, "users");
+        assert_eq!(stats.column_count, 2);
+        assert_eq!(stats.primary_key_count, 1);
+        assert_eq!(stats.root_page_id, root_page);
+
+        // Test all table statistics
+        let all_stats = catalog.get_all_table_stats()?;
+        assert_eq!(all_stats.len(), 1);
+        assert_eq!(all_stats[0].name, "users");
+
+        // Test column methods
+        let columns = catalog.get_table_columns(table_id)?.unwrap();
+        assert_eq!(columns.len(), 2);
+        assert_eq!(columns[0].name, "id");
+        assert_eq!(columns[1].name, "name");
+
+        let columns_by_name = catalog.get_table_columns_by_name("users")?.unwrap();
+        assert_eq!(columns_by_name.len(), 2);
+
+        let pk_columns = catalog.get_primary_key_columns(table_id)?.unwrap();
+        assert_eq!(pk_columns.len(), 1);
+        assert_eq!(pk_columns[0].name, "id");
+        assert!(pk_columns[0].primary_key);
+
+        // Test schema validation
+        assert!(catalog.validate_schema().is_ok());
+
+        // Test column count
+        assert_eq!(catalog.get_total_column_count(), 2);
+
+        // Test peek next table ID
+        let next_id = catalog.peek_next_table_id()?;
+        assert_eq!(next_id.as_u32(), 2); // First table was ID 1
+
+        // Clean up
+        fs::remove_file(test_path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_catalog_create_table_with_root() -> Result<()> {
+        let test_path = "_test_create_with_root.db";
+        let _ = fs::remove_file(test_path);
+
+        let mut catalog = Catalog::open_or_create(test_path)?;
+
+        let columns = vec![
+            Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer).primary_key(true),
+        ];
+
+        let root_page = crate::storage::PageId::new(100);
+        let table_id = catalog.create_table_with_root("products", columns, root_page)?;
+
+        let table = catalog.get_table(table_id)?.unwrap();
+        assert_eq!(table.name, "products");
+        assert_eq!(table.root_page_id, root_page);
+
+        // Clean up
+        fs::remove_file(test_path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_catalog_validation_logic() -> Result<()> {
+        let test_path = "_test_validation.db";
+        let _ = fs::remove_file(test_path);
+
+        let mut catalog = Catalog::open_or_create(test_path)?;
+
+        // Create a table
+        let columns = vec![
+            Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer).primary_key(true),
+        ];
+
+        let table_id = catalog.create_table("users", columns)?;
+
+        // Test validation of newly created table (should pass - root page 0 is OK)
+        assert!(catalog.validate_schema().is_ok());
+
+        // Test setting invalid root page (page 0 should be rejected)
+        let result = catalog.set_table_root_page(table_id, crate::storage::PageId::new(0));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("reserved for database header"));
+
+        // Test setting valid root page
+        let valid_page = crate::storage::PageId::new(42);
+        assert!(catalog.set_table_root_page(table_id, valid_page).is_ok());
+
+        // Test getting root page
+        let retrieved_page = catalog.get_table_root_page(table_id)?.unwrap();
+        assert_eq!(retrieved_page, valid_page);
+
+        // Test validation with valid root page
+        assert!(catalog.validate_schema().is_ok());
+
+        // Test setting root page for non-existent table
+        let fake_id = TableId::new(999);
+        let result = catalog.set_table_root_page(fake_id, crate::storage::PageId::new(100));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+
+        // Clean up
+        fs::remove_file(test_path)?;
+        Ok(())
+    }
+}

@@ -1,6 +1,7 @@
 //! Catalog and schema management for database objects
 
 pub mod catalog;
+pub mod catalog_new;
 pub mod column;
 pub mod header;
 pub mod ids;
