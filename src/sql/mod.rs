@@ -7,3 +7,6 @@ pub mod result;
 pub use connection::*;
 pub use interface::*;
 pub use result::*;
+
+#[cfg(test)]
+mod tests;

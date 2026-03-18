@@ -155,33 +155,3 @@ impl RowSerializer {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_roundtrip_row() -> Result<()> {
-        let row = vec![
-            Value::Integer(1),
-            Value::Text("hello".to_string()),
-            Value::Boolean(true),
-            Value::Float(3.5),
-            Value::Null,
-        ];
-
-        let bytes = RowSerializer::serialize(&row)?;
-        // Stored length includes everything after the 4-byte length prefix.
-        let len = RowSerializer::read_row_length(&bytes[0..4])?;
-        let decoded = RowSerializer::deserialize(&bytes[4..4 + len])?;
-        assert_eq!(decoded.len(), row.len());
-        Ok(())
-    }
-
-    #[test]
-    fn test_deserialize_truncated_returns_error() {
-        // Integer marker without enough payload bytes.
-        let truncated = vec![1u8, 0, 1];
-        let err = RowSerializer::deserialize(&truncated).unwrap_err();
-        assert!(matches!(err, HematiteError::CorruptedData(_)));
-    }
-}

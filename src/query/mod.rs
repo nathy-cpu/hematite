@@ -7,3 +7,6 @@ pub mod planner;
 pub use executor::*;
 pub use optimizer::*;
 pub use planner::*;
+
+#[cfg(test)]
+mod tests;
