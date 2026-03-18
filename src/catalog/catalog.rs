@@ -19,6 +19,14 @@ pub struct Catalog {
 }
 
 impl Catalog {
+    fn persist_table_entry(&mut self, table: &Table) -> Result<()> {
+        let mut btree = BTreeIndex::from_shared_storage(self.storage.clone(), self.schema_root);
+        let key = crate::btree::BTreeKey::new(table.name.as_bytes().to_vec());
+        let val = crate::btree::BTreeValue::new(table.to_bytes()?);
+        btree.insert(key, val)?;
+        Ok(())
+    }
+
     /// Open or create a database with SQLite-style schema management
     pub fn open_or_create<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
         let storage = StorageEngine::new(path)?;
@@ -149,24 +157,11 @@ impl Catalog {
         // Get next table ID
         let table_id = self.get_next_table_id()?;
 
-        // Create table with placeholder root page (will be set when B-tree is created)
-        let root_page = PageId::new(0); // Placeholder - indicates no B-tree yet
-        let table = Table::new(table_id, name.to_string(), columns, root_page)?;
+        // Create table with placeholder root page (will be set when storage/B-tree is created).
+        let table = Table::new(table_id, name.to_string(), columns, PageId::new(0))?;
 
-        // Add to in-memory schema (preserves all table information)
-        self.schema
-            .create_table(name.to_string(), table.columns.clone())?;
-
-        // Set the root page to maintain consistency
-        self.schema.set_table_root_page(table_id, root_page)?;
-
-        // Persist into schema B-tree (upsert)
-        {
-            let mut btree = BTreeIndex::from_shared_storage(self.storage.clone(), self.schema_root);
-            let key = crate::btree::BTreeKey::new(name.as_bytes().to_vec());
-            let val = crate::btree::BTreeValue::new(table.to_bytes()?);
-            btree.insert(key, val)?;
-        }
+        self.schema.insert_table(table.clone())?;
+        self.persist_table_entry(&table)?;
 
         Ok(table_id)
     }
@@ -258,10 +253,8 @@ impl Catalog {
 
         // Update schema B-tree entry
         if let Some(table) = self.schema.get_table(table_id) {
-            let mut btree = BTreeIndex::from_shared_storage(self.storage.clone(), self.schema_root);
-            let key = crate::btree::BTreeKey::new(table.name.as_bytes().to_vec());
-            let val = crate::btree::BTreeValue::new(table.to_bytes()?);
-            btree.insert(key, val)?;
+            let table = table.clone();
+            self.persist_table_entry(&table)?;
         }
 
         Ok(())
@@ -380,17 +373,10 @@ impl Catalog {
         // Get next table ID
         let table_id = self.get_next_table_id()?;
 
-        // Create table with specified root page
         let table = Table::new(table_id, name.to_string(), columns, root_page)?;
 
-        // Add to in-memory schema
-        self.schema
-            .create_table(name.to_string(), table.columns.clone())?;
-
-        // Update the table's root page
-        self.schema.set_table_root_page(table_id, root_page)?;
-
-        // TODO: Save to B-tree in Phase 3
+        self.schema.insert_table(table.clone())?;
+        self.persist_table_entry(&table)?;
 
         Ok(table_id)
     }

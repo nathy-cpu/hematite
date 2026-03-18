@@ -1414,18 +1414,49 @@ mod catalog_new_tests {
     fn test_catalog_create_table_with_root() -> Result<()> {
         let test_db = TestDbFile::new("_test_create_with_root");
 
-        let mut catalog = Catalog::open_or_create(test_db.path())?;
-
-        let columns = vec![
-            Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer).primary_key(true),
-        ];
-
         let root_page = crate::storage::PageId::new(100);
-        let table_id = catalog.create_table_with_root("products", columns, root_page)?;
 
-        let table = catalog.get_table(table_id)?.unwrap();
-        assert_eq!(table.name, "products");
+        {
+            let mut catalog = Catalog::open_or_create(test_db.path())?;
+            let columns = vec![
+                Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer)
+                    .primary_key(true),
+            ];
+
+            let table_id = catalog.create_table_with_root("products", columns, root_page)?;
+
+            let table = catalog.get_table(table_id)?.unwrap();
+            assert_eq!(table.name, "products");
+            assert_eq!(table.root_page_id, root_page);
+        }
+
+        let reopened = Catalog::open_or_create(test_db.path())?;
+        let table = reopened.get_table_by_name("products")?.unwrap();
         assert_eq!(table.root_page_id, root_page);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_catalog_root_page_update_persists_across_reopen() -> Result<()> {
+        let test_db = TestDbFile::new("_test_root_page_persistence");
+        let updated_root = crate::storage::PageId::new(77);
+
+        {
+            let mut catalog = Catalog::open_or_create(test_db.path())?;
+            let columns = vec![
+                Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer)
+                    .primary_key(true),
+            ];
+
+            let table_id = catalog.create_table("users", columns)?;
+            catalog.set_table_root_page(table_id, updated_root)?;
+            assert_eq!(catalog.get_table_root_page(table_id)?, Some(updated_root));
+        }
+
+        let reopened = Catalog::open_or_create(test_db.path())?;
+        let table = reopened.get_table_by_name("users")?.unwrap();
+        assert_eq!(table.root_page_id, updated_root);
 
         Ok(())
     }
