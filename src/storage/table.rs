@@ -5,6 +5,7 @@ use crate::error::{HematiteError, Result};
 use crate::storage::serialization::RowSerializer;
 use crate::storage::{
     Page, PageId, PageType, TableMetadata, TablePageHeader, MAX_ROWS_PER_PAGE, PAGE_SIZE,
+    TABLE_PAGE_HEADER_SIZE,
 };
 use std::collections::HashMap;
 
@@ -27,6 +28,29 @@ impl std::fmt::Debug for TableManager {
 }
 
 impl TableManager {
+    fn row_data_end(&self, page: &Page, row_count: u32) -> Result<usize> {
+        let mut offset = TABLE_PAGE_HEADER_SIZE;
+
+        for _ in 0..row_count {
+            if offset + 4 > PAGE_SIZE {
+                return Err(HematiteError::CorruptedData(
+                    "Row length exceeds page bounds".to_string(),
+                ));
+            }
+
+            let row_length = RowSerializer::read_row_length(&page.data[offset..offset + 4])?;
+            offset += 4 + row_length;
+
+            if offset > PAGE_SIZE {
+                return Err(HematiteError::CorruptedData(
+                    "Row payload exceeds page bounds".to_string(),
+                ));
+            }
+        }
+
+        Ok(offset)
+    }
+
     pub fn new() -> Self {
         Self {
             table_metadata: HashMap::new(),
@@ -155,47 +179,30 @@ impl TableManager {
             metadata.root_page_id
         };
 
-        // For now, simple implementation: serialize row and write to root page
-        // In a real implementation, this would use B-tree for efficient storage
+        let serialized_row = RowSerializer::serialize(&row)?;
+        if TABLE_PAGE_HEADER_SIZE + serialized_row.len() > PAGE_SIZE {
+            return Err(HematiteError::StorageError(
+                "Row too large to fit in a table page".to_string(),
+            ));
+        }
+
         let mut page = page_ops.read_page(root_page_id)?;
         let mut header = self.read_page_header(&page)?;
+        let offset = self.row_data_end(&page, header.row_count)?;
 
-        // Serialize the row
-        let serialized_row = RowSerializer::serialize(&row)?;
+        if header.row_count < MAX_ROWS_PER_PAGE as u32 && offset + serialized_row.len() <= PAGE_SIZE
+        {
+            page.data[offset..offset + serialized_row.len()].copy_from_slice(&serialized_row);
+            header.row_count += 1;
+            self.write_page_header(&mut page, &header)?;
+            page_ops.write_page(page)?;
 
-        // Find space in the page (simplified - just append)
-        if header.row_count < MAX_ROWS_PER_PAGE as u32 {
-            // Calculate current offset by reading existing rows to find the end
-            let mut offset = 64; // Start after header
-            for _ in 0..header.row_count {
-                // Read row length for existing row
-                if offset + 4 <= PAGE_SIZE {
-                    let existing_row_length =
-                        RowSerializer::read_row_length(&page.data[offset..offset + 4])?;
-                    offset += 4 + existing_row_length;
-                } else {
-                    break;
-                }
+            if let Some(metadata) = self.table_metadata.get_mut(table_name) {
+                metadata.row_count += 1;
+                metadata.next_row_id += 1;
             }
 
-            if offset + serialized_row.len() <= PAGE_SIZE {
-                page.data[offset..offset + serialized_row.len()].copy_from_slice(&serialized_row);
-                header.row_count += 1;
-                self.write_page_header(&mut page, &header)?;
-                page_ops.write_page(page)?;
-
-                // Update metadata
-                if let Some(metadata) = self.table_metadata.get_mut(table_name) {
-                    metadata.row_count += 1;
-                    metadata.next_row_id += 1;
-                }
-
-                Ok(())
-            } else {
-                Err(HematiteError::StorageError(
-                    "Page full - need page splitting".to_string(),
-                ))
-            }
+            Ok(())
         } else {
             Err(HematiteError::StorageError(
                 "Page full - need page splitting".to_string(),

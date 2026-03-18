@@ -16,12 +16,13 @@ pub use serialization::RowSerializer;
 pub use table::TableManager;
 pub use types::{
     Page, PageId, PageType, TableMetadata, TablePageHeader, DB_HEADER_PAGE_ID,
-    MAX_ROWS_PER_PAGE, PAGE_SIZE, STORAGE_METADATA_PAGE_ID,
+    MAX_ROWS_PER_PAGE, PAGE_SIZE, STORAGE_METADATA_PAGE_ID, TABLE_PAGE_HEADER_SIZE,
 };
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::Value;
     use crate::test_utils::TestDbFile;
 
     // ... (rest of the code remains the same)
@@ -50,6 +51,43 @@ mod tests {
         // Read again (should get the updated data from cache)
         let updated_page = storage.read_page(page_id)?;
         assert_eq!(updated_page.data[0..8], [5, 2, 3, 4, 5, 6, 7, 8]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_table_storage_spans_multiple_pages() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_storage_multi_page");
+        let mut storage = StorageEngine::new(test_db.path())?;
+
+        storage.create_table("users")?;
+
+        let payload = "x".repeat(500);
+        for i in 0..12 {
+            storage.insert_into_table(
+                "users",
+                vec![Value::Integer(i), Value::Text(format!("{payload}-{i}"))],
+            )?;
+        }
+
+        let metadata = storage
+            .get_table_metadata()
+            .get("users")
+            .expect("table metadata should exist")
+            .clone();
+        let root_page = storage.read_page(metadata.root_page_id)?;
+        let root_header = storage.read_page_header(&root_page)?;
+
+        assert_ne!(root_header.next_page_id, PageId::invalid());
+        assert_eq!(metadata.row_count, 12);
+
+        let rows = storage.read_from_table("users")?;
+        assert_eq!(rows.len(), 12);
+        assert_eq!(rows.first(), Some(&vec![Value::Integer(0), Value::Text(format!("{payload}-0"))]));
+        assert_eq!(
+            rows.last(),
+            Some(&vec![Value::Integer(11), Value::Text(format!("{payload}-11"))])
+        );
 
         Ok(())
     }

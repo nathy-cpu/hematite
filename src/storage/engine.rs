@@ -4,7 +4,7 @@ use crate::error::Result;
 use crate::storage::table::{PageOperations, TableManager};
 use crate::storage::{
     buffer_pool::BufferPool, file_manager::FileManager, Page, PageId, TableMetadata,
-    DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID,
+    DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID, TABLE_PAGE_HEADER_SIZE,
 };
 use std::path::Path;
 
@@ -17,6 +17,48 @@ pub struct StorageEngine {
 }
 
 impl StorageEngine {
+    fn row_data_end(page: &Page, row_count: u32) -> Result<usize> {
+        let mut offset = TABLE_PAGE_HEADER_SIZE;
+
+        for _ in 0..row_count {
+            if offset + 4 > crate::storage::PAGE_SIZE {
+                return Err(crate::error::HematiteError::CorruptedData(
+                    "Row length exceeds page bounds".to_string(),
+                ));
+            }
+
+            let row_length = crate::storage::serialization::RowSerializer::read_row_length(
+                &page.data[offset..offset + 4],
+            )?;
+            offset += 4 + row_length;
+
+            if offset > crate::storage::PAGE_SIZE {
+                return Err(crate::error::HematiteError::CorruptedData(
+                    "Row payload exceeds page bounds".to_string(),
+                ));
+            }
+        }
+
+        Ok(offset)
+    }
+
+    fn initialize_table_page(
+        &self,
+        page_id: PageId,
+        prev_page_id: PageId,
+        next_page_id: PageId,
+    ) -> Result<Page> {
+        let mut page = Page::new(page_id);
+        let header = crate::storage::TablePageHeader {
+            page_type: crate::storage::PageType::TableData,
+            row_count: 0,
+            next_page_id,
+            prev_page_id,
+        };
+        self.table_manager.write_page_header(&mut page, &header)?;
+        Ok(page)
+    }
+
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file_manager = FileManager::new(path)?;
         let buffer_pool = BufferPool::new(100); // 100 pages in memory
@@ -178,15 +220,8 @@ impl StorageEngine {
         self.table_manager.create_table(table_name, root_page_id)?;
 
         // Initialize root page as empty table data page
-        let mut root_page = Page::new(root_page_id);
-        let header = crate::storage::TablePageHeader {
-            page_type: crate::storage::PageType::TableData,
-            row_count: 0,
-            next_page_id: PageId::invalid(),
-            prev_page_id: PageId::invalid(),
-        };
-        self.table_manager
-            .write_page_header(&mut root_page, &header)?;
+        let root_page =
+            self.initialize_table_page(root_page_id, PageId::invalid(), PageId::invalid())?;
         self.write_page(root_page)?;
 
         Ok(())
@@ -210,32 +245,23 @@ impl StorageEngine {
             metadata.root_page_id
         };
 
-        // For now, simple implementation: serialize row and write to root page
-        // In a real implementation, this would use B-tree for efficient storage
-        let mut page = self.read_page(root_page_id)?;
-        let mut header = self.table_manager.read_page_header(&page)?;
-
-        // Serialize the row
         let serialized_row = crate::storage::serialization::RowSerializer::serialize(&row)?;
+        if TABLE_PAGE_HEADER_SIZE + serialized_row.len() > crate::storage::PAGE_SIZE {
+            return Err(crate::error::HematiteError::StorageError(
+                "Row too large to fit in a table page".to_string(),
+            ));
+        }
 
-        // Find space in the page (simplified - just append)
-        if header.row_count < crate::storage::MAX_ROWS_PER_PAGE as u32 {
-            // Calculate current offset by reading existing rows to find the end
-            let mut offset = 64; // Start after header
-            for _ in 0..header.row_count {
-                // Read row length for existing row
-                if offset + 4 <= crate::storage::PAGE_SIZE {
-                    let existing_row_length =
-                        crate::storage::serialization::RowSerializer::read_row_length(
-                            &page.data[offset..offset + 4],
-                        )?;
-                    offset += 4 + existing_row_length;
-                } else {
-                    break;
-                }
-            }
+        let mut current_page_id = root_page_id;
 
-            if offset + serialized_row.len() <= crate::storage::PAGE_SIZE {
+        loop {
+            let mut page = self.read_page(current_page_id)?;
+            let mut header = self.table_manager.read_page_header(&page)?;
+            let offset = Self::row_data_end(&page, header.row_count)?;
+
+            if header.row_count < crate::storage::MAX_ROWS_PER_PAGE as u32
+                && offset + serialized_row.len() <= crate::storage::PAGE_SIZE
+            {
                 page.data[offset..offset + serialized_row.len()].copy_from_slice(&serialized_row);
                 header.row_count += 1;
                 self.table_manager.write_page_header(&mut page, &header)?;
@@ -247,16 +273,36 @@ impl StorageEngine {
                     metadata.next_row_id += 1;
                 }
 
-                Ok(())
-            } else {
-                Err(crate::error::HematiteError::StorageError(
-                    "Page full - need page splitting".to_string(),
-                ))
+                return Ok(());
             }
-        } else {
-            Err(crate::error::HematiteError::StorageError(
-                "Page full - need page splitting".to_string(),
-            ))
+
+            if header.next_page_id != PageId::invalid() {
+                current_page_id = header.next_page_id;
+                continue;
+            }
+
+            let new_page_id = self.allocate_page()?;
+            let mut new_page =
+                self.initialize_table_page(new_page_id, current_page_id, PageId::invalid())?;
+
+            header.next_page_id = new_page_id;
+            self.table_manager.write_page_header(&mut page, &header)?;
+            self.write_page(page)?;
+
+            new_page.data[TABLE_PAGE_HEADER_SIZE..TABLE_PAGE_HEADER_SIZE + serialized_row.len()]
+                .copy_from_slice(&serialized_row);
+            let mut new_header = self.table_manager.read_page_header(&new_page)?;
+            new_header.row_count = 1;
+            self.table_manager
+                .write_page_header(&mut new_page, &new_header)?;
+            self.write_page(new_page)?;
+
+            if let Some(metadata) = self.table_manager.get_table_metadata_mut(table_name) {
+                metadata.row_count += 1;
+                metadata.next_row_id += 1;
+            }
+
+            return Ok(());
         }
     }
 
@@ -271,27 +317,43 @@ impl StorageEngine {
                 ))
             })?;
 
-        let page = self.read_page(metadata.root_page_id)?;
-        let header = self.table_manager.read_page_header(&page)?;
-
         let mut rows = Vec::new();
-        let mut offset = 64; // Start after header
+        let mut current_page_id = metadata.root_page_id;
 
-        for _ in 0..header.row_count {
-            // Read row length
-            let row_length = crate::storage::serialization::RowSerializer::read_row_length(
-                &page.data[offset..offset + 4],
-            )?;
-            offset += 4;
+        loop {
+            let page = self.read_page(current_page_id)?;
+            let header = self.table_manager.read_page_header(&page)?;
+            let mut offset = TABLE_PAGE_HEADER_SIZE;
 
-            if offset + row_length <= crate::storage::PAGE_SIZE {
+            for _ in 0..header.row_count {
+                if offset + 4 > crate::storage::PAGE_SIZE {
+                    return Err(crate::error::HematiteError::CorruptedData(
+                        "Row length exceeds page bounds".to_string(),
+                    ));
+                }
+
+                let row_length = crate::storage::serialization::RowSerializer::read_row_length(
+                    &page.data[offset..offset + 4],
+                )?;
+                offset += 4;
+
+                if offset + row_length > crate::storage::PAGE_SIZE {
+                    return Err(crate::error::HematiteError::CorruptedData(
+                        "Row payload exceeds page bounds".to_string(),
+                    ));
+                }
+
                 let row_data = &page.data[offset..offset + row_length];
                 let row = crate::storage::serialization::RowSerializer::deserialize(row_data)?;
                 rows.push(row);
                 offset += row_length;
-            } else {
+            }
+
+            if header.next_page_id == PageId::invalid() {
                 break;
             }
+
+            current_page_id = header.next_page_id;
         }
 
         Ok(rows)
