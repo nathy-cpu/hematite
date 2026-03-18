@@ -11,6 +11,9 @@ pub mod query;
 pub mod sql;
 pub mod storage;
 
+#[cfg(test)]
+pub mod test_utils;
+
 pub use btree::tree::BTreeManager;
 pub use catalog::{Catalog, Column, DataType, Schema, Table, Value};
 pub use error::{HematiteError, Result};

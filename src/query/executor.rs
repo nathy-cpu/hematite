@@ -380,16 +380,7 @@ impl QueryExecutor for CreateExecutor {
 mod tests {
     use super::*;
     use crate::catalog::types::{DataType, Value};
-    use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn tmp_db(prefix: &str) -> String {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        format!("{}_{}.db", prefix, nanos)
-    }
+    use crate::test_utils::TestDbFile;
 
     #[test]
     fn test_select_executor_debug() -> Result<()> {
@@ -413,9 +404,8 @@ mod tests {
         ];
         catalog.create_table("users".to_string(), columns)?;
 
-        let path = tmp_db("_test_select_executor_debug");
-        let _ = fs::remove_file(&path);
-        let mut storage = StorageEngine::new(path.clone())?;
+        let db = TestDbFile::new("_test_select_executor_debug");
+        let mut storage = StorageEngine::new(db.path())?;
         // Create table in storage as well
         storage.create_table("users")?;
 
@@ -465,7 +455,6 @@ mod tests {
         assert_eq!(result.rows.len(), 3); // 3 simulated rows
         println!("✓ SUCCESS: Select executor test passed");
         storage.flush()?;
-        let _ = fs::remove_file(&path);
         Ok(())
     }
 
@@ -489,9 +478,8 @@ mod tests {
         ];
         catalog.create_table("users".to_string(), columns)?;
 
-        let path = tmp_db("_test_select_executor");
-        let _ = fs::remove_file(&path);
-        let mut storage = StorageEngine::new(path.clone())?;
+        let db = TestDbFile::new("_test_select_executor");
+        let mut storage = StorageEngine::new(db.path())?;
         // Create table in storage as well
         storage.create_table("users")?;
 
@@ -522,7 +510,6 @@ mod tests {
         assert_eq!(result.columns, vec!["id"]);
         assert_eq!(result.rows.len(), 3); // 3 simulated rows
         storage.flush()?;
-        let _ = fs::remove_file(&path);
         Ok(())
     }
 
@@ -546,9 +533,8 @@ mod tests {
         ];
         catalog.create_table("users".to_string(), columns)?;
 
-        let path = tmp_db("_test_insert_executor");
-        let _ = fs::remove_file(&path);
-        let mut storage = StorageEngine::new(path.clone())?;
+        let db = TestDbFile::new("_test_insert_executor");
+        let mut storage = StorageEngine::new(db.path())?;
         // Create table in storage as well
         storage.create_table("users")?;
         let mut ctx = ExecutionContext::new(&catalog, &mut storage);
@@ -568,16 +554,14 @@ mod tests {
         assert!(result.columns.is_empty());
         assert!(result.rows.is_empty());
         storage.flush()?;
-        let _ = fs::remove_file(&path);
         Ok(())
     }
 
     #[test]
     fn test_create_executor() -> Result<()> {
         let catalog = Schema::new();
-        let path = tmp_db("_test_create_executor");
-        let _ = fs::remove_file(&path);
-        let mut storage = StorageEngine::new(path.clone())?;
+        let db = TestDbFile::new("_test_create_executor");
+        let mut storage = StorageEngine::new(db.path())?;
         let mut ctx = ExecutionContext::new(&catalog, &mut storage);
 
         let statement = CreateStatement {
@@ -598,7 +582,6 @@ mod tests {
         assert!(result.rows.is_empty());
         assert!(ctx.catalog.get_table_by_name("test_table").is_some());
         storage.flush()?;
-        let _ = fs::remove_file(&path);
         Ok(())
     }
 }

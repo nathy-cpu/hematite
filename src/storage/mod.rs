@@ -22,16 +22,15 @@ pub use types::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use crate::test_utils::TestDbFile;
 
     // ... (rest of the code remains the same)
 
     #[test]
     fn test_concurrent_page_access() -> crate::error::Result<()> {
-        let test_path = "_test_storage_concurrent.db";
-        let _ = fs::remove_file(test_path);
+        let test_db = TestDbFile::new("_test_storage_concurrent");
 
-        let mut storage = StorageEngine::new(test_path)?;
+        let mut storage = StorageEngine::new(test_db.path())?;
         let page_id = storage.allocate_page()?;
 
         // Write initial data
@@ -52,8 +51,6 @@ mod tests {
         let updated_page = storage.read_page(page_id)?;
         assert_eq!(updated_page.data[0..8], [5, 2, 3, 4, 5, 6, 7, 8]);
 
-        // Clean up
-        fs::remove_file(test_path)?;
         Ok(())
     }
 }

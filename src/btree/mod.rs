@@ -73,22 +73,20 @@ mod tests {
     use crate::btree::{BTreeKey, BTreeValue};
     use crate::error::Result;
     use crate::storage::StorageEngine;
-    use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use crate::test_utils::TestDbFile;
 
-    fn tmp_db() -> String {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        format!("_test_btree_{}.db", nanos)
+    fn tmp_db() -> TestDbFile {
+        TestDbFile::new("_test_btree")
+    }
+
+    fn new_storage(db: &TestDbFile) -> Result<StorageEngine> {
+        StorageEngine::new(db.path().to_string())
     }
 
     #[test]
     fn test_btree_insert_and_search() -> Result<()> {
         let path = tmp_db();
-        let _ = fs::remove_file(&path);
-        let storage = StorageEngine::new(path.clone())?;
+        let storage = new_storage(&path)?;
         let mut btree = BTreeIndex::new_with_init(storage)?;
 
         // Insert some key-value pairs with unique keys
@@ -122,15 +120,13 @@ mod tests {
         let found_missing = btree.search(&key_missing)?;
         assert!(found_missing.is_none());
 
-        let _ = fs::remove_file(&path);
         Ok(())
     }
 
     #[test]
     fn test_btree_delete() -> Result<()> {
         let path = tmp_db();
-        let _ = fs::remove_file(&path);
-        let storage = StorageEngine::new(path.clone())?;
+        let storage = new_storage(&path)?;
         let mut btree = BTreeIndex::new_with_init(storage)?;
 
         // Insert some key-value pairs with unique keys
@@ -166,15 +162,13 @@ mod tests {
         let deleted_missing = btree.delete(&key_missing)?;
         assert!(deleted_missing.is_none());
 
-        let _ = fs::remove_file(&path);
         Ok(())
     }
 
     #[test]
     fn test_btree_delete_all_keys() -> Result<()> {
         let path = tmp_db();
-        let _ = fs::remove_file(&path);
-        let storage = StorageEngine::new(path.clone())?;
+        let storage = new_storage(&path)?;
         let mut btree = BTreeIndex::new_with_init(storage)?;
 
         // Insert multiple keys with unique range
@@ -198,7 +192,6 @@ mod tests {
             assert!(found.is_none());
         }
 
-        let _ = fs::remove_file(&path);
         Ok(())
     }
 
@@ -206,8 +199,7 @@ mod tests {
     #[test]
     fn test_cursor_operations() -> Result<()> {
         let path = tmp_db();
-        let _ = fs::remove_file(&path);
-        let storage = StorageEngine::new(path.clone())?;
+        let storage = new_storage(&path)?;
         let mut btree = BTreeIndex::new_with_init(storage)?;
 
         // Insert test data
@@ -259,7 +251,6 @@ mod tests {
             assert_eq!(*current_key, seek_key);
         }
 
-        let _ = fs::remove_file(&path);
         Ok(())
     }
 
@@ -267,8 +258,7 @@ mod tests {
     #[test]
     fn test_leaf_node_splitting() -> Result<()> {
         let path = tmp_db();
-        let _ = fs::remove_file(&path);
-        let storage = StorageEngine::new(path.clone())?;
+        let storage = new_storage(&path)?;
         let mut btree = BTreeIndex::new_with_init(storage)?;
 
         // Insert enough keys to cause leaf splits
@@ -290,15 +280,13 @@ mod tests {
             assert_eq!(found.unwrap(), BTreeValue::new(vec![i as u8, 0, 0]));
         }
 
-        let _ = fs::remove_file(&path);
         Ok(())
     }
 
     #[test]
     fn test_internal_node_splitting() -> Result<()> {
         let path = tmp_db();
-        let _ = fs::remove_file(&path);
-        let storage = StorageEngine::new(path.clone())?;
+        let storage = new_storage(&path)?;
         let mut btree = BTreeIndex::new_with_init(storage)?;
 
         // Insert many keys to cause internal node splits
@@ -322,7 +310,6 @@ mod tests {
             );
         }
 
-        let _ = fs::remove_file(&path);
         Ok(())
     }
 
@@ -330,8 +317,7 @@ mod tests {
     #[test]
     fn test_size_based_splits() -> Result<()> {
         let path = tmp_db();
-        let _ = fs::remove_file(&path);
-        let storage = StorageEngine::new(path.clone())?;
+        let storage = new_storage(&path)?;
         let mut btree = BTreeIndex::new_with_init(storage)?;
 
         // Insert large keys/values to test size-based splits
@@ -349,7 +335,6 @@ mod tests {
             assert_eq!(found.unwrap(), BTreeValue::new(vec![i as u8; 100]));
         }
 
-        let _ = fs::remove_file(&path);
         Ok(())
     }
 
@@ -357,8 +342,7 @@ mod tests {
     #[test]
     fn test_duplicate_key_handling() -> Result<()> {
         let path = tmp_db();
-        let _ = fs::remove_file(&path);
-        let storage = StorageEngine::new(path.clone())?;
+        let storage = new_storage(&path)?;
         let mut btree = BTreeIndex::new_with_init(storage)?;
 
         let key = BTreeKey::new(vec![42, 0, 0]);
@@ -392,7 +376,6 @@ mod tests {
         }
         assert_eq!(count, 1, "Should only have one entry for duplicate key");
 
-        let _ = fs::remove_file(&path);
         Ok(())
     }
 
@@ -400,8 +383,7 @@ mod tests {
     #[test]
     fn test_empty_tree_operations() -> Result<()> {
         let path = tmp_db();
-        let _ = fs::remove_file(&path);
-        let storage = StorageEngine::new(path.clone())?;
+        let storage = new_storage(&path)?;
         let mut btree = BTreeIndex::new_with_init(storage)?;
 
         // Test operations on empty tree
@@ -416,15 +398,13 @@ mod tests {
         cursor.last()?; // Should succeed but cursor should be invalid
         assert!(!cursor.is_valid()); // Cursor should be invalid on empty tree
 
-        let _ = fs::remove_file(&path);
         Ok(())
     }
 
     #[test]
     fn test_single_key_operations() -> Result<()> {
         let path = tmp_db();
-        let _ = fs::remove_file(&path);
-        let storage = StorageEngine::new(path.clone())?;
+        let storage = new_storage(&path)?;
         let mut btree = BTreeIndex::new_with_init(storage)?;
 
         let key = BTreeKey::new(vec![5, 0, 0]);
@@ -448,15 +428,13 @@ mod tests {
         assert!(btree.delete(&key)?.is_some());
         assert!(btree.search(&key)?.is_none());
 
-        let _ = fs::remove_file(&path);
         Ok(())
     }
 
     #[test]
     fn test_root_split() -> Result<()> {
         let path = tmp_db();
-        let _ = fs::remove_file(&path);
-        let storage = StorageEngine::new(path.clone())?;
+        let storage = new_storage(&path)?;
         let mut btree = BTreeIndex::new_with_init(storage)?;
 
         // Insert keys to force root split
@@ -472,7 +450,6 @@ mod tests {
             assert!(btree.search(&key)?.is_some());
         }
 
-        let _ = fs::remove_file(&path);
         Ok(())
     }
 
@@ -480,8 +457,7 @@ mod tests {
     #[test]
     fn test_checksum_validation() -> Result<()> {
         let path = tmp_db();
-        let _ = fs::remove_file(&path);
-        let storage = StorageEngine::new(path.clone())?;
+        let storage = new_storage(&path)?;
         let mut btree = BTreeIndex::new_with_init(storage)?;
 
         // Insert some data
@@ -495,12 +471,11 @@ mod tests {
         drop(btree);
 
         // Reopen and verify checksums are validated
-        let storage = StorageEngine::new(path.clone())?;
+        let storage = new_storage(&path)?;
         let _manager = BTreeManager::new(storage);
         // This should work if checksums are valid
         // If we manually corrupt the data, it should fail
 
-        let _ = fs::remove_file(&path);
         Ok(())
     }
 
@@ -508,8 +483,7 @@ mod tests {
     #[test]
     fn test_tree_invariants_random_operations() -> Result<()> {
         let path = tmp_db();
-        let _ = fs::remove_file(&path);
-        let storage = StorageEngine::new(path.clone())?;
+        let storage = new_storage(&path)?;
         let mut btree = BTreeIndex::new_with_init(storage)?;
 
         let mut inserted_keys = Vec::new();
@@ -563,7 +537,6 @@ mod tests {
             assert_eq!(found.unwrap(), *expected_value);
         }
 
-        let _ = fs::remove_file(&path);
         Ok(())
     }
 
@@ -571,8 +544,7 @@ mod tests {
     #[test]
     fn test_merging_and_borrowing() -> Result<()> {
         let path = tmp_db();
-        let _ = fs::remove_file(&path);
-        let storage = StorageEngine::new(path.clone())?;
+        let storage = new_storage(&path)?;
         let mut btree = BTreeIndex::new_with_init(storage)?;
 
         // Insert many keys to create a multi-level tree
@@ -595,7 +567,6 @@ mod tests {
             assert!(found.is_some(), "Key {} should be found after deletions", i);
         }
 
-        let _ = fs::remove_file(&path);
         Ok(())
     }
 }

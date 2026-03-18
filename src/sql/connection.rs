@@ -305,17 +305,12 @@ impl Default for Database {
 mod tests {
     use super::*;
     use crate::catalog::DataType;
-    use std::fs;
-
-    fn tmp_db(prefix: &str) -> String {
-        unique_test_db_path(prefix)
-    }
+    use crate::test_utils::TestDbFile;
 
     #[test]
     fn test_connection_execute() -> Result<()> {
-        let path = tmp_db("_test_connection_execute");
-        let _ = fs::remove_file(&path);
-        let mut conn = Connection::new(&path)?;
+        let db = TestDbFile::new("_test_connection_execute");
+        let mut conn = Connection::new(db.path())?;
 
         // Create table
         let result = conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
@@ -333,15 +328,13 @@ mod tests {
         assert_eq!(result.rows.len(), 1);
 
         conn.close()?;
-        let _ = fs::remove_file(&path);
         Ok(())
     }
 
     #[test]
     fn test_prepared_statement() -> Result<()> {
-        let path = tmp_db("_test_prepared_statement");
-        let _ = fs::remove_file(&path);
-        let mut conn = Connection::new(&path)?;
+        let db = TestDbFile::new("_test_prepared_statement");
+        let mut conn = Connection::new(db.path())?;
 
         // Create table
         conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
@@ -357,15 +350,13 @@ mod tests {
         assert_eq!(query.rows.len(), 1);
 
         conn.close()?;
-        let _ = fs::remove_file(&path);
         Ok(())
     }
 
     #[test]
     fn test_transaction() -> Result<()> {
-        let path = tmp_db("_test_transaction");
-        let _ = fs::remove_file(&path);
-        let mut conn = Connection::new(&path)?;
+        let db = TestDbFile::new("_test_transaction");
+        let mut conn = Connection::new(db.path())?;
 
         // Create table
         conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
@@ -386,15 +377,13 @@ mod tests {
         assert_eq!(result.rows.len(), 1);
 
         conn.close()?;
-        let _ = fs::remove_file(&path);
         Ok(())
     }
 
     #[test]
     fn test_insert_reorders_columns_and_applies_defaults() -> Result<()> {
-        let path = tmp_db("_test_insert_reorders_columns");
-        let _ = fs::remove_file(&path);
-        let mut conn = Connection::new(&path)?;
+        let db = TestDbFile::new("_test_insert_reorders_columns");
+        let mut conn = Connection::new(db.path())?;
 
         conn.execute(
             "CREATE TABLE test (
@@ -418,15 +407,13 @@ mod tests {
         );
 
         conn.close()?;
-        let _ = fs::remove_file(&path);
         Ok(())
     }
 
     #[test]
     fn test_insert_missing_required_column_fails() -> Result<()> {
-        let path = tmp_db("_test_insert_missing_required_column");
-        let _ = fs::remove_file(&path);
-        let mut conn = Connection::new(&path)?;
+        let db = TestDbFile::new("_test_insert_missing_required_column");
+        let mut conn = Connection::new(db.path())?;
 
         conn.execute(
             "CREATE TABLE test (
@@ -439,17 +426,15 @@ mod tests {
         assert!(result.is_err());
 
         conn.close()?;
-        let _ = fs::remove_file(&path);
         Ok(())
     }
 
     #[test]
     fn test_reopen_preserves_exact_schema() -> Result<()> {
-        let path = tmp_db("_test_reopen_preserves_exact_schema");
-        let _ = fs::remove_file(&path);
+        let db = TestDbFile::new("_test_reopen_preserves_exact_schema");
 
         {
-            let mut conn = Connection::new(&path)?;
+            let mut conn = Connection::new(db.path())?;
             conn.execute(
                 "CREATE TABLE users (
                     id INTEGER PRIMARY KEY,
@@ -461,7 +446,7 @@ mod tests {
         }
 
         {
-            let mut conn = Connection::new(&path)?;
+            let mut conn = Connection::new(db.path())?;
             let schema = conn
                 .schema
                 .lock()
@@ -503,7 +488,6 @@ mod tests {
             conn.close()?;
         }
 
-        let _ = fs::remove_file(&path);
         Ok(())
     }
 
@@ -512,16 +496,14 @@ mod tests {
         let mut db = Database::new();
 
         // Connect to database
-        let path = tmp_db("_test_database_connect");
-        let _ = fs::remove_file(&path);
-        let mut conn = db.connect(&path)?;
+        let test_db = TestDbFile::new("_test_database_connect");
+        let mut conn = db.connect(test_db.path())?;
 
         // Create table
         let result = conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY);")?;
         assert!(result.columns.is_empty());
 
         conn.close()?;
-        let _ = fs::remove_file(&path);
         Ok(())
     }
 }

@@ -1246,15 +1246,14 @@ mod catalog_new_tests {
     use crate::catalog::ids::{ColumnId, TableId};
     use crate::catalog::types::DataType;
     use crate::error::Result;
-    use std::fs;
+    use crate::test_utils::TestDbFile;
 
     #[test]
     fn test_catalog_new_database() -> Result<()> {
-        let test_path = "_test_new_catalog.db";
-        let _ = fs::remove_file(test_path);
+        let test_db = TestDbFile::new("_test_new_catalog");
 
         {
-            let mut catalog = Catalog::open_or_create(test_path)?;
+            let mut catalog = Catalog::open_or_create(test_db.path())?;
 
             // Should start with empty schema
             assert_eq!(catalog.list_tables()?.len(), 0);
@@ -1275,21 +1274,18 @@ mod catalog_new_tests {
 
         // Reopen and verify persistence
         {
-            let catalog = Catalog::open_or_create(test_path)?;
+            let catalog = Catalog::open_or_create(test_db.path())?;
             assert_eq!(catalog.list_tables()?.len(), 1);
         }
 
-        // Clean up
-        fs::remove_file(test_path)?;
         Ok(())
     }
 
     #[test]
     fn test_catalog_table_operations() -> Result<()> {
-        let test_path = "_test_table_ops.db";
-        let _ = fs::remove_file(test_path);
+        let test_db = TestDbFile::new("_test_table_ops");
 
-        let mut catalog = Catalog::open_or_create(test_path)?;
+        let mut catalog = Catalog::open_or_create(test_db.path())?;
 
         // Create multiple tables
         let columns1 = vec![
@@ -1323,17 +1319,14 @@ mod catalog_new_tests {
         assert_eq!(catalog.list_tables()?.len(), 1);
         assert!(catalog.get_table(users_id)?.is_none());
 
-        // Clean up
-        fs::remove_file(test_path)?;
         Ok(())
     }
 
     #[test]
     fn test_catalog_duplicate_table() -> Result<()> {
-        let test_path = "_test_duplicate.db";
-        let _ = fs::remove_file(test_path);
+        let test_db = TestDbFile::new("_test_duplicate");
 
-        let mut catalog = Catalog::open_or_create(test_path)?;
+        let mut catalog = Catalog::open_or_create(test_db.path())?;
 
         let columns = vec![
             Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer).primary_key(true),
@@ -1347,17 +1340,14 @@ mod catalog_new_tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
 
-        // Clean up
-        fs::remove_file(test_path)?;
         Ok(())
     }
 
     #[test]
     fn test_catalog_new_methods() -> Result<()> {
-        let test_path = "_test_new_methods.db";
-        let _ = fs::remove_file(test_path);
+        let test_db = TestDbFile::new("_test_new_methods");
 
-        let mut catalog = Catalog::open_or_create(test_path)?;
+        let mut catalog = Catalog::open_or_create(test_db.path())?;
 
         // Create a table
         let columns = vec![
@@ -1417,17 +1407,14 @@ mod catalog_new_tests {
         let next_id = catalog.peek_next_table_id()?;
         assert_eq!(next_id.as_u32(), 2); // First table was ID 1
 
-        // Clean up
-        fs::remove_file(test_path)?;
         Ok(())
     }
 
     #[test]
     fn test_catalog_create_table_with_root() -> Result<()> {
-        let test_path = "_test_create_with_root.db";
-        let _ = fs::remove_file(test_path);
+        let test_db = TestDbFile::new("_test_create_with_root");
 
-        let mut catalog = Catalog::open_or_create(test_path)?;
+        let mut catalog = Catalog::open_or_create(test_db.path())?;
 
         let columns = vec![
             Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer).primary_key(true),
@@ -1440,17 +1427,14 @@ mod catalog_new_tests {
         assert_eq!(table.name, "products");
         assert_eq!(table.root_page_id, root_page);
 
-        // Clean up
-        fs::remove_file(test_path)?;
         Ok(())
     }
 
     #[test]
     fn test_catalog_validation_logic() -> Result<()> {
-        let test_path = "_test_validation.db";
-        let _ = fs::remove_file(test_path);
+        let test_db = TestDbFile::new("_test_validation");
 
-        let mut catalog = Catalog::open_or_create(test_path)?;
+        let mut catalog = Catalog::open_or_create(test_db.path())?;
 
         // Create a table
         let columns = vec![
@@ -1487,8 +1471,6 @@ mod catalog_new_tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
 
-        // Clean up
-        fs::remove_file(test_path)?;
         Ok(())
     }
 }

@@ -229,10 +229,12 @@ impl Default for HematiteBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::TestDbFile;
 
     #[test]
     fn test_hematite_basic_operations() -> Result<()> {
-        let mut db = Hematite::new_in_memory()?;
+        let test_db = TestDbFile::new("_test_in_memory");
+        let mut db = Hematite::new(test_db.path())?;
 
         // Create table
         let result = db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
@@ -255,7 +257,8 @@ mod tests {
 
     #[test]
     fn test_hematite_query_one() -> Result<()> {
-        let mut db = Hematite::new_in_memory()?;
+        let test_db = TestDbFile::new("_test_in_memory");
+        let mut db = Hematite::new(test_db.path())?;
 
         // Create table and insert data
         db.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, value INTEGER);")?;
@@ -270,7 +273,8 @@ mod tests {
 
     #[test]
     fn test_hematite_prepare() -> Result<()> {
-        let mut db = Hematite::new_in_memory()?;
+        let test_db = TestDbFile::new("_test_in_memory");
+        let mut db = Hematite::new(test_db.path())?;
 
         // Create table
         db.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
@@ -287,7 +291,8 @@ mod tests {
 
     #[test]
     fn test_hematite_transaction() -> Result<()> {
-        let mut db = Hematite::new_in_memory()?;
+        let test_db = TestDbFile::new("_test_in_memory");
+        let mut db = Hematite::new(test_db.path())?;
 
         // Create table
         db.execute("CREATE TABLE test (id INTEGER PRIMARY KEY);")?;
@@ -312,7 +317,8 @@ mod tests {
 
     #[test]
     fn test_execute_batch_semicolon_handling() -> Result<()> {
-        let mut db = Hematite::new_in_memory()?;
+        let test_db = TestDbFile::new("_test_in_memory");
+        let mut db = Hematite::new(test_db.path())?;
 
         db.execute_batch(
             "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);\n\

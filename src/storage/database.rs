@@ -28,37 +28,30 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use crate::test_utils::TestDbFile;
 
     #[test]
     fn test_database_creation_and_close() -> Result<()> {
-        let test_path = "_test_database.db";
-        let _ = fs::remove_file(test_path);
+        let test_db = TestDbFile::new("_test_database");
 
         {
-            let mut db = Database::open(test_path)?;
+            let mut db = Database::open(test_db.path())?;
             // Database is created successfully
             db.close()?;
         }
 
-        // Clean up
-        fs::remove_file(test_path)?;
         Ok(())
     }
 
     #[test]
     fn test_database_storage_access() -> Result<()> {
-        let test_path = "_test_database_storage.db";
-        let _ = fs::remove_file(test_path);
+        let test_db = TestDbFile::new("_test_database_storage");
 
-        let mut db = Database::open(test_path)?;
+        let mut db = Database::open(test_db.path())?;
         
         // Test storage access
         let storage = db.storage();
         assert_eq!(storage.get_table_metadata().len(), 0);
-
-        // Clean up
-        fs::remove_file(test_path)?;
         Ok(())
     }
 }
