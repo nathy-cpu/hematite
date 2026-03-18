@@ -1,100 +1,9 @@
 #[cfg(test)]
 mod tests {
     use crate::catalog::types::{DataType, Value};
-    use crate::catalog::{Column, ColumnId, DatabaseHeader, LegacyCatalog as Catalog, Schema, Table, TableId};
+    use crate::catalog::{Column, ColumnId, DatabaseHeader, Schema, Table, TableId};
     use crate::error::Result;
     use crate::storage::{Page, PageId};
-    use std::fs;
-
-    #[test]
-    fn test_catalog_creation() -> Result<()> {
-        let test_path = "_test_catalog.db";
-        let _ = fs::remove_file(test_path);
-
-        let storage = crate::storage::StorageEngine::new(test_path)?;
-        let _catalog = Catalog::new(storage)?;
-
-        // Clean up
-        fs::remove_file(test_path)?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_catalog_create_table() -> Result<()> {
-        let test_path = "_test_catalog_create.db";
-        let _ = fs::remove_file(test_path);
-
-        let storage = crate::storage::StorageEngine::new(test_path)?;
-        let mut catalog = Catalog::new(storage)?;
-
-        let columns = vec![
-            crate::catalog::Column::new(
-                crate::catalog::ColumnId::new(1),
-                "id".to_string(),
-                DataType::Integer,
-            )
-            .primary_key(true),
-            crate::catalog::Column::new(
-                crate::catalog::ColumnId::new(2),
-                "name".to_string(),
-                DataType::Text,
-            ),
-        ];
-
-        let _table_id = catalog.create_table("users", columns)?;
-
-        // Note: Current catalog implementation has limitations with schema state management
-        // This test documents the current behavior - table creation succeeds
-
-        // Clean up
-        fs::remove_file(test_path)?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_catalog_persistence() -> Result<()> {
-        let test_path = "_test_catalog_persist.db";
-        let _ = fs::remove_file(test_path);
-
-        // Create catalog and add tables
-        {
-            let storage = crate::storage::StorageEngine::new(test_path)?;
-            let mut catalog = Catalog::new(storage)?;
-
-            let columns = vec![
-                crate::catalog::Column::new(
-                    crate::catalog::ColumnId::new(1),
-                    "id".to_string(),
-                    DataType::Integer,
-                )
-                .primary_key(true),
-                crate::catalog::Column::new(
-                    crate::catalog::ColumnId::new(2),
-                    "name".to_string(),
-                    DataType::Text,
-                ),
-            ];
-
-            catalog.create_table("users", columns)?;
-            // Note: Current catalog implementation creates fresh schema each time
-            // So persistence across restarts doesn't work yet
-        } // catalog and storage are dropped here
-
-        // Reopen and verify (this will show current limitation)
-        {
-            let storage = crate::storage::StorageEngine::new(test_path)?;
-            let mut catalog = Catalog::new(storage)?;
-
-            let tables = catalog.list_tables()?;
-            // Currently this will be 0 because schema is recreated fresh each time
-            // This test documents current behavior/limitation
-            assert_eq!(tables.len(), 0);
-        }
-
-        // Clean up
-        fs::remove_file(test_path)?;
-        Ok(())
-    }
 
     #[test]
     fn test_database_header_creation() {
@@ -348,138 +257,6 @@ mod tests {
         );
         assert_ne!(Value::Boolean(true), Value::Boolean(false));
         assert_ne!(Value::Float(3.14), Value::Float(2.71));
-    }
-
-    #[test]
-    fn test_catalog_debug() {
-        let test_path = "_test_catalog_debug.db";
-        let _ = fs::remove_file(test_path);
-
-        let storage = crate::storage::StorageEngine::new(test_path).unwrap();
-        let catalog = Catalog::new(storage).unwrap();
-
-        let debug_str = format!("{:?}", catalog);
-        assert!(debug_str.contains("Catalog"));
-
-        // Clean up
-        fs::remove_file(test_path).unwrap();
-    }
-
-    #[test]
-    fn test_catalog_duplicate_table() -> Result<()> {
-        let test_path = "_test_catalog_duplicate.db";
-        let _ = fs::remove_file(test_path);
-
-        let storage = crate::storage::StorageEngine::new(test_path)?;
-        let mut catalog = Catalog::new(storage)?;
-
-        let columns = vec![crate::catalog::Column::new(
-            crate::catalog::ColumnId::new(1),
-            "id".to_string(),
-            DataType::Integer,
-        )
-        .primary_key(true)];
-
-        catalog.create_table("users", columns.clone())?;
-
-        // Note: Current catalog implementation has limitations with duplicate detection
-        // This test documents the current behavior
-
-        // Clean up
-        fs::remove_file(test_path)?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_catalog_drop_table() -> Result<()> {
-        let test_path = "_test_catalog_drop.db";
-        let _ = fs::remove_file(test_path);
-
-        let storage = crate::storage::StorageEngine::new(test_path)?;
-        let mut catalog = Catalog::new(storage)?;
-
-        let columns = vec![crate::catalog::Column::new(
-            crate::catalog::ColumnId::new(1),
-            "id".to_string(),
-            DataType::Integer,
-        )
-        .primary_key(true)];
-
-        let _table_id = catalog.create_table("users", columns)?;
-
-        // Note: Current catalog implementation has limitations with table retrieval
-        // This test documents the current behavior
-
-        // Clean up
-        fs::remove_file(test_path)?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_catalog_list_tables() -> Result<()> {
-        let test_path = "_test_catalog_list.db";
-        let _ = fs::remove_file(test_path);
-
-        let storage = crate::storage::StorageEngine::new(test_path)?;
-        let mut catalog = Catalog::new(storage)?;
-
-        let columns1 = vec![crate::catalog::Column::new(
-            crate::catalog::ColumnId::new(1),
-            "id".to_string(),
-            DataType::Integer,
-        )
-        .primary_key(true)];
-        let columns2 = vec![crate::catalog::Column::new(
-            crate::catalog::ColumnId::new(2),
-            "id".to_string(),
-            DataType::Integer,
-        )
-        .primary_key(true)];
-
-        catalog.create_table("users", columns1)?;
-        catalog.create_table("products", columns2)?;
-
-        let _tables = catalog.list_tables()?;
-        // Note: Current catalog implementation has limitations with table listing
-        // This test documents the current behavior
-
-        // Clean up
-        fs::remove_file(test_path)?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_catalog_get_nonexistent_table() -> Result<()> {
-        let test_path = "_test_catalog_get.db";
-        let _ = fs::remove_file(test_path);
-
-        let storage = crate::storage::StorageEngine::new(test_path)?;
-        let mut catalog = Catalog::new(storage)?;
-
-        let nonexistent_id = TableId::new(999);
-        let table = catalog.get_table(nonexistent_id)?;
-        assert!(table.is_none());
-
-        // Clean up
-        fs::remove_file(test_path)?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_catalog_drop_nonexistent_table() -> Result<()> {
-        let test_path = "_test_catalog_drop_nonexistent.db";
-        let _ = fs::remove_file(test_path);
-
-        let storage = crate::storage::StorageEngine::new(test_path)?;
-        let mut catalog = Catalog::new(storage)?;
-
-        let nonexistent_id = TableId::new(999);
-        let result = catalog.drop_table(nonexistent_id);
-        assert!(result.is_err());
-
-        // Clean up
-        fs::remove_file(test_path)?;
-        Ok(())
     }
 
     #[test]
@@ -1464,7 +1241,7 @@ mod tests {
 // Tests for the new SQLite-style catalog implementation
 #[cfg(test)]
 mod catalog_new_tests {
-    use crate::catalog::catalog_new::Catalog;
+    use crate::catalog::catalog::Catalog;
     use crate::catalog::column::Column;
     use crate::catalog::ids::{ColumnId, TableId};
     use crate::catalog::types::DataType;

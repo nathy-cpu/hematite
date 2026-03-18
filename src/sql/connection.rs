@@ -1,10 +1,10 @@
 //! SQL connection and statement interface
 
-use crate::catalog::{Column, ColumnId, DataType, Schema};
+use crate::catalog::Schema;
 use crate::error::{HematiteError, Result};
 use crate::parser::{Lexer, Parser};
 use crate::query::{ExecutionContext, QueryPlanner, QueryResult};
-use crate::storage::StorageEngine;
+use crate::storage::{Page, PageId, StorageEngine};
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
@@ -14,43 +14,94 @@ pub struct Connection {
 }
 
 impl Connection {
+    const SCHEMA_MAGIC: [u8; 4] = *b"HMSC";
+    const SCHEMA_VERSION: u32 = 1;
+    const SCHEMA_PAGE_ID: PageId = PageId::new(0);
+
     pub fn new(database_path: &str) -> Result<Self> {
         let mut storage = StorageEngine::new(database_path.to_string())?;
 
-        // Load existing schema from storage
+        // Load the durable schema from the reserved schema page.
         let schema = Self::load_schema(&mut storage)?;
 
-        Ok(Self { storage, schema })
+        Ok(Self {
+            storage,
+            schema,
+        })
     }
 
     fn load_schema(storage: &mut StorageEngine) -> Result<Arc<Mutex<Schema>>> {
-        // Load schema from existing table metadata
-        let mut schema = Schema::new();
-
-        // Get table metadata from storage engine
-        let table_metadata = storage.get_table_metadata();
-
-        // Reconstruct schema from table metadata
-        for (table_name, _metadata) in table_metadata {
-            // Create a placeholder table with basic columns
-            // In a real implementation, we would persist column definitions
-            let columns = vec![
-                Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer)
-                    .primary_key(true),
-                Column::new(ColumnId::new(2), "data".to_string(), DataType::Text),
-            ];
-
-            // Create the table in the schema
-            if let Err(_) = schema.create_table(table_name.clone(), columns) {
-                // If table creation fails, skip it
-                continue;
-            }
-        }
+        let schema = match storage.read_page(Self::SCHEMA_PAGE_ID) {
+            Ok(page) => Self::deserialize_schema_page(&page)?,
+            Err(_) => Schema::new(),
+        };
 
         Ok(Arc::new(Mutex::new(schema)))
     }
 
+    fn persist_schema(&mut self, schema: &Schema) -> Result<()> {
+        let page = Self::serialize_schema_page(schema)?;
+        self.storage.write_page(page)
+    }
+
+    fn serialize_schema_page(schema: &Schema) -> Result<Page> {
+        let mut payload = Vec::new();
+        schema.serialize(&mut payload)?;
+
+        if payload.len() + 12 > crate::storage::PAGE_SIZE {
+            return Err(HematiteError::StorageError(
+                "Schema too large for reserved schema page".to_string(),
+            ));
+        }
+
+        let mut page = Page::new(Self::SCHEMA_PAGE_ID);
+        page.data[0..4].copy_from_slice(&Self::SCHEMA_MAGIC);
+        page.data[4..8].copy_from_slice(&Self::SCHEMA_VERSION.to_le_bytes());
+        page.data[8..12].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+        page.data[12..12 + payload.len()].copy_from_slice(&payload);
+        Ok(page)
+    }
+
+    fn deserialize_schema_page(page: &Page) -> Result<Schema> {
+        if page.data.iter().all(|&byte| byte == 0) {
+            return Ok(Schema::new());
+        }
+
+        if page.data[0..4] != Self::SCHEMA_MAGIC {
+            return Err(HematiteError::CorruptedData(
+                "Invalid schema page magic".to_string(),
+            ));
+        }
+
+        let version = u32::from_le_bytes([page.data[4], page.data[5], page.data[6], page.data[7]]);
+        if version != Self::SCHEMA_VERSION {
+            return Err(HematiteError::CorruptedData(format!(
+                "Unsupported schema page version {}",
+                version
+            )));
+        }
+
+        let length =
+            u32::from_le_bytes([page.data[8], page.data[9], page.data[10], page.data[11]])
+                as usize;
+        if 12 + length > page.data.len() {
+            return Err(HematiteError::CorruptedData(
+                "Invalid schema page length".to_string(),
+            ));
+        }
+
+        Schema::deserialize(&page.data[12..12 + length])
+    }
+
     pub fn close(&mut self) -> Result<()> {
+        let schema = {
+            let schema_guard = self
+                .schema
+                .lock()
+                .map_err(|_| HematiteError::InternalError("Schema lock error".to_string()))?;
+            schema_guard.clone()
+        };
+        self.persist_schema(&schema)?;
         self.storage.flush()?;
         Ok(())
     }
@@ -83,13 +134,15 @@ impl Connection {
         let result = executor.execute(&mut ctx)?;
 
         // Update schema if it was modified
-        {
+        let updated_schema = {
             let mut schema_guard = self
                 .schema
                 .lock()
                 .map_err(|_| HematiteError::InternalError("Schema lock error".to_string()))?;
             *schema_guard = ctx.catalog;
-        }
+            schema_guard.clone()
+        };
+        self.persist_schema(&updated_schema)?;
 
         Ok(result)
     }
@@ -146,13 +199,15 @@ impl PreparedStatement {
         let result = executor.execute(&mut ctx)?;
 
         // Update schema if it was modified
-        {
+        let updated_schema = {
             let mut schema_guard = connection
                 .schema
                 .lock()
                 .map_err(|_| HematiteError::InternalError("Schema lock error".to_string()))?;
             *schema_guard = ctx.catalog;
-        }
+            schema_guard.clone()
+        };
+        connection.persist_schema(&updated_schema)?;
 
         Ok(result)
     }
@@ -249,6 +304,7 @@ impl Default for Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::DataType;
     use std::fs;
 
     fn tmp_db(prefix: &str) -> String {
@@ -383,6 +439,70 @@ mod tests {
         assert!(result.is_err());
 
         conn.close()?;
+        let _ = fs::remove_file(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn test_reopen_preserves_exact_schema() -> Result<()> {
+        let path = tmp_db("_test_reopen_preserves_exact_schema");
+        let _ = fs::remove_file(&path);
+
+        {
+            let mut conn = Connection::new(&path)?;
+            conn.execute(
+                "CREATE TABLE users (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    active BOOLEAN DEFAULT TRUE
+                );",
+            )?;
+            conn.close()?;
+        }
+
+        {
+            let mut conn = Connection::new(&path)?;
+            let schema = conn
+                .schema
+                .lock()
+                .map_err(|_| HematiteError::InternalError("Schema lock error".to_string()))?;
+            let table = schema.get_table_by_name("users").unwrap();
+
+            assert_eq!(table.columns.len(), 3);
+            assert_eq!(table.columns[0].name, "id");
+            assert_eq!(table.columns[0].data_type, DataType::Integer);
+            assert!(table.columns[0].primary_key);
+
+            assert_eq!(table.columns[1].name, "name");
+            assert_eq!(table.columns[1].data_type, DataType::Text);
+            assert!(!table.columns[1].nullable);
+
+            assert_eq!(table.columns[2].name, "active");
+            assert_eq!(table.columns[2].data_type, DataType::Boolean);
+            assert_eq!(
+                table.columns[2].default_value,
+                Some(crate::catalog::Value::Boolean(true))
+            );
+            drop(schema);
+
+            let result =
+                conn.execute("INSERT INTO users (id, name) VALUES (1, 'Alice');")?;
+            assert_eq!(result.affected_rows, 1);
+
+            let result = conn.execute("SELECT * FROM users;")?;
+            assert_eq!(result.columns, vec!["id", "name", "active"]);
+            assert_eq!(
+                result.rows[0],
+                vec![
+                    crate::catalog::Value::Integer(1),
+                    crate::catalog::Value::Text("Alice".to_string()),
+                    crate::catalog::Value::Boolean(true),
+                ]
+            );
+
+            conn.close()?;
+        }
+
         let _ = fs::remove_file(&path);
         Ok(())
     }

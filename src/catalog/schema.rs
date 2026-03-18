@@ -99,6 +99,14 @@ impl Schema {
         self.tables.values().map(|table| table.column_count()).sum()
     }
 
+    pub fn next_table_id(&self) -> u32 {
+        self.next_table_id
+    }
+
+    pub fn next_column_id(&self) -> u32 {
+        self.next_column_id
+    }
+
     pub fn validate(&self) -> Result<()> {
         // Check for orphaned table names
         for (name, &table_id) in &self.table_names {
