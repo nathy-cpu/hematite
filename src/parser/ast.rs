@@ -104,33 +104,68 @@ impl Statement {
 
 impl SelectStatement {
     pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
-        // Validate table exists
-        match &self.from {
-            TableReference::Table(table_name) => {
-                if catalog.get_table_by_name(table_name).is_none() {
-                    return Err(HematiteError::ParseError(format!(
-                        "Table '{}' does not exist",
-                        table_name
-                    )));
-                }
-            }
-        }
+        let table = match &self.from {
+            TableReference::Table(table_name) => catalog.get_table_by_name(table_name).ok_or_else(
+                || HematiteError::ParseError(format!("Table '{}' does not exist", table_name)),
+            )?,
+        };
 
         // Validate columns
         for item in &self.columns {
             match item {
                 SelectItem::Column(name) => {
-                    let TableReference::Table(table_name) = &self.from;
-                    if let Some(table) = catalog.get_table_by_name(table_name) {
-                        if table.get_column_by_name(name).is_none() {
-                            return Err(HematiteError::ParseError(format!(
-                                "Column '{}' does not exist in table '{}'",
-                                name, table_name
-                            )));
-                        }
+                    if table.get_column_by_name(name).is_none() {
+                        let TableReference::Table(table_name) = &self.from;
+                        return Err(HematiteError::ParseError(format!(
+                            "Column '{}' does not exist in table '{}'",
+                            name, table_name
+                        )));
                     }
                 }
                 SelectItem::Wildcard => {} // Always valid
+            }
+        }
+
+        if let Some(where_clause) = &self.where_clause {
+            for condition in &where_clause.conditions {
+                Self::validate_condition(condition, table, &self.from)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_condition(
+        condition: &Condition,
+        table: &crate::catalog::Table,
+        from: &TableReference,
+    ) -> Result<()> {
+        match condition {
+            Condition::Comparison { left, right, .. } => {
+                Self::validate_expression(left, table, from)?;
+                Self::validate_expression(right, table, from)?;
+            }
+            Condition::Logical { left, right, .. } => {
+                Self::validate_condition(left, table, from)?;
+                Self::validate_condition(right, table, from)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_expression(
+        expr: &Expression,
+        table: &crate::catalog::Table,
+        from: &TableReference,
+    ) -> Result<()> {
+        if let Expression::Column(name) = expr {
+            if table.get_column_by_name(name).is_none() {
+                let TableReference::Table(table_name) = from;
+                return Err(HematiteError::ParseError(format!(
+                    "Column '{}' does not exist in table '{}'",
+                    name, table_name
+                )));
             }
         }
 
@@ -140,24 +175,32 @@ impl SelectStatement {
 
 impl InsertStatement {
     pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
-        // Validate table exists
-        if catalog.get_table_by_name(&self.table).is_none() {
-            return Err(HematiteError::ParseError(format!(
-                "Table '{}' does not exist",
-                self.table
-            )));
-        }
+        let table = catalog.get_table_by_name(&self.table).ok_or_else(|| {
+            HematiteError::ParseError(format!("Table '{}' does not exist", self.table))
+        })?;
+
+        let mut seen_columns = std::collections::HashSet::new();
 
         // Validate columns
-        if let Some(table) = catalog.get_table_by_name(&self.table) {
-            for col_name in &self.columns {
-                if table.get_column_by_name(col_name).is_none() {
-                    return Err(HematiteError::ParseError(format!(
-                        "Column '{}' does not exist in table '{}'",
-                        col_name, self.table
-                    )));
-                }
+        for col_name in &self.columns {
+            if !seen_columns.insert(col_name) {
+                return Err(HematiteError::ParseError(format!(
+                    "Duplicate column '{}' in INSERT",
+                    col_name
+                )));
             }
+            if table.get_column_by_name(col_name).is_none() {
+                return Err(HematiteError::ParseError(format!(
+                    "Column '{}' does not exist in table '{}'",
+                    col_name, self.table
+                )));
+            }
+        }
+
+        if self.columns.is_empty() {
+            return Err(HematiteError::ParseError(
+                "INSERT must specify at least one column".to_string(),
+            ));
         }
 
         // Validate values count matches columns
@@ -260,6 +303,33 @@ mod tests {
             columns: vec![SelectItem::Column("invalid".to_string())],
             from: TableReference::Table("users".to_string()),
             where_clause: None,
+        };
+
+        assert!(select.validate(&catalog).is_err());
+    }
+
+    #[test]
+    fn test_invalid_where_column_reference() {
+        let mut catalog = crate::catalog::Schema::new();
+
+        let columns = vec![crate::catalog::Column::new(
+            crate::catalog::ColumnId::new(1),
+            "id".to_string(),
+            DataType::Integer,
+        )
+        .primary_key(true)];
+        catalog.create_table("users".to_string(), columns).unwrap();
+
+        let select = SelectStatement {
+            columns: vec![SelectItem::Wildcard],
+            from: TableReference::Table("users".to_string()),
+            where_clause: Some(WhereClause {
+                conditions: vec![Condition::Comparison {
+                    left: Expression::Column("missing".to_string()),
+                    operator: ComparisonOperator::Equal,
+                    right: Expression::Literal(Value::Integer(1)),
+                }],
+            }),
         };
 
         assert!(select.validate(&catalog).is_err());

@@ -335,6 +335,59 @@ mod tests {
     }
 
     #[test]
+    fn test_insert_reorders_columns_and_applies_defaults() -> Result<()> {
+        let path = tmp_db("_test_insert_reorders_columns");
+        let _ = fs::remove_file(&path);
+        let mut conn = Connection::new(&path)?;
+
+        conn.execute(
+            "CREATE TABLE test (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                active BOOLEAN NOT NULL DEFAULT TRUE
+            );",
+        )?;
+
+        conn.execute("INSERT INTO test (name, id) VALUES ('test', 1);")?;
+
+        let result = conn.execute("SELECT * FROM test;")?;
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0],
+            vec![
+                crate::catalog::Value::Integer(1),
+                crate::catalog::Value::Text("test".to_string()),
+                crate::catalog::Value::Boolean(true),
+            ]
+        );
+
+        conn.close()?;
+        let _ = fs::remove_file(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn test_insert_missing_required_column_fails() -> Result<()> {
+        let path = tmp_db("_test_insert_missing_required_column");
+        let _ = fs::remove_file(&path);
+        let mut conn = Connection::new(&path)?;
+
+        conn.execute(
+            "CREATE TABLE test (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL
+            );",
+        )?;
+
+        let result = conn.execute("INSERT INTO test (id) VALUES (1);");
+        assert!(result.is_err());
+
+        conn.close()?;
+        let _ = fs::remove_file(&path);
+        Ok(())
+    }
+
+    #[test]
     fn test_database() -> Result<()> {
         let mut db = Database::new();
 

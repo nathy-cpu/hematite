@@ -224,42 +224,70 @@ impl InsertExecutor {
         Self { statement }
     }
 
-    fn validate_values(&self, table: &Table) -> Result<()> {
-        for (_row_idx, value_row) in self.statement.values.iter().enumerate() {
-            for (col_idx, value_expr) in value_row.iter().enumerate() {
-                if col_idx < self.statement.columns.len() {
-                    let col_name = &self.statement.columns[col_idx];
-                    if let Some(column) = table.get_column_by_name(col_name) {
-                        // Extract the actual value from the expression
-                        let value = match value_expr {
-                            Expression::Literal(v) => v,
-                            _ => {
-                                return Err(HematiteError::ParseError(format!(
-                                    "Only literal values are supported in INSERT, column '{}'",
-                                    col_name
-                                )));
-                            }
-                        };
+    fn build_row(&self, table: &Table, value_row: &[Expression]) -> Result<Vec<Value>> {
+        let mut row = Vec::with_capacity(table.columns.len());
 
-                        // Simplified validation - just check for basic type compatibility
-                        match (&column.data_type, value) {
-                            (DataType::Integer, Value::Integer(_)) => {}
-                            (DataType::Text, Value::Text(_)) => {}
-                            (DataType::Boolean, Value::Boolean(_)) => {}
-                            (DataType::Float, Value::Float(_)) => {}
-                            (DataType::Float, Value::Integer(_)) => {} // Allow integer to float conversion
-                            _ => {
-                                return Err(HematiteError::ParseError(format!(
-                                    "Type mismatch: column '{}' expects {:?}, got {:?}",
-                                    col_name, column.data_type, value
-                                )));
-                            }
-                        }
+        for column in &table.columns {
+            let value = if let Some(position) = self
+                .statement
+                .columns
+                .iter()
+                .position(|name| name == &column.name)
+            {
+                let expr = value_row.get(position).ok_or_else(|| {
+                    HematiteError::ParseError(format!(
+                        "Missing value for column '{}'",
+                        column.name
+                    ))
+                })?;
+                let literal = match expr {
+                    Expression::Literal(value) => value.clone(),
+                    _ => {
+                        return Err(HematiteError::ParseError(format!(
+                            "Only literal values are supported in INSERT, column '{}'",
+                            column.name
+                        )));
+                    }
+                };
+
+                match (&column.data_type, literal) {
+                    (DataType::Integer, Value::Integer(i)) => Value::Integer(i),
+                    (DataType::Text, Value::Text(s)) => Value::Text(s),
+                    (DataType::Boolean, Value::Boolean(b)) => Value::Boolean(b),
+                    (DataType::Float, Value::Float(f)) => Value::Float(f),
+                    (DataType::Float, Value::Integer(i)) => Value::Float(i as f64),
+                    (_, Value::Null) if column.nullable => Value::Null,
+                    (_, Value::Null) => {
+                        return Err(HematiteError::ParseError(format!(
+                            "Column '{}' cannot be NULL",
+                            column.name
+                        )));
+                    }
+                    (_, value) => {
+                        return Err(HematiteError::ParseError(format!(
+                            "Type mismatch: column '{}' expects {:?}, got {:?}",
+                            column.name, column.data_type, value
+                        )));
                     }
                 }
-            }
+            } else if let Some(default_value) = &column.default_value {
+                default_value.clone()
+            } else if column.nullable {
+                Value::Null
+            } else {
+                return Err(HematiteError::ParseError(format!(
+                    "Missing value for required column '{}'",
+                    column.name
+                )));
+            };
+
+            row.push(value);
         }
-        Ok(())
+
+        table.validate_row(&row)
+            .map_err(|err| HematiteError::ParseError(err.to_string()))?;
+
+        Ok(row)
     }
 }
 
@@ -275,21 +303,9 @@ impl QueryExecutor for InsertExecutor {
                 HematiteError::ParseError(format!("Table '{}' not found", self.statement.table))
             })?;
 
-        // Validate values against column types
-        self.validate_values(table)?;
-
         // Insert data into storage
         for value_row in &self.statement.values {
-            // Convert Expression to Value (simplified - only literals supported)
-            let row_values: Vec<Value> = value_row
-                .iter()
-                .map(|expr| {
-                    match expr {
-                        Expression::Literal(val) => val.clone(),
-                        _ => Value::Null, // Simplified: non-literals become NULL
-                    }
-                })
-                .collect();
+            let row_values = self.build_row(table, value_row)?;
 
             ctx.storage
                 .insert_into_table(&self.statement.table, row_values)?;
