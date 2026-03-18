@@ -12,6 +12,7 @@ pub enum Token {
     Values,
     Create,
     Table,
+    Where,
     Integer,
     Text,
     Boolean,
@@ -21,6 +22,8 @@ pub enum Token {
     Not,
     Null,
     Default,
+    And,
+    Or,
 
     // Operators
     Equal,
@@ -29,8 +32,7 @@ pub enum Token {
     LessThanOrEqual,
     GreaterThan,
     GreaterThanOrEqual,
-    And,
-    Or,
+    // Note: logical operators are tokenized as keywords (AND/OR) and as symbols (&&/||)
 
     // Punctuation
     Comma,
@@ -137,6 +139,7 @@ impl Lexer {
             "VALUES" => Token::Values,
             "CREATE" => Token::Create,
             "TABLE" => Token::Table,
+            "WHERE" => Token::Where,
             "INTEGER" => Token::Integer,
             "TEXT" => Token::Text,
             "BOOLEAN" => Token::Boolean,
@@ -146,6 +149,10 @@ impl Lexer {
             "NOT" => Token::Not,
             "NULL" => Token::Null,
             "DEFAULT" => Token::Default,
+            "AND" => Token::And,
+            "OR" => Token::Or,
+            "TRUE" => Token::BooleanLiteral(true),
+            "FALSE" => Token::BooleanLiteral(false),
             _ => Token::Identifier(identifier.to_string()),
         };
 
@@ -290,6 +297,30 @@ mod tests {
             Token::Asterisk,
             Token::From,
             Token::Identifier("users".to_string()),
+        ];
+
+        assert_eq!(lexer.get_tokens(), &expected);
+        Ok(())
+    }
+
+    #[test]
+    fn test_select_with_where_and_and() -> Result<()> {
+        let mut lexer = Lexer::new("SELECT id FROM users WHERE id = 1 AND id != 2".to_string());
+        lexer.tokenize()?;
+
+        let expected = vec![
+            Token::Select,
+            Token::Identifier("id".to_string()),
+            Token::From,
+            Token::Identifier("users".to_string()),
+            Token::Where,
+            Token::Identifier("id".to_string()),
+            Token::Equal,
+            Token::NumberLiteral(1.0),
+            Token::And,
+            Token::Identifier("id".to_string()),
+            Token::NotEqual,
+            Token::NumberLiteral(2.0),
         ];
 
         assert_eq!(lexer.get_tokens(), &expected);

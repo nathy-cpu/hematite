@@ -5,8 +5,11 @@ use crate::error::Result;
 pub const PAGE_SIZE: usize = 4096; // 4KB pages
 pub const MAX_ROWS_PER_PAGE: usize = 100; // Approximate, depends on row size
 
-/// Table storage constants
-pub const TABLE_METADATA_PAGE_ID: PageId = PageId::new(0);
+/// Reserved page IDs for the single-file database layout.
+///
+/// Kept in `storage` to avoid higher-layer dependencies.
+pub const DB_HEADER_PAGE_ID: PageId = PageId::new(0);
+pub const STORAGE_METADATA_PAGE_ID: PageId = PageId::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PageId(u32);

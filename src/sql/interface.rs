@@ -13,7 +13,9 @@ pub struct Hematite {
 impl Hematite {
     /// Create a new database instance with an in-memory database
     pub fn new_in_memory() -> Result<Self> {
-        let connection = Connection::new("_test.db")?;
+        // This project doesn't yet support a true in-memory backend; use a unique temp file to
+        // avoid test contention when running in parallel.
+        let connection = Connection::new(&unique_test_db_path("_test_in_memory"))?;
         Ok(Self { connection })
     }
 
@@ -109,7 +111,8 @@ impl Hematite {
 
     /// Execute multiple SQL statements in sequence
     pub fn execute_batch(&mut self, sql: &str) -> Result<()> {
-        // Split SQL by semicolons and execute each statement
+        // Split SQL by semicolons and execute each statement.
+        // The parser currently expects statements to end with a semicolon, so we re-append it.
         let statements: Vec<&str> = sql
             .split(';')
             .map(|s| s.trim())
@@ -117,11 +120,22 @@ impl Hematite {
             .collect();
 
         for statement in statements {
-            self.execute(statement)?;
+            let mut owned = statement.to_string();
+            owned.push(';');
+            self.execute(&owned)?;
         }
 
         Ok(())
     }
+}
+
+fn unique_test_db_path(prefix: &str) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{}_{}.db", prefix, nanos)
 }
 
 /// Trait for converting database values to Rust types
@@ -293,6 +307,21 @@ mod tests {
         let result_set = db.query("SELECT * FROM test;")?;
         assert_eq!(result_set.len(), 1);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_execute_batch_semicolon_handling() -> Result<()> {
+        let mut db = Hematite::new_in_memory()?;
+
+        db.execute_batch(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);\n\
+             INSERT INTO users (id, name) VALUES (1, 'Alice');\n\
+             INSERT INTO users (id, name) VALUES (2, 'Bob');",
+        )?;
+
+        let rs = db.query("SELECT * FROM users;")?;
+        assert_eq!(rs.len(), 2);
         Ok(())
     }
 

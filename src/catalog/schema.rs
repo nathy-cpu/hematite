@@ -211,4 +211,34 @@ impl Schema {
         table.root_page_id = root_page_id;
         Ok(())
     }
+
+    /// Insert a fully-defined table (used when loading persisted schema).
+    pub fn insert_table(&mut self, table: Table) -> Result<()> {
+        // Check for duplicate table name
+        if self.table_names.contains_key(&table.name) {
+            return Err(HematiteError::CorruptedData(format!(
+                "Duplicate table name '{}' while loading schema",
+                table.name
+            )));
+        }
+        // Check for duplicate table id
+        if self.tables.contains_key(&table.id) {
+            return Err(HematiteError::CorruptedData(format!(
+                "Duplicate table id {} while loading schema",
+                table.id.as_u32()
+            )));
+        }
+
+        // Advance ID generators to avoid collisions on subsequent creates.
+        self.next_table_id = self.next_table_id.max(table.id.as_u32().saturating_add(1));
+        for col in &table.columns {
+            self.next_column_id = self
+                .next_column_id
+                .max(col.id.as_u32().saturating_add(1));
+        }
+
+        self.table_names.insert(table.name.clone(), table.id);
+        self.tables.insert(table.id, table);
+        Ok(())
+    }
 }

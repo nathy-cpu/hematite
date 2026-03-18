@@ -4,6 +4,7 @@ use crate::error::Result;
 use crate::storage::table::{PageOperations, TableManager};
 use crate::storage::{
     buffer_pool::BufferPool, file_manager::FileManager, Page, PageId, TableMetadata,
+    DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID,
 };
 use std::path::Path;
 
@@ -60,8 +61,8 @@ impl StorageEngine {
     pub fn allocate_page(&mut self) -> Result<PageId> {
         let page_id = self.file_manager.allocate_page()?;
 
-        // Never allocate page 0 (reserved for database header)
-        if page_id == crate::catalog::DatabaseHeader::HEADER_PAGE_ID {
+        // Never allocate reserved pages.
+        if page_id == DB_HEADER_PAGE_ID || page_id == STORAGE_METADATA_PAGE_ID {
             return self.allocate_page(); // Recursive call to get next page
         }
 
@@ -69,8 +70,8 @@ impl StorageEngine {
     }
 
     pub fn deallocate_page(&mut self, page_id: PageId) -> Result<()> {
-        // Never deallocate page 0 (reserved for database header)
-        if page_id == crate::catalog::DatabaseHeader::HEADER_PAGE_ID {
+        // Never deallocate reserved pages.
+        if page_id == DB_HEADER_PAGE_ID || page_id == STORAGE_METADATA_PAGE_ID {
             return Err(crate::error::HematiteError::StorageError(
                 "Cannot deallocate database header page".to_string(),
             ));
@@ -92,7 +93,7 @@ impl StorageEngine {
     // Table metadata persistence
     fn load_table_metadata(&mut self) -> Result<()> {
         // Try to read table metadata from a special page (e.g., page 1)
-        match self.file_manager.read_page(PageId::new(1)) {
+        match self.file_manager.read_page(STORAGE_METADATA_PAGE_ID) {
             Ok(page) => {
                 // Check if this page contains table metadata
                 if page.data.len() >= 4 {
@@ -153,7 +154,7 @@ impl StorageEngine {
         }
 
         // Create or update metadata page
-        let mut page = Page::new(PageId::new(1));
+        let mut page = Page::new(STORAGE_METADATA_PAGE_ID);
 
         // Write metadata size
         let size_bytes = (metadata_bytes.len() as u32).to_le_bytes();
@@ -311,19 +312,6 @@ impl StorageEngine {
 
     pub fn read_page_header(&self, page: &Page) -> Result<crate::storage::TablePageHeader> {
         self.table_manager.read_page_header(page)
-    }
-
-    // Helper methods for database header and B-tree operations
-    pub fn read_database_header(&mut self) -> Result<crate::catalog::DatabaseHeader> {
-        let page = self.read_page(crate::catalog::DatabaseHeader::HEADER_PAGE_ID)?;
-        crate::catalog::DatabaseHeader::deserialize(&page)
-    }
-
-    pub fn write_database_header(&mut self, header: &crate::catalog::DatabaseHeader) -> Result<()> {
-        let mut page = Page::new(crate::catalog::DatabaseHeader::HEADER_PAGE_ID);
-        header.serialize(&mut page)?;
-        self.write_page(page)?;
-        Ok(())
     }
 
     pub fn create_empty_btree(&mut self) -> Result<PageId> {

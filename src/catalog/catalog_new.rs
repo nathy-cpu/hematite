@@ -7,7 +7,7 @@ use crate::catalog::ids::TableId;
 use crate::catalog::schema::Schema;
 use crate::catalog::table::Table;
 use crate::error::Result;
-use crate::storage::{Page, PageId, StorageEngine};
+use crate::storage::{Page, PageId, StorageEngine, DB_HEADER_PAGE_ID};
 use std::sync::{Arc, Mutex};
 
 /// SQLite-style catalog manager with B-tree schema persistence
@@ -26,7 +26,7 @@ impl Catalog {
 
         // Try to read existing database header
         let mut storage_guard = storage.lock().unwrap();
-        let header = match storage_guard.read_page(PageId::new(0)) {
+        let header = match storage_guard.read_page(DB_HEADER_PAGE_ID) {
             Ok(page) => {
                 // Existing database - read header
                 DatabaseHeader::deserialize(&page)?
@@ -41,7 +41,7 @@ impl Catalog {
                 new_header.schema_root_page = schema_root;
 
                 // Write header to page 0
-                let mut header_page = Page::new(PageId::new(0));
+                let mut header_page = Page::new(DB_HEADER_PAGE_ID);
                 new_header.serialize(&mut header_page)?;
                 storage_guard.write_page(header_page)?;
 
@@ -76,13 +76,10 @@ impl Catalog {
                 let table_name = String::from_utf8(key.data.clone()).map_err(|e| {
                     crate::error::HematiteError::StorageError(format!("Invalid table name: {}", e))
                 })?;
-                let table = Table::from_bytes(&value.data)?;
-
-                // Use Schema's public methods to add tables
-                schema.create_table(table_name, table.columns.clone())?;
-
-                // IMPORTANT: Preserve the root page information from the loaded table
-                schema.set_table_root_page(table.id, table.root_page_id)?;
+                let mut table = Table::from_bytes(&value.data)?;
+                // Ensure the persisted name matches the key to avoid inconsistencies.
+                table.name = table_name;
+                schema.insert_table(table)?;
             }
             cursor.next()?;
         }
@@ -92,25 +89,47 @@ impl Catalog {
 
     /// Save schema to the B-tree (transactional)
     fn save_schema_to_btree(&mut self) -> Result<()> {
-        // Clear existing schema B-tree
-        let _storage_guard = self.storage.lock().unwrap();
-        let _btree = BTreeIndex::from_shared_storage(self.storage.clone(), self.schema_root);
+        // For now we do a simple "rebuild" by creating a new schema B-tree root
+        // and then atomically switching the database header to point at it.
+        //
+        // This avoids relying on B-tree delete correctness for clearing old entries.
+        let mut storage_guard = self.storage.lock().unwrap();
+        let new_schema_root = storage_guard.create_empty_btree()?;
+        drop(storage_guard);
 
-        // TODO: In Phase 3, implement proper transactional updates
-        // For now, this is a placeholder
+        let mut btree = BTreeIndex::from_shared_storage(self.storage.clone(), new_schema_root);
 
+        for (table_id, _name) in self.schema.list_tables() {
+            if let Some(table) = self.schema.get_table(table_id) {
+                let key = crate::btree::BTreeKey::new(table.name.as_bytes().to_vec());
+                let value_bytes = table.to_bytes()?;
+                let val = crate::btree::BTreeValue::new(value_bytes);
+                btree.insert(key, val)?;
+            }
+        }
+
+        // Switch header to new root.
+        let mut storage_guard = self.storage.lock().unwrap();
+        let header_page = storage_guard.read_page(DB_HEADER_PAGE_ID)?;
+        let mut header = DatabaseHeader::deserialize(&header_page)?;
+        header.schema_root_page = new_schema_root;
+        let mut updated = Page::new(DB_HEADER_PAGE_ID);
+        header.serialize(&mut updated)?;
+        storage_guard.write_page(updated)?;
+
+        self.schema_root = new_schema_root;
         Ok(())
     }
 
     /// Get the next table ID from database header
     fn get_next_table_id(&self) -> Result<TableId> {
         let mut storage_guard = self.storage.lock().unwrap();
-        let header_page = storage_guard.read_page(PageId::new(0))?;
+        let header_page = storage_guard.read_page(DB_HEADER_PAGE_ID)?;
         let mut header = DatabaseHeader::deserialize(&header_page)?;
         let table_id = header.increment_table_id();
 
         // Update header with new table ID
-        let mut updated_page = Page::new(PageId::new(0));
+        let mut updated_page = Page::new(DB_HEADER_PAGE_ID);
         header.serialize(&mut updated_page)?;
         storage_guard.write_page(updated_page)?;
 
@@ -141,7 +160,13 @@ impl Catalog {
         // Set the root page to maintain consistency
         self.schema.set_table_root_page(table_id, root_page)?;
 
-        // TODO: Save to B-tree in Phase 3 and update root_page
+        // Persist into schema B-tree (upsert)
+        {
+            let mut btree = BTreeIndex::from_shared_storage(self.storage.clone(), self.schema_root);
+            let key = crate::btree::BTreeKey::new(name.as_bytes().to_vec());
+            let val = crate::btree::BTreeValue::new(table.to_bytes()?);
+            btree.insert(key, val)?;
+        }
 
         Ok(table_id)
     }
@@ -159,16 +184,21 @@ impl Catalog {
     /// Drop a table from the catalog
     pub fn drop_table(&mut self, table_id: TableId) -> Result<()> {
         // Check if table exists
-        if self.schema.get_table(table_id).is_none() {
+        let table = self.schema.get_table(table_id).cloned();
+        if table.is_none() {
             return Err(crate::error::HematiteError::StorageError(
                 "Table not found".to_string(),
             ));
         }
+        let table = table.unwrap();
 
         // Remove from in-memory schema
         self.schema.drop_table(table_id)?;
 
-        // TODO: Remove from B-tree in Phase 3
+        // Remove from schema B-tree
+        let mut btree = BTreeIndex::from_shared_storage(self.storage.clone(), self.schema_root);
+        let key = crate::btree::BTreeKey::new(table.name.as_bytes().to_vec());
+        let _ = btree.delete(&key)?;
 
         Ok(())
     }
@@ -208,7 +238,13 @@ impl Catalog {
         // Update in-memory schema
         self.schema.set_table_root_page(table_id, root_page)?;
 
-        // TODO: Update B-tree in Phase 3
+        // Update schema B-tree entry
+        if let Some(table) = self.schema.get_table(table_id) {
+            let mut btree = BTreeIndex::from_shared_storage(self.storage.clone(), self.schema_root);
+            let key = crate::btree::BTreeKey::new(table.name.as_bytes().to_vec());
+            let val = crate::btree::BTreeValue::new(table.to_bytes()?);
+            btree.insert(key, val)?;
+        }
 
         Ok(())
     }

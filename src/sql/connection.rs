@@ -215,7 +215,9 @@ impl Database {
     }
 
     pub fn open_in_memory() -> Result<Connection> {
-        Connection::new("_test.db")
+        // This project doesn't yet support a true in-memory backend; use a unique temp file to
+        // avoid test contention when running in parallel.
+        Connection::new(&unique_test_db_path("_test_in_memory"))
     }
 
     pub fn connect(&mut self, database_path: &str) -> Result<Connection> {
@@ -224,6 +226,15 @@ impl Database {
         // Don't store connections for now to avoid Clone issues
         Ok(connection)
     }
+}
+
+fn unique_test_db_path(prefix: &str) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{}_{}.db", prefix, nanos)
 }
 
 impl Default for Database {
@@ -235,10 +246,17 @@ impl Default for Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    fn tmp_db(prefix: &str) -> String {
+        unique_test_db_path(prefix)
+    }
 
     #[test]
     fn test_connection_execute() -> Result<()> {
-        let mut conn = Connection::new("_test.db")?;
+        let path = tmp_db("_test_connection_execute");
+        let _ = fs::remove_file(&path);
+        let mut conn = Connection::new(&path)?;
 
         // Create table
         let result = conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
@@ -255,12 +273,16 @@ mod tests {
         assert_eq!(result.columns, vec!["id", "name"]);
         assert_eq!(result.rows.len(), 1);
 
+        conn.close()?;
+        let _ = fs::remove_file(&path);
         Ok(())
     }
 
     #[test]
     fn test_prepared_statement() -> Result<()> {
-        let mut conn = Connection::new("_test.db")?;
+        let path = tmp_db("_test_prepared_statement");
+        let _ = fs::remove_file(&path);
+        let mut conn = Connection::new(&path)?;
 
         // Create table
         conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
@@ -271,12 +293,16 @@ mod tests {
         assert!(result.columns.is_empty());
         assert!(result.rows.is_empty());
 
+        conn.close()?;
+        let _ = fs::remove_file(&path);
         Ok(())
     }
 
     #[test]
     fn test_transaction() -> Result<()> {
-        let mut conn = Connection::new("_test.db")?;
+        let path = tmp_db("_test_transaction");
+        let _ = fs::remove_file(&path);
+        let mut conn = Connection::new(&path)?;
 
         // Create table
         conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
@@ -296,6 +322,8 @@ mod tests {
         let result = conn.execute("SELECT * FROM test;")?;
         assert_eq!(result.rows.len(), 1);
 
+        conn.close()?;
+        let _ = fs::remove_file(&path);
         Ok(())
     }
 
@@ -304,12 +332,16 @@ mod tests {
         let mut db = Database::new();
 
         // Connect to database
-        let mut conn = db.connect("_test.db")?;
+        let path = tmp_db("_test_database_connect");
+        let _ = fs::remove_file(&path);
+        let mut conn = db.connect(&path)?;
 
         // Create table
         let result = conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY);")?;
         assert!(result.columns.is_empty());
 
+        conn.close()?;
+        let _ = fs::remove_file(&path);
         Ok(())
     }
 }

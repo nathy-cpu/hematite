@@ -44,7 +44,7 @@ impl Parser {
 
         let from = self.parse_table_reference()?;
 
-        let where_clause = if self.peek_token()? == Token::Identifier("WHERE".to_string()) {
+        let where_clause = if self.peek_token()? == Token::Where {
             Some(self.parse_where_clause()?)
         } else {
             None
@@ -112,7 +112,7 @@ impl Parser {
     }
 
     fn parse_where_clause(&mut self) -> Result<WhereClause> {
-        self.consume_token(&Token::Identifier("WHERE".to_string()))?;
+        self.consume_token(&Token::Where)?;
 
         let conditions = self.parse_conditions()?;
 
@@ -200,8 +200,14 @@ impl Parser {
                     value,
                 )))
             }
-            Token::NullLiteral => {
-                self.consume_token(&Token::NullLiteral)?;
+            Token::NullLiteral | Token::Null => {
+                // `NULL` is used both as a constraint keyword and as a literal in expressions.
+                // We accept either token as a NULL literal here.
+                if token == Token::NullLiteral {
+                    self.consume_token(&Token::NullLiteral)?;
+                } else {
+                    self.consume_token(&Token::Null)?;
+                }
                 Ok(Expression::Literal(crate::catalog::types::Value::Null))
             }
             _ => Err(HematiteError::ParseError(format!(
@@ -427,8 +433,32 @@ impl Parser {
     fn parse_default_value(&mut self) -> Result<crate::catalog::types::Value> {
         let token = self.peek_token()?;
         match token {
+            Token::StringLiteral(value) => {
+                self.consume_token(&Token::StringLiteral(value.clone()))?;
+                Ok(crate::catalog::types::Value::Text(value))
+            }
+            Token::NumberLiteral(value) => {
+                self.consume_token(&Token::NumberLiteral(value.clone()))?;
+                if value.fract() == 0.0 {
+                    Ok(crate::catalog::types::Value::Integer(value as i32))
+                } else {
+                    Ok(crate::catalog::types::Value::Float(value))
+                }
+            }
+            Token::BooleanLiteral(value) => {
+                self.consume_token(&Token::BooleanLiteral(value.clone()))?;
+                Ok(crate::catalog::types::Value::Boolean(value))
+            }
+            Token::NullLiteral | Token::Null => {
+                if token == Token::NullLiteral {
+                    self.consume_token(&Token::NullLiteral)?;
+                } else {
+                    self.consume_token(&Token::Null)?;
+                }
+                Ok(crate::catalog::types::Value::Null)
+            }
             _ => Err(HematiteError::ParseError(format!(
-                "Expected default value, found: {:?}",
+                "Expected DEFAULT literal (NULL, number, string, boolean), found: {:?}",
                 token
             ))),
         }
@@ -514,6 +544,31 @@ mod tests {
             }
             _ => panic!("Expected INSERT statement"),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_create_with_default_literal() -> Result<()> {
+        let mut lexer = Lexer::new(
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT DEFAULT 'x');".to_string(),
+        );
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let statement = parser.parse()?;
+
+        match statement {
+            Statement::Create(create) => {
+                assert_eq!(create.table, "t");
+                assert_eq!(create.columns.len(), 2);
+                assert_eq!(create.columns[1].name, "name");
+                assert_eq!(
+                    create.columns[1].default_value,
+                    Some(crate::catalog::types::Value::Text("x".to_string()))
+                );
+            }
+            _ => panic!("Expected CREATE statement"),
+        }
+
         Ok(())
     }
 }

@@ -77,7 +77,6 @@ impl FileManager {
 
         self.file.seek(SeekFrom::Start(offset))?;
         self.file.write_all(&page.data)?;
-        self.file.sync_all()?;
 
         Ok(())
     }

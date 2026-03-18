@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::catalog::types::{DataType, Value};
-    use crate::catalog::{Catalog, Column, ColumnId, DatabaseHeader, Schema, Table, TableId};
+    use crate::catalog::{Column, ColumnId, DatabaseHeader, LegacyCatalog as Catalog, Schema, Table, TableId};
     use crate::error::Result;
     use crate::storage::{Page, PageId};
     use std::fs;
@@ -1498,10 +1498,8 @@ mod catalog_new_tests {
 
         // Reopen and verify persistence
         {
-            let _catalog = Catalog::open_or_create(test_path)?;
-
-            // TODO: This will work once B-tree loading is implemented in Phase 3
-            // assert_eq!(catalog.list_tables()?.len(), 1);
+            let catalog = Catalog::open_or_create(test_path)?;
+            assert_eq!(catalog.list_tables()?.len(), 1);
         }
 
         // Clean up

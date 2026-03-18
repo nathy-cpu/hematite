@@ -11,7 +11,8 @@ pub mod tests;
 pub mod types;
 
 // Re-export main types for easier access
-pub use catalog::Catalog;
+pub use catalog_new::Catalog;
+pub use catalog::Catalog as LegacyCatalog;
 pub use column::Column;
 pub use header::DatabaseHeader;
 pub use ids::{ColumnId, TableId};

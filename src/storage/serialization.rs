@@ -51,12 +51,20 @@ impl RowSerializer {
         let mut offset = 0;
 
         while offset < data.len() {
+            if offset >= data.len() {
+                break;
+            }
             let type_marker = data[offset];
             offset += 1;
 
             let value = match type_marker {
                 1 => {
                     // Integer
+                    if offset + 4 > data.len() {
+                        return Err(HematiteError::CorruptedData(
+                            "Truncated INTEGER value".to_string(),
+                        ));
+                    }
                     let bytes = [
                         data[offset],
                         data[offset + 1],
@@ -68,6 +76,11 @@ impl RowSerializer {
                 }
                 2 => {
                     // Text
+                    if offset + 4 > data.len() {
+                        return Err(HematiteError::CorruptedData(
+                            "Truncated TEXT length".to_string(),
+                        ));
+                    }
                     let len_bytes = [
                         data[offset],
                         data[offset + 1],
@@ -76,6 +89,11 @@ impl RowSerializer {
                     ];
                     offset += 4;
                     let len = u32::from_le_bytes(len_bytes) as usize;
+                    if offset + len > data.len() {
+                        return Err(HematiteError::CorruptedData(
+                            "Truncated TEXT payload".to_string(),
+                        ));
+                    }
                     let text = String::from_utf8(data[offset..offset + len].to_vec())
                         .map_err(|_| HematiteError::StorageError("Invalid UTF-8".to_string()))?;
                     offset += len;
@@ -83,12 +101,22 @@ impl RowSerializer {
                 }
                 3 => {
                     // Boolean
+                    if offset + 1 > data.len() {
+                        return Err(HematiteError::CorruptedData(
+                            "Truncated BOOLEAN value".to_string(),
+                        ));
+                    }
                     let b = data[offset] != 0;
                     offset += 1;
                     Value::Boolean(b)
                 }
                 4 => {
                     // Float
+                    if offset + 8 > data.len() {
+                        return Err(HematiteError::CorruptedData(
+                            "Truncated FLOAT value".to_string(),
+                        ));
+                    }
                     let bytes = [
                         data[offset],
                         data[offset + 1],
@@ -124,5 +152,36 @@ impl RowSerializer {
             return Err(HematiteError::StorageError("Invalid row data".to_string()));
         }
         Ok(u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_roundtrip_row() -> Result<()> {
+        let row = vec![
+            Value::Integer(1),
+            Value::Text("hello".to_string()),
+            Value::Boolean(true),
+            Value::Float(3.5),
+            Value::Null,
+        ];
+
+        let bytes = RowSerializer::serialize(&row)?;
+        // Stored length includes everything after the 4-byte length prefix.
+        let len = RowSerializer::read_row_length(&bytes[0..4])?;
+        let decoded = RowSerializer::deserialize(&bytes[4..4 + len])?;
+        assert_eq!(decoded.len(), row.len());
+        Ok(())
+    }
+
+    #[test]
+    fn test_deserialize_truncated_returns_error() {
+        // Integer marker without enough payload bytes.
+        let truncated = vec![1u8, 0, 1];
+        let err = RowSerializer::deserialize(&truncated).unwrap_err();
+        assert!(matches!(err, HematiteError::CorruptedData(_)));
     }
 }
