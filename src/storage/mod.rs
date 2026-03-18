@@ -60,7 +60,7 @@ mod tests {
         let test_db = TestDbFile::new("_test_storage_multi_page");
         let mut storage = StorageEngine::new(test_db.path())?;
 
-        storage.create_table("users")?;
+        let _ = storage.create_table("users")?;
 
         let payload = "x".repeat(500);
         for i in 0..12 {

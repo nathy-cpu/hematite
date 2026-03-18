@@ -362,11 +362,13 @@ impl QueryExecutor for CreateExecutor {
         let columns = self.convert_column_definitions()?;
 
         // Create table in catalog
-        ctx.catalog
+        let table_id = ctx
+            .catalog
             .create_table(self.statement.table.clone(), columns)?;
 
         // Create table in storage
-        ctx.storage.create_table(&self.statement.table)?;
+        let root_page_id = ctx.storage.create_table(&self.statement.table)?;
+        ctx.catalog.set_table_root_page(table_id, root_page_id)?;
 
         Ok(QueryResult {
             affected_rows: 0,
@@ -407,7 +409,7 @@ mod tests {
         let db = TestDbFile::new("_test_select_executor_debug");
         let mut storage = StorageEngine::new(db.path())?;
         // Create table in storage as well
-        storage.create_table("users")?;
+        let _ = storage.create_table("users")?;
 
         // Add some test data
         println!("✓ Inserting row 1");
@@ -481,7 +483,7 @@ mod tests {
         let db = TestDbFile::new("_test_select_executor");
         let mut storage = StorageEngine::new(db.path())?;
         // Create table in storage as well
-        storage.create_table("users")?;
+        let _ = storage.create_table("users")?;
 
         // Add some test data
         storage.insert_into_table(
@@ -536,7 +538,7 @@ mod tests {
         let db = TestDbFile::new("_test_insert_executor");
         let mut storage = StorageEngine::new(db.path())?;
         // Create table in storage as well
-        storage.create_table("users")?;
+        let _ = storage.create_table("users")?;
         let mut ctx = ExecutionContext::new(&catalog, &mut storage);
 
         let statement = InsertStatement {

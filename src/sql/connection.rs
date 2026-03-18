@@ -1,150 +1,63 @@
 //! SQL connection and statement interface
 
-use crate::catalog::Schema;
-use crate::error::{HematiteError, Result};
+use crate::catalog::Catalog;
+use crate::error::Result;
 use crate::parser::{Lexer, Parser};
 use crate::query::{ExecutionContext, QueryPlanner, QueryResult};
-use crate::storage::{Page, PageId, StorageEngine};
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
 pub struct Connection {
-    storage: StorageEngine,
-    schema: Arc<Mutex<Schema>>,
+    catalog: Arc<Mutex<Catalog>>,
 }
 
 impl Connection {
-    const SCHEMA_MAGIC: [u8; 4] = *b"HMSC";
-    const SCHEMA_VERSION: u32 = 1;
-    const SCHEMA_PAGE_ID: PageId = PageId::new(0);
-
     pub fn new(database_path: &str) -> Result<Self> {
-        let mut storage = StorageEngine::new(database_path.to_string())?;
-
-        // Load the durable schema from the reserved schema page.
-        let schema = Self::load_schema(&mut storage)?;
-
+        let catalog = Catalog::open_or_create(database_path)?;
         Ok(Self {
-            storage,
-            schema,
+            catalog: Arc::new(Mutex::new(catalog)),
         })
     }
 
-    fn load_schema(storage: &mut StorageEngine) -> Result<Arc<Mutex<Schema>>> {
-        let schema = match storage.read_page(Self::SCHEMA_PAGE_ID) {
-            Ok(page) => Self::deserialize_schema_page(&page)?,
-            Err(_) => Schema::new(),
+    fn execute_statement(&mut self, statement: crate::parser::ast::Statement) -> Result<QueryResult> {
+        let schema = {
+            let catalog_guard = self.catalog.lock().unwrap();
+            catalog_guard.clone_schema()
         };
 
-        Ok(Arc::new(Mutex::new(schema)))
-    }
+        let planner = QueryPlanner::new(schema.clone());
+        let plan = planner.plan(statement)?;
+        let mut executor = plan.executor;
 
-    fn persist_schema(&mut self, schema: &Schema) -> Result<()> {
-        let page = Self::serialize_schema_page(schema)?;
-        self.storage.write_page(page)
-    }
+        let (result, updated_schema) = {
+            let catalog_guard = self.catalog.lock().unwrap();
+            catalog_guard.with_storage(|storage| {
+                let mut ctx = ExecutionContext::new(&schema, storage);
+                let result = executor.execute(&mut ctx)?;
+                Ok((result, ctx.catalog))
+            })?
+        };
 
-    fn serialize_schema_page(schema: &Schema) -> Result<Page> {
-        let mut payload = Vec::new();
-        schema.serialize(&mut payload)?;
-
-        if payload.len() + 12 > crate::storage::PAGE_SIZE {
-            return Err(HematiteError::StorageError(
-                "Schema too large for reserved schema page".to_string(),
-            ));
+        {
+            let mut catalog_guard = self.catalog.lock().unwrap();
+            catalog_guard.replace_schema(updated_schema)?;
         }
 
-        let mut page = Page::new(Self::SCHEMA_PAGE_ID);
-        page.data[0..4].copy_from_slice(&Self::SCHEMA_MAGIC);
-        page.data[4..8].copy_from_slice(&Self::SCHEMA_VERSION.to_le_bytes());
-        page.data[8..12].copy_from_slice(&(payload.len() as u32).to_le_bytes());
-        page.data[12..12 + payload.len()].copy_from_slice(&payload);
-        Ok(page)
-    }
-
-    fn deserialize_schema_page(page: &Page) -> Result<Schema> {
-        if page.data.iter().all(|&byte| byte == 0) {
-            return Ok(Schema::new());
-        }
-
-        if page.data[0..4] != Self::SCHEMA_MAGIC {
-            return Err(HematiteError::CorruptedData(
-                "Invalid schema page magic".to_string(),
-            ));
-        }
-
-        let version = u32::from_le_bytes([page.data[4], page.data[5], page.data[6], page.data[7]]);
-        if version != Self::SCHEMA_VERSION {
-            return Err(HematiteError::CorruptedData(format!(
-                "Unsupported schema page version {}",
-                version
-            )));
-        }
-
-        let length =
-            u32::from_le_bytes([page.data[8], page.data[9], page.data[10], page.data[11]])
-                as usize;
-        if 12 + length > page.data.len() {
-            return Err(HematiteError::CorruptedData(
-                "Invalid schema page length".to_string(),
-            ));
-        }
-
-        Schema::deserialize(&page.data[12..12 + length])
+        Ok(result)
     }
 
     pub fn close(&mut self) -> Result<()> {
-        let schema = {
-            let schema_guard = self
-                .schema
-                .lock()
-                .map_err(|_| HematiteError::InternalError("Schema lock error".to_string()))?;
-            schema_guard.clone()
-        };
-        self.persist_schema(&schema)?;
-        self.storage.flush()?;
-        Ok(())
+        let mut catalog_guard = self.catalog.lock().unwrap();
+        catalog_guard.flush()
     }
 
     pub fn execute(&mut self, sql: &str) -> Result<QueryResult> {
-        // Parse SQL
         let mut lexer = Lexer::new(sql.to_string());
         lexer.tokenize()?;
 
         let mut parser = Parser::new(lexer.get_tokens().to_vec());
         let statement = parser.parse()?;
-
-        // Create execution context
-        let schema = {
-            let schema_guard = self
-                .schema
-                .lock()
-                .map_err(|_| HematiteError::InternalError("Schema lock error".to_string()))?;
-            schema_guard.clone()
-        };
-
-        let mut ctx = ExecutionContext::new(&schema, &mut self.storage);
-
-        // Plan and execute query
-        let planner = QueryPlanner::new(schema.clone());
-        let plan = planner.plan(statement)?;
-
-        // Execute the plan
-        let mut executor = plan.executor;
-        let result = executor.execute(&mut ctx)?;
-
-        // Update schema if it was modified
-        let updated_schema = {
-            let mut schema_guard = self
-                .schema
-                .lock()
-                .map_err(|_| HematiteError::InternalError("Schema lock error".to_string()))?;
-            *schema_guard = ctx.catalog;
-            schema_guard.clone()
-        };
-        self.persist_schema(&updated_schema)?;
-
-        Ok(result)
+        self.execute_statement(statement)
     }
 
     pub fn execute_query(&mut self, sql: &str) -> Result<QueryResult> {
@@ -152,64 +65,34 @@ impl Connection {
     }
 
     pub fn prepare(&self, sql: &str) -> Result<PreparedStatement> {
-        // Parse SQL to validate syntax
         let mut lexer = Lexer::new(sql.to_string());
         lexer.tokenize()?;
 
         let mut parser = Parser::new(lexer.get_tokens().to_vec());
         let statement = parser.parse()?;
 
-        Ok(PreparedStatement {
-            sql: sql.to_string(),
-            statement,
-            connection_schema: self.schema.clone(),
-        })
+        Ok(PreparedStatement { statement })
     }
 
     pub fn begin_transaction(&'_ mut self) -> Result<Transaction<'_>> {
         Ok(Transaction::new(self))
     }
+
+    #[cfg(test)]
+    fn schema_snapshot(&self) -> Result<crate::catalog::Schema> {
+        let catalog_guard = self.catalog.lock().unwrap();
+        Ok(catalog_guard.clone_schema())
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct PreparedStatement {
-    sql: String,
     statement: crate::parser::ast::Statement,
-    connection_schema: Arc<Mutex<Schema>>,
 }
 
 impl PreparedStatement {
     pub fn execute(&mut self, connection: &mut Connection) -> Result<QueryResult> {
-        let schema = {
-            let schema_guard = connection
-                .schema
-                .lock()
-                .map_err(|_| HematiteError::InternalError("Schema lock error".to_string()))?;
-            schema_guard.clone()
-        };
-
-        let mut ctx = ExecutionContext::new(&schema, &mut connection.storage);
-
-        // Plan and execute query
-        let planner = QueryPlanner::new(schema.clone());
-        let plan = planner.plan(self.statement.clone())?;
-
-        // Execute the plan
-        let mut executor = plan.executor;
-        let result = executor.execute(&mut ctx)?;
-
-        // Update schema if it was modified
-        let updated_schema = {
-            let mut schema_guard = connection
-                .schema
-                .lock()
-                .map_err(|_| HematiteError::InternalError("Schema lock error".to_string()))?;
-            *schema_guard = ctx.catalog;
-            schema_guard.clone()
-        };
-        connection.persist_schema(&updated_schema)?;
-
-        Ok(result)
+        connection.execute_statement(self.statement.clone())
     }
 
     pub fn query(&mut self, connection: &mut Connection) -> Result<QueryResult> {
@@ -236,13 +119,11 @@ impl<'a> Transaction<'a> {
     }
 
     pub fn commit(&mut self) -> Result<()> {
-        // In a real implementation, this would commit changes to storage
         self.committed = true;
         Ok(())
     }
 
     pub fn rollback(&mut self) -> Result<()> {
-        // In a real implementation, this would rollback changes
         self.committed = false;
         Ok(())
     }
@@ -273,15 +154,11 @@ impl Database {
     }
 
     pub fn open_in_memory() -> Result<Connection> {
-        // This project doesn't yet support a true in-memory backend; use a unique temp file to
-        // avoid test contention when running in parallel.
         Connection::new(&unique_test_db_path("_test_in_memory"))
     }
 
     pub fn connect(&mut self, database_path: &str) -> Result<Connection> {
         let connection = Connection::new(database_path)?;
-
-        // Don't store connections for now to avoid Clone issues
         Ok(connection)
     }
 }
@@ -312,17 +189,14 @@ mod tests {
         let db = TestDbFile::new("_test_connection_execute");
         let mut conn = Connection::new(db.path())?;
 
-        // Create table
         let result = conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
         assert!(result.columns.is_empty());
         assert!(result.rows.is_empty());
 
-        // Insert data
         let result = conn.execute("INSERT INTO test (id, name) VALUES (1, 'test');")?;
         assert!(result.columns.is_empty());
         assert!(result.rows.is_empty());
 
-        // Query data
         let result = conn.execute("SELECT * FROM test;")?;
         assert_eq!(result.columns, vec!["id", "name"]);
         assert_eq!(result.rows.len(), 1);
@@ -336,10 +210,8 @@ mod tests {
         let db = TestDbFile::new("_test_prepared_statement");
         let mut conn = Connection::new(db.path())?;
 
-        // Create table
         conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
 
-        // Prepare statement
         let mut stmt = conn.prepare("INSERT INTO test (id, name) VALUES (1, 'test');")?;
         let result = stmt.execute(&mut conn)?;
         assert!(result.columns.is_empty());
@@ -358,21 +230,14 @@ mod tests {
         let db = TestDbFile::new("_test_transaction");
         let mut conn = Connection::new(db.path())?;
 
-        // Create table
         conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
 
-        // Begin transaction and execute within its scope
         {
             let mut tx = conn.begin_transaction()?;
-
-            // Insert data
             tx.execute("INSERT INTO test (id, name) VALUES (1, 'test');")?;
-
-            // Commit transaction
             tx.commit()?;
-        } // tx is dropped here, releasing the mutable borrow
+        }
 
-        // Verify data - now safe to use conn again
         let result = conn.execute("SELECT * FROM test;")?;
         assert_eq!(result.rows.len(), 1);
 
@@ -447,10 +312,7 @@ mod tests {
 
         {
             let mut conn = Connection::new(db.path())?;
-            let schema = conn
-                .schema
-                .lock()
-                .map_err(|_| HematiteError::InternalError("Schema lock error".to_string()))?;
+            let schema = conn.schema_snapshot()?;
             let table = schema.get_table_by_name("users").unwrap();
 
             assert_eq!(table.columns.len(), 3);
@@ -468,10 +330,8 @@ mod tests {
                 table.columns[2].default_value,
                 Some(crate::catalog::Value::Boolean(true))
             );
-            drop(schema);
 
-            let result =
-                conn.execute("INSERT INTO users (id, name) VALUES (1, 'Alice');")?;
+            let result = conn.execute("INSERT INTO users (id, name) VALUES (1, 'Alice');")?;
             assert_eq!(result.affected_rows, 1);
 
             let result = conn.execute("SELECT * FROM users;")?;
@@ -492,14 +352,34 @@ mod tests {
     }
 
     #[test]
+    fn test_reopen_preserves_table_root_page() -> Result<()> {
+        let db = TestDbFile::new("_test_reopen_preserves_table_root_page");
+
+        let root_page_before = {
+            let mut conn = Connection::new(db.path())?;
+            conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+            let schema = conn.schema_snapshot()?;
+            let table = schema.get_table_by_name("users").unwrap();
+            let root_page = table.root_page_id;
+            assert_ne!(root_page.as_u32(), 0);
+            conn.close()?;
+            root_page
+        };
+
+        let conn = Connection::new(db.path())?;
+        let schema = conn.schema_snapshot()?;
+        let table = schema.get_table_by_name("users").unwrap();
+        assert_eq!(table.root_page_id, root_page_before);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_database() -> Result<()> {
         let mut db = Database::new();
-
-        // Connect to database
         let test_db = TestDbFile::new("_test_database_connect");
         let mut conn = db.connect(test_db.path())?;
 
-        // Create table
         let result = conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY);")?;
         assert!(result.columns.is_empty());
 

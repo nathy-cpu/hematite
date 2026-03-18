@@ -47,6 +47,7 @@ impl Catalog {
                 let schema_root = storage_guard.create_empty_btree()?;
                 let mut new_header = header;
                 new_header.schema_root_page = schema_root;
+                new_header.checksum = new_header.calculate_checksum();
 
                 // Write header to page 0
                 let mut header_page = Page::new(DB_HEADER_PAGE_ID);
@@ -121,6 +122,7 @@ impl Catalog {
         let header_page = storage_guard.read_page(DB_HEADER_PAGE_ID)?;
         let mut header = DatabaseHeader::deserialize(&header_page)?;
         header.schema_root_page = new_schema_root;
+        header.checksum = header.calculate_checksum();
         let mut updated = Page::new(DB_HEADER_PAGE_ID);
         header.serialize(&mut updated)?;
         storage_guard.write_page(updated)?;
@@ -208,9 +210,30 @@ impl Catalog {
         &self.schema
     }
 
+    /// Clone the current in-memory schema snapshot.
+    pub fn clone_schema(&self) -> Schema {
+        self.schema.clone()
+    }
+
+    /// Run a storage operation against the catalog's backing storage.
+    pub fn with_storage<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&mut StorageEngine) -> Result<T>,
+    {
+        let mut storage_guard = self.storage.lock().unwrap();
+        f(&mut storage_guard)
+    }
+
     /// Force schema persistence to B-tree
     pub fn flush_schema(&mut self) -> Result<()> {
         self.save_schema_to_btree()
+    }
+
+    /// Flush both schema metadata and storage pages.
+    pub fn flush(&mut self) -> Result<()> {
+        self.save_schema_to_btree()?;
+        let mut storage_guard = self.storage.lock().unwrap();
+        storage_guard.flush()
     }
 
     /// Replace the entire in-memory schema and persist it as the durable catalog state.

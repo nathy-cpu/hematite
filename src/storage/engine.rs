@@ -212,7 +212,7 @@ impl StorageEngine {
     }
 
     // Proper table operations using page-based storage
-    pub fn create_table(&mut self, table_name: &str) -> Result<()> {
+    pub fn create_table(&mut self, table_name: &str) -> Result<PageId> {
         // Allocate root page for the table
         let root_page_id = self.allocate_page()?;
 
@@ -224,7 +224,7 @@ impl StorageEngine {
             self.initialize_table_page(root_page_id, PageId::invalid(), PageId::invalid())?;
         self.write_page(root_page)?;
 
-        Ok(())
+        Ok(root_page_id)
     }
 
     pub fn insert_into_table(
