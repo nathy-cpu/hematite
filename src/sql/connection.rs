@@ -127,15 +127,18 @@ pub struct PreparedStatement {
 
 impl PreparedStatement {
     pub fn execute(&mut self, connection: &mut Connection) -> Result<QueryResult> {
-        // Create execution context
-        let schema_guard = connection
-            .schema
-            .lock()
-            .map_err(|_| HematiteError::InternalError("Schema lock error".to_string()))?;
-        let mut ctx = ExecutionContext::new(&schema_guard, &mut connection.storage);
+        let schema = {
+            let schema_guard = connection
+                .schema
+                .lock()
+                .map_err(|_| HematiteError::InternalError("Schema lock error".to_string()))?;
+            schema_guard.clone()
+        };
+
+        let mut ctx = ExecutionContext::new(&schema, &mut connection.storage);
 
         // Plan and execute query
-        let planner = QueryPlanner::new(schema_guard.clone());
+        let planner = QueryPlanner::new(schema.clone());
         let plan = planner.plan(self.statement.clone())?;
 
         // Execute the plan
@@ -292,6 +295,10 @@ mod tests {
         let result = stmt.execute(&mut conn)?;
         assert!(result.columns.is_empty());
         assert!(result.rows.is_empty());
+        assert_eq!(result.affected_rows, 1);
+
+        let query = conn.execute("SELECT * FROM test;")?;
+        assert_eq!(query.rows.len(), 1);
 
         conn.close()?;
         let _ = fs::remove_file(&path);

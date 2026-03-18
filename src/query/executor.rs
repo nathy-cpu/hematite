@@ -7,6 +7,7 @@ use crate::storage::StorageEngine;
 
 #[derive(Debug, Clone)]
 pub struct QueryResult {
+    pub affected_rows: usize,
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Value>>,
 }
@@ -206,6 +207,7 @@ impl QueryExecutor for SelectExecutor {
         }
 
         Ok(QueryResult {
+            affected_rows: projected_rows.len(),
             columns: self.get_column_names(ctx),
             rows: projected_rows,
         })
@@ -294,6 +296,7 @@ impl QueryExecutor for InsertExecutor {
         }
 
         Ok(QueryResult {
+            affected_rows: self.statement.values.len(),
             columns: vec![],
             rows: vec![],
         })
@@ -350,6 +353,7 @@ impl QueryExecutor for CreateExecutor {
         ctx.storage.create_table(&self.statement.table)?;
 
         Ok(QueryResult {
+            affected_rows: 0,
             columns: Vec::new(),
             rows: Vec::new(),
         })

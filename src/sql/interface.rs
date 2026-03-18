@@ -33,7 +33,7 @@ impl Hematite {
         if query_result.columns.is_empty() {
             // This was a DML statement (INSERT, UPDATE, DELETE, CREATE, etc.)
             Ok(StatementResult::new(
-                0,
+                query_result.affected_rows,
                 "Statement executed successfully".to_string(),
             ))
         } else {
@@ -93,7 +93,7 @@ impl Hematite {
         if query_result.columns.is_empty() {
             // This was a DML statement (INSERT, UPDATE, DELETE, CREATE, etc.)
             Ok(StatementResult::new(
-                0,
+                query_result.affected_rows,
                 "Statement executed successfully".to_string(),
             ))
         } else {
@@ -240,7 +240,7 @@ mod tests {
 
         // Insert data
         let result = db.execute("INSERT INTO users (id, name) VALUES (1, 'Alice');")?;
-        assert_eq!(result.affected_rows, 0);
+        assert_eq!(result.affected_rows, 1);
 
         // Query data
         let result_set = db.query("SELECT * FROM users;")?;
