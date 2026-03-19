@@ -59,6 +59,12 @@ impl Parser {
             Vec::new()
         };
 
+        let limit = if matches!(self.peek_token(), Ok(Token::Limit)) {
+            Some(self.parse_limit_clause()?)
+        } else {
+            None
+        };
+
         // Expect semicolon
         self.consume_token(&Token::Semicolon)?;
 
@@ -67,6 +73,7 @@ impl Parser {
             from,
             where_clause,
             order_by,
+            limit,
         }))
     }
 
@@ -159,6 +166,20 @@ impl Parser {
         }
 
         Ok(items)
+    }
+
+    fn parse_limit_clause(&mut self) -> Result<usize> {
+        self.consume_token(&Token::Limit)?;
+        match self.peek_token()? {
+            Token::NumberLiteral(value) if value.fract() == 0.0 && value >= 0.0 => {
+                self.consume_token(&Token::NumberLiteral(value))?;
+                Ok(value as usize)
+            }
+            token => Err(HematiteError::ParseError(format!(
+                "Expected non-negative integer after LIMIT, found: {:?}",
+                token
+            ))),
+        }
     }
 
     fn parse_conditions(&mut self) -> Result<Vec<Condition>> {

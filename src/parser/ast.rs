@@ -20,6 +20,7 @@ pub struct SelectStatement {
     pub from: TableReference,
     pub where_clause: Option<WhereClause>,
     pub order_by: Vec<OrderByItem>,
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone)]

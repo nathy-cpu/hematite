@@ -68,6 +68,7 @@ mod executor_tests {
             from: TableReference::Table("users".to_string()),
             where_clause: None,
             order_by: Vec::new(),
+            limit: None,
         };
 
         let mut executor = SelectExecutor::new(statement);
@@ -131,6 +132,7 @@ mod executor_tests {
             from: TableReference::Table("users".to_string()),
             where_clause: None,
             order_by: Vec::new(),
+            limit: None,
         };
 
         let mut executor = SelectExecutor::new(statement);
@@ -294,6 +296,7 @@ mod planner_tests {
             from: TableReference::Table("users".to_string()),
             where_clause: None,
             order_by: Vec::new(),
+            limit: None,
         };
 
         let plan = planner.plan(Statement::Select(statement))?;

@@ -273,6 +273,10 @@ impl QueryExecutor for SelectExecutor {
             });
         }
 
+        if let Some(limit) = self.statement.limit {
+            filtered_rows.truncate(limit);
+        }
+
         // Apply column projection
         let mut projected_rows = Vec::new();
         for row in filtered_rows {
@@ -495,6 +499,7 @@ impl QueryExecutor for UpdateExecutor {
             from: TableReference::Table(self.statement.table.clone()),
             where_clause: self.statement.where_clause.clone(),
             order_by: Vec::new(),
+            limit: None,
         });
 
         let mut rewritten_rows = Vec::with_capacity(all_rows.len());
@@ -584,6 +589,7 @@ impl QueryExecutor for DeleteExecutor {
             from: TableReference::Table(self.statement.table.clone()),
             where_clause: self.statement.where_clause.clone(),
             order_by: Vec::new(),
+            limit: None,
         });
 
         let mut survivors = Vec::new();

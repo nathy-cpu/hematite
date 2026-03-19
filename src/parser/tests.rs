@@ -31,6 +31,7 @@ mod ast_tests {
             from: TableReference::Table("users".to_string()),
             where_clause: None,
             order_by: Vec::new(),
+            limit: None,
         };
 
         assert!(select.validate(&catalog).is_ok());
@@ -54,6 +55,7 @@ mod ast_tests {
             from: TableReference::Table("users".to_string()),
             where_clause: None,
             order_by: Vec::new(),
+            limit: None,
         };
 
         assert!(select.validate(&catalog).is_err());
@@ -82,6 +84,7 @@ mod ast_tests {
                 }],
             }),
             order_by: Vec::new(),
+            limit: None,
         };
 
         assert!(select.validate(&catalog).is_err());
@@ -126,6 +129,29 @@ mod lexer_tests {
             Token::Identifier("id".to_string()),
             Token::NotEqual,
             Token::NumberLiteral(2.0),
+        ];
+
+        assert_eq!(lexer.get_tokens(), &expected);
+        Ok(())
+    }
+
+    #[test]
+    fn test_limit_statement() -> Result<()> {
+        let mut lexer = Lexer::new("SELECT id FROM users ORDER BY name DESC LIMIT 5;".to_string());
+        lexer.tokenize()?;
+
+        let expected = vec![
+            Token::Select,
+            Token::Identifier("id".to_string()),
+            Token::From,
+            Token::Identifier("users".to_string()),
+            Token::Order,
+            Token::By,
+            Token::Identifier("name".to_string()),
+            Token::Desc,
+            Token::Limit,
+            Token::NumberLiteral(5.0),
+            Token::Semicolon,
         ];
 
         assert_eq!(lexer.get_tokens(), &expected);
@@ -363,6 +389,7 @@ mod parser_tests {
                 assert!(matches!(select.from, TableReference::Table(name) if name == "users"));
                 assert!(select.where_clause.is_none());
                 assert!(select.order_by.is_empty());
+                assert!(select.limit.is_none());
             }
             _ => panic!("Expected SELECT statement"),
         }
@@ -379,6 +406,7 @@ mod parser_tests {
             Statement::Select(select) => {
                 assert!(select.where_clause.is_some());
                 assert!(select.order_by.is_empty());
+                assert!(select.limit.is_none());
                 if let Some(where_clause) = select.where_clause {
                     assert_eq!(where_clause.conditions.len(), 1);
                 }
@@ -401,6 +429,22 @@ mod parser_tests {
                 assert_eq!(select.order_by[0].direction, SortDirection::Desc);
                 assert_eq!(select.order_by[1].column, "id");
                 assert_eq!(select.order_by[1].direction, SortDirection::Asc);
+            }
+            _ => panic!("Expected SELECT statement"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_limit() -> Result<()> {
+        let mut lexer = Lexer::new("SELECT id FROM users ORDER BY name DESC LIMIT 5;".to_string());
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let statement = parser.parse()?;
+        match statement {
+            Statement::Select(select) => {
+                assert_eq!(select.order_by.len(), 1);
+                assert_eq!(select.limit, Some(5));
             }
             _ => panic!("Expected SELECT statement"),
         }
