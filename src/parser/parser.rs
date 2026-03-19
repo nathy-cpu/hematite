@@ -26,11 +26,12 @@ impl Parser {
 
         match token {
             Token::Select => self.parse_select(),
+            Token::Update => self.parse_update(),
             Token::Insert => self.parse_insert(),
             Token::Delete => self.parse_delete(),
             Token::Create => self.parse_create(),
             _ => Err(HematiteError::ParseError(format!(
-                "Expected SELECT, INSERT, DELETE, or CREATE, found: {:?}",
+                "Expected SELECT, UPDATE, INSERT, DELETE, or CREATE, found: {:?}",
                 token
             ))),
         }
@@ -274,6 +275,27 @@ impl Parser {
         }))
     }
 
+    fn parse_update(&mut self) -> Result<Statement> {
+        self.consume_token(&Token::Update)?;
+        let table = self.parse_identifier()?;
+        self.consume_token(&Token::Set)?;
+        let assignments = self.parse_update_assignments()?;
+
+        let where_clause = if matches!(self.peek_token(), Ok(Token::Where)) {
+            Some(self.parse_where_clause()?)
+        } else {
+            None
+        };
+
+        self.consume_token(&Token::Semicolon)?;
+
+        Ok(Statement::Update(UpdateStatement {
+            table,
+            assignments,
+            where_clause,
+        }))
+    }
+
     fn parse_delete(&mut self) -> Result<Statement> {
         self.consume_token(&Token::Delete)?;
         self.consume_token(&Token::From)?;
@@ -351,6 +373,26 @@ impl Parser {
         }
 
         Ok(columns)
+    }
+
+    fn parse_update_assignments(&mut self) -> Result<Vec<UpdateAssignment>> {
+        let mut assignments = Vec::new();
+
+        loop {
+            let column = self.parse_identifier()?;
+            self.consume_token(&Token::Equal)?;
+            let value = self.parse_expression()?;
+            assignments.push(UpdateAssignment { column, value });
+
+            if matches!(self.peek_token(), Ok(Token::Comma)) {
+                self.consume_token(&Token::Comma)?;
+                continue;
+            }
+
+            break;
+        }
+
+        Ok(assignments)
     }
 
     fn parse_value_lists(&mut self) -> Result<Vec<Vec<Expression>>> {

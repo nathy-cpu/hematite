@@ -355,6 +355,77 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_update_with_where_clause() -> Result<()> {
+        let db = TestDbFile::new("_test_update_with_where_clause");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute(
+            "CREATE TABLE test (
+                id INTEGER PRIMARY KEY,
+                name TEXT,
+                active BOOLEAN NOT NULL
+            );",
+        )?;
+        conn.execute("INSERT INTO test (id, name, active) VALUES (1, 'Alice', FALSE);")?;
+        conn.execute("INSERT INTO test (id, name, active) VALUES (2, 'Bob', FALSE);")?;
+
+        let result = conn.execute("UPDATE test SET name = 'Bobby', active = TRUE WHERE id = 2;")?;
+        assert_eq!(result.affected_rows, 1);
+
+        let result = conn.execute("SELECT * FROM test WHERE id = 2;")?;
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0],
+            vec![
+                crate::catalog::Value::Integer(2),
+                crate::catalog::Value::Text("Bobby".to_string()),
+                crate::catalog::Value::Boolean(true),
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_without_where_clause() -> Result<()> {
+        let db = TestDbFile::new("_test_update_without_where_clause");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, active BOOLEAN NOT NULL);")?;
+        conn.execute("INSERT INTO test (id, active) VALUES (1, FALSE);")?;
+        conn.execute("INSERT INTO test (id, active) VALUES (2, FALSE);")?;
+
+        let result = conn.execute("UPDATE test SET active = TRUE;")?;
+        assert_eq!(result.affected_rows, 2);
+
+        let result = conn.execute("SELECT * FROM test WHERE active = TRUE;")?;
+        assert_eq!(result.rows.len(), 2);
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_rejects_duplicate_primary_key() -> Result<()> {
+        let db = TestDbFile::new("_test_update_rejects_duplicate_primary_key");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (1, 'Alice');")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (2, 'Bob');")?;
+
+        let result = conn.execute("UPDATE test SET id = 1 WHERE id = 2;");
+        assert!(result.is_err());
+
+        let result = conn.execute("SELECT * FROM test;")?;
+        assert_eq!(result.rows.len(), 2);
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_reopen_preserves_table_root_page() -> Result<()> {
         let db = TestDbFile::new("_test_reopen_preserves_table_root_page");
 

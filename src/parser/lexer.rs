@@ -6,10 +6,12 @@ use crate::error::{HematiteError, Result};
 pub enum Token {
     // Keywords
     Select,
+    Update,
     From,
     Insert,
     Delete,
     Into,
+    Set,
     Values,
     Create,
     Table,
@@ -142,10 +144,12 @@ impl Lexer {
         let identifier = &self.input[start..self.position];
         let token = match identifier.to_uppercase().as_str() {
             "SELECT" => Token::Select,
+            "UPDATE" => Token::Update,
             "FROM" => Token::From,
             "INSERT" => Token::Insert,
             "DELETE" => Token::Delete,
             "INTO" => Token::Into,
+            "SET" => Token::Set,
             "VALUES" => Token::Values,
             "CREATE" => Token::Create,
             "TABLE" => Token::Table,

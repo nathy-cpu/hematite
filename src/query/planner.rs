@@ -4,7 +4,7 @@ use crate::catalog::{Schema, Table};
 use crate::error::Result;
 use crate::parser::ast::*;
 use crate::query::executor::{
-    CreateExecutor, DeleteExecutor, InsertExecutor, QueryExecutor, SelectExecutor,
+    CreateExecutor, DeleteExecutor, InsertExecutor, QueryExecutor, SelectExecutor, UpdateExecutor,
 };
 use crate::HematiteError;
 
@@ -38,6 +38,7 @@ impl QueryPlanner {
 
         match statement {
             Statement::Select(select) => self.plan_select(select),
+            Statement::Update(update) => self.plan_update(update),
             Statement::Insert(insert) => self.plan_insert(insert),
             Statement::Delete(delete) => self.plan_delete(delete),
             Statement::Create(create) => self.plan_create(create),
@@ -77,6 +78,16 @@ impl QueryPlanner {
 
         // Cost estimation for CREATE is fixed
         let estimated_cost = 1.0;
+
+        Ok(QueryPlan {
+            executor,
+            estimated_cost,
+        })
+    }
+
+    fn plan_update(&self, statement: UpdateStatement) -> Result<QueryPlan> {
+        let executor = Box::new(UpdateExecutor::new(statement));
+        let estimated_cost = 1000.0;
 
         Ok(QueryPlan {
             executor,

@@ -7,6 +7,7 @@ use crate::error::{HematiteError, Result};
 #[derive(Debug, Clone)]
 pub enum Statement {
     Select(SelectStatement),
+    Update(UpdateStatement),
     Insert(InsertStatement),
     Delete(DeleteStatement),
     Create(CreateStatement),
@@ -79,6 +80,19 @@ pub struct InsertStatement {
 }
 
 #[derive(Debug, Clone)]
+pub struct UpdateAssignment {
+    pub column: String,
+    pub value: Expression,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateStatement {
+    pub table: String,
+    pub assignments: Vec<UpdateAssignment>,
+    pub where_clause: Option<WhereClause>,
+}
+
+#[derive(Debug, Clone)]
 pub struct DeleteStatement {
     pub table: String,
     pub where_clause: Option<WhereClause>,
@@ -103,6 +117,7 @@ impl Statement {
     pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
         match self {
             Statement::Select(select) => select.validate(catalog),
+            Statement::Update(update) => update.validate(catalog),
             Statement::Insert(insert) => insert.validate(catalog),
             Statement::Delete(delete) => delete.validate(catalog),
             Statement::Create(create) => create.validate(catalog),
@@ -226,6 +241,55 @@ impl InsertStatement {
                     value_row.len(),
                     self.columns.len()
                 )));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl UpdateStatement {
+    pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
+        let table = catalog.get_table_by_name(&self.table).ok_or_else(|| {
+            HematiteError::ParseError(format!("Table '{}' does not exist", self.table))
+        })?;
+
+        if self.assignments.is_empty() {
+            return Err(HematiteError::ParseError(
+                "UPDATE must specify at least one assignment".to_string(),
+            ));
+        }
+
+        let mut seen_columns = std::collections::HashSet::new();
+        for assignment in &self.assignments {
+            if !seen_columns.insert(&assignment.column) {
+                return Err(HematiteError::ParseError(format!(
+                    "Duplicate column '{}' in UPDATE",
+                    assignment.column
+                )));
+            }
+
+            if table.get_column_by_name(&assignment.column).is_none() {
+                return Err(HematiteError::ParseError(format!(
+                    "Column '{}' does not exist in table '{}'",
+                    assignment.column, self.table
+                )));
+            }
+
+            SelectStatement::validate_expression(
+                &assignment.value,
+                table,
+                &TableReference::Table(self.table.clone()),
+            )?;
+        }
+
+        if let Some(where_clause) = &self.where_clause {
+            for condition in &where_clause.conditions {
+                SelectStatement::validate_condition(
+                    condition,
+                    table,
+                    &TableReference::Table(self.table.clone()),
+                )?;
             }
         }
 

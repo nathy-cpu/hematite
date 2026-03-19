@@ -382,6 +382,141 @@ impl QueryExecutor for InsertExecutor {
 }
 
 #[derive(Debug, Clone)]
+pub struct UpdateExecutor {
+    pub statement: UpdateStatement,
+}
+
+impl UpdateExecutor {
+    pub fn new(statement: UpdateStatement) -> Self {
+        Self { statement }
+    }
+
+    fn coerce_assignment_value(
+        &self,
+        column: &crate::catalog::Column,
+        value: Value,
+    ) -> Result<Value> {
+        match (&column.data_type, value) {
+            (DataType::Integer, Value::Integer(i)) => Ok(Value::Integer(i)),
+            (DataType::Text, Value::Text(s)) => Ok(Value::Text(s)),
+            (DataType::Boolean, Value::Boolean(b)) => Ok(Value::Boolean(b)),
+            (DataType::Float, Value::Float(f)) => Ok(Value::Float(f)),
+            (DataType::Float, Value::Integer(i)) => Ok(Value::Float(i as f64)),
+            (_, Value::Null) if column.nullable => Ok(Value::Null),
+            (_, Value::Null) => Err(HematiteError::ParseError(format!(
+                "Column '{}' cannot be NULL",
+                column.name
+            ))),
+            (_, value) => Err(HematiteError::ParseError(format!(
+                "Type mismatch: column '{}' expects {:?}, got {:?}",
+                column.name, column.data_type, value
+            ))),
+        }
+    }
+
+    fn ensure_primary_keys_unique(&self, table: &Table, rows: &[Vec<Value>]) -> Result<()> {
+        for i in 0..rows.len() {
+            let left = table.get_primary_key_values(&rows[i]).map_err(|err| {
+                HematiteError::ParseError(format!("Failed to extract primary key values: {}", err))
+            })?;
+            for right_row in rows.iter().skip(i + 1) {
+                let right = table.get_primary_key_values(right_row).map_err(|err| {
+                    HematiteError::ParseError(format!(
+                        "Failed to extract primary key values: {}",
+                        err
+                    ))
+                })?;
+                if left == right {
+                    return Err(HematiteError::ParseError(format!(
+                        "Duplicate primary key for table '{}': {:?}",
+                        table.name, left
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl QueryExecutor for UpdateExecutor {
+    fn execute(&mut self, ctx: &mut ExecutionContext<'_>) -> Result<QueryResult> {
+        self.statement.validate(&ctx.catalog)?;
+
+        let table = ctx
+            .catalog
+            .get_table_by_name(&self.statement.table)
+            .ok_or_else(|| {
+                HematiteError::ParseError(format!("Table '{}' not found", self.statement.table))
+            })?;
+
+        let all_rows = ctx.storage.read_from_table(&self.statement.table)?;
+        let select_executor = SelectExecutor::new(SelectStatement {
+            columns: vec![SelectItem::Wildcard],
+            from: TableReference::Table(self.statement.table.clone()),
+            where_clause: self.statement.where_clause.clone(),
+        });
+
+        let mut rewritten_rows = Vec::with_capacity(all_rows.len());
+        let mut updated_rows = 0usize;
+
+        for row in all_rows {
+            let should_update = match &self.statement.where_clause {
+                Some(where_clause) => {
+                    let mut matches_where = true;
+                    for condition in &where_clause.conditions {
+                        if select_executor.evaluate_condition(ctx, condition, &row)? != Some(true) {
+                            matches_where = false;
+                            break;
+                        }
+                    }
+                    matches_where
+                }
+                None => true,
+            };
+
+            if should_update {
+                let mut updated_row = row.clone();
+                for assignment in &self.statement.assignments {
+                    let column_index =
+                        table.get_column_index(&assignment.column).ok_or_else(|| {
+                            HematiteError::ParseError(format!(
+                                "Column '{}' does not exist in table '{}'",
+                                assignment.column, self.statement.table
+                            ))
+                        })?;
+                    let column = &table.columns[column_index];
+                    let value = select_executor.evaluate_expression(
+                        ctx,
+                        &assignment.value,
+                        &updated_row,
+                    )?;
+                    updated_row[column_index] = self.coerce_assignment_value(column, value)?;
+                }
+
+                table
+                    .validate_row(&updated_row)
+                    .map_err(|err| HematiteError::ParseError(err.to_string()))?;
+                rewritten_rows.push(updated_row);
+                updated_rows += 1;
+            } else {
+                rewritten_rows.push(row);
+            }
+        }
+
+        self.ensure_primary_keys_unique(table, &rewritten_rows)?;
+        ctx.storage
+            .replace_table_rows(&self.statement.table, rewritten_rows)?;
+
+        Ok(QueryResult {
+            affected_rows: updated_rows,
+            columns: Vec::new(),
+            rows: Vec::new(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct DeleteExecutor {
     pub statement: DeleteStatement,
 }

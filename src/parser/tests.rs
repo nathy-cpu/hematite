@@ -176,6 +176,34 @@ mod lexer_tests {
     }
 
     #[test]
+    fn test_update_statement() -> Result<()> {
+        let mut lexer =
+            Lexer::new("UPDATE users SET name = 'John', active = TRUE WHERE id = 1;".to_string());
+        lexer.tokenize()?;
+
+        let expected = vec![
+            Token::Update,
+            Token::Identifier("users".to_string()),
+            Token::Set,
+            Token::Identifier("name".to_string()),
+            Token::Equal,
+            Token::StringLiteral("John".to_string()),
+            Token::Comma,
+            Token::Identifier("active".to_string()),
+            Token::Equal,
+            Token::BooleanLiteral(true),
+            Token::Where,
+            Token::Identifier("id".to_string()),
+            Token::Equal,
+            Token::NumberLiteral(1.0),
+            Token::Semicolon,
+        ];
+
+        assert_eq!(lexer.get_tokens(), &expected);
+        Ok(())
+    }
+
+    #[test]
     fn test_create_table() -> Result<()> {
         let mut lexer =
             Lexer::new("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)".to_string());
@@ -399,6 +427,24 @@ mod parser_tests {
                 assert!(delete.where_clause.is_some());
             }
             _ => panic!("Expected DELETE statement"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_update() -> Result<()> {
+        let mut lexer =
+            Lexer::new("UPDATE users SET name = 'John', active = TRUE WHERE id = 1;".to_string());
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let statement = parser.parse()?;
+        match statement {
+            Statement::Update(update) => {
+                assert_eq!(update.table, "users");
+                assert_eq!(update.assignments.len(), 2);
+                assert!(update.where_clause.is_some());
+            }
+            _ => panic!("Expected UPDATE statement"),
         }
         Ok(())
     }
