@@ -44,6 +44,10 @@ pub enum Condition {
         operator: ComparisonOperator,
         right: Expression,
     },
+    NullCheck {
+        expr: Expression,
+        is_not: bool,
+    },
     Logical {
         left: Box<Condition>,
         operator: LogicalOperator,
@@ -180,6 +184,9 @@ impl SelectStatement {
             Condition::Comparison { left, right, .. } => {
                 Self::validate_expression(left, table, from)?;
                 Self::validate_expression(right, table, from)?;
+            }
+            Condition::NullCheck { expr, .. } => {
+                Self::validate_expression(expr, table, from)?;
             }
             Condition::Logical { left, right, .. } => {
                 Self::validate_condition(left, table, from)?;

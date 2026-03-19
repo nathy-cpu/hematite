@@ -128,6 +128,11 @@ impl SelectExecutor {
                 let right_val = self.evaluate_expression(ctx, right, row)?;
                 Ok(self.compare_values(&left_val, operator, &right_val))
             }
+            Condition::NullCheck { expr, is_not } => {
+                let value = self.evaluate_expression(ctx, expr, row)?;
+                let is_null = value.is_null();
+                Ok(Some(if *is_not { !is_null } else { is_null }))
+            }
             Condition::Logical {
                 left,
                 operator,

@@ -204,6 +204,28 @@ mod lexer_tests {
     }
 
     #[test]
+    fn test_is_null_statement() -> Result<()> {
+        let mut lexer = Lexer::new("SELECT * FROM users WHERE name IS NOT NULL;".to_string());
+        lexer.tokenize()?;
+
+        let expected = vec![
+            Token::Select,
+            Token::Asterisk,
+            Token::From,
+            Token::Identifier("users".to_string()),
+            Token::Where,
+            Token::Identifier("name".to_string()),
+            Token::Is,
+            Token::Not,
+            Token::Null,
+            Token::Semicolon,
+        ];
+
+        assert_eq!(lexer.get_tokens(), &expected);
+        Ok(())
+    }
+
+    #[test]
     fn test_drop_table_statement() -> Result<()> {
         let mut lexer = Lexer::new("DROP TABLE users;".to_string());
         lexer.tokenize()?;
@@ -461,6 +483,26 @@ mod parser_tests {
                 assert!(update.where_clause.is_some());
             }
             _ => panic!("Expected UPDATE statement"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_is_null() -> Result<()> {
+        let mut lexer = Lexer::new("SELECT * FROM users WHERE name IS NULL;".to_string());
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let statement = parser.parse()?;
+        match statement {
+            Statement::Select(select) => {
+                let where_clause = select.where_clause.unwrap();
+                assert_eq!(where_clause.conditions.len(), 1);
+                assert!(matches!(
+                    where_clause.conditions[0],
+                    Condition::NullCheck { is_not: false, .. }
+                ));
+            }
+            _ => panic!("Expected SELECT statement"),
         }
         Ok(())
     }

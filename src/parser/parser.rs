@@ -172,6 +172,18 @@ impl Parser {
     fn parse_condition(&mut self) -> Result<Condition> {
         let left = self.parse_expression()?;
 
+        if matches!(self.peek_token(), Ok(Token::Is)) {
+            self.consume_token(&Token::Is)?;
+            let is_not = if matches!(self.peek_token(), Ok(Token::Not)) {
+                self.consume_token(&Token::Not)?;
+                true
+            } else {
+                false
+            };
+            self.consume_token(&Token::Null)?;
+            return Ok(Condition::NullCheck { expr: left, is_not });
+        }
+
         let operator = self.parse_comparison_operator()?;
 
         let right = self.parse_expression()?;

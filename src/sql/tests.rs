@@ -245,6 +245,27 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_is_null_and_is_not_null() -> Result<()> {
+        let db = TestDbFile::new("_test_is_null_and_is_not_null");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (1, NULL);")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (2, 'Alice');")?;
+
+        let is_null = conn.execute("SELECT * FROM test WHERE name IS NULL;")?;
+        assert_eq!(is_null.rows.len(), 1);
+        assert_eq!(is_null.rows[0][0], crate::catalog::Value::Integer(1));
+
+        let is_not_null = conn.execute("SELECT * FROM test WHERE name IS NOT NULL;")?;
+        assert_eq!(is_not_null.rows.len(), 1);
+        assert_eq!(is_not_null.rows[0][0], crate::catalog::Value::Integer(2));
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_reopen_preserves_exact_schema() -> Result<()> {
         let db = TestDbFile::new("_test_reopen_preserves_exact_schema");
 
