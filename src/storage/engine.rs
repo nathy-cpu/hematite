@@ -306,6 +306,56 @@ impl StorageEngine {
         }
     }
 
+    pub fn replace_table_rows(
+        &mut self,
+        table_name: &str,
+        rows: Vec<Vec<crate::catalog::Value>>,
+    ) -> Result<()> {
+        let root_page_id = {
+            let metadata = self
+                .table_manager
+                .get_table_metadata(table_name)
+                .ok_or_else(|| {
+                    crate::error::HematiteError::StorageError(format!(
+                        "Table '{}' does not exist",
+                        table_name
+                    ))
+                })?;
+            metadata.root_page_id
+        };
+
+        let mut page_ids = vec![root_page_id];
+        let mut current_page_id = root_page_id;
+        loop {
+            let page = self.read_page(current_page_id)?;
+            let header = self.table_manager.read_page_header(&page)?;
+            if header.next_page_id == PageId::invalid() {
+                break;
+            }
+            current_page_id = header.next_page_id;
+            page_ids.push(current_page_id);
+        }
+
+        let root_page =
+            self.initialize_table_page(root_page_id, PageId::invalid(), PageId::invalid())?;
+        self.write_page(root_page)?;
+
+        for page_id in page_ids.into_iter().skip(1) {
+            self.deallocate_page(page_id)?;
+        }
+
+        if let Some(metadata) = self.table_manager.get_table_metadata_mut(table_name) {
+            metadata.row_count = 0;
+            metadata.next_row_id = 1;
+        }
+
+        for row in rows {
+            self.insert_into_table(table_name, row)?;
+        }
+
+        Ok(())
+    }
+
     pub fn read_from_table(&mut self, table_name: &str) -> Result<Vec<Vec<crate::catalog::Value>>> {
         let metadata = self
             .table_manager

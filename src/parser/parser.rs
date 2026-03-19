@@ -27,9 +27,10 @@ impl Parser {
         match token {
             Token::Select => self.parse_select(),
             Token::Insert => self.parse_insert(),
+            Token::Delete => self.parse_delete(),
             Token::Create => self.parse_create(),
             _ => Err(HematiteError::ParseError(format!(
-                "Expected SELECT, INSERT, or CREATE, found: {:?}",
+                "Expected SELECT, INSERT, DELETE, or CREATE, found: {:?}",
                 token
             ))),
         }
@@ -270,6 +271,26 @@ impl Parser {
             table,
             columns,
             values,
+        }))
+    }
+
+    fn parse_delete(&mut self) -> Result<Statement> {
+        self.consume_token(&Token::Delete)?;
+        self.consume_token(&Token::From)?;
+
+        let table = self.parse_identifier()?;
+
+        let where_clause = if matches!(self.peek_token(), Ok(Token::Where)) {
+            Some(self.parse_where_clause()?)
+        } else {
+            None
+        };
+
+        self.consume_token(&Token::Semicolon)?;
+
+        Ok(Statement::Delete(DeleteStatement {
+            table,
+            where_clause,
         }))
     }
 

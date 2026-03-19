@@ -302,6 +302,59 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_delete_with_where_clause() -> Result<()> {
+        let db = TestDbFile::new("_test_delete_with_where_clause");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (1, 'Alice');")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (2, 'Bob');")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (3, 'Cara');")?;
+
+        let result = conn.execute("DELETE FROM test WHERE id = 2;")?;
+        assert_eq!(result.affected_rows, 1);
+
+        let result = conn.execute("SELECT * FROM test;")?;
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(
+            result.rows[0],
+            vec![
+                crate::catalog::Value::Integer(1),
+                crate::catalog::Value::Text("Alice".to_string()),
+            ]
+        );
+        assert_eq!(
+            result.rows[1],
+            vec![
+                crate::catalog::Value::Integer(3),
+                crate::catalog::Value::Text("Cara".to_string()),
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_delete_without_where_clause() -> Result<()> {
+        let db = TestDbFile::new("_test_delete_without_where_clause");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (1, 'Alice');")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (2, 'Bob');")?;
+
+        let result = conn.execute("DELETE FROM test;")?;
+        assert_eq!(result.affected_rows, 2);
+
+        let result = conn.execute("SELECT * FROM test;")?;
+        assert_eq!(result.rows.len(), 0);
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_reopen_preserves_table_root_page() -> Result<()> {
         let db = TestDbFile::new("_test_reopen_preserves_table_root_page");
 

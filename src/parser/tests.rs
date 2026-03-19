@@ -156,6 +156,26 @@ mod lexer_tests {
     }
 
     #[test]
+    fn test_delete_statement() -> Result<()> {
+        let mut lexer = Lexer::new("DELETE FROM users WHERE id = 1;".to_string());
+        lexer.tokenize()?;
+
+        let expected = vec![
+            Token::Delete,
+            Token::From,
+            Token::Identifier("users".to_string()),
+            Token::Where,
+            Token::Identifier("id".to_string()),
+            Token::Equal,
+            Token::NumberLiteral(1.0),
+            Token::Semicolon,
+        ];
+
+        assert_eq!(lexer.get_tokens(), &expected);
+        Ok(())
+    }
+
+    #[test]
     fn test_create_table() -> Result<()> {
         let mut lexer =
             Lexer::new("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)".to_string());
@@ -363,6 +383,22 @@ mod parser_tests {
                 assert_eq!(insert.values[0].len(), 2);
             }
             _ => panic!("Expected INSERT statement"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_delete() -> Result<()> {
+        let mut lexer = Lexer::new("DELETE FROM users WHERE id = 1;".to_string());
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let statement = parser.parse()?;
+        match statement {
+            Statement::Delete(delete) => {
+                assert_eq!(delete.table, "users");
+                assert!(delete.where_clause.is_some());
+            }
+            _ => panic!("Expected DELETE statement"),
         }
         Ok(())
     }

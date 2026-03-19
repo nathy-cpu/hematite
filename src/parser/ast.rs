@@ -8,6 +8,7 @@ use crate::error::{HematiteError, Result};
 pub enum Statement {
     Select(SelectStatement),
     Insert(InsertStatement),
+    Delete(DeleteStatement),
     Create(CreateStatement),
 }
 
@@ -78,6 +79,12 @@ pub struct InsertStatement {
 }
 
 #[derive(Debug, Clone)]
+pub struct DeleteStatement {
+    pub table: String,
+    pub where_clause: Option<WhereClause>,
+}
+
+#[derive(Debug, Clone)]
 pub struct CreateStatement {
     pub table: String,
     pub columns: Vec<ColumnDefinition>,
@@ -97,6 +104,7 @@ impl Statement {
         match self {
             Statement::Select(select) => select.validate(catalog),
             Statement::Insert(insert) => insert.validate(catalog),
+            Statement::Delete(delete) => delete.validate(catalog),
             Statement::Create(create) => create.validate(catalog),
         }
     }
@@ -252,6 +260,26 @@ impl CreateStatement {
             return Err(HematiteError::ParseError(
                 "Table must have at least one primary key column".to_string(),
             ));
+        }
+
+        Ok(())
+    }
+}
+
+impl DeleteStatement {
+    pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
+        let table = catalog.get_table_by_name(&self.table).ok_or_else(|| {
+            HematiteError::ParseError(format!("Table '{}' does not exist", self.table))
+        })?;
+
+        if let Some(where_clause) = &self.where_clause {
+            for condition in &where_clause.conditions {
+                SelectStatement::validate_condition(
+                    condition,
+                    table,
+                    &TableReference::Table(self.table.clone()),
+                )?;
+            }
         }
 
         Ok(())

@@ -112,7 +112,7 @@ impl SelectExecutor {
         }
     }
 
-    fn evaluate_condition(
+    pub(crate) fn evaluate_condition(
         &self,
         ctx: &ExecutionContext,
         condition: &Condition,
@@ -377,6 +377,71 @@ impl QueryExecutor for InsertExecutor {
             affected_rows: self.statement.values.len(),
             columns: vec![],
             rows: vec![],
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DeleteExecutor {
+    pub statement: DeleteStatement,
+}
+
+impl DeleteExecutor {
+    pub fn new(statement: DeleteStatement) -> Self {
+        Self { statement }
+    }
+}
+
+impl QueryExecutor for DeleteExecutor {
+    fn execute(&mut self, ctx: &mut ExecutionContext) -> Result<QueryResult> {
+        self.statement.validate(&ctx.catalog)?;
+
+        let table = ctx
+            .catalog
+            .get_table_by_name(&self.statement.table)
+            .ok_or_else(|| {
+                HematiteError::ParseError(format!("Table '{}' not found", self.statement.table))
+            })?;
+
+        let all_rows = ctx.storage.read_from_table(&self.statement.table)?;
+        let select_executor = SelectExecutor::new(SelectStatement {
+            columns: vec![SelectItem::Wildcard],
+            from: TableReference::Table(self.statement.table.clone()),
+            where_clause: self.statement.where_clause.clone(),
+        });
+
+        let mut survivors = Vec::new();
+        let mut deleted_rows = 0usize;
+        for row in all_rows {
+            let delete_row = match &self.statement.where_clause {
+                Some(where_clause) => {
+                    let mut matches_where = true;
+                    for condition in &where_clause.conditions {
+                        if select_executor.evaluate_condition(ctx, condition, &row)? != Some(true) {
+                            matches_where = false;
+                            break;
+                        }
+                    }
+                    matches_where
+                }
+                None => true,
+            };
+
+            if delete_row {
+                deleted_rows += 1;
+            } else {
+                survivors.push(row);
+            }
+        }
+
+        let _ = table;
+        ctx.storage
+            .replace_table_rows(&self.statement.table, survivors)?;
+
+        Ok(QueryResult {
+            affected_rows: deleted_rows,
+            columns: Vec::new(),
+            rows: Vec::new(),
         })
     }
 }

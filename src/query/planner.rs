@@ -3,7 +3,9 @@
 use crate::catalog::{Schema, Table};
 use crate::error::Result;
 use crate::parser::ast::*;
-use crate::query::executor::{CreateExecutor, InsertExecutor, QueryExecutor, SelectExecutor};
+use crate::query::executor::{
+    CreateExecutor, DeleteExecutor, InsertExecutor, QueryExecutor, SelectExecutor,
+};
 use crate::HematiteError;
 
 pub struct QueryPlan {
@@ -37,6 +39,7 @@ impl QueryPlanner {
         match statement {
             Statement::Select(select) => self.plan_select(select),
             Statement::Insert(insert) => self.plan_insert(insert),
+            Statement::Delete(delete) => self.plan_delete(delete),
             Statement::Create(create) => self.plan_create(create),
         }
     }
@@ -74,6 +77,16 @@ impl QueryPlanner {
 
         // Cost estimation for CREATE is fixed
         let estimated_cost = 1.0;
+
+        Ok(QueryPlan {
+            executor,
+            estimated_cost,
+        })
+    }
+
+    fn plan_delete(&self, statement: DeleteStatement) -> Result<QueryPlan> {
+        let executor = Box::new(DeleteExecutor::new(statement));
+        let estimated_cost = 1000.0;
 
         Ok(QueryPlan {
             executor,
@@ -225,4 +238,3 @@ pub enum ColumnAccessType {
     Read,
     Write,
 }
-
