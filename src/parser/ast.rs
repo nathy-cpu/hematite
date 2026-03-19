@@ -19,6 +19,7 @@ pub struct SelectStatement {
     pub columns: Vec<SelectItem>,
     pub from: TableReference,
     pub where_clause: Option<WhereClause>,
+    pub order_by: Vec<OrderByItem>,
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +36,18 @@ pub enum TableReference {
 #[derive(Debug, Clone)]
 pub struct WhereClause {
     pub conditions: Vec<Condition>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OrderByItem {
+    pub column: String,
+    pub direction: SortDirection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortDirection {
+    Asc,
+    Desc,
 }
 
 #[derive(Debug, Clone)]
@@ -169,6 +182,16 @@ impl SelectStatement {
         if let Some(where_clause) = &self.where_clause {
             for condition in &where_clause.conditions {
                 Self::validate_condition(condition, table, &self.from)?;
+            }
+        }
+
+        for item in &self.order_by {
+            if table.get_column_by_name(&item.column).is_none() {
+                let TableReference::Table(table_name) = &self.from;
+                return Err(HematiteError::ParseError(format!(
+                    "Column '{}' does not exist in table '{}'",
+                    item.column, table_name
+                )));
             }
         }
 

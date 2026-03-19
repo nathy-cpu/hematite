@@ -53,6 +53,12 @@ impl Parser {
             None
         };
 
+        let order_by = if matches!(self.peek_token(), Ok(Token::Order)) {
+            self.parse_order_by_clause()?
+        } else {
+            Vec::new()
+        };
+
         // Expect semicolon
         self.consume_token(&Token::Semicolon)?;
 
@@ -60,6 +66,7 @@ impl Parser {
             columns,
             from,
             where_clause,
+            order_by,
         }))
     }
 
@@ -120,6 +127,38 @@ impl Parser {
         let conditions = self.parse_conditions()?;
 
         Ok(WhereClause { conditions })
+    }
+
+    fn parse_order_by_clause(&mut self) -> Result<Vec<OrderByItem>> {
+        self.consume_token(&Token::Order)?;
+        self.consume_token(&Token::By)?;
+
+        let mut items = Vec::new();
+        loop {
+            let column = self.parse_identifier()?;
+            let direction = match self.peek_token() {
+                Ok(Token::Asc) => {
+                    self.consume_token(&Token::Asc)?;
+                    SortDirection::Asc
+                }
+                Ok(Token::Desc) => {
+                    self.consume_token(&Token::Desc)?;
+                    SortDirection::Desc
+                }
+                _ => SortDirection::Asc,
+            };
+
+            items.push(OrderByItem { column, direction });
+
+            if matches!(self.peek_token(), Ok(Token::Comma)) {
+                self.consume_token(&Token::Comma)?;
+                continue;
+            }
+
+            break;
+        }
+
+        Ok(items)
     }
 
     fn parse_conditions(&mut self) -> Result<Vec<Condition>> {

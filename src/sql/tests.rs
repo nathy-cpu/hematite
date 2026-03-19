@@ -266,6 +266,40 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_order_by_asc_and_desc() -> Result<()> {
+        let db = TestDbFile::new("_test_order_by_asc_and_desc");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (2, 'Bob');")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (1, 'Alice');")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (3, NULL);")?;
+
+        let asc = conn.execute("SELECT id FROM test ORDER BY name ASC, id ASC;")?;
+        assert_eq!(
+            asc.rows,
+            vec![
+                vec![crate::catalog::Value::Integer(3)],
+                vec![crate::catalog::Value::Integer(1)],
+                vec![crate::catalog::Value::Integer(2)],
+            ]
+        );
+
+        let desc = conn.execute("SELECT id FROM test ORDER BY name DESC, id DESC;")?;
+        assert_eq!(
+            desc.rows,
+            vec![
+                vec![crate::catalog::Value::Integer(2)],
+                vec![crate::catalog::Value::Integer(1)],
+                vec![crate::catalog::Value::Integer(3)],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_reopen_preserves_exact_schema() -> Result<()> {
         let db = TestDbFile::new("_test_reopen_preserves_exact_schema");
 

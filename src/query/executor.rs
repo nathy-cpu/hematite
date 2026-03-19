@@ -4,6 +4,7 @@ use crate::catalog::{Column, DataType, Schema, Table, Value};
 use crate::error::{HematiteError, Result};
 use crate::parser::ast::*;
 use crate::storage::StorageEngine;
+use std::cmp::Ordering;
 
 #[derive(Debug, Clone)]
 pub struct QueryResult {
@@ -199,6 +200,15 @@ impl SelectExecutor {
 
         columns
     }
+
+    fn compare_sort_values(&self, left: &Value, right: &Value) -> Ordering {
+        match (left.is_null(), right.is_null()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Less,
+            (false, true) => Ordering::Greater,
+            (false, false) => left.partial_cmp(right).unwrap_or(Ordering::Equal),
+        }
+    }
 }
 
 impl QueryExecutor for SelectExecutor {
@@ -237,6 +247,30 @@ impl QueryExecutor for SelectExecutor {
             if include {
                 filtered_rows.push(row.clone());
             }
+        }
+
+        if !self.statement.order_by.is_empty() {
+            let table = ctx.catalog.get_table_by_name(&table_name).ok_or_else(|| {
+                HematiteError::ParseError(format!("Table '{}' not found", table_name))
+            })?;
+
+            filtered_rows.sort_by(|left, right| {
+                for item in &self.statement.order_by {
+                    let Some(index) = table.get_column_index(&item.column) else {
+                        continue;
+                    };
+
+                    let ordering = self.compare_sort_values(&left[index], &right[index]);
+                    if ordering != Ordering::Equal {
+                        return match item.direction {
+                            SortDirection::Asc => ordering,
+                            SortDirection::Desc => ordering.reverse(),
+                        };
+                    }
+                }
+
+                Ordering::Equal
+            });
         }
 
         // Apply column projection
@@ -460,6 +494,7 @@ impl QueryExecutor for UpdateExecutor {
             columns: vec![SelectItem::Wildcard],
             from: TableReference::Table(self.statement.table.clone()),
             where_clause: self.statement.where_clause.clone(),
+            order_by: Vec::new(),
         });
 
         let mut rewritten_rows = Vec::with_capacity(all_rows.len());
@@ -548,6 +583,7 @@ impl QueryExecutor for DeleteExecutor {
             columns: vec![SelectItem::Wildcard],
             from: TableReference::Table(self.statement.table.clone()),
             where_clause: self.statement.where_clause.clone(),
+            order_by: Vec::new(),
         });
 
         let mut survivors = Vec::new();

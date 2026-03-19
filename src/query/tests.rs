@@ -1,12 +1,12 @@
 //! Centralized tests for the query module
 
 mod executor_tests {
+    use crate::catalog::types::{DataType, Value};
     use crate::catalog::{Column, Schema};
     use crate::error::Result;
     use crate::parser::ast::*;
     use crate::query::executor::*;
     use crate::storage::StorageEngine;
-    use crate::catalog::types::{DataType, Value};
     use crate::test_utils::TestDbFile;
 
     #[test]
@@ -67,6 +67,7 @@ mod executor_tests {
             columns: vec![SelectItem::Column("id".to_string())],
             from: TableReference::Table("users".to_string()),
             where_clause: None,
+            order_by: Vec::new(),
         };
 
         let mut executor = SelectExecutor::new(statement);
@@ -129,6 +130,7 @@ mod executor_tests {
             columns: vec![SelectItem::Column("id".to_string())],
             from: TableReference::Table("users".to_string()),
             where_clause: None,
+            order_by: Vec::new(),
         };
 
         let mut executor = SelectExecutor::new(statement);
@@ -214,11 +216,11 @@ mod executor_tests {
 }
 
 mod optimizer_tests {
+    use crate::catalog::types::DataType;
     use crate::catalog::Schema;
     use crate::error::Result;
     use crate::query::optimizer::*;
     use crate::query::planner::SelectAnalysis;
-    use crate::catalog::types::DataType;
 
     #[test]
     fn test_query_optimizer() -> Result<()> {
@@ -259,11 +261,11 @@ mod optimizer_tests {
 }
 
 mod planner_tests {
+    use crate::catalog::types::{DataType, Value};
     use crate::catalog::Schema;
     use crate::error::Result;
     use crate::parser::ast::*;
     use crate::query::planner::*;
-    use crate::catalog::types::{DataType, Value};
 
     #[test]
     fn test_query_planner_select() -> Result<()> {
@@ -291,6 +293,7 @@ mod planner_tests {
             columns: vec![SelectItem::Column("id".to_string())],
             from: TableReference::Table("users".to_string()),
             where_clause: None,
+            order_by: Vec::new(),
         };
 
         let plan = planner.plan(Statement::Select(statement))?;

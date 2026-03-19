@@ -30,6 +30,7 @@ mod ast_tests {
             columns: vec![SelectItem::Column("id".to_string())],
             from: TableReference::Table("users".to_string()),
             where_clause: None,
+            order_by: Vec::new(),
         };
 
         assert!(select.validate(&catalog).is_ok());
@@ -52,6 +53,7 @@ mod ast_tests {
             columns: vec![SelectItem::Column("invalid".to_string())],
             from: TableReference::Table("users".to_string()),
             where_clause: None,
+            order_by: Vec::new(),
         };
 
         assert!(select.validate(&catalog).is_err());
@@ -79,6 +81,7 @@ mod ast_tests {
                     right: Expression::Literal(Value::Integer(1)),
                 }],
             }),
+            order_by: Vec::new(),
         };
 
         assert!(select.validate(&catalog).is_err());
@@ -123,6 +126,30 @@ mod lexer_tests {
             Token::Identifier("id".to_string()),
             Token::NotEqual,
             Token::NumberLiteral(2.0),
+        ];
+
+        assert_eq!(lexer.get_tokens(), &expected);
+        Ok(())
+    }
+
+    #[test]
+    fn test_order_by_statement() -> Result<()> {
+        let mut lexer = Lexer::new("SELECT id FROM users ORDER BY name DESC, id ASC;".to_string());
+        lexer.tokenize()?;
+
+        let expected = vec![
+            Token::Select,
+            Token::Identifier("id".to_string()),
+            Token::From,
+            Token::Identifier("users".to_string()),
+            Token::Order,
+            Token::By,
+            Token::Identifier("name".to_string()),
+            Token::Desc,
+            Token::Comma,
+            Token::Identifier("id".to_string()),
+            Token::Asc,
+            Token::Semicolon,
         ];
 
         assert_eq!(lexer.get_tokens(), &expected);
@@ -335,6 +362,7 @@ mod parser_tests {
                 assert!(matches!(select.columns[0], SelectItem::Wildcard));
                 assert!(matches!(select.from, TableReference::Table(name) if name == "users"));
                 assert!(select.where_clause.is_none());
+                assert!(select.order_by.is_empty());
             }
             _ => panic!("Expected SELECT statement"),
         }
@@ -350,9 +378,29 @@ mod parser_tests {
         match statement {
             Statement::Select(select) => {
                 assert!(select.where_clause.is_some());
+                assert!(select.order_by.is_empty());
                 if let Some(where_clause) = select.where_clause {
                     assert_eq!(where_clause.conditions.len(), 1);
                 }
+            }
+            _ => panic!("Expected SELECT statement"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_order_by() -> Result<()> {
+        let mut lexer = Lexer::new("SELECT id FROM users ORDER BY name DESC, id ASC;".to_string());
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let statement = parser.parse()?;
+        match statement {
+            Statement::Select(select) => {
+                assert_eq!(select.order_by.len(), 2);
+                assert_eq!(select.order_by[0].column, "name");
+                assert_eq!(select.order_by[0].direction, SortDirection::Desc);
+                assert_eq!(select.order_by[1].column, "id");
+                assert_eq!(select.order_by[1].direction, SortDirection::Asc);
             }
             _ => panic!("Expected SELECT statement"),
         }
