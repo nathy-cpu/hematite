@@ -224,6 +224,32 @@ impl InsertExecutor {
         Self { statement }
     }
 
+    fn ensure_primary_key_is_unique(
+        &self,
+        table: &Table,
+        existing_rows: &[Vec<Value>],
+        candidate_row: &[Value],
+    ) -> Result<()> {
+        let candidate_pk = table.get_primary_key_values(candidate_row).map_err(|err| {
+            HematiteError::ParseError(format!("Failed to extract primary key values: {}", err))
+        })?;
+
+        for existing_row in existing_rows {
+            let existing_pk = table.get_primary_key_values(existing_row).map_err(|err| {
+                HematiteError::ParseError(format!("Failed to extract primary key values: {}", err))
+            })?;
+
+            if existing_pk == candidate_pk {
+                return Err(HematiteError::ParseError(format!(
+                    "Duplicate primary key for table '{}': {:?}",
+                    table.name, candidate_pk
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
     fn build_row(&self, table: &Table, value_row: &[Expression]) -> Result<Vec<Value>> {
         let mut row = Vec::with_capacity(table.columns.len());
 
@@ -235,10 +261,7 @@ impl InsertExecutor {
                 .position(|name| name == &column.name)
             {
                 let expr = value_row.get(position).ok_or_else(|| {
-                    HematiteError::ParseError(format!(
-                        "Missing value for column '{}'",
-                        column.name
-                    ))
+                    HematiteError::ParseError(format!("Missing value for column '{}'", column.name))
                 })?;
                 let literal = match expr {
                     Expression::Literal(value) => value.clone(),
@@ -284,7 +307,8 @@ impl InsertExecutor {
             row.push(value);
         }
 
-        table.validate_row(&row)
+        table
+            .validate_row(&row)
             .map_err(|err| HematiteError::ParseError(err.to_string()))?;
 
         Ok(row)
@@ -303,12 +327,16 @@ impl QueryExecutor for InsertExecutor {
                 HematiteError::ParseError(format!("Table '{}' not found", self.statement.table))
             })?;
 
+        let mut existing_rows = ctx.storage.read_from_table(&self.statement.table)?;
+
         // Insert data into storage
         for value_row in &self.statement.values {
             let row_values = self.build_row(table, value_row)?;
+            self.ensure_primary_key_is_unique(table, &existing_rows, &row_values)?;
 
             ctx.storage
-                .insert_into_table(&self.statement.table, row_values)?;
+                .insert_into_table(&self.statement.table, row_values.clone())?;
+            existing_rows.push(row_values);
         }
 
         Ok(QueryResult {
@@ -377,4 +405,3 @@ impl QueryExecutor for CreateExecutor {
         })
     }
 }
-

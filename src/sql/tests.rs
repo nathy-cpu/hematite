@@ -130,6 +130,55 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_duplicate_primary_key_insert_fails() -> Result<()> {
+        let db = TestDbFile::new("_test_duplicate_primary_key_insert_fails");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (1, 'Alice');")?;
+
+        let result = conn.execute("INSERT INTO test (id, name) VALUES (1, 'Bob');");
+        assert!(result.is_err());
+
+        let result = conn.execute("SELECT * FROM test;")?;
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0],
+            vec![
+                crate::catalog::Value::Integer(1),
+                crate::catalog::Value::Text("Alice".to_string()),
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_duplicate_primary_key_in_single_multi_row_insert_fails() -> Result<()> {
+        let db = TestDbFile::new("_test_duplicate_primary_key_in_single_multi_row_insert_fails");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
+
+        let result = conn.execute("INSERT INTO test (id, name) VALUES (1, 'Alice'), (1, 'Bob');");
+        assert!(result.is_err());
+
+        let result = conn.execute("SELECT * FROM test;")?;
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0],
+            vec![
+                crate::catalog::Value::Integer(1),
+                crate::catalog::Value::Text("Alice".to_string()),
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_reopen_preserves_exact_schema() -> Result<()> {
         let db = TestDbFile::new("_test_reopen_preserves_exact_schema");
 
