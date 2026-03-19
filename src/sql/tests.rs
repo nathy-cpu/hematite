@@ -211,6 +211,40 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_where_and_or_precedence() -> Result<()> {
+        let db = TestDbFile::new("_test_where_and_or_precedence");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute(
+            "CREATE TABLE test (
+                id INTEGER PRIMARY KEY,
+                active BOOLEAN NOT NULL
+            );",
+        )?;
+        conn.execute("INSERT INTO test (id, active) VALUES (1, FALSE);")?;
+        conn.execute("INSERT INTO test (id, active) VALUES (2, TRUE);")?;
+        conn.execute("INSERT INTO test (id, active) VALUES (3, FALSE);")?;
+
+        let result =
+            conn.execute("SELECT id FROM test WHERE id = 1 OR id = 2 AND active = TRUE;")?;
+
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.rows[0], vec![crate::catalog::Value::Integer(1)]);
+        assert_eq!(result.rows[1], vec![crate::catalog::Value::Integer(2)]);
+
+        let parenthesized =
+            conn.execute("SELECT id FROM test WHERE (id = 1 OR id = 2) AND active = TRUE;")?;
+        assert_eq!(parenthesized.rows.len(), 1);
+        assert_eq!(
+            parenthesized.rows[0],
+            vec![crate::catalog::Value::Integer(2)]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_reopen_preserves_exact_schema() -> Result<()> {
         let db = TestDbFile::new("_test_reopen_preserves_exact_schema");
 

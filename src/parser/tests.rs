@@ -1,10 +1,10 @@
 //! Centralized tests for the parser module
 
 mod ast_tests {
+    use crate::catalog::types::DataType;
     use crate::catalog::Value;
     use crate::error::Result;
     use crate::parser::ast::*;
-    use crate::catalog::types::DataType;
 
     #[test]
     fn test_select_statement_validation() -> Result<()> {
@@ -220,6 +220,82 @@ mod parser_tests {
             }
             _ => panic!("Expected SELECT statement"),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_where_operator_precedence() -> Result<()> {
+        let mut lexer = Lexer::new(
+            "SELECT id FROM users WHERE id = 1 OR id = 2 AND active = TRUE;".to_string(),
+        );
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let statement = parser.parse()?;
+
+        match statement {
+            Statement::Select(select) => {
+                let where_clause = select.where_clause.unwrap();
+                assert_eq!(where_clause.conditions.len(), 1);
+
+                match &where_clause.conditions[0] {
+                    Condition::Logical {
+                        left,
+                        operator: LogicalOperator::Or,
+                        right,
+                    } => {
+                        assert!(matches!(**left, Condition::Comparison { .. }));
+                        assert!(matches!(
+                            **right,
+                            Condition::Logical {
+                                operator: LogicalOperator::And,
+                                ..
+                            }
+                        ));
+                    }
+                    _ => panic!("Expected OR condition at the root"),
+                }
+            }
+            _ => panic!("Expected SELECT statement"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_where_parentheses() -> Result<()> {
+        let mut lexer = Lexer::new(
+            "SELECT id FROM users WHERE (id = 1 OR id = 2) AND active = TRUE;".to_string(),
+        );
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let statement = parser.parse()?;
+
+        match statement {
+            Statement::Select(select) => {
+                let where_clause = select.where_clause.unwrap();
+                assert_eq!(where_clause.conditions.len(), 1);
+
+                match &where_clause.conditions[0] {
+                    Condition::Logical {
+                        left,
+                        operator: LogicalOperator::And,
+                        right,
+                    } => {
+                        assert!(matches!(
+                            **left,
+                            Condition::Logical {
+                                operator: LogicalOperator::Or,
+                                ..
+                            }
+                        ));
+                        assert!(matches!(**right, Condition::Comparison { .. }));
+                    }
+                    _ => panic!("Expected AND condition at the root"),
+                }
+            }
+            _ => panic!("Expected SELECT statement"),
+        }
+
         Ok(())
     }
 

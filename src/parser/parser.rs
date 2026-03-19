@@ -120,39 +120,50 @@ impl Parser {
     }
 
     fn parse_conditions(&mut self) -> Result<Vec<Condition>> {
-        let mut conditions = Vec::new();
+        Ok(vec![self.parse_or_condition()?])
+    }
 
-        // Parse first condition
-        conditions.push(self.parse_condition()?);
+    fn parse_or_condition(&mut self) -> Result<Condition> {
+        let mut condition = self.parse_and_condition()?;
 
-        // Parse additional conditions with AND/OR
-        while let Ok(token) = self.peek_token() {
-            match token {
-                Token::And => {
-                    self.consume_token(&Token::And)?;
-                    let right = self.parse_condition()?;
-                    let left = conditions.pop().unwrap();
-                    conditions.push(Condition::Logical {
-                        left: Box::new(left),
-                        operator: LogicalOperator::And,
-                        right: Box::new(right),
-                    });
-                }
-                Token::Or => {
-                    self.consume_token(&Token::Or)?;
-                    let right = self.parse_condition()?;
-                    let left = conditions.pop().unwrap();
-                    conditions.push(Condition::Logical {
-                        left: Box::new(left),
-                        operator: LogicalOperator::Or,
-                        right: Box::new(right),
-                    });
-                }
-                _ => break,
-            }
+        while matches!(self.peek_token(), Ok(Token::Or)) {
+            self.consume_token(&Token::Or)?;
+            let right = self.parse_and_condition()?;
+            condition = Condition::Logical {
+                left: Box::new(condition),
+                operator: LogicalOperator::Or,
+                right: Box::new(right),
+            };
         }
 
-        Ok(conditions)
+        Ok(condition)
+    }
+
+    fn parse_and_condition(&mut self) -> Result<Condition> {
+        let mut condition = self.parse_primary_condition()?;
+
+        while matches!(self.peek_token(), Ok(Token::And)) {
+            self.consume_token(&Token::And)?;
+            let right = self.parse_primary_condition()?;
+            condition = Condition::Logical {
+                left: Box::new(condition),
+                operator: LogicalOperator::And,
+                right: Box::new(right),
+            };
+        }
+
+        Ok(condition)
+    }
+
+    fn parse_primary_condition(&mut self) -> Result<Condition> {
+        if self.peek_token()? == Token::LeftParen {
+            self.consume_token(&Token::LeftParen)?;
+            let condition = self.parse_or_condition()?;
+            self.consume_token(&Token::RightParen)?;
+            Ok(condition)
+        } else {
+            self.parse_condition()
+        }
     }
 
     fn parse_condition(&mut self) -> Result<Condition> {
