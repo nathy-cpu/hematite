@@ -23,6 +23,7 @@ impl Connection {
         &mut self,
         statement: crate::parser::ast::Statement,
     ) -> Result<QueryResult> {
+        let persists_schema = statement.mutates_schema();
         let schema = {
             let catalog_guard = self.catalog.lock().unwrap();
             catalog_guard.clone_schema()
@@ -41,7 +42,7 @@ impl Connection {
             })?
         };
 
-        {
+        if persists_schema {
             let mut catalog_guard = self.catalog.lock().unwrap();
             catalog_guard.replace_schema(updated_schema)?;
         }

@@ -16,6 +16,7 @@ pub struct Catalog {
     storage: Arc<Mutex<StorageEngine>>,
     schema: Schema,
     schema_root: PageId,
+    schema_dirty: bool,
 }
 
 impl Catalog {
@@ -67,6 +68,7 @@ impl Catalog {
             storage,
             schema,
             schema_root: header.schema_root_page,
+            schema_dirty: false,
         })
     }
 
@@ -98,6 +100,10 @@ impl Catalog {
 
     /// Save schema to the B-tree (transactional)
     fn save_schema_to_btree(&mut self) -> Result<()> {
+        if !self.schema_dirty {
+            return Ok(());
+        }
+
         // For now we do a simple "rebuild" by creating a new schema B-tree root
         // and then atomically switching the database header to point at it.
         //
@@ -128,6 +134,7 @@ impl Catalog {
         storage_guard.write_page(updated)?;
 
         self.schema_root = new_schema_root;
+        self.schema_dirty = false;
         Ok(())
     }
 
@@ -164,6 +171,7 @@ impl Catalog {
 
         self.schema.insert_table(table.clone())?;
         self.persist_table_entry(&table)?;
+        self.schema_dirty = true;
 
         Ok(table_id)
     }
@@ -196,6 +204,7 @@ impl Catalog {
         let mut btree = BTreeIndex::from_shared_storage(self.storage.clone(), self.schema_root);
         let key = crate::btree::BTreeKey::new(table.name.as_bytes().to_vec());
         let _ = btree.delete(&key)?;
+        self.schema_dirty = true;
 
         Ok(())
     }
@@ -239,6 +248,7 @@ impl Catalog {
     /// Replace the entire in-memory schema and persist it as the durable catalog state.
     pub fn replace_schema(&mut self, schema: Schema) -> Result<()> {
         self.schema = schema;
+        self.schema_dirty = true;
         self.save_schema_to_btree()?;
 
         let mut storage_guard = self.storage.lock().unwrap();
@@ -273,6 +283,7 @@ impl Catalog {
 
         // Update in-memory schema
         self.schema.set_table_root_page(table_id, root_page)?;
+        self.schema_dirty = true;
 
         // Update schema B-tree entry
         if let Some(table) = self.schema.get_table(table_id) {
@@ -400,6 +411,7 @@ impl Catalog {
 
         self.schema.insert_table(table.clone())?;
         self.persist_table_entry(&table)?;
+        self.schema_dirty = true;
 
         Ok(table_id)
     }

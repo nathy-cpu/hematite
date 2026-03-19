@@ -5,6 +5,7 @@ mod connection_tests {
     use crate::error::Result;
     use crate::sql::connection::*;
     use crate::test_utils::TestDbFile;
+    use std::fs;
 
     #[test]
     fn test_connection_execute() -> Result<()> {
@@ -186,6 +187,29 @@ mod connection_tests {
         let schema = conn.schema_snapshot()?;
         let table = schema.get_table_by_name("users").unwrap();
         assert_eq!(table.root_page_id, root_page_before);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_select_does_not_grow_catalog_storage() -> Result<()> {
+        let db = TestDbFile::new("_test_select_does_not_grow_catalog_storage");
+
+        let size_after_create = {
+            let mut conn = Connection::new(db.path())?;
+            conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+            conn.close()?;
+            fs::metadata(db.path())?.len()
+        };
+
+        {
+            let mut conn = Connection::new(db.path())?;
+            let _ = conn.execute("SELECT * FROM users;")?;
+            conn.close()?;
+        }
+
+        let size_after_select = fs::metadata(db.path())?.len();
+        assert_eq!(size_after_select, size_after_create);
 
         Ok(())
     }

@@ -100,14 +100,20 @@ impl Statement {
             Statement::Create(create) => create.validate(catalog),
         }
     }
+
+    pub fn mutates_schema(&self) -> bool {
+        matches!(self, Statement::Create(_))
+    }
 }
 
 impl SelectStatement {
     pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
         let table = match &self.from {
-            TableReference::Table(table_name) => catalog.get_table_by_name(table_name).ok_or_else(
-                || HematiteError::ParseError(format!("Table '{}' does not exist", table_name)),
-            )?,
+            TableReference::Table(table_name) => {
+                catalog.get_table_by_name(table_name).ok_or_else(|| {
+                    HematiteError::ParseError(format!("Table '{}' does not exist", table_name))
+                })?
+            }
         };
 
         // Validate columns
@@ -251,4 +257,3 @@ impl CreateStatement {
         Ok(())
     }
 }
-
