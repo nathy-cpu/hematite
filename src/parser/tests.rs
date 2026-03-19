@@ -179,6 +179,56 @@ mod lexer_tests {
         assert_eq!(lexer.get_tokens(), &expected);
         Ok(())
     }
+
+    #[test]
+    fn test_unicode_identifier_and_string_literal() -> Result<()> {
+        let mut lexer = Lexer::new("SELECT navn FROM brukere WHERE navn = 'Alíce';".to_string());
+        lexer.tokenize()?;
+
+        let expected = vec![
+            Token::Select,
+            Token::Identifier("navn".to_string()),
+            Token::From,
+            Token::Identifier("brukere".to_string()),
+            Token::Where,
+            Token::Identifier("navn".to_string()),
+            Token::Equal,
+            Token::StringLiteral("Alíce".to_string()),
+            Token::Semicolon,
+        ];
+
+        assert_eq!(lexer.get_tokens(), &expected);
+        Ok(())
+    }
+
+    #[test]
+    fn test_string_literal_escaped_quotes() -> Result<()> {
+        let mut lexer =
+            Lexer::new("INSERT INTO users (name) VALUES ('O\\'Brien'), ('D''Angelo');".to_string());
+        lexer.tokenize()?;
+
+        assert_eq!(
+            lexer.get_tokens(),
+            &[
+                Token::Insert,
+                Token::Into,
+                Token::Identifier("users".to_string()),
+                Token::LeftParen,
+                Token::Identifier("name".to_string()),
+                Token::RightParen,
+                Token::Values,
+                Token::LeftParen,
+                Token::StringLiteral("O'Brien".to_string()),
+                Token::RightParen,
+                Token::Comma,
+                Token::LeftParen,
+                Token::StringLiteral("D'Angelo".to_string()),
+                Token::RightParen,
+                Token::Semicolon,
+            ]
+        );
+        Ok(())
+    }
 }
 
 mod parser_tests {

@@ -106,16 +106,24 @@ impl Lexer {
             if !ch.is_whitespace() {
                 break;
             }
-            self.position += 1;
+            self.advance_char();
         }
     }
 
     fn current_char(&self) -> char {
-        self.input.chars().nth(self.position).unwrap_or('\0')
+        self.input[self.position..].chars().next().unwrap_or('\0')
     }
 
     fn peek_char(&self) -> Option<char> {
-        self.input.chars().nth(self.position + 1)
+        let mut chars = self.input[self.position..].chars();
+        chars.next()?;
+        chars.next()
+    }
+
+    fn advance_char(&mut self) {
+        if self.position < self.input.len() {
+            self.position += self.current_char().len_utf8();
+        }
     }
 
     fn read_identifier(&mut self) -> Result<()> {
@@ -124,7 +132,7 @@ impl Lexer {
         while self.position < self.input.len() {
             let ch = self.current_char();
             if ch.is_alphanumeric() || ch == '_' {
-                self.position += 1;
+                self.advance_char();
             } else {
                 break;
             }
@@ -161,23 +169,37 @@ impl Lexer {
     }
 
     fn read_string_literal(&mut self) -> Result<()> {
-        self.position += 1; // Skip opening quote
-        let start = self.position;
+        self.advance_char(); // Skip opening quote
+        let mut literal = String::new();
 
         while self.position < self.input.len() {
             let ch = self.current_char();
             if ch == '\'' {
-                let literal = &self.input[start..self.position];
-                self.tokens.push(Token::StringLiteral(literal.to_string()));
-                self.position += 1; // Skip closing quote
+                if self.peek_char() == Some('\'') {
+                    literal.push('\'');
+                    self.advance_char();
+                    self.advance_char();
+                    continue;
+                }
+
+                self.tokens.push(Token::StringLiteral(literal));
+                self.advance_char(); // Skip closing quote
                 return Ok(());
             }
-            // Handle escaped quotes
-            if ch == '\\' && self.peek_char() == Some('\'') {
-                self.position += 2; // Skip backslash and quote
-            } else {
-                self.position += 1;
+
+            if ch == '\\' {
+                if let Some(next) = self.peek_char() {
+                    if next == '\'' || next == '\\' {
+                        literal.push(next);
+                        self.advance_char();
+                        self.advance_char();
+                        continue;
+                    }
+                }
             }
+
+            literal.push(ch);
+            self.advance_char();
         }
 
         Err(HematiteError::ParseError(
@@ -198,9 +220,9 @@ impl Lexer {
                     ));
                 }
                 has_decimal = true;
-                self.position += 1;
+                self.advance_char();
             } else if ch.is_ascii_digit() {
-                self.position += 1;
+                self.advance_char();
             } else {
                 break;
             }
@@ -226,7 +248,7 @@ impl Lexer {
             '=' => Token::Equal,
             '!' => {
                 if self.peek_char() == Some('=') {
-                    self.position += 1;
+                    self.advance_char();
                     Token::NotEqual
                 } else {
                     Token::Not
@@ -234,7 +256,7 @@ impl Lexer {
             }
             '<' => {
                 if self.peek_char() == Some('=') {
-                    self.position += 1;
+                    self.advance_char();
                     Token::LessThanOrEqual
                 } else {
                     Token::LessThan
@@ -242,7 +264,7 @@ impl Lexer {
             }
             '>' => {
                 if self.peek_char() == Some('=') {
-                    self.position += 1;
+                    self.advance_char();
                     Token::GreaterThanOrEqual
                 } else {
                     Token::GreaterThan
@@ -250,7 +272,7 @@ impl Lexer {
             }
             '&' => {
                 if self.peek_char() == Some('&') {
-                    self.position += 1;
+                    self.advance_char();
                     Token::And
                 } else {
                     return Err(HematiteError::ParseError("Invalid operator".to_string()));
@@ -258,7 +280,7 @@ impl Lexer {
             }
             '|' => {
                 if self.peek_char() == Some('|') {
-                    self.position += 1;
+                    self.advance_char();
                     Token::Or
                 } else {
                     return Err(HematiteError::ParseError("Invalid operator".to_string()));
@@ -277,9 +299,8 @@ impl Lexer {
             }
         };
 
-        self.position += 1;
+        self.advance_char();
         self.tokens.push(token);
         Ok(())
     }
 }
-
