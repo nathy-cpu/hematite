@@ -90,13 +90,20 @@ impl Parser {
             loop {
                 let token = self.peek_token()?;
                 match token {
+                    Token::Count => {
+                        self.consume_token(&Token::Count)?;
+                        self.consume_token(&Token::LeftParen)?;
+                        self.consume_token(&Token::Asterisk)?;
+                        self.consume_token(&Token::RightParen)?;
+                        columns.push(SelectItem::CountAll);
+                    }
                     Token::Identifier(name) => {
                         self.consume_token(&Token::Identifier(name.clone()))?;
                         columns.push(SelectItem::Column(name));
                     }
                     _ => {
                         return Err(HematiteError::ParseError(format!(
-                            "Expected column name, found: {:?}",
+                            "Expected column name or COUNT(*), found: {:?}",
                             token
                         )))
                     }

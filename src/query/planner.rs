@@ -201,6 +201,7 @@ impl QueryPlanner {
                         });
                     }
                 }
+                SelectItem::CountAll => {}
             }
         }
 

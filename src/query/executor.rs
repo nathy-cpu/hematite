@@ -174,6 +174,7 @@ impl SelectExecutor {
                         }
                     }
                 }
+                SelectItem::CountAll => {}
             }
         }
 
@@ -195,6 +196,7 @@ impl SelectExecutor {
                     }
                 }
                 SelectItem::Column(name) => columns.push(name.clone()),
+                SelectItem::CountAll => columns.push("COUNT(*)".to_string()),
             }
         }
 
@@ -275,6 +277,20 @@ impl QueryExecutor for SelectExecutor {
 
         if let Some(limit) = self.statement.limit {
             filtered_rows.truncate(limit);
+        }
+
+        // Aggregate COUNT(*) after filtering and ordering.
+        if self
+            .statement
+            .columns
+            .iter()
+            .any(|item| matches!(item, SelectItem::CountAll))
+        {
+            return Ok(QueryResult {
+                affected_rows: 1,
+                columns: self.get_column_names(ctx),
+                rows: vec![vec![Value::Integer(filtered_rows.len() as i32)]],
+            });
         }
 
         // Apply column projection

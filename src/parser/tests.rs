@@ -159,6 +159,26 @@ mod lexer_tests {
     }
 
     #[test]
+    fn test_count_statement() -> Result<()> {
+        let mut lexer = Lexer::new("SELECT COUNT(*) FROM users;".to_string());
+        lexer.tokenize()?;
+
+        let expected = vec![
+            Token::Select,
+            Token::Count,
+            Token::LeftParen,
+            Token::Asterisk,
+            Token::RightParen,
+            Token::From,
+            Token::Identifier("users".to_string()),
+            Token::Semicolon,
+        ];
+
+        assert_eq!(lexer.get_tokens(), &expected);
+        Ok(())
+    }
+
+    #[test]
     fn test_order_by_statement() -> Result<()> {
         let mut lexer = Lexer::new("SELECT id FROM users ORDER BY name DESC, id ASC;".to_string());
         lexer.tokenize()?;
@@ -445,6 +465,22 @@ mod parser_tests {
             Statement::Select(select) => {
                 assert_eq!(select.order_by.len(), 1);
                 assert_eq!(select.limit, Some(5));
+            }
+            _ => panic!("Expected SELECT statement"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_count() -> Result<()> {
+        let mut lexer = Lexer::new("SELECT COUNT(*) FROM users;".to_string());
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let statement = parser.parse()?;
+        match statement {
+            Statement::Select(select) => {
+                assert_eq!(select.columns.len(), 1);
+                assert!(matches!(select.columns[0], SelectItem::CountAll));
             }
             _ => panic!("Expected SELECT statement"),
         }

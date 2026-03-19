@@ -27,6 +27,7 @@ pub struct SelectStatement {
 pub enum SelectItem {
     Wildcard,
     Column(String),
+    CountAll,
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +166,16 @@ impl SelectStatement {
         };
 
         // Validate columns
+        let has_count_all = self
+            .columns
+            .iter()
+            .any(|item| matches!(item, SelectItem::CountAll));
+        if has_count_all && self.columns.len() > 1 {
+            return Err(HematiteError::ParseError(
+                "COUNT(*) cannot be combined with other select items yet".to_string(),
+            ));
+        }
+
         for item in &self.columns {
             match item {
                 SelectItem::Column(name) => {
@@ -176,7 +187,7 @@ impl SelectStatement {
                         )));
                     }
                 }
-                SelectItem::Wildcard => {} // Always valid
+                SelectItem::Wildcard | SelectItem::CountAll => {} // Always valid
             }
         }
 
