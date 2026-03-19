@@ -1,7 +1,7 @@
 //! SQL connection and statement interface
 
 use crate::catalog::Catalog;
-use crate::error::Result;
+use crate::error::{HematiteError, Result};
 use crate::parser::{Lexer, Parser};
 use crate::query::{ExecutionContext, QueryPlanner, QueryResult};
 use std::sync::{Arc, Mutex};
@@ -19,7 +19,10 @@ impl Connection {
         })
     }
 
-    fn execute_statement(&mut self, statement: crate::parser::ast::Statement) -> Result<QueryResult> {
+    fn execute_statement(
+        &mut self,
+        statement: crate::parser::ast::Statement,
+    ) -> Result<QueryResult> {
         let schema = {
             let catalog_guard = self.catalog.lock().unwrap();
             catalog_guard.clone_schema()
@@ -75,7 +78,9 @@ impl Connection {
     }
 
     pub fn begin_transaction(&'_ mut self) -> Result<Transaction<'_>> {
-        Ok(Transaction::new(self))
+        Err(HematiteError::InternalError(
+            "Transactions are not supported yet".to_string(),
+        ))
     }
 
     #[cfg(test)]
@@ -102,38 +107,28 @@ impl PreparedStatement {
 
 #[derive(Debug)]
 pub struct Transaction<'a> {
+    #[allow(dead_code)]
     connection: &'a mut Connection,
-    committed: bool,
 }
 
 impl<'a> Transaction<'a> {
-    fn new(connection: &'a mut Connection) -> Self {
-        Self {
-            connection,
-            committed: false,
-        }
-    }
-
     pub fn execute(&mut self, sql: &str) -> Result<QueryResult> {
-        self.connection.execute(sql)
+        Err(HematiteError::InternalError(format!(
+            "Transactions are not supported yet; cannot execute '{}'",
+            sql
+        )))
     }
 
     pub fn commit(&mut self) -> Result<()> {
-        self.committed = true;
-        Ok(())
+        Err(HematiteError::InternalError(
+            "Transactions are not supported yet".to_string(),
+        ))
     }
 
     pub fn rollback(&mut self) -> Result<()> {
-        self.committed = false;
-        Ok(())
-    }
-}
-
-impl<'a> Drop for Transaction<'a> {
-    fn drop(&mut self) {
-        if !self.committed {
-            let _ = self.rollback();
-        }
+        Err(HematiteError::InternalError(
+            "Transactions are not supported yet".to_string(),
+        ))
     }
 }
 

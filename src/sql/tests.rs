@@ -1,9 +1,9 @@
 //! Centralized tests for the sql module
 
 mod connection_tests {
+    use crate::catalog::DataType;
     use crate::error::Result;
     use crate::sql::connection::*;
-    use crate::catalog::DataType;
     use crate::test_utils::TestDbFile;
 
     #[test]
@@ -54,14 +54,8 @@ mod connection_tests {
 
         conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
 
-        {
-            let mut tx = conn.begin_transaction()?;
-            tx.execute("INSERT INTO test (id, name) VALUES (1, 'test');")?;
-            tx.commit()?;
-        }
-
-        let result = conn.execute("SELECT * FROM test;")?;
-        assert_eq!(result.rows.len(), 1);
+        let result = conn.begin_transaction();
+        assert!(result.is_err());
 
         conn.close()?;
         Ok(())
@@ -281,20 +275,8 @@ mod interface_tests {
         // Create table
         db.execute("CREATE TABLE test (id INTEGER PRIMARY KEY);")?;
 
-        // Begin transaction and execute within its scope
-        {
-            let mut tx = db.transaction()?;
-
-            // Insert data
-            tx.execute("INSERT INTO test (id) VALUES (1);")?;
-
-            // Commit transaction
-            tx.commit()?;
-        } // tx is dropped here, releasing the mutable borrow
-
-        // Verify data - now safe to use db again
-        let result_set = db.query("SELECT * FROM test;")?;
-        assert_eq!(result_set.len(), 1);
+        let result = db.transaction();
+        assert!(result.is_err());
 
         Ok(())
     }
@@ -338,9 +320,9 @@ mod interface_tests {
 }
 
 mod result_tests {
+    use crate::catalog::Value;
     use crate::error::Result;
     use crate::sql::result::*;
-    use crate::catalog::Value;
 
     #[test]
     fn test_result_set() -> Result<()> {
