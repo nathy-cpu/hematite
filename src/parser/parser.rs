@@ -393,6 +393,7 @@ impl Parser {
                     self.consume_token(&Token::Primary)?;
                     self.consume_token(&Token::Key)?;
                     primary_key = true;
+                    nullable = false;
                 }
                 Token::Default => {
                     self.consume_token(&Token::Default)?;
@@ -487,4 +488,3 @@ impl Parser {
         }
     }
 }
-

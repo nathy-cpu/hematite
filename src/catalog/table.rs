@@ -21,11 +21,17 @@ impl Table {
     pub fn new(
         id: TableId,
         name: String,
-        columns: Vec<Column>,
+        mut columns: Vec<Column>,
         root_page_id: crate::storage::PageId,
     ) -> Result<Self> {
         let mut column_indices = HashMap::new();
         let mut primary_key_columns = Vec::new();
+
+        for column in &mut columns {
+            if column.primary_key {
+                column.nullable = false;
+            }
+        }
 
         for (index, column) in columns.iter().enumerate() {
             column_indices.insert(column.name.clone(), index);

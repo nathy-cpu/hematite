@@ -112,6 +112,24 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_primary_key_is_implicitly_not_null() -> Result<()> {
+        let db = TestDbFile::new("_test_primary_key_is_implicitly_not_null");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
+
+        let schema = conn.schema_snapshot()?;
+        let table = schema.get_table_by_name("test").unwrap();
+        assert!(!table.columns[0].nullable);
+
+        let result = conn.execute("INSERT INTO test (id, name) VALUES (NULL, 'x');");
+        assert!(result.is_err());
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_reopen_preserves_exact_schema() -> Result<()> {
         let db = TestDbFile::new("_test_reopen_preserves_exact_schema");
 

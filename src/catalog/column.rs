@@ -32,6 +32,9 @@ impl Column {
 
     pub fn primary_key(mut self, primary_key: bool) -> Self {
         self.primary_key = primary_key;
+        if primary_key {
+            self.nullable = false;
+        }
         self
     }
 
