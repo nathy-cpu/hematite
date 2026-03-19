@@ -70,12 +70,54 @@ impl SelectExecutor {
         }
     }
 
+    fn compare_values(
+        &self,
+        left_val: &Value,
+        operator: &ComparisonOperator,
+        right_val: &Value,
+    ) -> Option<bool> {
+        if left_val.is_null() || right_val.is_null() {
+            return None;
+        }
+
+        match operator {
+            ComparisonOperator::Equal => Some(left_val == right_val),
+            ComparisonOperator::NotEqual => Some(left_val != right_val),
+            ComparisonOperator::LessThan => left_val.partial_cmp(right_val).map(|ord| ord.is_lt()),
+            ComparisonOperator::LessThanOrEqual => {
+                left_val.partial_cmp(right_val).map(|ord| ord.is_le())
+            }
+            ComparisonOperator::GreaterThan => {
+                left_val.partial_cmp(right_val).map(|ord| ord.is_gt())
+            }
+            ComparisonOperator::GreaterThanOrEqual => {
+                left_val.partial_cmp(right_val).map(|ord| ord.is_ge())
+            }
+        }
+    }
+
+    fn logical_and(&self, left: Option<bool>, right: Option<bool>) -> Option<bool> {
+        match (left, right) {
+            (Some(false), _) | (_, Some(false)) => Some(false),
+            (Some(true), Some(true)) => Some(true),
+            _ => None,
+        }
+    }
+
+    fn logical_or(&self, left: Option<bool>, right: Option<bool>) -> Option<bool> {
+        match (left, right) {
+            (Some(true), _) | (_, Some(true)) => Some(true),
+            (Some(false), Some(false)) => Some(false),
+            _ => None,
+        }
+    }
+
     fn evaluate_condition(
         &self,
         ctx: &ExecutionContext,
         condition: &Condition,
         row: &[Value],
-    ) -> Result<bool> {
+    ) -> Result<Option<bool>> {
         match condition {
             Condition::Comparison {
                 left,
@@ -84,15 +126,7 @@ impl SelectExecutor {
             } => {
                 let left_val = self.evaluate_expression(ctx, left, row)?;
                 let right_val = self.evaluate_expression(ctx, right, row)?;
-
-                match operator {
-                    ComparisonOperator::Equal => Ok(left_val == right_val),
-                    ComparisonOperator::NotEqual => Ok(left_val != right_val),
-                    ComparisonOperator::LessThan => Ok(left_val < right_val),
-                    ComparisonOperator::LessThanOrEqual => Ok(left_val <= right_val),
-                    ComparisonOperator::GreaterThan => Ok(left_val > right_val),
-                    ComparisonOperator::GreaterThanOrEqual => Ok(left_val >= right_val),
-                }
+                Ok(self.compare_values(&left_val, operator, &right_val))
             }
             Condition::Logical {
                 left,
@@ -103,8 +137,8 @@ impl SelectExecutor {
                 let right_result = self.evaluate_condition(ctx, right, row)?;
 
                 match operator {
-                    LogicalOperator::And => Ok(left_result && right_result),
-                    LogicalOperator::Or => Ok(left_result || right_result),
+                    LogicalOperator::And => Ok(self.logical_and(left_result, right_result)),
+                    LogicalOperator::Or => Ok(self.logical_or(left_result, right_result)),
                 }
             }
         }
@@ -185,7 +219,7 @@ impl QueryExecutor for SelectExecutor {
                 Some(where_clause) => {
                     let mut all_conditions_met = true;
                     for condition in &where_clause.conditions {
-                        if !self.evaluate_condition(ctx, condition, row)? {
+                        if self.evaluate_condition(ctx, condition, row)? != Some(true) {
                             all_conditions_met = false;
                             break;
                         }

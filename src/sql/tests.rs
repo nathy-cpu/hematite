@@ -179,6 +179,38 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_where_null_comparisons_filter_out_rows() -> Result<()> {
+        let db = TestDbFile::new("_test_where_null_comparisons_filter_out_rows");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (1, NULL);")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (2, 'Alice');")?;
+
+        let eq_null = conn.execute("SELECT * FROM test WHERE name = NULL;")?;
+        assert_eq!(eq_null.rows.len(), 0);
+
+        let neq_null = conn.execute("SELECT * FROM test WHERE name != NULL;")?;
+        assert_eq!(neq_null.rows.len(), 0);
+
+        let null_eq_null = conn.execute("SELECT * FROM test WHERE NULL = NULL;")?;
+        assert_eq!(null_eq_null.rows.len(), 0);
+
+        let eq_text = conn.execute("SELECT * FROM test WHERE name = 'Alice';")?;
+        assert_eq!(eq_text.rows.len(), 1);
+        assert_eq!(
+            eq_text.rows[0],
+            vec![
+                crate::catalog::Value::Integer(2),
+                crate::catalog::Value::Text("Alice".to_string()),
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_reopen_preserves_exact_schema() -> Result<()> {
         let db = TestDbFile::new("_test_reopen_preserves_exact_schema");
 
