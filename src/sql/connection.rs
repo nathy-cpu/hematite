@@ -19,7 +19,7 @@ impl Connection {
         })
     }
 
-    fn execute_statement(
+    pub(crate) fn execute_statement(
         &mut self,
         statement: crate::parser::ast::Statement,
     ) -> Result<QueryResult> {

@@ -2,6 +2,8 @@
 
 use crate::catalog::Value;
 use crate::error::{HematiteError, Result};
+use crate::parser::lexer::Token;
+use crate::parser::{Lexer, Parser};
 use crate::sql::connection::{Connection, PreparedStatement, Transaction};
 use crate::sql::result::{ResultSet, Row, StatementResult};
 
@@ -111,18 +113,26 @@ impl Hematite {
 
     /// Execute multiple SQL statements in sequence
     pub fn execute_batch(&mut self, sql: &str) -> Result<()> {
-        // Split SQL by semicolons and execute each statement.
-        // The parser currently expects statements to end with a semicolon, so we re-append it.
-        let statements: Vec<&str> = sql
-            .split(';')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .collect();
+        let mut lexer = Lexer::new(sql.to_string());
+        lexer.tokenize()?;
 
-        for statement in statements {
-            let mut owned = statement.to_string();
-            owned.push(';');
-            self.execute(&owned)?;
+        let mut current_tokens = Vec::new();
+        for token in lexer.get_tokens().iter().cloned() {
+            current_tokens.push(token.clone());
+
+            if token == Token::Semicolon {
+                let mut parser = Parser::new(current_tokens);
+                let statement = parser.parse()?;
+                self.connection.execute_statement(statement)?;
+                current_tokens = Vec::new();
+            }
+        }
+
+        if !current_tokens.is_empty() {
+            current_tokens.push(Token::Semicolon);
+            let mut parser = Parser::new(current_tokens);
+            let statement = parser.parse()?;
+            self.connection.execute_statement(statement)?;
         }
 
         Ok(())
@@ -225,4 +235,3 @@ impl Default for HematiteBuilder {
         Self::new()
     }
 }
-

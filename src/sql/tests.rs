@@ -455,6 +455,41 @@ mod interface_tests {
     }
 
     #[test]
+    fn test_execute_batch_handles_semicolon_in_string_literal() -> Result<()> {
+        let test_db = TestDbFile::new("_test_batch_semicolon_in_string");
+        let mut db = Hematite::new(test_db.path())?;
+
+        db.execute_batch(
+            "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT);\n\
+             INSERT INTO notes (id, body) VALUES (1, 'hello;world');",
+        )?;
+
+        let rs = db.query("SELECT * FROM notes;")?;
+        assert_eq!(rs.len(), 1);
+        let row = rs.get_row(0).unwrap();
+        assert_eq!(row.get_string(1)?, "hello;world");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_execute_batch_allows_select_statements() -> Result<()> {
+        let test_db = TestDbFile::new("_test_batch_select_statements");
+        let mut db = Hematite::new(test_db.path())?;
+
+        db.execute_batch(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);\n\
+             INSERT INTO users (id, name) VALUES (1, 'Alice');\n\
+             SELECT * FROM users;",
+        )?;
+
+        let rs = db.query("SELECT * FROM users;")?;
+        assert_eq!(rs.len(), 1);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_sql_debug_simple() -> Result<()> {
         println!("=== Testing SQL Parsing Only ===");
 
