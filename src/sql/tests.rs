@@ -355,6 +355,35 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_drop_table_removes_schema_and_storage() -> Result<()> {
+        let db = TestDbFile::new("_test_drop_table_removes_schema_and_storage");
+
+        {
+            let mut conn = Connection::new(db.path())?;
+            conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
+            conn.execute("INSERT INTO test (id, name) VALUES (1, 'Alice');")?;
+            let result = conn.execute("DROP TABLE test;")?;
+            assert_eq!(result.affected_rows, 0);
+
+            let schema = conn.schema_snapshot()?;
+            assert!(schema.get_table_by_name("test").is_none());
+
+            let select_result = conn.execute("SELECT * FROM test;");
+            assert!(select_result.is_err());
+
+            conn.close()?;
+        }
+
+        {
+            let conn = Connection::new(db.path())?;
+            let schema = conn.schema_snapshot()?;
+            assert!(schema.get_table_by_name("test").is_none());
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn test_update_with_where_clause() -> Result<()> {
         let db = TestDbFile::new("_test_update_with_where_clause");
         let mut conn = Connection::new(db.path())?;

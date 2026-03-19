@@ -639,3 +639,39 @@ impl QueryExecutor for CreateExecutor {
         })
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct DropExecutor {
+    pub statement: DropStatement,
+}
+
+impl DropExecutor {
+    pub fn new(statement: DropStatement) -> Self {
+        Self { statement }
+    }
+}
+
+impl QueryExecutor for DropExecutor {
+    fn execute(&mut self, ctx: &mut ExecutionContext<'_>) -> Result<QueryResult> {
+        self.statement.validate(&ctx.catalog)?;
+
+        let table = ctx
+            .catalog
+            .get_table_by_name(&self.statement.table)
+            .ok_or_else(|| {
+                HematiteError::ParseError(format!("Table '{}' not found", self.statement.table))
+            })?
+            .clone();
+
+        ctx.storage.drop_table(&self.statement.table)?;
+        ctx.catalog
+            .drop_table(table.id)
+            .map_err(|err| HematiteError::ParseError(err.to_string()))?;
+
+        Ok(QueryResult {
+            affected_rows: 0,
+            columns: Vec::new(),
+            rows: Vec::new(),
+        })
+    }
+}

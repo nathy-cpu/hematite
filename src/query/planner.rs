@@ -4,7 +4,8 @@ use crate::catalog::{Schema, Table};
 use crate::error::Result;
 use crate::parser::ast::*;
 use crate::query::executor::{
-    CreateExecutor, DeleteExecutor, InsertExecutor, QueryExecutor, SelectExecutor, UpdateExecutor,
+    CreateExecutor, DeleteExecutor, DropExecutor, InsertExecutor, QueryExecutor, SelectExecutor,
+    UpdateExecutor,
 };
 use crate::HematiteError;
 
@@ -42,6 +43,7 @@ impl QueryPlanner {
             Statement::Insert(insert) => self.plan_insert(insert),
             Statement::Delete(delete) => self.plan_delete(delete),
             Statement::Create(create) => self.plan_create(create),
+            Statement::Drop(drop) => self.plan_drop(drop),
         }
     }
 
@@ -98,6 +100,16 @@ impl QueryPlanner {
     fn plan_delete(&self, statement: DeleteStatement) -> Result<QueryPlan> {
         let executor = Box::new(DeleteExecutor::new(statement));
         let estimated_cost = 1000.0;
+
+        Ok(QueryPlan {
+            executor,
+            estimated_cost,
+        })
+    }
+
+    fn plan_drop(&self, statement: DropStatement) -> Result<QueryPlan> {
+        let executor = Box::new(DropExecutor::new(statement));
+        let estimated_cost = 1.0;
 
         Ok(QueryPlan {
             executor,

@@ -11,6 +11,7 @@ pub enum Statement {
     Insert(InsertStatement),
     Delete(DeleteStatement),
     Create(CreateStatement),
+    Drop(DropStatement),
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +106,11 @@ pub struct CreateStatement {
 }
 
 #[derive(Debug, Clone)]
+pub struct DropStatement {
+    pub table: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct ColumnDefinition {
     pub name: String,
     pub data_type: DataType,
@@ -121,11 +127,12 @@ impl Statement {
             Statement::Insert(insert) => insert.validate(catalog),
             Statement::Delete(delete) => delete.validate(catalog),
             Statement::Create(create) => create.validate(catalog),
+            Statement::Drop(drop) => drop.validate(catalog),
         }
     }
 
     pub fn mutates_schema(&self) -> bool {
-        matches!(self, Statement::Create(_))
+        matches!(self, Statement::Create(_) | Statement::Drop(_))
     }
 }
 
@@ -346,6 +353,15 @@ impl DeleteStatement {
             }
         }
 
+        Ok(())
+    }
+}
+
+impl DropStatement {
+    pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
+        catalog.get_table_by_name(&self.table).ok_or_else(|| {
+            HematiteError::ParseError(format!("Table '{}' does not exist", self.table))
+        })?;
         Ok(())
     }
 }

@@ -92,6 +92,10 @@ impl TableManager {
         &self.table_metadata
     }
 
+    pub fn remove_table(&mut self, table_name: &str) -> Option<TableMetadata> {
+        self.table_metadata.remove(table_name)
+    }
+
     // Helper methods for page operations
     pub fn write_page_header(&self, page: &mut Page, header: &TablePageHeader) -> Result<()> {
         let mut offset = 0;

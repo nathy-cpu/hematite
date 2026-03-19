@@ -356,6 +356,31 @@ impl StorageEngine {
         Ok(())
     }
 
+    pub fn drop_table(&mut self, table_name: &str) -> Result<()> {
+        let metadata = self.table_manager.remove_table(table_name).ok_or_else(|| {
+            crate::error::HematiteError::StorageError(format!(
+                "Table '{}' does not exist",
+                table_name
+            ))
+        })?;
+
+        let mut current_page_id = metadata.root_page_id;
+        loop {
+            let page = self.read_page(current_page_id)?;
+            let header = self.table_manager.read_page_header(&page)?;
+            let next_page_id = header.next_page_id;
+            self.deallocate_page(current_page_id)?;
+
+            if next_page_id == PageId::invalid() {
+                break;
+            }
+
+            current_page_id = next_page_id;
+        }
+
+        Ok(())
+    }
+
     pub fn read_from_table(&mut self, table_name: &str) -> Result<Vec<Vec<crate::catalog::Value>>> {
         let metadata = self
             .table_manager

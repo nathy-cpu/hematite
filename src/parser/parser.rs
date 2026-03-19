@@ -30,8 +30,9 @@ impl Parser {
             Token::Insert => self.parse_insert(),
             Token::Delete => self.parse_delete(),
             Token::Create => self.parse_create(),
+            Token::Drop => self.parse_drop(),
             _ => Err(HematiteError::ParseError(format!(
-                "Expected SELECT, UPDATE, INSERT, DELETE, or CREATE, found: {:?}",
+                "Expected SELECT, UPDATE, INSERT, DELETE, CREATE, or DROP, found: {:?}",
                 token
             ))),
         }
@@ -330,6 +331,14 @@ impl Parser {
         self.consume_token(&Token::Semicolon)?;
 
         Ok(Statement::Create(CreateStatement { table, columns }))
+    }
+
+    fn parse_drop(&mut self) -> Result<Statement> {
+        self.consume_token(&Token::Drop)?;
+        self.consume_token(&Token::Table)?;
+        let table = self.parse_identifier()?;
+        self.consume_token(&Token::Semicolon)?;
+        Ok(Statement::Drop(DropStatement { table }))
     }
 
     fn parse_identifier(&mut self) -> Result<String> {

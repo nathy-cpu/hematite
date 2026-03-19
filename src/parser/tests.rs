@@ -204,6 +204,22 @@ mod lexer_tests {
     }
 
     #[test]
+    fn test_drop_table_statement() -> Result<()> {
+        let mut lexer = Lexer::new("DROP TABLE users;".to_string());
+        lexer.tokenize()?;
+
+        let expected = vec![
+            Token::Drop,
+            Token::Table,
+            Token::Identifier("users".to_string()),
+            Token::Semicolon,
+        ];
+
+        assert_eq!(lexer.get_tokens(), &expected);
+        Ok(())
+    }
+
+    #[test]
     fn test_create_table() -> Result<()> {
         let mut lexer =
             Lexer::new("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)".to_string());
@@ -445,6 +461,21 @@ mod parser_tests {
                 assert!(update.where_clause.is_some());
             }
             _ => panic!("Expected UPDATE statement"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_drop() -> Result<()> {
+        let mut lexer = Lexer::new("DROP TABLE users;".to_string());
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let statement = parser.parse()?;
+        match statement {
+            Statement::Drop(drop) => {
+                assert_eq!(drop.table, "users");
+            }
+            _ => panic!("Expected DROP statement"),
         }
         Ok(())
     }
