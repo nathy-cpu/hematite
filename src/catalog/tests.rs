@@ -1569,4 +1569,29 @@ mod catalog_new_tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_catalog_validate_integrity_detects_storage_schema_mismatch() -> Result<()> {
+        let test_db = TestDbFile::new("_test_catalog_validate_integrity_mismatch");
+
+        let mut catalog = Catalog::open_or_create(test_db.path())?;
+        let table_id = catalog.create_table(
+            "users",
+            vec![
+                Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer)
+                    .primary_key(true)
+                    .nullable(false),
+            ],
+        )?;
+        let root_page_id = catalog.with_storage(|storage| storage.create_table("users"))?;
+        catalog.set_table_root_page(table_id, root_page_id)?;
+        assert!(catalog.validate_integrity().is_ok());
+
+        catalog.with_storage(|storage| storage.drop_table("users"))?;
+
+        let err = catalog.validate_integrity().unwrap_err();
+        assert!(err.to_string().contains("missing from storage metadata"));
+
+        Ok(())
+    }
 }

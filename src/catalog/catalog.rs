@@ -8,7 +8,8 @@ use crate::catalog::ids::TableId;
 use crate::catalog::schema::Schema;
 use crate::catalog::table::{SecondaryIndex, Table};
 use crate::error::Result;
-use crate::storage::{Page, PageId, StorageEngine, DB_HEADER_PAGE_ID};
+use crate::storage::{Page, PageId, StorageEngine, StorageIntegrityReport, DB_HEADER_PAGE_ID};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 /// SQLite-style catalog manager with B-tree schema persistence
@@ -362,6 +363,57 @@ impl Catalog {
         }
 
         schema_result
+    }
+
+    pub fn validate_integrity(&self) -> Result<StorageIntegrityReport> {
+        self.validate_schema()?;
+
+        let schema_tables = self
+            .schema
+            .list_tables()
+            .into_iter()
+            .filter_map(|(table_id, table_name)| {
+                self.schema
+                    .get_table(table_id)
+                    .map(|table| (table_name, table.root_page_id))
+            })
+            .collect::<HashMap<_, _>>();
+
+        let mut storage_guard = self.storage.lock().unwrap();
+        let storage_tables = storage_guard
+            .get_table_metadata()
+            .iter()
+            .map(|(name, metadata)| (name.clone(), metadata.root_page_id))
+            .collect::<HashMap<_, _>>();
+
+        for (table_name, root_page_id) in &schema_tables {
+            let storage_root = storage_tables.get(table_name).ok_or_else(|| {
+                crate::error::HematiteError::CorruptedData(format!(
+                    "Catalog table '{}' is missing from storage metadata",
+                    table_name
+                ))
+            })?;
+
+            if storage_root != root_page_id {
+                return Err(crate::error::HematiteError::CorruptedData(format!(
+                    "Catalog/storage root mismatch for table '{}': catalog={}, storage={}",
+                    table_name,
+                    root_page_id.as_u32(),
+                    storage_root.as_u32()
+                )));
+            }
+        }
+
+        for table_name in storage_tables.keys() {
+            if !schema_tables.contains_key(table_name) {
+                return Err(crate::error::HematiteError::CorruptedData(format!(
+                    "Storage metadata contains table '{}' missing from catalog schema",
+                    table_name
+                )));
+            }
+        }
+
+        storage_guard.validate_integrity()
     }
 
     // ... (rest of the code remains the same)

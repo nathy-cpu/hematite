@@ -4,10 +4,10 @@ use crate::catalog::{Table, Value};
 use crate::error::Result;
 use crate::storage::table::{PageOperations, TableManager};
 use crate::storage::{
-    buffer_pool::BufferPool, file_manager::FileManager, Page, PageId, StoredRow, TableMetadata,
-    DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID, TABLE_PAGE_HEADER_SIZE,
+    buffer_pool::BufferPool, file_manager::FileManager, Page, PageId, StorageIntegrityReport,
+    StoredRow, TableMetadata, DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID, TABLE_PAGE_HEADER_SIZE,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// Main storage engine interface
@@ -176,6 +176,183 @@ impl StorageEngine {
                 .sum(),
             free_page_count: self.file_manager.free_pages().len(),
         }
+    }
+
+    pub fn validate_integrity(&mut self) -> Result<StorageIntegrityReport> {
+        let metadata_entries = self
+            .table_manager
+            .get_all_metadata()
+            .iter()
+            .map(|(name, metadata)| (name.clone(), metadata.clone()))
+            .collect::<Vec<_>>();
+
+        let mut free_pages = HashSet::new();
+        for &page_id in self.file_manager.free_pages() {
+            if page_id == DB_HEADER_PAGE_ID || page_id == STORAGE_METADATA_PAGE_ID {
+                return Err(crate::error::HematiteError::CorruptedData(format!(
+                    "Reserved page {} cannot be marked free",
+                    page_id.as_u32()
+                )));
+            }
+
+            if !free_pages.insert(page_id) {
+                return Err(crate::error::HematiteError::CorruptedData(format!(
+                    "Duplicate free page {} detected",
+                    page_id.as_u32()
+                )));
+            }
+        }
+
+        let mut live_pages = HashSet::new();
+        let mut total_rows = 0u64;
+
+        for (table_name, metadata) in metadata_entries {
+            if metadata.root_page_id == PageId::invalid()
+                || metadata.root_page_id == DB_HEADER_PAGE_ID
+                || metadata.root_page_id == STORAGE_METADATA_PAGE_ID
+            {
+                return Err(crate::error::HematiteError::CorruptedData(format!(
+                    "Table '{}' has invalid root page {}",
+                    table_name,
+                    metadata.root_page_id.as_u32()
+                )));
+            }
+
+            let (table_pages, counted_rows, max_row_id) =
+                self.validate_table_page_chain(&table_name, &metadata)?;
+
+            for page_id in table_pages {
+                if free_pages.contains(&page_id) {
+                    return Err(crate::error::HematiteError::CorruptedData(format!(
+                        "Page {} for table '{}' is both live and free",
+                        page_id.as_u32(),
+                        table_name
+                    )));
+                }
+
+                if !live_pages.insert(page_id) {
+                    return Err(crate::error::HematiteError::CorruptedData(format!(
+                        "Page {} is shared by multiple tables",
+                        page_id.as_u32()
+                    )));
+                }
+            }
+
+            if counted_rows != metadata.row_count {
+                return Err(crate::error::HematiteError::CorruptedData(format!(
+                    "Table '{}' row count mismatch: metadata={}, actual={}",
+                    table_name, metadata.row_count, counted_rows
+                )));
+            }
+
+            if metadata.next_row_id <= max_row_id {
+                return Err(crate::error::HematiteError::CorruptedData(format!(
+                    "Table '{}' next_row_id {} is not ahead of max row_id {}",
+                    table_name, metadata.next_row_id, max_row_id
+                )));
+            }
+
+            total_rows += counted_rows;
+        }
+
+        Ok(StorageIntegrityReport {
+            table_count: self.table_manager.get_all_metadata().len(),
+            live_page_count: live_pages.len(),
+            free_page_count: free_pages.len(),
+            total_rows,
+        })
+    }
+
+    fn validate_table_page_chain(
+        &mut self,
+        table_name: &str,
+        metadata: &TableMetadata,
+    ) -> Result<(Vec<PageId>, u64, u64)> {
+        let mut current_page_id = metadata.root_page_id;
+        let mut previous_page_id = PageId::invalid();
+        let mut visited = HashSet::new();
+        let mut pages = Vec::new();
+        let mut row_count = 0u64;
+        let mut max_row_id = 0u64;
+
+        loop {
+            if !visited.insert(current_page_id) {
+                return Err(crate::error::HematiteError::CorruptedData(format!(
+                    "Cycle detected in page chain for table '{}'",
+                    table_name
+                )));
+            }
+
+            let page = self.read_page(current_page_id)?;
+            let header = self.table_manager.read_page_header(&page)?;
+            if header.page_type != crate::storage::PageType::TableData {
+                return Err(crate::error::HematiteError::CorruptedData(format!(
+                    "Table '{}' references non-table-data page {}",
+                    table_name,
+                    current_page_id.as_u32()
+                )));
+            }
+
+            if header.prev_page_id != previous_page_id {
+                return Err(crate::error::HematiteError::CorruptedData(format!(
+                    "Broken prev_page_id chain for table '{}' at page {}",
+                    table_name,
+                    current_page_id.as_u32()
+                )));
+            }
+
+            let mut offset = TABLE_PAGE_HEADER_SIZE;
+            for _ in 0..header.row_count {
+                if offset + 4 > crate::storage::PAGE_SIZE {
+                    return Err(crate::error::HematiteError::CorruptedData(format!(
+                        "Row length exceeds page bounds for table '{}' on page {}",
+                        table_name,
+                        current_page_id.as_u32()
+                    )));
+                }
+
+                let row_length = crate::storage::serialization::RowSerializer::read_row_length(
+                    &page.data[offset..offset + 4],
+                )?;
+                offset += 4;
+
+                if offset + row_length > crate::storage::PAGE_SIZE {
+                    return Err(crate::error::HematiteError::CorruptedData(format!(
+                        "Row payload exceeds page bounds for table '{}' on page {}",
+                        table_name,
+                        current_page_id.as_u32()
+                    )));
+                }
+
+                let row = crate::storage::serialization::RowSerializer::deserialize_stored_row(
+                    &page.data[offset..offset + row_length],
+                )?;
+                max_row_id = max_row_id.max(row.row_id);
+                row_count += 1;
+                offset += row_length;
+            }
+
+            pages.push(current_page_id);
+
+            if header.next_page_id == PageId::invalid() {
+                break;
+            }
+
+            if header.next_page_id == DB_HEADER_PAGE_ID
+                || header.next_page_id == STORAGE_METADATA_PAGE_ID
+            {
+                return Err(crate::error::HematiteError::CorruptedData(format!(
+                    "Table '{}' points at reserved page {}",
+                    table_name,
+                    header.next_page_id.as_u32()
+                )));
+            }
+
+            previous_page_id = current_page_id;
+            current_page_id = header.next_page_id;
+        }
+
+        Ok((pages, row_count, max_row_id))
     }
 
     fn row_data_end(page: &Page, row_count: u32) -> Result<usize> {

@@ -258,6 +258,56 @@ mod mod_tests {
     }
 
     #[test]
+    fn test_storage_integrity_validates_healthy_state() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_storage_integrity_healthy");
+        let mut storage = StorageEngine::new(test_db.path())?;
+
+        let _ = storage.create_table("users")?;
+        let _ = storage.insert_into_table("users", vec![Value::Integer(1)])?;
+        let _ = storage.insert_into_table("users", vec![Value::Integer(2)])?;
+
+        let report = storage.validate_integrity()?;
+        assert_eq!(report.table_count, 1);
+        assert_eq!(report.live_page_count, 1);
+        assert_eq!(report.total_rows, 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_storage_integrity_rejects_live_free_page_overlap() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_storage_integrity_overlap");
+        let mut storage = StorageEngine::new(test_db.path())?;
+
+        let root_page_id = storage.create_table("users")?;
+        let _extra_page_id = storage.allocate_page()?;
+        storage.deallocate_page(root_page_id)?;
+
+        let err = storage.validate_integrity().unwrap_err();
+        assert!(err.to_string().contains("is both live and free"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_storage_integrity_rejects_corrupt_table_row_count() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_storage_integrity_row_count_corrupt");
+        let mut storage = StorageEngine::new(test_db.path())?;
+
+        let root_page_id = storage.create_table("users")?;
+        let _ = storage.insert_into_table("users", vec![Value::Integer(1)])?;
+
+        let mut page = storage.read_page(root_page_id)?;
+        page.data[1..5].copy_from_slice(&2u32.to_le_bytes());
+        storage.write_page(page)?;
+
+        let err = storage.validate_integrity().unwrap_err();
+        assert!(err.to_string().contains("Corrupted data"));
+
+        Ok(())
+    }
+
+    #[test]
     fn test_versioned_storage_metadata_persists_across_reopen() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_versioned_storage_metadata");
 

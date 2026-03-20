@@ -67,6 +67,14 @@ pub struct StorageStats {
     pub free_page_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageIntegrityReport {
+    pub table_count: usize,
+    pub live_page_count: usize,
+    pub free_page_count: usize,
+    pub total_rows: u64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredRow {
     pub row_id: u64,
