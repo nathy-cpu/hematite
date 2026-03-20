@@ -15,9 +15,7 @@ pub struct Hematite {
 impl Hematite {
     /// Create a new database instance with an in-memory database
     pub fn new_in_memory() -> Result<Self> {
-        // This project doesn't yet support a true in-memory backend; use a unique temp file to
-        // avoid test contention when running in parallel.
-        let connection = Connection::new(&unique_test_db_path("_test_in_memory"))?;
+        let connection = Connection::new_in_memory()?;
         Ok(Self { connection })
     }
 
@@ -137,15 +135,6 @@ impl Hematite {
 
         Ok(())
     }
-}
-
-fn unique_test_db_path(prefix: &str) -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("{}_{}.db", prefix, nanos)
 }
 
 /// Trait for converting database values to Rust types

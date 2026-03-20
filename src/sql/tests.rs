@@ -29,6 +29,21 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_connection_execute_in_memory() -> Result<()> {
+        let mut conn = Connection::new_in_memory()?;
+
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (1, 'test');")?;
+
+        let result = conn.execute("SELECT * FROM test;")?;
+        assert_eq!(result.columns, vec!["id", "name"]);
+        assert_eq!(result.rows.len(), 1);
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_prepared_statement() -> Result<()> {
         let db = TestDbFile::new("_test_prepared_statement");
         let mut conn = Connection::new(db.path())?;
@@ -727,6 +742,22 @@ mod interface_tests {
         // Query single value using simple SELECT
         let result_set = db.query("SELECT * FROM test;")?;
         assert_eq!(result_set.len(), 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_hematite_new_in_memory() -> Result<()> {
+        let mut db = Hematite::new_in_memory()?;
+
+        db.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
+        db.execute("INSERT INTO test (id, name) VALUES (1, 'Alice');")?;
+
+        let result_set = db.query("SELECT * FROM test;")?;
+        assert_eq!(result_set.len(), 1);
+        let row = result_set.get_row(0).unwrap();
+        assert_eq!(row.get_int(0)?, 1);
+        assert_eq!(row.get_string(1)?, "Alice");
 
         Ok(())
     }

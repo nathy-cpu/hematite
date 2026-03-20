@@ -21,6 +21,13 @@ impl Connection {
         })
     }
 
+    pub fn new_in_memory() -> Result<Self> {
+        let catalog = Catalog::open_in_memory()?;
+        Ok(Self {
+            catalog: Arc::new(Mutex::new(catalog)),
+        })
+    }
+
     pub(crate) fn execute_statement(
         &mut self,
         statement: crate::parser::ast::Statement,
@@ -255,22 +262,13 @@ impl Database {
     }
 
     pub fn open_in_memory() -> Result<Connection> {
-        Connection::new(&unique_test_db_path("_test_in_memory"))
+        Connection::new_in_memory()
     }
 
     pub fn connect(&mut self, database_path: &str) -> Result<Connection> {
         let connection = Connection::new(database_path)?;
         Ok(connection)
     }
-}
-
-fn unique_test_db_path(prefix: &str) -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("{}_{}.db", prefix, nanos)
 }
 
 impl Default for Database {

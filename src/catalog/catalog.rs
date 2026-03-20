@@ -31,6 +31,15 @@ impl Catalog {
     /// Open or create a database with SQLite-style schema management
     pub fn open_or_create<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
         let storage = StorageEngine::new(path)?;
+        Self::open_with_storage(storage)
+    }
+
+    pub fn open_in_memory() -> Result<Self> {
+        let storage = StorageEngine::new_in_memory()?;
+        Self::open_with_storage(storage)
+    }
+
+    fn open_with_storage(storage: StorageEngine) -> Result<Self> {
         let storage = Arc::new(Mutex::new(storage));
 
         // Try to read existing database header

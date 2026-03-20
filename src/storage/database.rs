@@ -15,6 +15,11 @@ impl Database {
         Ok(Self { storage })
     }
 
+    pub fn open_in_memory() -> Result<Self> {
+        let storage = StorageEngine::new_in_memory()?;
+        Ok(Self { storage })
+    }
+
     pub fn close(&mut self) -> Result<()> {
         self.storage.flush()?;
         Ok(())
@@ -24,4 +29,3 @@ impl Database {
         &mut self.storage
     }
 }
-

@@ -61,6 +61,15 @@ impl StorageEngine {
 
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file_manager = FileManager::new(path)?;
+        Self::from_file_manager(file_manager)
+    }
+
+    pub fn new_in_memory() -> Result<Self> {
+        let file_manager = FileManager::new_in_memory()?;
+        Self::from_file_manager(file_manager)
+    }
+
+    fn from_file_manager(file_manager: FileManager) -> Result<Self> {
         let buffer_pool = BufferPool::new(100); // 100 pages in memory
         let table_manager = TableManager::new();
 
