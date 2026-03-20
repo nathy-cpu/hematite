@@ -7,6 +7,7 @@ use crate::parser::lexer::Token;
 pub struct Parser {
     tokens: Vec<Token>,
     position: usize,
+    parameter_count: usize,
 }
 
 impl Parser {
@@ -14,6 +15,7 @@ impl Parser {
         Self {
             tokens,
             position: 0,
+            parameter_count: 0,
         }
     }
 
@@ -338,6 +340,12 @@ impl Parser {
                     self.consume_token(&Token::Null)?;
                 }
                 Ok(Expression::Literal(crate::catalog::types::Value::Null))
+            }
+            Token::Placeholder => {
+                self.consume_token(&Token::Placeholder)?;
+                let index = self.parameter_count;
+                self.parameter_count += 1;
+                Ok(Expression::Parameter(index))
             }
             _ => Err(HematiteError::ParseError(format!(
                 "Expected expression, found: {:?}",

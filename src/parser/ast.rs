@@ -86,6 +86,7 @@ pub enum Condition {
 pub enum Expression {
     Column(String),
     Literal(Value),
+    Parameter(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -168,6 +169,204 @@ impl Statement {
 
     pub fn mutates_schema(&self) -> bool {
         matches!(self, Statement::Create(_) | Statement::Drop(_))
+    }
+
+    pub fn parameter_count(&self) -> usize {
+        let mut max_index: Option<usize> = None;
+        self.visit_parameters(&mut |index| {
+            max_index = Some(max_index.map_or(index, |current| current.max(index)));
+        });
+        max_index.map_or(0, |index| index + 1)
+    }
+
+    pub fn bind_parameters(&self, parameters: &[Value]) -> Result<Statement> {
+        self.bind_statement(parameters)
+    }
+
+    fn visit_parameters<F>(&self, f: &mut F)
+    where
+        F: FnMut(usize),
+    {
+        match self {
+            Statement::Select(select) => {
+                if let Some(where_clause) = &select.where_clause {
+                    where_clause.visit_parameters(f);
+                }
+            }
+            Statement::Update(update) => {
+                for assignment in &update.assignments {
+                    assignment.value.visit_parameters(f);
+                }
+                if let Some(where_clause) = &update.where_clause {
+                    where_clause.visit_parameters(f);
+                }
+            }
+            Statement::Insert(insert) => {
+                for row in &insert.values {
+                    for expr in row {
+                        expr.visit_parameters(f);
+                    }
+                }
+            }
+            Statement::Delete(delete) => {
+                if let Some(where_clause) = &delete.where_clause {
+                    where_clause.visit_parameters(f);
+                }
+            }
+            Statement::Create(_) | Statement::Drop(_) => {}
+        }
+    }
+
+    fn bind_statement(&self, parameters: &[Value]) -> Result<Statement> {
+        match self {
+            Statement::Select(select) => Ok(Statement::Select(SelectStatement {
+                columns: select.columns.clone(),
+                from: select.from.clone(),
+                where_clause: select
+                    .where_clause
+                    .as_ref()
+                    .map(|where_clause| where_clause.bind(parameters))
+                    .transpose()?,
+                order_by: select.order_by.clone(),
+                limit: select.limit,
+            })),
+            Statement::Update(update) => Ok(Statement::Update(UpdateStatement {
+                table: update.table.clone(),
+                assignments: update
+                    .assignments
+                    .iter()
+                    .map(|assignment| {
+                        Ok(UpdateAssignment {
+                            column: assignment.column.clone(),
+                            value: assignment.value.bind(parameters)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+                where_clause: update
+                    .where_clause
+                    .as_ref()
+                    .map(|where_clause| where_clause.bind(parameters))
+                    .transpose()?,
+            })),
+            Statement::Insert(insert) => Ok(Statement::Insert(InsertStatement {
+                table: insert.table.clone(),
+                columns: insert.columns.clone(),
+                values: insert
+                    .values
+                    .iter()
+                    .map(|row| {
+                        row.iter()
+                            .map(|expr| expr.bind(parameters))
+                            .collect::<Result<Vec<_>>>()
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            })),
+            Statement::Delete(delete) => Ok(Statement::Delete(DeleteStatement {
+                table: delete.table.clone(),
+                where_clause: delete
+                    .where_clause
+                    .as_ref()
+                    .map(|where_clause| where_clause.bind(parameters))
+                    .transpose()?,
+            })),
+            Statement::Create(create) => Ok(Statement::Create(create.clone())),
+            Statement::Drop(drop) => Ok(Statement::Drop(drop.clone())),
+        }
+    }
+}
+
+impl WhereClause {
+    fn visit_parameters<F>(&self, f: &mut F)
+    where
+        F: FnMut(usize),
+    {
+        for condition in &self.conditions {
+            condition.visit_parameters(f);
+        }
+    }
+
+    fn bind(&self, parameters: &[Value]) -> Result<WhereClause> {
+        Ok(WhereClause {
+            conditions: self
+                .conditions
+                .iter()
+                .map(|condition| condition.bind(parameters))
+                .collect::<Result<Vec<_>>>()?,
+        })
+    }
+}
+
+impl Condition {
+    fn visit_parameters<F>(&self, f: &mut F)
+    where
+        F: FnMut(usize),
+    {
+        match self {
+            Condition::Comparison { left, right, .. } => {
+                left.visit_parameters(f);
+                right.visit_parameters(f);
+            }
+            Condition::NullCheck { expr, .. } => expr.visit_parameters(f),
+            Condition::Logical { left, right, .. } => {
+                left.visit_parameters(f);
+                right.visit_parameters(f);
+            }
+        }
+    }
+
+    fn bind(&self, parameters: &[Value]) -> Result<Condition> {
+        match self {
+            Condition::Comparison {
+                left,
+                operator,
+                right,
+            } => Ok(Condition::Comparison {
+                left: left.bind(parameters)?,
+                operator: operator.clone(),
+                right: right.bind(parameters)?,
+            }),
+            Condition::NullCheck { expr, is_not } => Ok(Condition::NullCheck {
+                expr: expr.bind(parameters)?,
+                is_not: *is_not,
+            }),
+            Condition::Logical {
+                left,
+                operator,
+                right,
+            } => Ok(Condition::Logical {
+                left: Box::new(left.bind(parameters)?),
+                operator: operator.clone(),
+                right: Box::new(right.bind(parameters)?),
+            }),
+        }
+    }
+}
+
+impl Expression {
+    fn visit_parameters<F>(&self, f: &mut F)
+    where
+        F: FnMut(usize),
+    {
+        if let Expression::Parameter(index) = self {
+            f(*index);
+        }
+    }
+
+    fn bind(&self, parameters: &[Value]) -> Result<Expression> {
+        match self {
+            Expression::Column(name) => Ok(Expression::Column(name.clone())),
+            Expression::Literal(value) => Ok(Expression::Literal(value.clone())),
+            Expression::Parameter(index) => parameters
+                .get(*index)
+                .cloned()
+                .map(Expression::Literal)
+                .ok_or_else(|| {
+                    HematiteError::ParseError(format!(
+                        "Missing bound value for parameter {}",
+                        index + 1
+                    ))
+                }),
+        }
     }
 }
 

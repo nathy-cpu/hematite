@@ -49,6 +49,50 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_prepared_statement_with_parameters() -> Result<()> {
+        let db = TestDbFile::new("_test_prepared_statement_with_parameters");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
+
+        let mut stmt = conn.prepare("INSERT INTO test (id, name) VALUES (?, ?);")?;
+        assert_eq!(stmt.parameter_count(), 2);
+        stmt.bind(1, crate::catalog::Value::Integer(1))?;
+        stmt.bind(2, crate::catalog::Value::Text("test".to_string()))?;
+        stmt.execute(&mut conn)?;
+
+        let query = conn.execute("SELECT * FROM test;")?;
+        assert_eq!(query.rows.len(), 1);
+        assert_eq!(
+            query.rows[0],
+            vec![
+                crate::catalog::Value::Integer(1),
+                crate::catalog::Value::Text("test".to_string()),
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_prepared_statement_requires_all_parameters() -> Result<()> {
+        let db = TestDbFile::new("_test_prepared_statement_requires_all_parameters");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
+
+        let mut stmt = conn.prepare("INSERT INTO test (id, name) VALUES (?, ?);")?;
+        stmt.bind(1, crate::catalog::Value::Integer(1))?;
+
+        let result = stmt.execute(&mut conn);
+        assert!(result.is_err());
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_transaction() -> Result<()> {
         let db = TestDbFile::new("_test_transaction");
         let mut conn = Connection::new(db.path())?;
@@ -701,6 +745,29 @@ mod interface_tests {
         // Note: This is a simplified implementation - real prepared statements would support parameters
         let result = stmt.execute(&mut db.connection)?;
         assert_eq!(result.rows.len(), 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_hematite_prepare_with_parameters() -> Result<()> {
+        let test_db = TestDbFile::new("_test_prepare_with_parameters");
+        let mut db = Hematite::new(test_db.path())?;
+
+        db.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
+
+        let mut stmt = db.prepare("INSERT INTO test (id, name) VALUES (?, ?);")?;
+        stmt.bind_all(vec![
+            crate::catalog::Value::Integer(1),
+            crate::catalog::Value::Text("Alice".to_string()),
+        ])?;
+
+        let result = stmt.execute(&mut db.connection)?;
+        assert_eq!(result.affected_rows, 1);
+
+        let rows = db.query("SELECT * FROM test;")?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.get_row(0).unwrap().get_string(1)?, "Alice");
 
         Ok(())
     }

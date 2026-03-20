@@ -57,6 +57,10 @@ impl SelectExecutor {
     ) -> Result<Value> {
         match expr {
             Expression::Literal(value) => Ok(value.clone()),
+            Expression::Parameter(index) => Err(HematiteError::ParseError(format!(
+                "Unbound parameter {} reached execution",
+                index + 1
+            ))),
             Expression::Column(name) => {
                 // Find column index in the current row (simplified for single table)
                 if let Some(table_name) = self.get_table_name() {

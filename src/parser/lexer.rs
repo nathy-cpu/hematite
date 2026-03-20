@@ -55,6 +55,7 @@ pub enum Token {
     LeftParen,
     RightParen,
     Asterisk,
+    Placeholder,
 
     // Literals
     Identifier(String),
@@ -321,6 +322,7 @@ impl Lexer {
             '(' => Token::LeftParen,
             ')' => Token::RightParen,
             '*' => Token::Asterisk,
+            '?' => Token::Placeholder,
             _ => {
                 return Err(HematiteError::ParseError(format!(
                     "Unexpected character: {}",

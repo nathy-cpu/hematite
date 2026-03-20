@@ -1,6 +1,7 @@
 //! SQL connection and statement interface
 
 use crate::catalog::Catalog;
+use crate::catalog::Value;
 use crate::error::{HematiteError, Result};
 use crate::parser::{Lexer, Parser};
 use crate::query::{ExecutionContext, QueryPlanner, QueryResult};
@@ -124,8 +125,12 @@ impl Connection {
 
         let mut parser = Parser::new(lexer.get_tokens().to_vec());
         let statement = parser.parse()?;
+        let parameter_count = statement.parameter_count();
 
-        Ok(PreparedStatement { statement })
+        Ok(PreparedStatement {
+            statement,
+            parameters: vec![None; parameter_count],
+        })
     }
 
     pub fn begin_transaction(&'_ mut self) -> Result<Transaction<'_>> {
@@ -144,15 +149,65 @@ impl Connection {
 #[derive(Debug, Clone)]
 pub struct PreparedStatement {
     statement: crate::parser::ast::Statement,
+    parameters: Vec<Option<Value>>,
 }
 
 impl PreparedStatement {
+    pub fn bind(&mut self, index: usize, value: Value) -> Result<()> {
+        if index == 0 || index > self.parameters.len() {
+            return Err(HematiteError::ParseError(format!(
+                "Parameter index {} is out of range",
+                index
+            )));
+        }
+
+        self.parameters[index - 1] = Some(value);
+        Ok(())
+    }
+
+    pub fn bind_all(&mut self, values: Vec<Value>) -> Result<()> {
+        if values.len() != self.parameters.len() {
+            return Err(HematiteError::ParseError(format!(
+                "Expected {} parameters, got {}",
+                self.parameters.len(),
+                values.len()
+            )));
+        }
+
+        self.parameters = values.into_iter().map(Some).collect();
+        Ok(())
+    }
+
+    pub fn clear_bindings(&mut self) {
+        self.parameters.fill(None);
+    }
+
+    pub fn parameter_count(&self) -> usize {
+        self.parameters.len()
+    }
+
     pub fn execute(&mut self, connection: &mut Connection) -> Result<QueryResult> {
-        connection.execute_statement(self.statement.clone())
+        let statement = self.bound_statement()?;
+        connection.execute_statement(statement)
     }
 
     pub fn query(&mut self, connection: &mut Connection) -> Result<QueryResult> {
         self.execute(connection)
+    }
+
+    fn bound_statement(&self) -> Result<crate::parser::ast::Statement> {
+        let bound_values = self
+            .parameters
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                value.clone().ok_or_else(|| {
+                    HematiteError::ParseError(format!("Parameter {} has not been bound", index + 1))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        self.statement.bind_parameters(&bound_values)
     }
 }
 

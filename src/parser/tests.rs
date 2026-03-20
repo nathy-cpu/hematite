@@ -199,6 +199,27 @@ mod lexer_tests {
     }
 
     #[test]
+    fn test_placeholder_statement() -> Result<()> {
+        let mut lexer = Lexer::new("SELECT * FROM users WHERE id = ?;".to_string());
+        lexer.tokenize()?;
+
+        let expected = vec![
+            Token::Select,
+            Token::Asterisk,
+            Token::From,
+            Token::Identifier("users".to_string()),
+            Token::Where,
+            Token::Identifier("id".to_string()),
+            Token::Equal,
+            Token::Placeholder,
+            Token::Semicolon,
+        ];
+
+        assert_eq!(lexer.get_tokens(), &expected);
+        Ok(())
+    }
+
+    #[test]
     fn test_order_by_statement() -> Result<()> {
         let mut lexer = Lexer::new("SELECT id FROM users ORDER BY name DESC, id ASC;".to_string());
         lexer.tokenize()?;
@@ -562,6 +583,25 @@ mod parser_tests {
                 }
             }
             _ => panic!("Expected SELECT statement"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_parameterized_insert() -> Result<()> {
+        let mut lexer = Lexer::new("INSERT INTO users (id, name) VALUES (?, ?);".to_string());
+        lexer.tokenize()?;
+
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let statement = parser.parse()?;
+
+        match statement {
+            Statement::Insert(insert) => {
+                assert!(matches!(insert.values[0][0], Expression::Parameter(0)));
+                assert!(matches!(insert.values[0][1], Expression::Parameter(1)));
+            }
+            _ => panic!("Expected INSERT statement"),
         }
 
         Ok(())
