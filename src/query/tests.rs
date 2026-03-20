@@ -151,6 +151,92 @@ mod executor_tests {
     }
 
     #[test]
+    fn test_select_executor_secondary_index_lookup() -> Result<()> {
+        let mut catalog = Schema::new();
+
+        let mut table = crate::catalog::Table::new(
+            crate::catalog::TableId::new(1),
+            "users".to_string(),
+            vec![
+                Column::new(
+                    crate::catalog::ColumnId::new(1),
+                    "id".to_string(),
+                    DataType::Integer,
+                )
+                .primary_key(true),
+                Column::new(
+                    crate::catalog::ColumnId::new(2),
+                    "email".to_string(),
+                    DataType::Text,
+                ),
+            ],
+            crate::storage::PageId::new(10),
+        )?;
+        table.add_secondary_index(crate::catalog::SecondaryIndex {
+            name: "idx_users_email".to_string(),
+            column_indices: vec![1],
+            root_page_id: crate::storage::PageId::new(11),
+        })?;
+        catalog.insert_table(table)?;
+
+        let db = TestDbFile::new("_test_select_executor_secondary_index_lookup");
+        let mut storage = StorageEngine::new(db.path())?;
+        let _ = storage.create_table("users")?;
+
+        let row_id_1 = storage.insert_into_table(
+            "users",
+            vec![Value::Integer(1), Value::Text("a@example.com".to_string())],
+        )?;
+        let row_id_2 = storage.insert_into_table(
+            "users",
+            vec![Value::Integer(2), Value::Text("b@example.com".to_string())],
+        )?;
+
+        let table = catalog.get_table_by_name("users").unwrap();
+        storage.register_secondary_index_row(
+            table,
+            crate::storage::StoredRow {
+                row_id: row_id_1,
+                values: vec![Value::Integer(1), Value::Text("a@example.com".to_string())],
+            },
+        )?;
+        storage.register_secondary_index_row(
+            table,
+            crate::storage::StoredRow {
+                row_id: row_id_2,
+                values: vec![Value::Integer(2), Value::Text("b@example.com".to_string())],
+            },
+        )?;
+
+        let mut ctx = ExecutionContext::for_read(&catalog, &mut storage);
+        let statement = SelectStatement {
+            columns: vec![SelectItem::Column("id".to_string())],
+            from: TableReference::Table("users".to_string()),
+            where_clause: Some(WhereClause {
+                conditions: vec![Condition::Comparison {
+                    left: Expression::Column("email".to_string()),
+                    operator: ComparisonOperator::Equal,
+                    right: Expression::Literal(Value::Text("b@example.com".to_string())),
+                }],
+            }),
+            order_by: Vec::new(),
+            limit: None,
+        };
+
+        let mut executor = SelectExecutor::new(
+            statement,
+            crate::query::planner::SelectAccessPath::SecondaryIndexLookup(
+                "idx_users_email".to_string(),
+            ),
+        );
+        let result = executor.execute(&mut ctx)?;
+
+        assert_eq!(result.rows, vec![vec![Value::Integer(2)]]);
+        storage.flush()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_insert_executor() -> Result<()> {
         let mut catalog = Schema::new();
 
@@ -331,6 +417,66 @@ mod planner_tests {
             .optimizations
             .expect("select plans should be optimized");
         assert_eq!(optimizations.recommended_index_scans.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn test_query_planner_select_uses_secondary_index() -> Result<()> {
+        let mut catalog = Schema::new();
+
+        let mut table = crate::catalog::Table::new(
+            crate::catalog::TableId::new(1),
+            "users".to_string(),
+            vec![
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(1),
+                    "id".to_string(),
+                    DataType::Integer,
+                )
+                .primary_key(true),
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(2),
+                    "email".to_string(),
+                    DataType::Text,
+                ),
+            ],
+            crate::storage::PageId::new(10),
+        )?;
+        table.add_secondary_index(crate::catalog::SecondaryIndex {
+            name: "idx_users_email".to_string(),
+            column_indices: vec![1],
+            root_page_id: crate::storage::PageId::new(11),
+        })?;
+        catalog.insert_table(table)?;
+
+        let planner = QueryPlanner::new(catalog);
+
+        let statement = SelectStatement {
+            columns: vec![SelectItem::Column("id".to_string())],
+            from: TableReference::Table("users".to_string()),
+            where_clause: Some(WhereClause {
+                conditions: vec![Condition::Comparison {
+                    left: Expression::Column("email".to_string()),
+                    operator: ComparisonOperator::Equal,
+                    right: Expression::Literal(Value::Text("a@example.com".to_string())),
+                }],
+            }),
+            order_by: Vec::new(),
+            limit: None,
+        };
+
+        let plan = planner.plan(Statement::Select(statement))?;
+
+        match &plan.node {
+            PlanNode::Select(node) => {
+                assert_eq!(
+                    node.access_path,
+                    SelectAccessPath::SecondaryIndexLookup("idx_users_email".to_string())
+                );
+            }
+            other => panic!("expected select plan node, got {:?}", other),
+        }
+
         Ok(())
     }
 

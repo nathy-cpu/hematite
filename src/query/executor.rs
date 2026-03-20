@@ -387,6 +387,44 @@ impl SelectExecutor {
             _ => None,
         }
     }
+
+    fn extract_secondary_index_lookup(
+        &self,
+        table: &Table,
+        index_name: &str,
+    ) -> Option<Vec<Value>> {
+        let index = table.get_secondary_index(index_name)?;
+        if index.column_indices.len() != 1 {
+            return None;
+        }
+
+        let where_clause = self.statement.where_clause.as_ref()?;
+        if where_clause.conditions.len() != 1 {
+            return None;
+        }
+
+        let indexed_column = table.columns.get(index.column_indices[0])?;
+        match &where_clause.conditions[0] {
+            Condition::Comparison {
+                left,
+                operator: ComparisonOperator::Equal,
+                right,
+            } => match (left, right) {
+                (Expression::Column(column_name), Expression::Literal(value))
+                    if indexed_column.name == *column_name =>
+                {
+                    Some(vec![value.clone()])
+                }
+                (Expression::Literal(value), Expression::Column(column_name))
+                    if indexed_column.name == *column_name =>
+                {
+                    Some(vec![value.clone()])
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
 }
 
 impl QueryExecutor for SelectExecutor {
@@ -415,6 +453,21 @@ impl QueryExecutor for SelectExecutor {
                     .lookup_row_by_primary_key(table, &primary_key_values)?
                     .map(|row| vec![row.values])
                     .unwrap_or_default()
+            }
+            SelectAccessPath::SecondaryIndexLookup(ref index_name) => {
+                let key_values = self
+                    .extract_secondary_index_lookup(table, index_name)
+                    .ok_or_else(|| {
+                        HematiteError::InternalError(format!(
+                            "Planner selected secondary index lookup '{}' without a matching predicate",
+                            index_name
+                        ))
+                    })?;
+                ctx.storage
+                    .lookup_rows_by_secondary_index(table, index_name, &key_values)?
+                    .into_iter()
+                    .map(|row| row.values)
+                    .collect()
             }
             SelectAccessPath::FullTableScan => ctx.storage.read_from_table(&table_name)?,
         };

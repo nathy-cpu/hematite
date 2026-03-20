@@ -55,6 +55,7 @@ pub struct SelectPlanNode {
 pub enum SelectAccessPath {
     FullTableScan,
     PrimaryKeyLookup,
+    SecondaryIndexLookup(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -254,6 +255,17 @@ impl QueryPlanner {
             .any(|usage| matches!(usage.index_type, IndexType::PrimaryKey))
         {
             SelectAccessPath::PrimaryKeyLookup
+        } else if let Some(index_usage) = analysis
+            .usable_indexes
+            .iter()
+            .find(|usage| matches!(usage.index_type, IndexType::Secondary))
+        {
+            SelectAccessPath::SecondaryIndexLookup(
+                index_usage
+                    .index_name
+                    .clone()
+                    .unwrap_or_else(|| "unnamed_secondary_index".to_string()),
+            )
         } else {
             SelectAccessPath::FullTableScan
         };
@@ -346,8 +358,25 @@ impl QueryPlanner {
                                 usable_indexes.push(IndexUsage {
                                     column_id: column.id,
                                     index_type: IndexType::PrimaryKey,
+                                    index_name: None,
                                     selectivity: 1.0, // Primary key equality is highly selective
                                 });
+                            } else if matches!(operator, ComparisonOperator::Equal) {
+                                let Some(column_index) = table.get_column_index(col_name) else {
+                                    continue;
+                                };
+                                for index in &table.secondary_indexes {
+                                    if index.column_indices.len() == 1
+                                        && index.column_indices[0] == column_index
+                                    {
+                                        usable_indexes.push(IndexUsage {
+                                            column_id: column.id,
+                                            index_type: IndexType::Secondary,
+                                            index_name: Some(index.name.clone()),
+                                            selectivity: 0.1,
+                                        });
+                                    }
+                                }
                             }
                         }
                     }
@@ -428,6 +457,7 @@ pub struct SelectAnalysis {
 pub struct IndexUsage {
     pub column_id: crate::catalog::ColumnId,
     pub index_type: IndexType,
+    pub index_name: Option<String>,
     pub selectivity: f64,
 }
 
