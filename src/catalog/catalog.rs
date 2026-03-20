@@ -22,14 +22,6 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    fn persist_table_entry(&mut self, table: &Table) -> Result<()> {
-        let mut btree = BTreeIndex::from_shared_storage(self.storage.clone(), self.schema_root);
-        let key = crate::btree::BTreeKey::new(table.name.as_bytes().to_vec());
-        let val = crate::btree::BTreeValue::new(table.to_bytes()?);
-        btree.insert(key, val)?;
-        Ok(())
-    }
-
     /// Open or create a database with SQLite-style schema management
     pub fn open_or_create<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
         let storage = StorageEngine::new(path)?;
@@ -115,27 +107,31 @@ impl Catalog {
             return Ok(());
         }
 
-        // For now we do a simple "rebuild" by creating a new schema B-tree root
-        // and then atomically switching the database header to point at it.
-        //
-        // This avoids relying on B-tree delete correctness for clearing old entries.
-        let mut storage_guard = self.storage.lock().unwrap();
-        let new_schema_root = storage_guard.create_empty_btree()?;
-        drop(storage_guard);
+        let table_entries = self
+            .schema
+            .list_tables()
+            .into_iter()
+            .filter_map(|(table_id, _name)| self.schema.get_table(table_id).cloned())
+            .map(|table| {
+                Ok((
+                    crate::btree::BTreeKey::new(table.name.as_bytes().to_vec()),
+                    crate::btree::BTreeValue::new(table.to_bytes()?),
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
 
-        let mut btree = BTreeIndex::from_shared_storage(self.storage.clone(), new_schema_root);
+        let old_schema_root = self.schema_root;
+        let mut manager = BTreeManager::from_shared_storage(self.storage.clone());
+        manager.delete_tree(old_schema_root)?;
+        let new_schema_root = manager.create_tree()?;
 
-        for (table_id, _name) in self.schema.list_tables() {
-            if let Some(table) = self.schema.get_table(table_id) {
-                let key = crate::btree::BTreeKey::new(table.name.as_bytes().to_vec());
-                let value_bytes = table.to_bytes()?;
-                let val = crate::btree::BTreeValue::new(value_bytes);
-                btree.insert(key, val)?;
-            }
+        let mut btree =
+            crate::btree::BTreeIndex::from_shared_storage(self.storage.clone(), new_schema_root);
+
+        for (key, value) in table_entries {
+            btree.insert(key, value)?;
         }
 
-        // Switch header to new root.
-        let old_schema_root = self.schema_root;
         let mut storage_guard = self.storage.lock().unwrap();
         let header_page = storage_guard.read_page(DB_HEADER_PAGE_ID)?;
         let mut header = DatabaseHeader::deserialize(&header_page)?;
@@ -144,12 +140,6 @@ impl Catalog {
         let mut updated = Page::new(DB_HEADER_PAGE_ID);
         header.serialize(&mut updated)?;
         storage_guard.write_page(updated)?;
-        drop(storage_guard);
-
-        if old_schema_root != new_schema_root {
-            let mut manager = BTreeManager::from_shared_storage(self.storage.clone());
-            manager.delete_tree(old_schema_root)?;
-        }
 
         self.schema_root = new_schema_root;
         self.schema_dirty = false;
@@ -188,7 +178,6 @@ impl Catalog {
         let table = Table::new(table_id, name.to_string(), columns, PageId::new(0))?;
 
         self.schema.insert_table(table.clone())?;
-        self.persist_table_entry(&table)?;
         self.schema_dirty = true;
 
         Ok(table_id)
@@ -213,15 +202,8 @@ impl Catalog {
                 "Table not found".to_string(),
             ));
         }
-        let table = table.unwrap();
-
         // Remove from in-memory schema
         self.schema.drop_table(table_id)?;
-
-        // Remove from schema B-tree
-        let mut btree = BTreeIndex::from_shared_storage(self.storage.clone(), self.schema_root);
-        let key = crate::btree::BTreeKey::new(table.name.as_bytes().to_vec());
-        let _ = btree.delete(&key)?;
         self.schema_dirty = true;
 
         Ok(())
@@ -303,12 +285,6 @@ impl Catalog {
         self.schema.set_table_root_page(table_id, root_page)?;
         self.schema_dirty = true;
 
-        // Update schema B-tree entry
-        if let Some(table) = self.schema.get_table(table_id) {
-            let table = table.clone();
-            self.persist_table_entry(&table)?;
-        }
-
         Ok(())
     }
 
@@ -330,11 +306,6 @@ impl Catalog {
     pub fn add_secondary_index(&mut self, table_id: TableId, index: SecondaryIndex) -> Result<()> {
         self.schema.add_secondary_index(table_id, index)?;
         self.schema_dirty = true;
-
-        if let Some(table) = self.schema.get_table(table_id) {
-            let table = table.clone();
-            self.persist_table_entry(&table)?;
-        }
 
         Ok(())
     }
@@ -491,7 +462,6 @@ impl Catalog {
         let table = Table::new(table_id, name.to_string(), columns, root_page)?;
 
         self.schema.insert_table(table.clone())?;
-        self.persist_table_entry(&table)?;
         self.schema_dirty = true;
 
         Ok(table_id)
