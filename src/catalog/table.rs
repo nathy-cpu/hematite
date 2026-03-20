@@ -14,6 +14,14 @@ pub struct Table {
     pub columns: Vec<Column>,
     pub column_indices: HashMap<String, usize>,
     pub primary_key_columns: Vec<usize>,
+    pub secondary_indexes: Vec<SecondaryIndex>,
+    pub root_page_id: crate::storage::PageId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecondaryIndex {
+    pub name: String,
+    pub column_indices: Vec<usize>,
     pub root_page_id: crate::storage::PageId,
 }
 
@@ -60,6 +68,7 @@ impl Table {
             columns,
             column_indices,
             primary_key_columns,
+            secondary_indexes: Vec::new(),
             root_page_id,
         })
     }
@@ -122,6 +131,39 @@ impl Table {
         self.columns.iter().map(|col| col.size()).sum()
     }
 
+    pub fn get_secondary_index(&self, name: &str) -> Option<&SecondaryIndex> {
+        self.secondary_indexes
+            .iter()
+            .find(|index| index.name == name)
+    }
+
+    pub fn add_secondary_index(&mut self, index: SecondaryIndex) -> Result<()> {
+        if self.get_secondary_index(&index.name).is_some() {
+            return Err(HematiteError::StorageError(format!(
+                "Secondary index '{}' already exists on table '{}'",
+                index.name, self.name
+            )));
+        }
+
+        if index.column_indices.is_empty() {
+            return Err(HematiteError::StorageError(
+                "Secondary index must reference at least one column".to_string(),
+            ));
+        }
+
+        for &column_index in &index.column_indices {
+            if column_index >= self.columns.len() {
+                return Err(HematiteError::StorageError(format!(
+                    "Secondary index '{}' references invalid column index {}",
+                    index.name, column_index
+                )));
+            }
+        }
+
+        self.secondary_indexes.push(index);
+        Ok(())
+    }
+
     pub fn serialize(&self, buffer: &mut Vec<u8>) -> Result<()> {
         // Table ID (4 bytes)
         buffer.extend_from_slice(&self.id.as_u32().to_le_bytes());
@@ -148,6 +190,19 @@ impl Table {
         // Primary key column indices
         for &index in &self.primary_key_columns {
             buffer.extend_from_slice(&(index as u32).to_le_bytes());
+        }
+
+        // Secondary indexes
+        buffer.extend_from_slice(&(self.secondary_indexes.len() as u32).to_le_bytes());
+        for index in &self.secondary_indexes {
+            let name_bytes = index.name.as_bytes();
+            buffer.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+            buffer.extend_from_slice(name_bytes);
+            buffer.extend_from_slice(&index.root_page_id.as_u32().to_le_bytes());
+            buffer.extend_from_slice(&(index.column_indices.len() as u32).to_le_bytes());
+            for &column_index in &index.column_indices {
+                buffer.extend_from_slice(&(column_index as u32).to_le_bytes());
+            }
         }
 
         Ok(())
@@ -243,7 +298,98 @@ impl Table {
             primary_key_columns.push(index);
         }
 
-        Self::new(id, name, columns, root_page_id)
+        let mut table = Self::new(id, name, columns, root_page_id)?;
+
+        if *offset == buffer.len() {
+            return Ok(table);
+        }
+
+        if *offset + 4 > buffer.len() {
+            return Err(HematiteError::CorruptedData(
+                "Invalid secondary index count".to_string(),
+            ));
+        }
+        let secondary_index_count = u32::from_le_bytes([
+            buffer[*offset],
+            buffer[*offset + 1],
+            buffer[*offset + 2],
+            buffer[*offset + 3],
+        ]) as usize;
+        *offset += 4;
+
+        for _ in 0..secondary_index_count {
+            if *offset + 4 > buffer.len() {
+                return Err(HematiteError::CorruptedData(
+                    "Invalid secondary index name length".to_string(),
+                ));
+            }
+            let name_len = u32::from_le_bytes([
+                buffer[*offset],
+                buffer[*offset + 1],
+                buffer[*offset + 2],
+                buffer[*offset + 3],
+            ]) as usize;
+            *offset += 4;
+
+            if *offset + name_len > buffer.len() {
+                return Err(HematiteError::CorruptedData(
+                    "Invalid secondary index name".to_string(),
+                ));
+            }
+            let name =
+                String::from_utf8(buffer[*offset..*offset + name_len].to_vec()).map_err(|_| {
+                    HematiteError::CorruptedData(
+                        "Invalid UTF-8 in secondary index name".to_string(),
+                    )
+                })?;
+            *offset += name_len;
+
+            if *offset + 8 > buffer.len() {
+                return Err(HematiteError::CorruptedData(
+                    "Invalid secondary index metadata".to_string(),
+                ));
+            }
+            let index_root_page_id = crate::storage::PageId::new(u32::from_le_bytes([
+                buffer[*offset],
+                buffer[*offset + 1],
+                buffer[*offset + 2],
+                buffer[*offset + 3],
+            ]));
+            *offset += 4;
+
+            let column_count = u32::from_le_bytes([
+                buffer[*offset],
+                buffer[*offset + 1],
+                buffer[*offset + 2],
+                buffer[*offset + 3],
+            ]) as usize;
+            *offset += 4;
+
+            let mut column_indices = Vec::with_capacity(column_count);
+            for _ in 0..column_count {
+                if *offset + 4 > buffer.len() {
+                    return Err(HematiteError::CorruptedData(
+                        "Invalid secondary index column index".to_string(),
+                    ));
+                }
+                let column_index = u32::from_le_bytes([
+                    buffer[*offset],
+                    buffer[*offset + 1],
+                    buffer[*offset + 2],
+                    buffer[*offset + 3],
+                ]) as usize;
+                *offset += 4;
+                column_indices.push(column_index);
+            }
+
+            table.add_secondary_index(SecondaryIndex {
+                name,
+                column_indices,
+                root_page_id: index_root_page_id,
+            })?;
+        }
+
+        Ok(table)
     }
 
     /// Convert table to bytes for storage in schema B-tree

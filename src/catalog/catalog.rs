@@ -5,7 +5,7 @@ use crate::catalog::column::Column;
 use crate::catalog::header::DatabaseHeader;
 use crate::catalog::ids::TableId;
 use crate::catalog::schema::Schema;
-use crate::catalog::table::Table;
+use crate::catalog::table::{SecondaryIndex, Table};
 use crate::error::Result;
 use crate::storage::{Page, PageId, StorageEngine, DB_HEADER_PAGE_ID};
 use std::sync::{Arc, Mutex};
@@ -316,6 +316,18 @@ impl Catalog {
         } else {
             Ok(None)
         }
+    }
+
+    pub fn add_secondary_index(&mut self, table_id: TableId, index: SecondaryIndex) -> Result<()> {
+        self.schema.add_secondary_index(table_id, index)?;
+        self.schema_dirty = true;
+
+        if let Some(table) = self.schema.get_table(table_id) {
+            let table = table.clone();
+            self.persist_table_entry(&table)?;
+        }
+
+        Ok(())
     }
 
     /// Validate the entire schema

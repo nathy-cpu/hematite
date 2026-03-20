@@ -2,7 +2,7 @@
 
 use super::column::Column;
 use super::ids::TableId;
-use super::table::Table;
+use super::table::{SecondaryIndex, Table};
 use crate::error::HematiteError;
 use crate::Result;
 use std::collections::HashMap;
@@ -82,6 +82,14 @@ impl Schema {
         self.table_names.remove(&name);
 
         Ok(())
+    }
+
+    pub fn add_secondary_index(&mut self, table_id: TableId, index: SecondaryIndex) -> Result<()> {
+        let table = self
+            .tables
+            .get_mut(&table_id)
+            .ok_or_else(|| HematiteError::StorageError("Table not found".to_string()))?;
+        table.add_secondary_index(index)
     }
 
     pub fn list_tables(&self) -> Vec<(TableId, String)> {
@@ -240,9 +248,7 @@ impl Schema {
         // Advance ID generators to avoid collisions on subsequent creates.
         self.next_table_id = self.next_table_id.max(table.id.as_u32().saturating_add(1));
         for col in &table.columns {
-            self.next_column_id = self
-                .next_column_id
-                .max(col.id.as_u32().saturating_add(1));
+            self.next_column_id = self.next_column_id.max(col.id.as_u32().saturating_add(1));
         }
 
         self.table_names.insert(table.name.clone(), table.id);

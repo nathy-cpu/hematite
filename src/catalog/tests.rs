@@ -1504,4 +1504,69 @@ mod catalog_new_tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_table_secondary_index_metadata_roundtrip() -> Result<()> {
+        let mut table = crate::catalog::Table::new(
+            TableId::new(1),
+            "users".to_string(),
+            vec![
+                Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer)
+                    .primary_key(true),
+                Column::new(ColumnId::new(2), "email".to_string(), DataType::Text),
+            ],
+            crate::storage::PageId::new(10),
+        )?;
+
+        table.add_secondary_index(crate::catalog::SecondaryIndex {
+            name: "idx_users_email".to_string(),
+            column_indices: vec![1],
+            root_page_id: crate::storage::PageId::new(42),
+        })?;
+
+        let bytes = table.to_bytes()?;
+        let decoded = crate::catalog::Table::from_bytes(&bytes)?;
+
+        assert_eq!(decoded.secondary_indexes.len(), 1);
+        let index = decoded.get_secondary_index("idx_users_email").unwrap();
+        assert_eq!(index.column_indices, vec![1]);
+        assert_eq!(index.root_page_id, crate::storage::PageId::new(42));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_catalog_secondary_index_metadata_persists_across_reopen() -> Result<()> {
+        let test_db = TestDbFile::new("_test_secondary_index_metadata_persistence");
+
+        {
+            let mut catalog = Catalog::open_or_create(test_db.path())?;
+            let table_id = catalog.create_table(
+                "users",
+                vec![
+                    Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer)
+                        .primary_key(true),
+                    Column::new(ColumnId::new(2), "email".to_string(), DataType::Text),
+                ],
+            )?;
+            catalog.add_secondary_index(
+                table_id,
+                crate::catalog::SecondaryIndex {
+                    name: "idx_users_email".to_string(),
+                    column_indices: vec![1],
+                    root_page_id: crate::storage::PageId::new(55),
+                },
+            )?;
+            catalog.flush()?;
+        }
+
+        let reopened = Catalog::open_or_create(test_db.path())?;
+        let table = reopened.get_table_by_name("users")?.unwrap();
+        assert_eq!(table.secondary_indexes.len(), 1);
+        let index = table.get_secondary_index("idx_users_email").unwrap();
+        assert_eq!(index.column_indices, vec![1]);
+        assert_eq!(index.root_page_id, crate::storage::PageId::new(55));
+
+        Ok(())
+    }
 }

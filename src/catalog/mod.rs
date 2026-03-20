@@ -15,5 +15,5 @@ pub use column::Column;
 pub use header::DatabaseHeader;
 pub use ids::{ColumnId, TableId};
 pub use schema::Schema;
-pub use table::Table;
+pub use table::{SecondaryIndex, Table};
 pub use types::{DataType, Value};
