@@ -190,6 +190,27 @@ mod mod_tests {
     }
 
     #[test]
+    fn test_free_pages_persist_across_reopen() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_storage_free_pages_persist");
+
+        let deallocated_page = {
+            let mut storage = StorageEngine::new(test_db.path())?;
+            let page_1 = storage.allocate_page()?;
+            let page_2 = storage.allocate_page()?;
+            assert_ne!(page_1, page_2);
+            storage.deallocate_page(page_1)?;
+            storage.flush()?;
+            page_1
+        };
+
+        let mut reopened = StorageEngine::new(test_db.path())?;
+        let reused = reopened.allocate_page()?;
+        assert_eq!(reused, deallocated_page);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_table_storage_spans_multiple_pages() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_storage_multi_page");
         let mut storage = StorageEngine::new(test_db.path())?;

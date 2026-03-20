@@ -21,6 +21,62 @@ pub struct StorageEngine {
 }
 
 impl StorageEngine {
+    fn serialize_storage_metadata(&self) -> Result<String> {
+        let tables = self.table_manager.serialize_metadata()?;
+        let free_pages = self
+            .file_manager
+            .free_pages()
+            .iter()
+            .map(|page_id| page_id.as_u32().to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+
+        Ok(format!("tables={}\nfree_pages={}", tables, free_pages))
+    }
+
+    fn parse_storage_metadata(&mut self, metadata_str: &str) -> Result<()> {
+        // Backward compatibility: older builds persisted only table metadata.
+        if !metadata_str.contains('\n') && !metadata_str.starts_with("tables=") {
+            self.table_manager.parse_metadata(metadata_str)?;
+            return Ok(());
+        }
+
+        let mut table_metadata = None;
+        let mut free_pages = None;
+
+        for line in metadata_str.lines() {
+            if let Some(value) = line.strip_prefix("tables=") {
+                table_metadata = Some(value.to_string());
+            } else if let Some(value) = line.strip_prefix("free_pages=") {
+                free_pages = Some(value.to_string());
+            }
+        }
+
+        self.table_manager
+            .parse_metadata(table_metadata.as_deref().unwrap_or_default())?;
+
+        if let Some(free_pages) = free_pages {
+            let pages = if free_pages.is_empty() {
+                Vec::new()
+            } else {
+                free_pages
+                    .split(',')
+                    .filter(|entry| !entry.is_empty())
+                    .map(|entry| {
+                        entry.parse::<u32>().map(PageId::new).map_err(|_| {
+                            crate::error::HematiteError::StorageError(
+                                "Invalid free page metadata".to_string(),
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?
+            };
+            self.file_manager.set_free_pages(pages);
+        }
+
+        Ok(())
+    }
+
     fn row_data_end(page: &Page, row_count: u32) -> Result<usize> {
         let mut offset = TABLE_PAGE_HEADER_SIZE;
 
@@ -182,8 +238,7 @@ impl StorageEngine {
                                 )
                             })?;
 
-                        // Parse metadata
-                        self.table_manager.parse_metadata(&metadata_str)?;
+                        self.parse_storage_metadata(&metadata_str)?;
                     }
                 }
             }
@@ -201,7 +256,7 @@ impl StorageEngine {
 
     fn save_table_metadata(&mut self) -> Result<()> {
         // Serialize table metadata
-        let metadata_str = self.table_manager.serialize_metadata()?;
+        let metadata_str = self.serialize_storage_metadata()?;
         let metadata_bytes = metadata_str.as_bytes();
 
         if metadata_bytes.len() > crate::storage::PAGE_SIZE - 4 {

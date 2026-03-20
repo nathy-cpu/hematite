@@ -138,6 +138,14 @@ impl FileManager {
         Ok(())
     }
 
+    pub fn free_pages(&self) -> &[PageId] {
+        &self.free_pages
+    }
+
+    pub fn set_free_pages(&mut self, free_pages: Vec<PageId>) {
+        self.free_pages = free_pages;
+    }
+
     fn len(&self) -> Result<u64> {
         match &self.backend {
             FileBackend::Disk(file) => Ok(file.metadata()?.len()),
