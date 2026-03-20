@@ -1,5 +1,6 @@
 //! Catalog - SQLite-style schema management with B-tree persistence
 
+use crate::btree::tree::BTreeManager;
 use crate::btree::BTreeIndex;
 use crate::catalog::column::Column;
 use crate::catalog::header::DatabaseHeader;
@@ -133,6 +134,7 @@ impl Catalog {
         }
 
         // Switch header to new root.
+        let old_schema_root = self.schema_root;
         let mut storage_guard = self.storage.lock().unwrap();
         let header_page = storage_guard.read_page(DB_HEADER_PAGE_ID)?;
         let mut header = DatabaseHeader::deserialize(&header_page)?;
@@ -141,6 +143,12 @@ impl Catalog {
         let mut updated = Page::new(DB_HEADER_PAGE_ID);
         header.serialize(&mut updated)?;
         storage_guard.write_page(updated)?;
+        drop(storage_guard);
+
+        if old_schema_root != new_schema_root {
+            let mut manager = BTreeManager::from_shared_storage(self.storage.clone());
+            manager.delete_tree(old_schema_root)?;
+        }
 
         self.schema_root = new_schema_root;
         self.schema_dirty = false;

@@ -16,6 +16,10 @@ impl BTreeManager {
         }
     }
 
+    pub fn from_shared_storage(storage: Arc<Mutex<StorageEngine>>) -> Self {
+        Self { storage }
+    }
+
     pub fn create_tree(&mut self) -> Result<PageId> {
         let root_page_id = self.storage.lock().unwrap().allocate_page()?;
         let mut root_page = Page::new(root_page_id);
@@ -165,4 +169,3 @@ impl TreeStats {
         }
     }
 }
-

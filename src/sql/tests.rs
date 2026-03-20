@@ -571,6 +571,46 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_repeated_schema_rewrites_reuse_schema_pages() -> Result<()> {
+        let db = TestDbFile::new("_test_repeated_schema_rewrites_reuse_schema_pages");
+
+        {
+            let mut conn = Connection::new(db.path())?;
+            conn.execute("CREATE TABLE seed (id INTEGER PRIMARY KEY);")?;
+            conn.close()?;
+        }
+
+        let initial_size = fs::metadata(db.path())?.len();
+
+        {
+            let mut conn = Connection::new(db.path())?;
+            for cycle in 0..5 {
+                conn.execute(&format!(
+                    "CREATE TABLE t{} (id INTEGER PRIMARY KEY, name TEXT);",
+                    cycle
+                ))?;
+                conn.execute(&format!("DROP TABLE t{};", cycle))?;
+            }
+            conn.close()?;
+        }
+
+        let after_cycles = fs::metadata(db.path())?.len();
+
+        {
+            let mut conn = Connection::new(db.path())?;
+            conn.execute("CREATE TABLE final_table (id INTEGER PRIMARY KEY);")?;
+            conn.close()?;
+        }
+
+        let final_size = fs::metadata(db.path())?.len();
+
+        assert!(after_cycles <= initial_size + (crate::storage::PAGE_SIZE as u64 * 2));
+        assert!(final_size <= after_cycles + crate::storage::PAGE_SIZE as u64);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_update_with_where_clause() -> Result<()> {
         let db = TestDbFile::new("_test_update_with_where_clause");
         let mut conn = Connection::new(db.path())?;
