@@ -1,11 +1,13 @@
 //! Main storage engine implementation
 
+use crate::catalog::{Table, Value};
 use crate::error::Result;
 use crate::storage::table::{PageOperations, TableManager};
 use crate::storage::{
     buffer_pool::BufferPool, file_manager::FileManager, Page, PageId, StoredRow, TableMetadata,
     DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID, TABLE_PAGE_HEADER_SIZE,
 };
+use std::collections::HashMap;
 use std::path::Path;
 
 /// Main storage engine interface
@@ -14,6 +16,7 @@ pub struct StorageEngine {
     file_manager: FileManager,
     buffer_pool: BufferPool,
     table_manager: TableManager,
+    primary_key_indexes: HashMap<String, HashMap<Vec<u8>, StoredRow>>,
 }
 
 impl StorageEngine {
@@ -79,6 +82,7 @@ impl StorageEngine {
                 file_manager,
                 buffer_pool,
                 table_manager,
+                primary_key_indexes: HashMap::new(),
             };
             engine.load_table_metadata()?;
             Ok(engine)
@@ -467,6 +471,8 @@ impl StorageEngine {
             current_page_id = next_page_id;
         }
 
+        self.primary_key_indexes.remove(table_name);
+
         Ok(())
     }
 
@@ -534,6 +540,51 @@ impl StorageEngine {
 
     pub fn table_exists(&self, table_name: &str) -> bool {
         self.table_manager.table_exists(table_name)
+    }
+
+    pub fn lookup_row_by_primary_key(
+        &mut self,
+        table: &Table,
+        key_values: &[Value],
+    ) -> Result<Option<StoredRow>> {
+        self.ensure_primary_key_index(table)?;
+        let key = Self::encode_primary_key(key_values)?;
+        Ok(self
+            .primary_key_indexes
+            .get(&table.name)
+            .and_then(|index| index.get(&key).cloned()))
+    }
+
+    pub fn register_primary_key_row(&mut self, table: &Table, row: StoredRow) -> Result<()> {
+        let key = Self::encode_primary_key(&table.get_primary_key_values(&row.values)?)?;
+        self.primary_key_indexes
+            .entry(table.name.clone())
+            .or_default()
+            .insert(key, row);
+        Ok(())
+    }
+
+    pub fn rebuild_primary_key_index(&mut self, table: &Table, rows: &[StoredRow]) -> Result<()> {
+        let mut index = HashMap::new();
+        for row in rows {
+            let key = Self::encode_primary_key(&table.get_primary_key_values(&row.values)?)?;
+            index.insert(key, row.clone());
+        }
+        self.primary_key_indexes.insert(table.name.clone(), index);
+        Ok(())
+    }
+
+    fn ensure_primary_key_index(&mut self, table: &Table) -> Result<()> {
+        if self.primary_key_indexes.contains_key(&table.name) {
+            return Ok(());
+        }
+
+        let rows = self.read_rows_with_ids(&table.name)?;
+        self.rebuild_primary_key_index(table, &rows)
+    }
+
+    fn encode_primary_key(values: &[Value]) -> Result<Vec<u8>> {
+        crate::storage::serialization::RowSerializer::serialize(values)
     }
 
     // Helper methods for page operations

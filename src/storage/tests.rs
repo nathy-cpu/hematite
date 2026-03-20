@@ -274,6 +274,59 @@ mod mod_tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_lookup_row_by_primary_key() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_storage_lookup_by_primary_key");
+        let mut storage = StorageEngine::new(test_db.path())?;
+
+        let _ = storage.create_table("users")?;
+        let first_id = storage.insert_into_table(
+            "users",
+            vec![Value::Integer(1), Value::Text("Alice".to_string())],
+        )?;
+        let _ = storage.insert_into_table(
+            "users",
+            vec![Value::Integer(2), Value::Text("Bob".to_string())],
+        )?;
+
+        let table = crate::catalog::Table::new(
+            crate::catalog::TableId::new(1),
+            "users".to_string(),
+            vec![
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(1),
+                    "id".to_string(),
+                    crate::catalog::DataType::Integer,
+                )
+                .primary_key(true),
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(2),
+                    "name".to_string(),
+                    crate::catalog::DataType::Text,
+                ),
+            ],
+            storage
+                .get_table_metadata()
+                .get("users")
+                .expect("table metadata should exist")
+                .root_page_id,
+        )?;
+
+        let found = storage.lookup_row_by_primary_key(&table, &[Value::Integer(1)])?;
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(found.row_id, first_id);
+        assert_eq!(
+            found.values,
+            vec![Value::Integer(1), Value::Text("Alice".to_string()),]
+        );
+
+        let missing = storage.lookup_row_by_primary_key(&table, &[Value::Integer(99)])?;
+        assert!(missing.is_none());
+
+        Ok(())
+    }
 }
 
 mod serialization_tests {

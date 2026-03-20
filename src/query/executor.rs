@@ -342,6 +342,46 @@ impl SelectExecutor {
             _ => Ok(None),
         }
     }
+
+    fn extract_primary_key_lookup(&self, table: &Table) -> Option<Vec<Value>> {
+        if table.primary_key_count() != 1 {
+            return None;
+        }
+
+        let where_clause = self.statement.where_clause.as_ref()?;
+        if where_clause.conditions.len() != 1 {
+            return None;
+        }
+
+        match &where_clause.conditions[0] {
+            Condition::Comparison {
+                left,
+                operator: ComparisonOperator::Equal,
+                right,
+            } => match (left, right) {
+                (Expression::Column(column_name), Expression::Literal(value))
+                    if table
+                        .primary_key_columns
+                        .first()
+                        .and_then(|index| table.columns.get(*index))
+                        .is_some_and(|column| column.name == *column_name) =>
+                {
+                    Some(vec![value.clone()])
+                }
+                (Expression::Literal(value), Expression::Column(column_name))
+                    if table
+                        .primary_key_columns
+                        .first()
+                        .and_then(|index| table.columns.get(*index))
+                        .is_some_and(|column| column.name == *column_name) =>
+                {
+                    Some(vec![value.clone()])
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
 }
 
 impl QueryExecutor for SelectExecutor {
@@ -353,12 +393,18 @@ impl QueryExecutor for SelectExecutor {
             TableReference::Table(name) => name.clone(),
         };
 
-        let _table = ctx.catalog.get_table_by_name(&table_name).ok_or_else(|| {
+        let table = ctx.catalog.get_table_by_name(&table_name).ok_or_else(|| {
             HematiteError::ParseError(format!("Table '{}' not found", table_name))
         })?;
 
-        // Read data from storage
-        let all_rows = ctx.storage.read_from_table(&table_name)?;
+        let all_rows = if let Some(primary_key_values) = self.extract_primary_key_lookup(table) {
+            ctx.storage
+                .lookup_row_by_primary_key(table, &primary_key_values)?
+                .map(|row| vec![row.values])
+                .unwrap_or_default()
+        } else {
+            ctx.storage.read_from_table(&table_name)?
+        };
 
         // Apply WHERE clause filtering
         let mut filtered_rows = Vec::new();
@@ -383,10 +429,6 @@ impl QueryExecutor for SelectExecutor {
         }
 
         if !self.statement.order_by.is_empty() {
-            let table = ctx.catalog.get_table_by_name(&table_name).ok_or_else(|| {
-                HematiteError::ParseError(format!("Table '{}' not found", table_name))
-            })?;
-
             filtered_rows.sort_by(|left, right| {
                 for item in &self.statement.order_by {
                     let Some(index) = table.get_column_index(&item.column) else {
@@ -561,9 +603,16 @@ impl QueryExecutor for InsertExecutor {
             let row_values = self.build_row(table, value_row)?;
             self.ensure_primary_key_is_unique(table, &existing_rows, &row_values)?;
 
-            let _ = ctx
+            let row_id = ctx
                 .storage
                 .insert_into_table(&self.statement.table, row_values.clone())?;
+            ctx.storage.register_primary_key_row(
+                table,
+                crate::storage::StoredRow {
+                    row_id,
+                    values: row_values.clone(),
+                },
+            )?;
             existing_rows.push(row_values);
         }
 
@@ -713,6 +762,9 @@ impl QueryExecutor for UpdateExecutor {
         )?;
         ctx.storage
             .replace_table_rows(&self.statement.table, rewritten_rows)?;
+        let refreshed_rows = ctx.storage.read_rows_with_ids(&self.statement.table)?;
+        ctx.storage
+            .rebuild_primary_key_index(table, &refreshed_rows)?;
 
         Ok(QueryResult {
             affected_rows: updated_rows,
@@ -781,6 +833,9 @@ impl QueryExecutor for DeleteExecutor {
         let _ = table;
         ctx.storage
             .replace_table_rows(&self.statement.table, survivors)?;
+        let refreshed_rows = ctx.storage.read_rows_with_ids(&self.statement.table)?;
+        ctx.storage
+            .rebuild_primary_key_index(table, &refreshed_rows)?;
 
         Ok(QueryResult {
             affected_rows: deleted_rows,
