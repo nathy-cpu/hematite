@@ -308,6 +308,18 @@ mod planner_tests {
         let plan = planner.plan(Statement::Select(statement))?;
 
         assert!(plan.estimated_cost > 0.0);
+        match &plan.node {
+            PlanNode::Select(node) => {
+                assert_eq!(node.table_name, "users");
+                assert_eq!(node.access_path, SelectAccessPath::PrimaryKeyLookup);
+                assert_eq!(
+                    node.projection,
+                    SelectProjection::Columns(vec!["id".to_string()])
+                );
+                assert!(node.has_filter);
+            }
+            other => panic!("expected select plan node, got {:?}", other),
+        }
         assert!(plan.select_analysis.is_some());
         let optimizations = plan
             .optimizations
@@ -385,6 +397,13 @@ mod planner_tests {
 
         let plan = planner.plan(Statement::Insert(statement))?;
 
+        match &plan.node {
+            PlanNode::Insert(node) => {
+                assert_eq!(node.table_name, "users");
+                assert_eq!(node.row_count, 1);
+            }
+            other => panic!("expected insert plan node, got {:?}", other),
+        }
         assert_eq!(plan.estimated_cost, 1.0); // One row
         Ok(())
     }
@@ -407,6 +426,13 @@ mod planner_tests {
 
         let plan = planner.plan(Statement::Create(statement))?;
 
+        match &plan.node {
+            PlanNode::Create(node) => {
+                assert_eq!(node.table_name, "test_table");
+                assert_eq!(node.column_count, 1);
+            }
+            other => panic!("expected create plan node, got {:?}", other),
+        }
         assert_eq!(plan.estimated_cost, 1.0); // Fixed cost for CREATE
         Ok(())
     }

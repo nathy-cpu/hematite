@@ -12,6 +12,7 @@ use crate::HematiteError;
 use std::collections::HashMap;
 
 pub struct QueryPlan {
+    pub node: PlanNode,
     pub executor: Box<dyn QueryExecutor>,
     pub estimated_cost: f64,
     pub select_analysis: Option<SelectAnalysis>,
@@ -21,12 +22,80 @@ pub struct QueryPlan {
 impl std::fmt::Debug for QueryPlan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("QueryPlan")
+            .field("node", &self.node)
             .field("estimated_cost", &self.estimated_cost)
             .field("select_analysis", &self.select_analysis)
             .field("optimizations", &self.optimizations)
             .field("executor", &"<QueryExecutor>")
             .finish()
     }
+}
+
+#[derive(Debug, Clone)]
+pub enum PlanNode {
+    Select(SelectPlanNode),
+    Insert(InsertPlanNode),
+    Update(UpdatePlanNode),
+    Delete(DeletePlanNode),
+    Create(CreatePlanNode),
+    Drop(DropPlanNode),
+}
+
+#[derive(Debug, Clone)]
+pub struct SelectPlanNode {
+    pub table_name: String,
+    pub access_path: SelectAccessPath,
+    pub projection: SelectProjection,
+    pub has_filter: bool,
+    pub order_by_columns: Vec<String>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectAccessPath {
+    FullTableScan,
+    PrimaryKeyLookup,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectProjection {
+    Wildcard,
+    Columns(Vec<String>),
+    CountAll,
+    Aggregate {
+        function: AggregateFunction,
+        column: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InsertPlanNode {
+    pub table_name: String,
+    pub row_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdatePlanNode {
+    pub table_name: String,
+    pub assignment_count: usize,
+    pub has_filter: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeletePlanNode {
+    pub table_name: String,
+    pub has_filter: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatePlanNode {
+    pub table_name: String,
+    pub column_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropPlanNode {
+    pub table_name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -68,6 +137,7 @@ impl QueryPlanner {
     fn plan_select(&self, statement: SelectStatement) -> Result<QueryPlan> {
         // Analyze the query to determine optimal execution strategy
         let analysis = self.analyze_select(&statement)?;
+        let node = self.build_select_plan_node(&statement, &analysis);
 
         // Create executor based on analysis
         let executor = Box::new(SelectExecutor::new(statement));
@@ -76,6 +146,7 @@ impl QueryPlanner {
         let estimated_cost = self.estimate_select_cost(&analysis);
 
         Ok(QueryPlan {
+            node: PlanNode::Select(node),
             executor,
             estimated_cost,
             select_analysis: Some(analysis),
@@ -86,9 +157,14 @@ impl QueryPlanner {
     fn plan_insert(&self, statement: InsertStatement) -> Result<QueryPlan> {
         // For INSERT, the planning is straightforward
         let estimated_cost = statement.values.len() as f64;
+        let node = PlanNode::Insert(InsertPlanNode {
+            table_name: statement.table.clone(),
+            row_count: statement.values.len(),
+        });
         let executor = Box::new(InsertExecutor::new(statement));
 
         Ok(QueryPlan {
+            node,
             executor,
             estimated_cost,
             select_analysis: None,
@@ -98,12 +174,17 @@ impl QueryPlanner {
 
     fn plan_create(&self, statement: CreateStatement) -> Result<QueryPlan> {
         // For CREATE, the planning is straightforward
+        let node = PlanNode::Create(CreatePlanNode {
+            table_name: statement.table.clone(),
+            column_count: statement.columns.len(),
+        });
         let executor = Box::new(CreateExecutor::new(statement));
 
         // Cost estimation for CREATE is fixed
         let estimated_cost = 1.0;
 
         Ok(QueryPlan {
+            node,
             executor,
             estimated_cost,
             select_analysis: None,
@@ -112,10 +193,16 @@ impl QueryPlanner {
     }
 
     fn plan_update(&self, statement: UpdateStatement) -> Result<QueryPlan> {
+        let node = PlanNode::Update(UpdatePlanNode {
+            table_name: statement.table.clone(),
+            assignment_count: statement.assignments.len(),
+            has_filter: statement.where_clause.is_some(),
+        });
         let executor = Box::new(UpdateExecutor::new(statement));
         let estimated_cost = 1000.0;
 
         Ok(QueryPlan {
+            node,
             executor,
             estimated_cost,
             select_analysis: None,
@@ -124,10 +211,15 @@ impl QueryPlanner {
     }
 
     fn plan_delete(&self, statement: DeleteStatement) -> Result<QueryPlan> {
+        let node = PlanNode::Delete(DeletePlanNode {
+            table_name: statement.table.clone(),
+            has_filter: statement.where_clause.is_some(),
+        });
         let executor = Box::new(DeleteExecutor::new(statement));
         let estimated_cost = 1000.0;
 
         Ok(QueryPlan {
+            node,
             executor,
             estimated_cost,
             select_analysis: None,
@@ -136,15 +228,76 @@ impl QueryPlanner {
     }
 
     fn plan_drop(&self, statement: DropStatement) -> Result<QueryPlan> {
+        let node = PlanNode::Drop(DropPlanNode {
+            table_name: statement.table.clone(),
+        });
         let executor = Box::new(DropExecutor::new(statement));
         let estimated_cost = 1.0;
 
         Ok(QueryPlan {
+            node,
             executor,
             estimated_cost,
             select_analysis: None,
             optimizations: None,
         })
+    }
+
+    fn build_select_plan_node(
+        &self,
+        statement: &SelectStatement,
+        analysis: &SelectAnalysis,
+    ) -> SelectPlanNode {
+        let access_path = if analysis
+            .usable_indexes
+            .iter()
+            .any(|usage| matches!(usage.index_type, IndexType::PrimaryKey))
+        {
+            SelectAccessPath::PrimaryKeyLookup
+        } else {
+            SelectAccessPath::FullTableScan
+        };
+
+        let projection = if statement
+            .columns
+            .iter()
+            .any(|item| matches!(item, SelectItem::Wildcard))
+        {
+            SelectProjection::Wildcard
+        } else if let Some(item) = statement.columns.first() {
+            match item {
+                SelectItem::CountAll => SelectProjection::CountAll,
+                SelectItem::Aggregate { function, column } => SelectProjection::Aggregate {
+                    function: *function,
+                    column: column.clone(),
+                },
+                _ => SelectProjection::Columns(
+                    statement
+                        .columns
+                        .iter()
+                        .filter_map(|item| match item {
+                            SelectItem::Column(name) => Some(name.clone()),
+                            _ => None,
+                        })
+                        .collect(),
+                ),
+            }
+        } else {
+            SelectProjection::Columns(Vec::new())
+        };
+
+        SelectPlanNode {
+            table_name: analysis.table_name.clone(),
+            access_path,
+            projection,
+            has_filter: statement.where_clause.is_some(),
+            order_by_columns: statement
+                .order_by
+                .iter()
+                .map(|item| item.column.clone())
+                .collect(),
+            limit: statement.limit,
+        }
     }
 
     fn analyze_select(&self, statement: &SelectStatement) -> Result<SelectAnalysis> {
