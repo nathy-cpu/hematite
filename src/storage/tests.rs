@@ -211,6 +211,33 @@ mod mod_tests {
     }
 
     #[test]
+    fn test_trailing_free_pages_compact_storage() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_storage_trailing_free_pages_compact");
+
+        let (highest_page, size_before, size_after_compaction) = {
+            let mut storage = StorageEngine::new(test_db.path())?;
+            let _page_1 = storage.allocate_page()?;
+            let _page_2 = storage.allocate_page()?;
+            let page_3 = storage.allocate_page()?;
+            let size_before = std::fs::metadata(test_db.path())?.len();
+
+            storage.deallocate_page(page_3)?;
+            storage.flush()?;
+            let size_after_compaction = std::fs::metadata(test_db.path())?.len();
+
+            (page_3, size_before, size_after_compaction)
+        };
+
+        assert!(size_after_compaction < size_before);
+
+        let mut reopened = StorageEngine::new(test_db.path())?;
+        let reused = reopened.allocate_page()?;
+        assert_eq!(reused, highest_page);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_storage_stats_reflect_tables_rows_and_free_pages() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_storage_stats");
         let mut storage = StorageEngine::new(test_db.path())?;

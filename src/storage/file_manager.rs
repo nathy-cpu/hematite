@@ -1,7 +1,7 @@
 //! File manager for handling single-file database operations
 
 use crate::error::Result;
-use crate::storage::{Page, PageId, PAGE_SIZE};
+use crate::storage::{Page, PageId, PAGE_SIZE, STORAGE_METADATA_PAGE_ID};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -72,15 +72,11 @@ impl FileManager {
         self.seek(SeekFrom::Start(0))?;
         self.read_exact(&mut header)?;
 
-        // For now, just calculate next page ID from file size
-        // Account for page 0 (header) and page 1 (metadata) being reserved
+        // Derive the next allocatable page from the number of page-sized regions after the
+        // 64-byte file header. Reserved pages 0 and 1 imply a minimum next page id of 2.
         let file_size = self.len()?;
-        if file_size <= 64 {
-            self.next_page_id = 2; // Only header exists
-        } else {
-            let data_pages = ((file_size - 64) / PAGE_SIZE as u64) as u32;
-            self.next_page_id = if data_pages <= 1 { 2 } else { data_pages + 1 };
-        }
+        let page_regions = file_size.saturating_sub(64) / PAGE_SIZE as u64;
+        self.next_page_id = (page_regions as u32).max(2);
         Ok(())
     }
 
@@ -135,6 +131,7 @@ impl FileManager {
         if !self.free_pages.contains(&page_id) {
             self.free_pages.push(page_id);
         }
+        self.compact_trailing_free_pages()?;
         Ok(())
     }
 
@@ -144,6 +141,33 @@ impl FileManager {
 
     pub fn set_free_pages(&mut self, free_pages: Vec<PageId>) {
         self.free_pages = free_pages;
+    }
+
+    fn compact_trailing_free_pages(&mut self) -> Result<()> {
+        while self.next_page_id > 2 {
+            let candidate = PageId::new(self.next_page_id - 1);
+            if let Some(position) = self
+                .free_pages
+                .iter()
+                .position(|page_id| *page_id == candidate)
+            {
+                self.free_pages.swap_remove(position);
+                self.next_page_id -= 1;
+            } else {
+                break;
+            }
+        }
+
+        let minimum_next_page_id = STORAGE_METADATA_PAGE_ID.as_u32() + 1;
+        let target_next_page_id = self.next_page_id.max(minimum_next_page_id);
+        let target_len = 64 + target_next_page_id as u64 * PAGE_SIZE as u64;
+        let current_len = self.len()?;
+
+        if target_len < current_len {
+            self.set_len(target_len)?;
+        }
+
+        Ok(())
     }
 
     fn len(&self) -> Result<u64> {
@@ -215,6 +239,23 @@ impl FileManager {
                 self.position = end as u64;
             }
         }
+        Ok(())
+    }
+
+    fn set_len(&mut self, len: u64) -> Result<()> {
+        match &mut self.backend {
+            FileBackend::Disk(file) => {
+                file.set_len(len)?;
+            }
+            FileBackend::Memory(buffer) => {
+                buffer.resize(len as usize, 0);
+            }
+        }
+
+        if self.position > len {
+            self.position = len;
+        }
+
         Ok(())
     }
 }
