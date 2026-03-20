@@ -211,6 +211,48 @@ mod mod_tests {
     }
 
     #[test]
+    fn test_storage_stats_reflect_tables_rows_and_free_pages() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_storage_stats");
+        let mut storage = StorageEngine::new(test_db.path())?;
+
+        let _ = storage.create_table("users")?;
+        let _ = storage.create_table("notes")?;
+        let _ = storage.insert_into_table("users", vec![Value::Integer(1)])?;
+        let _ = storage.insert_into_table("users", vec![Value::Integer(2)])?;
+        let free_page = storage.allocate_page()?;
+        storage.deallocate_page(free_page)?;
+
+        let stats = storage.get_storage_stats();
+        assert_eq!(stats.table_count, 2);
+        assert_eq!(stats.total_rows, 2);
+        assert_eq!(stats.free_page_count, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_versioned_storage_metadata_persists_across_reopen() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_versioned_storage_metadata");
+
+        {
+            let mut storage = StorageEngine::new(test_db.path())?;
+            let _ = storage.create_table("users")?;
+            let _ = storage.insert_into_table("users", vec![Value::Integer(1)])?;
+            let page = storage.allocate_page()?;
+            storage.deallocate_page(page)?;
+            storage.flush()?;
+        }
+
+        let reopened = StorageEngine::new(test_db.path())?;
+        let stats = reopened.get_storage_stats();
+        assert_eq!(stats.table_count, 1);
+        assert_eq!(stats.total_rows, 1);
+        assert_eq!(stats.free_page_count, 1);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_table_storage_spans_multiple_pages() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_storage_multi_page");
         let mut storage = StorageEngine::new(test_db.path())?;

@@ -22,22 +22,110 @@ pub struct StorageEngine {
 
 impl StorageEngine {
     fn serialize_storage_metadata(&self) -> Result<String> {
-        let tables = self.table_manager.serialize_metadata()?;
-        let free_pages = self
-            .file_manager
-            .free_pages()
-            .iter()
-            .map(|page_id| page_id.as_u32().to_string())
-            .collect::<Vec<_>>()
-            .join(",");
+        let mut lines = vec![
+            "version=2".to_string(),
+            format!(
+                "table_count={}",
+                self.table_manager.get_all_metadata().len()
+            ),
+            format!("free_page_count={}", self.file_manager.free_pages().len()),
+        ];
 
-        Ok(format!("tables={}\nfree_pages={}", tables, free_pages))
+        let mut table_entries = self
+            .table_manager
+            .get_all_metadata()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        table_entries.sort_by(|left, right| left.name.cmp(&right.name));
+
+        for table in table_entries {
+            lines.push(format!(
+                "table|{}|{}|{}|{}",
+                table.name,
+                table.root_page_id.as_u32(),
+                table.row_count,
+                table.next_row_id
+            ));
+        }
+
+        let mut free_pages = self.file_manager.free_pages().to_vec();
+        free_pages.sort_by_key(|page_id| page_id.as_u32());
+        for page_id in free_pages {
+            lines.push(format!("free|{}", page_id.as_u32()));
+        }
+
+        Ok(lines.join("\n"))
     }
 
     fn parse_storage_metadata(&mut self, metadata_str: &str) -> Result<()> {
         // Backward compatibility: older builds persisted only table metadata.
         if !metadata_str.contains('\n') && !metadata_str.starts_with("tables=") {
             self.table_manager.parse_metadata(metadata_str)?;
+            return Ok(());
+        }
+
+        if metadata_str.starts_with("version=2\n") || metadata_str == "version=2" {
+            let mut free_pages = Vec::new();
+
+            for line in metadata_str.lines() {
+                if line.is_empty()
+                    || line.starts_with("version=")
+                    || line.starts_with("table_count=")
+                    || line.starts_with("free_page_count=")
+                {
+                    continue;
+                }
+
+                if let Some(payload) = line.strip_prefix("table|") {
+                    let parts = payload.split('|').collect::<Vec<_>>();
+                    if parts.len() != 4 {
+                        return Err(crate::error::HematiteError::StorageError(
+                            "Invalid table metadata record".to_string(),
+                        ));
+                    }
+
+                    let name = parts[0];
+                    let root_page_id = PageId::new(parts[1].parse::<u32>().map_err(|_| {
+                        crate::error::HematiteError::StorageError(
+                            "Invalid table root page metadata".to_string(),
+                        )
+                    })?);
+                    let row_count = parts[2].parse::<u64>().map_err(|_| {
+                        crate::error::HematiteError::StorageError(
+                            "Invalid table row count metadata".to_string(),
+                        )
+                    })?;
+                    let next_row_id = parts[3].parse::<u64>().map_err(|_| {
+                        crate::error::HematiteError::StorageError(
+                            "Invalid table next_row_id metadata".to_string(),
+                        )
+                    })?;
+
+                    self.table_manager.create_table(name, root_page_id)?;
+                    if let Some(metadata) = self.table_manager.get_table_metadata_mut(name) {
+                        metadata.row_count = row_count;
+                        metadata.next_row_id = next_row_id;
+                    }
+                    continue;
+                }
+
+                if let Some(payload) = line.strip_prefix("free|") {
+                    let page_id = payload.parse::<u32>().map(PageId::new).map_err(|_| {
+                        crate::error::HematiteError::StorageError(
+                            "Invalid free page metadata".to_string(),
+                        )
+                    })?;
+                    free_pages.push(page_id);
+                    continue;
+                }
+
+                return Err(crate::error::HematiteError::StorageError(
+                    "Unknown storage metadata record".to_string(),
+                ));
+            }
+
+            self.file_manager.set_free_pages(free_pages);
             return Ok(());
         }
 
@@ -75,6 +163,19 @@ impl StorageEngine {
         }
 
         Ok(())
+    }
+
+    pub fn get_storage_stats(&self) -> crate::storage::StorageStats {
+        crate::storage::StorageStats {
+            table_count: self.table_manager.get_all_metadata().len(),
+            total_rows: self
+                .table_manager
+                .get_all_metadata()
+                .values()
+                .map(|metadata| metadata.row_count)
+                .sum(),
+            free_page_count: self.file_manager.free_pages().len(),
+        }
     }
 
     fn row_data_end(page: &Page, row_count: u32) -> Result<usize> {

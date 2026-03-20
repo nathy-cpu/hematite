@@ -60,6 +60,13 @@ pub struct TableMetadata {
     pub next_row_id: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageStats {
+    pub table_count: usize,
+    pub total_rows: u64,
+    pub free_page_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredRow {
     pub row_id: u64,
