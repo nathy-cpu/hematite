@@ -317,6 +317,42 @@ mod planner_tests {
     }
 
     #[test]
+    fn test_query_planner_uses_metadata_backed_row_estimate() -> Result<()> {
+        let mut catalog = Schema::new();
+
+        let columns = vec![
+            crate::catalog::Column::new(
+                crate::catalog::ColumnId::new(1),
+                "id".to_string(),
+                DataType::Integer,
+            )
+            .primary_key(true),
+            crate::catalog::Column::new(
+                crate::catalog::ColumnId::new(2),
+                "name".to_string(),
+                DataType::Text,
+            ),
+        ];
+        catalog.create_table("users".to_string(), columns)?;
+
+        let planner = QueryPlanner::new(catalog)
+            .with_table_row_counts(std::collections::HashMap::from([("users".to_string(), 12)]));
+
+        let statement = SelectStatement {
+            columns: vec![SelectItem::Column("id".to_string())],
+            from: TableReference::Table("users".to_string()),
+            where_clause: None,
+            order_by: Vec::new(),
+            limit: None,
+        };
+
+        let plan = planner.plan(Statement::Select(statement))?;
+
+        assert_eq!(plan.select_analysis.unwrap().estimated_rows, 12);
+        Ok(())
+    }
+
+    #[test]
     fn test_query_planner_insert() -> Result<()> {
         let mut catalog = Schema::new();
 

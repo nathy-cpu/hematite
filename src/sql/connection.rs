@@ -4,6 +4,7 @@ use crate::catalog::Catalog;
 use crate::error::{HematiteError, Result};
 use crate::parser::{Lexer, Parser};
 use crate::query::{ExecutionContext, QueryPlanner, QueryResult};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
@@ -34,12 +35,15 @@ impl Connection {
         &mut self,
         statement: crate::parser::ast::Statement,
     ) -> Result<QueryResult> {
-        let schema = {
+        let (schema, table_row_counts) = {
             let catalog_guard = self.catalog.lock().unwrap();
-            catalog_guard.clone_schema()
+            let schema = catalog_guard.clone_schema();
+            let table_row_counts = catalog_guard
+                .with_storage(|storage| Ok(Self::collect_table_row_counts(storage)))?;
+            (schema, table_row_counts)
         };
 
-        let planner = QueryPlanner::new(schema.clone());
+        let planner = QueryPlanner::new(schema.clone()).with_table_row_counts(table_row_counts);
         let plan = planner.plan(statement)?;
         let mut executor = plan.executor;
 
@@ -59,12 +63,15 @@ impl Connection {
         statement: crate::parser::ast::Statement,
     ) -> Result<QueryResult> {
         let persists_schema = statement.mutates_schema();
-        let schema = {
+        let (schema, table_row_counts) = {
             let catalog_guard = self.catalog.lock().unwrap();
-            catalog_guard.clone_schema()
+            let schema = catalog_guard.clone_schema();
+            let table_row_counts = catalog_guard
+                .with_storage(|storage| Ok(Self::collect_table_row_counts(storage)))?;
+            (schema, table_row_counts)
         };
 
-        let planner = QueryPlanner::new(schema.clone());
+        let planner = QueryPlanner::new(schema.clone()).with_table_row_counts(table_row_counts);
         let plan = planner.plan(statement)?;
         let mut executor = plan.executor;
 
@@ -83,6 +90,14 @@ impl Connection {
         }
 
         Ok(result)
+    }
+
+    fn collect_table_row_counts(storage: &crate::storage::StorageEngine) -> HashMap<String, usize> {
+        storage
+            .get_table_metadata()
+            .iter()
+            .map(|(name, metadata)| (name.clone(), metadata.row_count as usize))
+            .collect()
     }
 
     pub fn close(&mut self) -> Result<()> {

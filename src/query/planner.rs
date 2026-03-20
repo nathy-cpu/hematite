@@ -9,6 +9,7 @@ use crate::query::executor::{
 };
 use crate::query::optimizer::{QueryOptimizer, SelectOptimizations};
 use crate::HematiteError;
+use std::collections::HashMap;
 
 pub struct QueryPlan {
     pub executor: Box<dyn QueryExecutor>,
@@ -31,11 +32,20 @@ impl std::fmt::Debug for QueryPlan {
 #[derive(Debug, Clone)]
 pub struct QueryPlanner {
     catalog: Schema,
+    table_row_counts: HashMap<String, usize>,
 }
 
 impl QueryPlanner {
     pub fn new(catalog: Schema) -> Self {
-        Self { catalog }
+        Self {
+            catalog,
+            table_row_counts: HashMap::new(),
+        }
+    }
+
+    pub fn with_table_row_counts(mut self, table_row_counts: HashMap<String, usize>) -> Self {
+        self.table_row_counts = table_row_counts;
+        self
     }
 
     pub fn plan(&self, statement: Statement) -> Result<QueryPlan> {
@@ -229,9 +239,11 @@ impl QueryPlanner {
         Ok(accessed_columns)
     }
 
-    fn estimate_table_rows(&self, _table: &Table) -> usize {
-        // For now, return a fixed estimate (in a real implementation, this would use statistics)
-        1000
+    fn estimate_table_rows(&self, table: &Table) -> usize {
+        self.table_row_counts
+            .get(&table.name)
+            .copied()
+            .unwrap_or(1000)
     }
 
     fn estimate_select_cost(&self, analysis: &SelectAnalysis) -> f64 {
