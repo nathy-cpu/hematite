@@ -626,6 +626,13 @@ impl QueryExecutor for InsertExecutor {
                     values: row_values.clone(),
                 },
             )?;
+            ctx.storage.register_secondary_index_row(
+                table,
+                crate::storage::StoredRow {
+                    row_id,
+                    values: row_values.clone(),
+                },
+            )?;
             existing_rows.push(row_values);
         }
 
@@ -781,6 +788,8 @@ impl QueryExecutor for UpdateExecutor {
         let refreshed_rows = ctx.storage.read_rows_with_ids(&self.statement.table)?;
         ctx.storage
             .rebuild_primary_key_index(table, &refreshed_rows)?;
+        ctx.storage
+            .rebuild_secondary_indexes(table, &refreshed_rows)?;
 
         Ok(QueryResult {
             affected_rows: updated_rows,
@@ -855,6 +864,8 @@ impl QueryExecutor for DeleteExecutor {
         let refreshed_rows = ctx.storage.read_rows_with_ids(&self.statement.table)?;
         ctx.storage
             .rebuild_primary_key_index(table, &refreshed_rows)?;
+        ctx.storage
+            .rebuild_secondary_indexes(table, &refreshed_rows)?;
 
         Ok(QueryResult {
             affected_rows: deleted_rows,

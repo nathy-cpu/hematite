@@ -327,6 +327,88 @@ mod mod_tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_secondary_index_lookup_and_rebuild() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_storage_secondary_index_lookup");
+        let mut storage = StorageEngine::new(test_db.path())?;
+
+        let root_page_id = storage.create_table("users")?;
+        let mut table = crate::catalog::Table::new(
+            crate::catalog::TableId::new(1),
+            "users".to_string(),
+            vec![
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(1),
+                    "id".to_string(),
+                    crate::catalog::DataType::Integer,
+                )
+                .primary_key(true),
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(2),
+                    "email".to_string(),
+                    crate::catalog::DataType::Text,
+                ),
+            ],
+            root_page_id,
+        )?;
+        table.add_secondary_index(crate::catalog::SecondaryIndex {
+            name: "idx_users_email".to_string(),
+            column_indices: vec![1],
+            root_page_id: crate::storage::PageId::new(77),
+        })?;
+
+        let row_id_1 = storage.insert_into_table(
+            "users",
+            vec![Value::Integer(1), Value::Text("a@example.com".to_string())],
+        )?;
+        let row_1 = crate::storage::StoredRow {
+            row_id: row_id_1,
+            values: vec![Value::Integer(1), Value::Text("a@example.com".to_string())],
+        };
+        storage.register_secondary_index_row(&table, row_1.clone())?;
+
+        let row_id_2 = storage.insert_into_table(
+            "users",
+            vec![Value::Integer(2), Value::Text("a@example.com".to_string())],
+        )?;
+        let row_2 = crate::storage::StoredRow {
+            row_id: row_id_2,
+            values: vec![Value::Integer(2), Value::Text("a@example.com".to_string())],
+        };
+        storage.register_secondary_index_row(&table, row_2.clone())?;
+
+        let matched = storage.lookup_rows_by_secondary_index(
+            &table,
+            "idx_users_email",
+            &[Value::Text("a@example.com".to_string())],
+        )?;
+        assert_eq!(matched.len(), 2);
+
+        let rewritten_rows = vec![crate::storage::StoredRow {
+            row_id: row_id_1,
+            values: vec![Value::Integer(1), Value::Text("b@example.com".to_string())],
+        }];
+        storage.replace_table_rows("users", rewritten_rows.clone())?;
+        storage.rebuild_secondary_indexes(&table, &rewritten_rows)?;
+
+        let old_key_rows = storage.lookup_rows_by_secondary_index(
+            &table,
+            "idx_users_email",
+            &[Value::Text("a@example.com".to_string())],
+        )?;
+        assert!(old_key_rows.is_empty());
+
+        let new_key_rows = storage.lookup_rows_by_secondary_index(
+            &table,
+            "idx_users_email",
+            &[Value::Text("b@example.com".to_string())],
+        )?;
+        assert_eq!(new_key_rows.len(), 1);
+        assert_eq!(new_key_rows[0].row_id, row_id_1);
+
+        Ok(())
+    }
 }
 
 mod serialization_tests {
