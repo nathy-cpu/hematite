@@ -38,17 +38,17 @@ mod executor_tests {
 
         // Add some test data
         println!("✓ Inserting row 1");
-        storage.insert_into_table(
+        let _ = storage.insert_into_table(
             "users",
             vec![Value::Integer(1), Value::Text("Alice".to_string())],
         )?;
         println!("✓ Inserting row 2");
-        storage.insert_into_table(
+        let _ = storage.insert_into_table(
             "users",
             vec![Value::Integer(2), Value::Text("Bob".to_string())],
         )?;
         println!("✓ Inserting row 3");
-        storage.insert_into_table(
+        let _ = storage.insert_into_table(
             "users",
             vec![Value::Integer(3), Value::Text("Charlie".to_string())],
         )?;
@@ -113,15 +113,15 @@ mod executor_tests {
         let _ = storage.create_table("users")?;
 
         // Add some test data
-        storage.insert_into_table(
+        let _ = storage.insert_into_table(
             "users",
             vec![Value::Integer(1), Value::Text("Alice".to_string())],
         )?;
-        storage.insert_into_table(
+        let _ = storage.insert_into_table(
             "users",
             vec![Value::Integer(2), Value::Text("Bob".to_string())],
         )?;
-        storage.insert_into_table(
+        let _ = storage.insert_into_table(
             "users",
             vec![Value::Integer(3), Value::Text("Charlie".to_string())],
         )?;

@@ -146,7 +146,7 @@ mod database_tests {
         let test_db = TestDbFile::new("_test_database_storage");
 
         let mut db = Database::open(test_db.path())?;
-        
+
         // Test storage access
         let storage = db.storage();
         assert_eq!(storage.get_table_metadata().len(), 0);
@@ -198,7 +198,7 @@ mod mod_tests {
 
         let payload = "x".repeat(500);
         for i in 0..12 {
-            storage.insert_into_table(
+            let _ = storage.insert_into_table(
                 "users",
                 vec![Value::Integer(i), Value::Text(format!("{payload}-{i}"))],
             )?;
@@ -217,11 +217,60 @@ mod mod_tests {
 
         let rows = storage.read_from_table("users")?;
         assert_eq!(rows.len(), 12);
-        assert_eq!(rows.first(), Some(&vec![Value::Integer(0), Value::Text(format!("{payload}-0"))]));
+        assert_eq!(
+            rows.first(),
+            Some(&vec![
+                Value::Integer(0),
+                Value::Text(format!("{payload}-0"))
+            ])
+        );
         assert_eq!(
             rows.last(),
-            Some(&vec![Value::Integer(11), Value::Text(format!("{payload}-11"))])
+            Some(&vec![
+                Value::Integer(11),
+                Value::Text(format!("{payload}-11"))
+            ])
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_row_ids_survive_table_rewrite() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_storage_row_ids_survive_rewrite");
+        let mut storage = StorageEngine::new(test_db.path())?;
+
+        let _ = storage.create_table("users")?;
+        let first_id = storage.insert_into_table(
+            "users",
+            vec![Value::Integer(1), Value::Text("Alice".to_string())],
+        )?;
+        let second_id = storage.insert_into_table(
+            "users",
+            vec![Value::Integer(2), Value::Text("Bob".to_string())],
+        )?;
+
+        let mut rows = storage.read_rows_with_ids("users")?;
+        assert_eq!(rows[0].row_id, first_id);
+        assert_eq!(rows[1].row_id, second_id);
+
+        rows[0].values[1] = Value::Text("Alice Updated".to_string());
+        rows.remove(1);
+        storage.replace_table_rows("users", rows)?;
+
+        let rewritten = storage.read_rows_with_ids("users")?;
+        assert_eq!(rewritten.len(), 1);
+        assert_eq!(rewritten[0].row_id, first_id);
+        assert_eq!(
+            rewritten[0].values,
+            vec![Value::Integer(1), Value::Text("Alice Updated".to_string()),]
+        );
+
+        let metadata = storage
+            .get_table_metadata()
+            .get("users")
+            .expect("table metadata should exist");
+        assert_eq!(metadata.next_row_id, second_id + 1);
 
         Ok(())
     }

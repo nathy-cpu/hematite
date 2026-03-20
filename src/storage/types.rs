@@ -60,6 +60,12 @@ pub struct TableMetadata {
     pub next_row_id: u64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredRow {
+    pub row_id: u64,
+    pub values: Vec<crate::catalog::Value>,
+}
+
 #[derive(Debug, Clone)]
 pub struct TablePageHeader {
     pub page_type: PageType,

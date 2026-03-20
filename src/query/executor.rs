@@ -561,7 +561,8 @@ impl QueryExecutor for InsertExecutor {
             let row_values = self.build_row(table, value_row)?;
             self.ensure_primary_key_is_unique(table, &existing_rows, &row_values)?;
 
-            ctx.storage
+            let _ = ctx
+                .storage
                 .insert_into_table(&self.statement.table, row_values.clone())?;
             existing_rows.push(row_values);
         }
@@ -643,7 +644,7 @@ impl QueryExecutor for UpdateExecutor {
                 HematiteError::ParseError(format!("Table '{}' not found", self.statement.table))
             })?;
 
-        let all_rows = ctx.storage.read_from_table(&self.statement.table)?;
+        let all_rows = ctx.storage.read_rows_with_ids(&self.statement.table)?;
         let select_executor = SelectExecutor::new(SelectStatement {
             columns: vec![SelectItem::Wildcard],
             from: TableReference::Table(self.statement.table.clone()),
@@ -655,7 +656,8 @@ impl QueryExecutor for UpdateExecutor {
         let mut rewritten_rows = Vec::with_capacity(all_rows.len());
         let mut updated_rows = 0usize;
 
-        for row in all_rows {
+        for stored_row in all_rows {
+            let row = stored_row.values.clone();
             let should_update = match &self.statement.where_clause {
                 Some(where_clause) => {
                     let mut matches_where = true;
@@ -692,14 +694,23 @@ impl QueryExecutor for UpdateExecutor {
                 table
                     .validate_row(&updated_row)
                     .map_err(|err| HematiteError::ParseError(err.to_string()))?;
-                rewritten_rows.push(updated_row);
+                rewritten_rows.push(crate::storage::StoredRow {
+                    row_id: stored_row.row_id,
+                    values: updated_row,
+                });
                 updated_rows += 1;
             } else {
-                rewritten_rows.push(row);
+                rewritten_rows.push(stored_row);
             }
         }
 
-        self.ensure_primary_keys_unique(table, &rewritten_rows)?;
+        self.ensure_primary_keys_unique(
+            table,
+            &rewritten_rows
+                .iter()
+                .map(|row| row.values.clone())
+                .collect::<Vec<_>>(),
+        )?;
         ctx.storage
             .replace_table_rows(&self.statement.table, rewritten_rows)?;
 
@@ -733,7 +744,7 @@ impl QueryExecutor for DeleteExecutor {
                 HematiteError::ParseError(format!("Table '{}' not found", self.statement.table))
             })?;
 
-        let all_rows = ctx.storage.read_from_table(&self.statement.table)?;
+        let all_rows = ctx.storage.read_rows_with_ids(&self.statement.table)?;
         let select_executor = SelectExecutor::new(SelectStatement {
             columns: vec![SelectItem::Wildcard],
             from: TableReference::Table(self.statement.table.clone()),
@@ -744,7 +755,8 @@ impl QueryExecutor for DeleteExecutor {
 
         let mut survivors = Vec::new();
         let mut deleted_rows = 0usize;
-        for row in all_rows {
+        for stored_row in all_rows {
+            let row = stored_row.values.clone();
             let delete_row = match &self.statement.where_clause {
                 Some(where_clause) => {
                     let mut matches_where = true;
@@ -762,7 +774,7 @@ impl QueryExecutor for DeleteExecutor {
             if delete_row {
                 deleted_rows += 1;
             } else {
-                survivors.push(row);
+                survivors.push(stored_row);
             }
         }
 

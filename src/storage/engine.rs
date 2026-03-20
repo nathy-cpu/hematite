@@ -3,7 +3,7 @@
 use crate::error::Result;
 use crate::storage::table::{PageOperations, TableManager};
 use crate::storage::{
-    buffer_pool::BufferPool, file_manager::FileManager, Page, PageId, TableMetadata,
+    buffer_pool::BufferPool, file_manager::FileManager, Page, PageId, StoredRow, TableMetadata,
     DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID, TABLE_PAGE_HEADER_SIZE,
 };
 use std::path::Path;
@@ -240,8 +240,8 @@ impl StorageEngine {
         &mut self,
         table_name: &str,
         row: Vec<crate::catalog::Value>,
-    ) -> Result<()> {
-        let root_page_id = {
+    ) -> Result<u64> {
+        let (root_page_id, row_id) = {
             let metadata = self
                 .table_manager
                 .get_table_metadata(table_name)
@@ -251,10 +251,14 @@ impl StorageEngine {
                         table_name
                     ))
                 })?;
-            metadata.root_page_id
+            (metadata.root_page_id, metadata.next_row_id)
         };
 
-        let serialized_row = crate::storage::serialization::RowSerializer::serialize(&row)?;
+        let serialized_row =
+            crate::storage::serialization::RowSerializer::serialize_stored_row(&StoredRow {
+                row_id,
+                values: row,
+            })?;
         if TABLE_PAGE_HEADER_SIZE + serialized_row.len() > crate::storage::PAGE_SIZE {
             return Err(crate::error::HematiteError::StorageError(
                 "Row too large to fit in a table page".to_string(),
@@ -282,7 +286,7 @@ impl StorageEngine {
                     metadata.next_row_id += 1;
                 }
 
-                return Ok(());
+                return Ok(row_id);
             }
 
             if header.next_page_id != PageId::invalid() {
@@ -311,15 +315,11 @@ impl StorageEngine {
                 metadata.next_row_id += 1;
             }
 
-            return Ok(());
+            return Ok(row_id);
         }
     }
 
-    pub fn replace_table_rows(
-        &mut self,
-        table_name: &str,
-        rows: Vec<Vec<crate::catalog::Value>>,
-    ) -> Result<()> {
+    pub fn replace_table_rows(&mut self, table_name: &str, rows: Vec<StoredRow>) -> Result<()> {
         let root_page_id = {
             let metadata = self
                 .table_manager
@@ -353,16 +353,96 @@ impl StorageEngine {
             self.deallocate_page(page_id)?;
         }
 
+        let next_row_id = self
+            .table_manager
+            .get_table_metadata(table_name)
+            .map(|metadata| metadata.next_row_id)
+            .unwrap_or(1);
+
         if let Some(metadata) = self.table_manager.get_table_metadata_mut(table_name) {
             metadata.row_count = 0;
-            metadata.next_row_id = 1;
+            metadata.next_row_id =
+                next_row_id.max(rows.iter().map(|row| row.row_id).max().unwrap_or(0) + 1);
         }
 
         for row in rows {
-            self.insert_into_table(table_name, row)?;
+            self.insert_stored_row(table_name, row)?;
         }
 
         Ok(())
+    }
+
+    fn insert_stored_row(&mut self, table_name: &str, row: StoredRow) -> Result<()> {
+        let root_page_id = {
+            let metadata = self
+                .table_manager
+                .get_table_metadata(table_name)
+                .ok_or_else(|| {
+                    crate::error::HematiteError::StorageError(format!(
+                        "Table '{}' does not exist",
+                        table_name
+                    ))
+                })?;
+            metadata.root_page_id
+        };
+
+        let serialized_row =
+            crate::storage::serialization::RowSerializer::serialize_stored_row(&row)?;
+        if TABLE_PAGE_HEADER_SIZE + serialized_row.len() > crate::storage::PAGE_SIZE {
+            return Err(crate::error::HematiteError::StorageError(
+                "Row too large to fit in a table page".to_string(),
+            ));
+        }
+
+        let mut current_page_id = root_page_id;
+
+        loop {
+            let mut page = self.read_page(current_page_id)?;
+            let mut header = self.table_manager.read_page_header(&page)?;
+            let offset = Self::row_data_end(&page, header.row_count)?;
+
+            if header.row_count < crate::storage::MAX_ROWS_PER_PAGE as u32
+                && offset + serialized_row.len() <= crate::storage::PAGE_SIZE
+            {
+                page.data[offset..offset + serialized_row.len()].copy_from_slice(&serialized_row);
+                header.row_count += 1;
+                self.table_manager.write_page_header(&mut page, &header)?;
+                self.write_page(page)?;
+
+                if let Some(metadata) = self.table_manager.get_table_metadata_mut(table_name) {
+                    metadata.row_count += 1;
+                }
+
+                return Ok(());
+            }
+
+            if header.next_page_id != PageId::invalid() {
+                current_page_id = header.next_page_id;
+                continue;
+            }
+
+            let new_page_id = self.allocate_page()?;
+            let mut new_page =
+                self.initialize_table_page(new_page_id, current_page_id, PageId::invalid())?;
+
+            header.next_page_id = new_page_id;
+            self.table_manager.write_page_header(&mut page, &header)?;
+            self.write_page(page)?;
+
+            new_page.data[TABLE_PAGE_HEADER_SIZE..TABLE_PAGE_HEADER_SIZE + serialized_row.len()]
+                .copy_from_slice(&serialized_row);
+            let mut new_header = self.table_manager.read_page_header(&new_page)?;
+            new_header.row_count = 1;
+            self.table_manager
+                .write_page_header(&mut new_page, &new_header)?;
+            self.write_page(new_page)?;
+
+            if let Some(metadata) = self.table_manager.get_table_metadata_mut(table_name) {
+                metadata.row_count += 1;
+            }
+
+            return Ok(());
+        }
     }
 
     pub fn drop_table(&mut self, table_name: &str) -> Result<()> {
@@ -390,7 +470,7 @@ impl StorageEngine {
         Ok(())
     }
 
-    pub fn read_from_table(&mut self, table_name: &str) -> Result<Vec<Vec<crate::catalog::Value>>> {
+    pub fn read_rows_with_ids(&mut self, table_name: &str) -> Result<Vec<StoredRow>> {
         let metadata = self
             .table_manager
             .get_table_metadata(table_name)
@@ -428,7 +508,8 @@ impl StorageEngine {
                 }
 
                 let row_data = &page.data[offset..offset + row_length];
-                let row = crate::storage::serialization::RowSerializer::deserialize(row_data)?;
+                let row =
+                    crate::storage::serialization::RowSerializer::deserialize_stored_row(row_data)?;
                 rows.push(row);
                 offset += row_length;
             }
@@ -441,6 +522,14 @@ impl StorageEngine {
         }
 
         Ok(rows)
+    }
+
+    pub fn read_from_table(&mut self, table_name: &str) -> Result<Vec<Vec<crate::catalog::Value>>> {
+        Ok(self
+            .read_rows_with_ids(table_name)?
+            .into_iter()
+            .map(|row| row.values)
+            .collect())
     }
 
     pub fn table_exists(&self, table_name: &str) -> bool {

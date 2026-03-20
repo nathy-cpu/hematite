@@ -2,18 +2,27 @@
 
 use crate::catalog::Value;
 use crate::error::{HematiteError, Result};
+use crate::storage::StoredRow;
 
 pub struct RowSerializer;
 
 impl RowSerializer {
     pub fn serialize(row: &[Value]) -> Result<Vec<u8>> {
+        Self::serialize_stored_row(&StoredRow {
+            row_id: 0,
+            values: row.to_vec(),
+        })
+    }
+
+    pub fn serialize_stored_row(row: &StoredRow) -> Result<Vec<u8>> {
         let mut data = Vec::new();
 
         // Write row length (placeholder, will be updated)
         data.extend_from_slice(&[0u8; 4]);
+        data.extend_from_slice(&row.row_id.to_le_bytes());
 
         // Serialize each value
-        for value in row {
+        for value in &row.values {
             match value {
                 Value::Integer(i) => {
                     data.push(1); // Type marker for Integer
@@ -47,8 +56,20 @@ impl RowSerializer {
     }
 
     pub fn deserialize(data: &[u8]) -> Result<Vec<Value>> {
+        Ok(Self::deserialize_stored_row(data)?.values)
+    }
+
+    pub fn deserialize_stored_row(data: &[u8]) -> Result<StoredRow> {
+        if data.len() < 8 {
+            return Err(HematiteError::CorruptedData("Truncated row id".to_string()));
+        }
+
+        let mut row_id_bytes = [0u8; 8];
+        row_id_bytes.copy_from_slice(&data[0..8]);
+        let row_id = u64::from_le_bytes(row_id_bytes);
+
         let mut values = Vec::new();
-        let mut offset = 0;
+        let mut offset = 8;
 
         while offset < data.len() {
             if offset >= data.len() {
@@ -144,7 +165,7 @@ impl RowSerializer {
             values.push(value);
         }
 
-        Ok(values)
+        Ok(StoredRow { row_id, values })
     }
 
     pub fn read_row_length(data: &[u8]) -> Result<usize> {
@@ -154,4 +175,3 @@ impl RowSerializer {
         Ok(u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize)
     }
 }
-
