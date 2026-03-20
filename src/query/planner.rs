@@ -202,6 +202,7 @@ impl QueryPlanner {
                     }
                 }
                 SelectItem::CountAll => {}
+                SelectItem::Aggregate { .. } => {}
             }
         }
 

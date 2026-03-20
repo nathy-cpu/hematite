@@ -347,6 +347,32 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_simple_aggregates_without_group_by() -> Result<()> {
+        let db = TestDbFile::new("_test_simple_aggregates_without_group_by");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, score FLOAT);")?;
+        conn.execute("INSERT INTO test (id, score) VALUES (1, 10);")?;
+        conn.execute("INSERT INTO test (id, score) VALUES (2, 20);")?;
+        conn.execute("INSERT INTO test (id, score) VALUES (3, NULL);")?;
+
+        let sum = conn.execute("SELECT SUM(score) FROM test;")?;
+        assert_eq!(sum.rows, vec![vec![crate::catalog::Value::Float(30.0)]]);
+
+        let avg = conn.execute("SELECT AVG(score) FROM test;")?;
+        assert_eq!(avg.rows, vec![vec![crate::catalog::Value::Float(15.0)]]);
+
+        let min = conn.execute("SELECT MIN(score) FROM test;")?;
+        assert_eq!(min.rows, vec![vec![crate::catalog::Value::Float(10.0)]]);
+
+        let max = conn.execute("SELECT MAX(score) FROM test;")?;
+        assert_eq!(max.rows, vec![vec![crate::catalog::Value::Float(20.0)]]);
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_reopen_preserves_exact_schema() -> Result<()> {
         let db = TestDbFile::new("_test_reopen_preserves_exact_schema");
 

@@ -175,6 +175,7 @@ impl SelectExecutor {
                     }
                 }
                 SelectItem::CountAll => {}
+                SelectItem::Aggregate { .. } => {}
             }
         }
 
@@ -197,6 +198,16 @@ impl SelectExecutor {
                 }
                 SelectItem::Column(name) => columns.push(name.clone()),
                 SelectItem::CountAll => columns.push("COUNT(*)".to_string()),
+                SelectItem::Aggregate { function, column } => columns.push(format!(
+                    "{}({})",
+                    match function {
+                        AggregateFunction::Sum => "SUM",
+                        AggregateFunction::Avg => "AVG",
+                        AggregateFunction::Min => "MIN",
+                        AggregateFunction::Max => "MAX",
+                    },
+                    column
+                )),
             }
         }
 
@@ -209,6 +220,115 @@ impl SelectExecutor {
             (true, false) => Ordering::Less,
             (false, true) => Ordering::Greater,
             (false, false) => left.partial_cmp(right).unwrap_or(Ordering::Equal),
+        }
+    }
+
+    fn evaluate_aggregate(
+        &self,
+        ctx: &ExecutionContext,
+        rows: &[Vec<Value>],
+    ) -> Result<Option<Value>> {
+        let Some(item) = self.statement.columns.first() else {
+            return Ok(None);
+        };
+
+        match item {
+            SelectItem::CountAll => Ok(Some(Value::Integer(rows.len() as i32))),
+            SelectItem::Aggregate { function, column } => {
+                let table_name = self
+                    .get_table_name()
+                    .ok_or_else(|| HematiteError::ParseError("Missing table name".to_string()))?;
+                let table = ctx.catalog.get_table_by_name(table_name).ok_or_else(|| {
+                    HematiteError::ParseError(format!("Table '{}' not found", table_name))
+                })?;
+                let index = table.get_column_index(column).ok_or_else(|| {
+                    HematiteError::ParseError(format!(
+                        "Column '{}' does not exist in table '{}'",
+                        column, table_name
+                    ))
+                })?;
+
+                let values: Vec<&Value> = rows
+                    .iter()
+                    .map(|row| &row[index])
+                    .filter(|value| !value.is_null())
+                    .collect();
+
+                if values.is_empty() {
+                    return Ok(Some(Value::Null));
+                }
+
+                match function {
+                    AggregateFunction::Min => {
+                        let mut current = values[0].clone();
+                        for value in values.into_iter().skip(1) {
+                            if value.partial_cmp(&current).is_some_and(|ord| ord.is_lt()) {
+                                current = value.clone();
+                            }
+                        }
+                        Ok(Some(current))
+                    }
+                    AggregateFunction::Max => {
+                        let mut current = values[0].clone();
+                        for value in values.into_iter().skip(1) {
+                            if value.partial_cmp(&current).is_some_and(|ord| ord.is_gt()) {
+                                current = value.clone();
+                            }
+                        }
+                        Ok(Some(current))
+                    }
+                    AggregateFunction::Sum => {
+                        let mut int_sum: i64 = 0;
+                        let mut float_sum: f64 = 0.0;
+                        let mut has_float = false;
+
+                        for value in values {
+                            match value {
+                                Value::Integer(i) => {
+                                    int_sum += *i as i64;
+                                    float_sum += *i as f64;
+                                }
+                                Value::Float(f) => {
+                                    has_float = true;
+                                    float_sum += *f;
+                                }
+                                _ => {
+                                    return Err(HematiteError::ParseError(format!(
+                                        "SUM() requires numeric values, found {:?}",
+                                        value
+                                    )))
+                                }
+                            }
+                        }
+
+                        if has_float {
+                            Ok(Some(Value::Float(float_sum)))
+                        } else {
+                            Ok(Some(Value::Integer(int_sum as i32)))
+                        }
+                    }
+                    AggregateFunction::Avg => {
+                        let mut sum: f64 = 0.0;
+                        let count = values.len() as f64;
+
+                        for value in values {
+                            match value {
+                                Value::Integer(i) => sum += *i as f64,
+                                Value::Float(f) => sum += *f,
+                                _ => {
+                                    return Err(HematiteError::ParseError(format!(
+                                        "AVG() requires numeric values, found {:?}",
+                                        value
+                                    )))
+                                }
+                            }
+                        }
+
+                        Ok(Some(Value::Float(sum / count)))
+                    }
+                }
+            }
+            _ => Ok(None),
         }
     }
 }
@@ -279,17 +399,20 @@ impl QueryExecutor for SelectExecutor {
             filtered_rows.truncate(limit);
         }
 
-        // Aggregate COUNT(*) after filtering and ordering.
+        // Aggregate scalar functions after filtering and ordering.
         if self
             .statement
             .columns
             .iter()
-            .any(|item| matches!(item, SelectItem::CountAll))
+            .any(|item| matches!(item, SelectItem::CountAll | SelectItem::Aggregate { .. }))
         {
+            let aggregate_value = self
+                .evaluate_aggregate(ctx, &filtered_rows)?
+                .unwrap_or(Value::Null);
             return Ok(QueryResult {
                 affected_rows: 1,
                 columns: self.get_column_names(ctx),
-                rows: vec![vec![Value::Integer(filtered_rows.len() as i32)]],
+                rows: vec![vec![aggregate_value]],
             });
         }
 

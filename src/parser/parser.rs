@@ -97,13 +97,16 @@ impl Parser {
                         self.consume_token(&Token::RightParen)?;
                         columns.push(SelectItem::CountAll);
                     }
+                    Token::Sum | Token::Avg | Token::Min | Token::Max => {
+                        columns.push(self.parse_aggregate_select_item()?);
+                    }
                     Token::Identifier(name) => {
                         self.consume_token(&Token::Identifier(name.clone()))?;
                         columns.push(SelectItem::Column(name));
                     }
                     _ => {
                         return Err(HematiteError::ParseError(format!(
-                            "Expected column name or COUNT(*), found: {:?}",
+                            "Expected column name or aggregate, found: {:?}",
                             token
                         )))
                     }
@@ -119,6 +122,39 @@ impl Parser {
         }
 
         Ok(columns)
+    }
+
+    fn parse_aggregate_select_item(&mut self) -> Result<SelectItem> {
+        let function = match self.peek_token()? {
+            Token::Sum => {
+                self.consume_token(&Token::Sum)?;
+                AggregateFunction::Sum
+            }
+            Token::Avg => {
+                self.consume_token(&Token::Avg)?;
+                AggregateFunction::Avg
+            }
+            Token::Min => {
+                self.consume_token(&Token::Min)?;
+                AggregateFunction::Min
+            }
+            Token::Max => {
+                self.consume_token(&Token::Max)?;
+                AggregateFunction::Max
+            }
+            token => {
+                return Err(HematiteError::ParseError(format!(
+                    "Expected aggregate function, found: {:?}",
+                    token
+                )))
+            }
+        };
+
+        self.consume_token(&Token::LeftParen)?;
+        let column = self.parse_identifier()?;
+        self.consume_token(&Token::RightParen)?;
+
+        Ok(SelectItem::Aggregate { function, column })
     }
 
     fn parse_table_reference(&mut self) -> Result<TableReference> {

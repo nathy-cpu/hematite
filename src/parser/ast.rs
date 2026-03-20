@@ -28,6 +28,18 @@ pub enum SelectItem {
     Wildcard,
     Column(String),
     CountAll,
+    Aggregate {
+        function: AggregateFunction,
+        column: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggregateFunction {
+    Sum,
+    Avg,
+    Min,
+    Max,
 }
 
 #[derive(Debug, Clone)]
@@ -166,6 +178,16 @@ impl SelectStatement {
         };
 
         // Validate columns
+        let has_aggregate = self
+            .columns
+            .iter()
+            .any(|item| matches!(item, SelectItem::CountAll | SelectItem::Aggregate { .. }));
+        if has_aggregate && self.columns.len() > 1 {
+            return Err(HematiteError::ParseError(
+                "Aggregate select items cannot be combined with other select items yet".to_string(),
+            ));
+        }
+
         let has_count_all = self
             .columns
             .iter()
@@ -184,6 +206,15 @@ impl SelectStatement {
                         return Err(HematiteError::ParseError(format!(
                             "Column '{}' does not exist in table '{}'",
                             name, table_name
+                        )));
+                    }
+                }
+                SelectItem::Aggregate { column, .. } => {
+                    if table.get_column_by_name(column).is_none() {
+                        let TableReference::Table(table_name) = &self.from;
+                        return Err(HematiteError::ParseError(format!(
+                            "Column '{}' does not exist in table '{}'",
+                            column, table_name
                         )));
                     }
                 }
