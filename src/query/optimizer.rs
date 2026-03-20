@@ -2,7 +2,7 @@
 
 use crate::catalog::Schema;
 use crate::error::Result;
-use crate::query::planner::{QueryPlan, SelectAnalysis};
+use crate::query::planner::{IndexType, QueryPlan, SelectAnalysis};
 
 #[derive(Debug, Clone)]
 pub struct QueryOptimizer {
@@ -15,14 +15,28 @@ impl QueryOptimizer {
     }
 
     pub fn optimize(&self, plan: QueryPlan) -> Result<QueryPlan> {
-        // For now, we'll implement basic optimizations
-        // In a more sophisticated system, this would include:
-        // - Predicate pushdown
-        // - Join reordering
-        // - Index selection
-        // - Query rewrite
+        let mut optimized_plan = plan;
 
-        Ok(plan)
+        if let Some(analysis) = optimized_plan.select_analysis.clone() {
+            // Sanity-check that the analyzed table still exists in the catalog snapshot used by the planner.
+            let _table = self
+                .catalog
+                .get_table_by_name(&analysis.table_name)
+                .ok_or_else(|| {
+                    crate::error::HematiteError::ParseError(format!(
+                        "Table '{}' not found during optimization",
+                        analysis.table_name
+                    ))
+                })?;
+
+            let optimizations = self.optimize_select(&analysis)?;
+            let reduction = optimizations.estimated_cost_reduction.clamp(0.0, 0.9);
+            optimized_plan.estimated_cost =
+                (optimized_plan.estimated_cost * (1.0 - reduction)).max(1.0);
+            optimized_plan.optimizations = Some(optimizations);
+        }
+
+        Ok(optimized_plan)
     }
 
     pub fn optimize_select(&self, analysis: &SelectAnalysis) -> Result<SelectOptimizations> {
@@ -47,8 +61,9 @@ impl QueryOptimizer {
     ) -> Result<()> {
         // Check if we can use indexes for WHERE conditions
         for index_usage in &analysis.usable_indexes {
-            if index_usage.selectivity < 0.1 {
-                // Highly selective index - recommend index scan
+            if matches!(index_usage.index_type, IndexType::PrimaryKey)
+                || index_usage.selectivity <= 0.1
+            {
                 optimizations.recommend_index_scan(index_usage.column_id.clone());
             }
         }
@@ -125,4 +140,3 @@ impl SelectOptimizations {
         self.suggested_indexes.push(column_id);
     }
 }
-

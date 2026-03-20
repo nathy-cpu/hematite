@@ -7,17 +7,22 @@ use crate::query::executor::{
     CreateExecutor, DeleteExecutor, DropExecutor, InsertExecutor, QueryExecutor, SelectExecutor,
     UpdateExecutor,
 };
+use crate::query::optimizer::{QueryOptimizer, SelectOptimizations};
 use crate::HematiteError;
 
 pub struct QueryPlan {
     pub executor: Box<dyn QueryExecutor>,
     pub estimated_cost: f64,
+    pub select_analysis: Option<SelectAnalysis>,
+    pub optimizations: Option<SelectOptimizations>,
 }
 
 impl std::fmt::Debug for QueryPlan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("QueryPlan")
             .field("estimated_cost", &self.estimated_cost)
+            .field("select_analysis", &self.select_analysis)
+            .field("optimizations", &self.optimizations)
             .field("executor", &"<QueryExecutor>")
             .finish()
     }
@@ -37,14 +42,17 @@ impl QueryPlanner {
         // Validate statement against catalog
         statement.validate(&self.catalog)?;
 
-        match statement {
+        let plan = match statement {
             Statement::Select(select) => self.plan_select(select),
             Statement::Update(update) => self.plan_update(update),
             Statement::Insert(insert) => self.plan_insert(insert),
             Statement::Delete(delete) => self.plan_delete(delete),
             Statement::Create(create) => self.plan_create(create),
             Statement::Drop(drop) => self.plan_drop(drop),
-        }
+        }?;
+
+        let optimizer = QueryOptimizer::new(self.catalog.clone());
+        optimizer.optimize(plan)
     }
 
     fn plan_select(&self, statement: SelectStatement) -> Result<QueryPlan> {
@@ -60,6 +68,8 @@ impl QueryPlanner {
         Ok(QueryPlan {
             executor,
             estimated_cost,
+            select_analysis: Some(analysis),
+            optimizations: None,
         })
     }
 
@@ -71,6 +81,8 @@ impl QueryPlanner {
         Ok(QueryPlan {
             executor,
             estimated_cost,
+            select_analysis: None,
+            optimizations: None,
         })
     }
 
@@ -84,6 +96,8 @@ impl QueryPlanner {
         Ok(QueryPlan {
             executor,
             estimated_cost,
+            select_analysis: None,
+            optimizations: None,
         })
     }
 
@@ -94,6 +108,8 @@ impl QueryPlanner {
         Ok(QueryPlan {
             executor,
             estimated_cost,
+            select_analysis: None,
+            optimizations: None,
         })
     }
 
@@ -104,6 +120,8 @@ impl QueryPlanner {
         Ok(QueryPlan {
             executor,
             estimated_cost,
+            select_analysis: None,
+            optimizations: None,
         })
     }
 
@@ -114,6 +132,8 @@ impl QueryPlanner {
         Ok(QueryPlan {
             executor,
             estimated_cost,
+            select_analysis: None,
+            optimizations: None,
         })
     }
 

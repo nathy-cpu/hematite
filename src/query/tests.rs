@@ -294,7 +294,13 @@ mod planner_tests {
         let statement = SelectStatement {
             columns: vec![SelectItem::Column("id".to_string())],
             from: TableReference::Table("users".to_string()),
-            where_clause: None,
+            where_clause: Some(WhereClause {
+                conditions: vec![Condition::Comparison {
+                    left: Expression::Column("id".to_string()),
+                    operator: ComparisonOperator::Equal,
+                    right: Expression::Literal(Value::Integer(1)),
+                }],
+            }),
             order_by: Vec::new(),
             limit: None,
         };
@@ -302,6 +308,11 @@ mod planner_tests {
         let plan = planner.plan(Statement::Select(statement))?;
 
         assert!(plan.estimated_cost > 0.0);
+        assert!(plan.select_analysis.is_some());
+        let optimizations = plan
+            .optimizations
+            .expect("select plans should be optimized");
+        assert_eq!(optimizations.recommended_index_scans.len(), 1);
         Ok(())
     }
 
