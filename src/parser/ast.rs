@@ -162,6 +162,10 @@ impl Statement {
         }
     }
 
+    pub fn is_read_only(&self) -> bool {
+        matches!(self, Statement::Select(_))
+    }
+
     pub fn mutates_schema(&self) -> bool {
         matches!(self, Statement::Create(_) | Statement::Drop(_))
     }

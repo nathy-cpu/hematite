@@ -61,7 +61,7 @@ mod executor_tests {
             println!("✓ Row {}: {:?}", i, row);
         }
 
-        let mut ctx = ExecutionContext::new(&catalog, &mut storage);
+        let mut ctx = ExecutionContext::for_read(&catalog, &mut storage);
 
         let statement = SelectStatement {
             columns: vec![SelectItem::Column("id".to_string())],
@@ -125,7 +125,7 @@ mod executor_tests {
             "users",
             vec![Value::Integer(3), Value::Text("Charlie".to_string())],
         )?;
-        let mut ctx = ExecutionContext::new(&catalog, &mut storage);
+        let mut ctx = ExecutionContext::for_mutation(&catalog, &mut storage);
 
         let statement = SelectStatement {
             columns: vec![SelectItem::Column("id".to_string())],
@@ -168,7 +168,7 @@ mod executor_tests {
         let mut storage = StorageEngine::new(db.path())?;
         // Create table in storage as well
         let _ = storage.create_table("users")?;
-        let mut ctx = ExecutionContext::new(&catalog, &mut storage);
+        let mut ctx = ExecutionContext::for_mutation(&catalog, &mut storage);
 
         let statement = InsertStatement {
             table: "users".to_string(),
@@ -193,7 +193,7 @@ mod executor_tests {
         let catalog = Schema::new();
         let db = TestDbFile::new("_test_create_executor");
         let mut storage = StorageEngine::new(db.path())?;
-        let mut ctx = ExecutionContext::new(&catalog, &mut storage);
+        let mut ctx = ExecutionContext::for_mutation(&catalog, &mut storage);
 
         let statement = CreateStatement {
             table: "test_table".to_string(),

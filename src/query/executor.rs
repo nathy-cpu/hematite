@@ -20,7 +20,14 @@ pub struct ExecutionContext<'a> {
 }
 
 impl<'a> ExecutionContext<'a> {
-    pub fn new(catalog: &Schema, storage: &'a mut StorageEngine) -> Self {
+    pub fn for_read(catalog: &Schema, storage: &'a mut StorageEngine) -> Self {
+        Self {
+            catalog: catalog.clone(),
+            storage,
+        }
+    }
+
+    pub fn for_mutation(catalog: &Schema, storage: &'a mut StorageEngine) -> Self {
         Self {
             catalog: catalog.clone(),
             storage,

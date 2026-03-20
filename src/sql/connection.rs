@@ -23,6 +23,41 @@ impl Connection {
         &mut self,
         statement: crate::parser::ast::Statement,
     ) -> Result<QueryResult> {
+        if statement.is_read_only() {
+            return self.execute_read_statement(statement);
+        }
+
+        self.execute_mutating_statement(statement)
+    }
+
+    fn execute_read_statement(
+        &mut self,
+        statement: crate::parser::ast::Statement,
+    ) -> Result<QueryResult> {
+        let schema = {
+            let catalog_guard = self.catalog.lock().unwrap();
+            catalog_guard.clone_schema()
+        };
+
+        let planner = QueryPlanner::new(schema.clone());
+        let plan = planner.plan(statement)?;
+        let mut executor = plan.executor;
+
+        let result = {
+            let catalog_guard = self.catalog.lock().unwrap();
+            catalog_guard.with_storage(|storage| {
+                let mut ctx = ExecutionContext::for_read(&schema, storage);
+                executor.execute(&mut ctx)
+            })?
+        };
+
+        Ok(result)
+    }
+
+    fn execute_mutating_statement(
+        &mut self,
+        statement: crate::parser::ast::Statement,
+    ) -> Result<QueryResult> {
         let persists_schema = statement.mutates_schema();
         let schema = {
             let catalog_guard = self.catalog.lock().unwrap();
@@ -36,7 +71,7 @@ impl Connection {
         let (result, updated_schema) = {
             let catalog_guard = self.catalog.lock().unwrap();
             catalog_guard.with_storage(|storage| {
-                let mut ctx = ExecutionContext::new(&schema, storage);
+                let mut ctx = ExecutionContext::for_mutation(&schema, storage);
                 let result = executor.execute(&mut ctx)?;
                 Ok((result, ctx.catalog))
             })?
