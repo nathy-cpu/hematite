@@ -71,7 +71,10 @@ mod executor_tests {
             limit: None,
         };
 
-        let mut executor = SelectExecutor::new(statement);
+        let mut executor = SelectExecutor::new(
+            statement,
+            crate::query::planner::SelectAccessPath::FullTableScan,
+        );
         let result = executor.execute(&mut ctx)?;
 
         println!("✓ Query result columns: {:?}", result.columns);
@@ -135,7 +138,10 @@ mod executor_tests {
             limit: None,
         };
 
-        let mut executor = SelectExecutor::new(statement);
+        let mut executor = SelectExecutor::new(
+            statement,
+            crate::query::planner::SelectAccessPath::FullTableScan,
+        );
         let result = executor.execute(&mut ctx)?;
 
         assert_eq!(result.columns, vec!["id"]);

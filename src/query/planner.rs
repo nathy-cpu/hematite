@@ -140,7 +140,7 @@ impl QueryPlanner {
         let node = self.build_select_plan_node(&statement, &analysis);
 
         // Create executor based on analysis
-        let executor = Box::new(SelectExecutor::new(statement));
+        let executor = Box::new(SelectExecutor::new(statement, node.access_path.clone()));
 
         // Estimate cost (simplified cost model)
         let estimated_cost = self.estimate_select_cost(&analysis);

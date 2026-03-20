@@ -3,6 +3,7 @@
 use crate::catalog::{Column, DataType, Schema, Table, Value};
 use crate::error::{HematiteError, Result};
 use crate::parser::ast::*;
+use crate::query::planner::SelectAccessPath;
 use crate::storage::StorageEngine;
 use std::cmp::Ordering;
 
@@ -42,11 +43,15 @@ pub trait QueryExecutor {
 #[derive(Debug, Clone)]
 pub struct SelectExecutor {
     pub statement: SelectStatement,
+    pub access_path: SelectAccessPath,
 }
 
 impl SelectExecutor {
-    pub fn new(statement: SelectStatement) -> Self {
-        Self { statement }
+    pub fn new(statement: SelectStatement, access_path: SelectAccessPath) -> Self {
+        Self {
+            statement,
+            access_path,
+        }
     }
 
     fn evaluate_expression(
@@ -397,13 +402,21 @@ impl QueryExecutor for SelectExecutor {
             HematiteError::ParseError(format!("Table '{}' not found", table_name))
         })?;
 
-        let all_rows = if let Some(primary_key_values) = self.extract_primary_key_lookup(table) {
-            ctx.storage
-                .lookup_row_by_primary_key(table, &primary_key_values)?
-                .map(|row| vec![row.values])
-                .unwrap_or_default()
-        } else {
-            ctx.storage.read_from_table(&table_name)?
+        let all_rows = match self.access_path {
+            SelectAccessPath::PrimaryKeyLookup => {
+                let primary_key_values =
+                    self.extract_primary_key_lookup(table).ok_or_else(|| {
+                        HematiteError::InternalError(
+                            "Planner selected primary-key lookup without a matching predicate"
+                                .to_string(),
+                        )
+                    })?;
+                ctx.storage
+                    .lookup_row_by_primary_key(table, &primary_key_values)?
+                    .map(|row| vec![row.values])
+                    .unwrap_or_default()
+            }
+            SelectAccessPath::FullTableScan => ctx.storage.read_from_table(&table_name)?,
         };
 
         // Apply WHERE clause filtering
@@ -694,13 +707,16 @@ impl QueryExecutor for UpdateExecutor {
             })?;
 
         let all_rows = ctx.storage.read_rows_with_ids(&self.statement.table)?;
-        let select_executor = SelectExecutor::new(SelectStatement {
-            columns: vec![SelectItem::Wildcard],
-            from: TableReference::Table(self.statement.table.clone()),
-            where_clause: self.statement.where_clause.clone(),
-            order_by: Vec::new(),
-            limit: None,
-        });
+        let select_executor = SelectExecutor::new(
+            SelectStatement {
+                columns: vec![SelectItem::Wildcard],
+                from: TableReference::Table(self.statement.table.clone()),
+                where_clause: self.statement.where_clause.clone(),
+                order_by: Vec::new(),
+                limit: None,
+            },
+            SelectAccessPath::FullTableScan,
+        );
 
         let mut rewritten_rows = Vec::with_capacity(all_rows.len());
         let mut updated_rows = 0usize;
@@ -797,13 +813,16 @@ impl QueryExecutor for DeleteExecutor {
             })?;
 
         let all_rows = ctx.storage.read_rows_with_ids(&self.statement.table)?;
-        let select_executor = SelectExecutor::new(SelectStatement {
-            columns: vec![SelectItem::Wildcard],
-            from: TableReference::Table(self.statement.table.clone()),
-            where_clause: self.statement.where_clause.clone(),
-            order_by: Vec::new(),
-            limit: None,
-        });
+        let select_executor = SelectExecutor::new(
+            SelectStatement {
+                columns: vec![SelectItem::Wildcard],
+                from: TableReference::Table(self.statement.table.clone()),
+                where_clause: self.statement.where_clause.clone(),
+                order_by: Vec::new(),
+                limit: None,
+            },
+            SelectAccessPath::FullTableScan,
+        );
 
         let mut survivors = Vec::new();
         let mut deleted_rows = 0usize;
