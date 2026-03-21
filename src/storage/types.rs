@@ -80,11 +80,19 @@ pub struct StorageStats {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PagerIntegrityReport {
+    pub free_page_count: usize,
+    pub checksummed_page_count: usize,
+    pub verified_checksum_pages: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageIntegrityReport {
     pub table_count: usize,
     pub live_page_count: usize,
     pub free_page_count: usize,
     pub total_rows: u64,
+    pub pager: PagerIntegrityReport,
 }
 
 #[derive(Debug, Clone, PartialEq)]

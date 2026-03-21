@@ -285,6 +285,8 @@ impl StorageEngine {
     }
 
     pub fn validate_integrity(&mut self) -> Result<StorageIntegrityReport> {
+        let pager_report = self.pager.validate_integrity()?;
+
         let metadata_entries = self
             .table_manager
             .get_all_metadata()
@@ -292,22 +294,12 @@ impl StorageEngine {
             .map(|(name, metadata)| (name.clone(), metadata.clone()))
             .collect::<Vec<_>>();
 
-        let mut free_pages = HashSet::new();
-        for &page_id in self.pager.free_pages() {
-            if page_id == DB_HEADER_PAGE_ID || page_id == STORAGE_METADATA_PAGE_ID {
-                return Err(crate::error::HematiteError::CorruptedData(format!(
-                    "Reserved page {} cannot be marked free",
-                    page_id.as_u32()
-                )));
-            }
-
-            if !free_pages.insert(page_id) {
-                return Err(crate::error::HematiteError::CorruptedData(format!(
-                    "Duplicate free page {} detected",
-                    page_id.as_u32()
-                )));
-            }
-        }
+        let free_pages = self
+            .pager
+            .free_pages()
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
 
         let mut live_pages = HashSet::new();
         let mut total_rows = 0u64;
@@ -364,8 +356,9 @@ impl StorageEngine {
         Ok(StorageIntegrityReport {
             table_count: self.table_manager.get_all_metadata().len(),
             live_page_count: live_pages.len(),
-            free_page_count: free_pages.len(),
+            free_page_count: pager_report.free_page_count,
             total_rows,
+            pager: pager_report,
         })
     }
 

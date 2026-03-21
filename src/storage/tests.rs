@@ -361,6 +361,8 @@ mod mod_tests {
         assert_eq!(report.table_count, 1);
         assert_eq!(report.live_page_count, 1);
         assert_eq!(report.total_rows, 2);
+        assert_eq!(report.pager.free_page_count, 0);
+        assert!(report.pager.verified_checksum_pages >= 1);
 
         Ok(())
     }
@@ -372,6 +374,7 @@ mod mod_tests {
 
         let root_page_id = storage.create_table("users")?;
         let _extra_page_id = storage.allocate_page()?;
+        storage.flush()?;
         storage.deallocate_page(root_page_id)?;
 
         let err = storage.validate_integrity().unwrap_err();
@@ -471,6 +474,38 @@ mod mod_tests {
 
         let mut reopened = StorageEngine::new(test_db.path())?;
         let err = reopened.read_page(corrupted_page_id).unwrap_err();
+        assert!(err.to_string().contains("Page checksum mismatch"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_storage_integrity_detects_checksum_corruption() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_storage_integrity_checksum_corrupt");
+
+        let corrupted_page_id = {
+            let mut storage = StorageEngine::new(test_db.path())?;
+            let page_id = storage.allocate_page()?;
+            let mut page = Page::new(page_id);
+            page.data[0..4].copy_from_slice(&[7, 7, 7, 7]);
+            storage.write_page(page)?;
+            storage.flush()?;
+            page_id
+        };
+
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(test_db.path())?;
+            let offset = 64 + (corrupted_page_id.as_u32() as u64 * PAGE_SIZE as u64);
+            file.seek(SeekFrom::Start(offset))?;
+            file.write_all(&[9])?;
+            file.flush()?;
+        }
+
+        let mut reopened = StorageEngine::new(test_db.path())?;
+        let err = reopened.validate_integrity().unwrap_err();
         assert!(err.to_string().contains("Page checksum mismatch"));
 
         Ok(())

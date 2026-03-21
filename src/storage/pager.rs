@@ -16,7 +16,8 @@
 
 use crate::error::Result;
 use crate::storage::{
-    buffer_pool::BufferPool, file_manager::FileManager, Page, PageId, STORAGE_METADATA_PAGE_ID,
+    buffer_pool::BufferPool, file_manager::FileManager, Page, PageId, PagerIntegrityReport,
+    DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -123,6 +124,95 @@ impl Pager {
 
     pub fn replace_checksums(&mut self, checksums: HashMap<PageId, u32>) {
         self.page_checksums = checksums;
+    }
+
+    pub fn validate_integrity(&mut self) -> Result<PagerIntegrityReport> {
+        let max_page_id_exclusive = self.file_manager.next_page_id();
+        let mut free_pages = HashSet::new();
+
+        for &page_id in self.file_manager.free_pages() {
+            if page_id == DB_HEADER_PAGE_ID || page_id == STORAGE_METADATA_PAGE_ID {
+                return Err(crate::error::HematiteError::CorruptedData(format!(
+                    "Reserved page {} cannot be marked free",
+                    page_id.as_u32()
+                )));
+            }
+
+            if page_id.as_u32() >= max_page_id_exclusive {
+                return Err(crate::error::HematiteError::CorruptedData(format!(
+                    "Free page {} exceeds allocated page range (next_page_id={})",
+                    page_id.as_u32(),
+                    max_page_id_exclusive
+                )));
+            }
+
+            if !free_pages.insert(page_id) {
+                return Err(crate::error::HematiteError::CorruptedData(format!(
+                    "Duplicate free page {} detected",
+                    page_id.as_u32()
+                )));
+            }
+        }
+
+        if self.page_checksums.contains_key(&STORAGE_METADATA_PAGE_ID) {
+            return Err(crate::error::HematiteError::CorruptedData(format!(
+                "Storage metadata page {} must not have pager checksum metadata",
+                STORAGE_METADATA_PAGE_ID.as_u32()
+            )));
+        }
+
+        let checksummed_pages = self
+            .page_checksums
+            .iter()
+            .map(|(page_id, checksum)| (*page_id, *checksum))
+            .collect::<Vec<_>>();
+
+        let mut verified_checksum_pages = 0usize;
+        for (page_id, expected_checksum) in checksummed_pages {
+            if page_id.as_u32() >= max_page_id_exclusive {
+                return Err(crate::error::HematiteError::CorruptedData(format!(
+                    "Checksum entry for page {} exceeds allocated page range (next_page_id={})",
+                    page_id.as_u32(),
+                    max_page_id_exclusive
+                )));
+            }
+
+            if free_pages.contains(&page_id) {
+                return Err(crate::error::HematiteError::CorruptedData(format!(
+                    "Page {} has checksum metadata but is marked free",
+                    page_id.as_u32()
+                )));
+            }
+
+            let page = if self.dirty_pages.contains(&page_id) {
+                self.buffer_pool.get(page_id).cloned().ok_or_else(|| {
+                    crate::error::HematiteError::StorageError(format!(
+                        "Dirty page {} missing from buffer pool",
+                        page_id.as_u32()
+                    ))
+                })?
+            } else {
+                self.file_manager.read_page(page_id)?
+            };
+
+            let actual_checksum = Self::calculate_page_checksum(&page);
+            if actual_checksum != expected_checksum {
+                return Err(crate::error::HematiteError::CorruptedData(format!(
+                    "Page checksum mismatch for page {}: expected {}, got {}",
+                    page_id.as_u32(),
+                    expected_checksum,
+                    actual_checksum
+                )));
+            }
+
+            verified_checksum_pages += 1;
+        }
+
+        Ok(PagerIntegrityReport {
+            free_page_count: free_pages.len(),
+            checksummed_page_count: self.page_checksums.len(),
+            verified_checksum_pages,
+        })
     }
 
     fn calculate_page_checksum(page: &Page) -> u32 {

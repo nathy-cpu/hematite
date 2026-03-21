@@ -149,6 +149,10 @@ impl FileManager {
         self.free_list.replace(free_pages);
     }
 
+    pub(crate) fn next_page_id(&self) -> u32 {
+        self.next_page_id
+    }
+
     fn compact_trailing_free_pages(&mut self) -> Result<()> {
         let minimum_next_page_id = STORAGE_METADATA_PAGE_ID.as_u32() + 1;
         self.free_list
