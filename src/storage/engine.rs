@@ -742,15 +742,12 @@ impl StorageEngine {
 
     // Proper table operations using page-based storage
     pub fn create_table(&mut self, table_name: &str) -> Result<PageId> {
-        // Allocate root page for the table
         let root_page_id = self.allocate_page()?;
-
-        // Initialize table metadata
         self.table_manager.create_table(table_name, root_page_id)?;
 
-        // Initialize root page as empty table data page
-        let root_page =
-            self.initialize_table_page(root_page_id, PageId::invalid(), PageId::invalid())?;
+        let mut root_page = Page::new(root_page_id);
+        let root = BTreeNode::new_leaf(root_page_id);
+        root.to_page(&mut root_page)?;
         self.write_page(root_page)?;
 
         Ok(root_page_id)
@@ -863,37 +860,106 @@ impl StorageEngine {
         row_id: u64,
         row: Vec<crate::catalog::Value>,
     ) -> Result<u64> {
+        self.insert_btree_row_with_id(table_name, root_page_id, row_id, row, true)?;
+        Ok(row_id)
+    }
+
+    fn insert_btree_row_with_id(
+        &mut self,
+        table_name: &str,
+        root_page_id: PageId,
+        row_id: u64,
+        row: Vec<crate::catalog::Value>,
+        advance_next_rowid: bool,
+    ) -> Result<()> {
         let key = BTreeKey::new(row_id.to_be_bytes().to_vec());
-        let value = BTreeValue::new(
+        let mut encoded =
             crate::storage::serialization::RowSerializer::serialize_stored_row(&StoredRow {
                 row_id,
                 values: row,
-            })?,
-        );
+            })?;
+        encoded.drain(0..4); // B-tree value payload stores row_id+values without length prefix.
+        let value = BTreeValue::new(encoded);
 
-        let mut root_page = self.read_page(root_page_id)?;
-        let mut root = BTreeNode::from_page(root_page.clone())?;
-        if root.node_type != NodeType::Leaf {
-            return Err(crate::error::HematiteError::StorageError(
-                "Rowid B-tree insert for internal roots is not implemented yet".to_string(),
-            ));
+        let split_result = self.insert_btree_recursive(root_page_id, key, value)?;
+        if let Some((split_key, split_page_id)) = split_result {
+            let new_root_page_id = self.allocate_page()?;
+            let mut new_root = BTreeNode::new_internal(new_root_page_id);
+            new_root.keys.push(split_key);
+            new_root.children.push(root_page_id);
+            new_root.children.push(split_page_id);
+
+            let mut new_root_page = Page::new(new_root_page_id);
+            new_root.to_page(&mut new_root_page)?;
+            self.write_page(new_root_page)?;
+
+            if let Some(metadata) = self.table_manager.get_table_metadata_mut(table_name) {
+                metadata.root_page_id = new_root_page_id;
+            }
         }
-        if root.keys.len() >= crate::btree::node::MAX_KEYS
-            || !root.can_insert_key_value(&key, &value)
-        {
-            return Err(crate::error::HematiteError::StorageError(
-                "Rowid B-tree root split is not implemented yet".to_string(),
-            ));
-        }
-        root.insert_leaf(key, value)?;
-        root.to_page(&mut root_page)?;
-        self.write_page(root_page)?;
 
         if let Some(metadata) = self.table_manager.get_table_metadata_mut(table_name) {
             metadata.row_count += 1;
-            metadata.next_row_id += 1;
+            if advance_next_rowid {
+                metadata.next_row_id += 1;
+            }
         }
-        Ok(row_id)
+
+        Ok(())
+    }
+
+    fn insert_btree_recursive(
+        &mut self,
+        page_id: PageId,
+        key: BTreeKey,
+        value: BTreeValue,
+    ) -> Result<Option<(BTreeKey, PageId)>> {
+        let mut page = self.read_page(page_id)?;
+        let mut node = BTreeNode::from_page(page.clone())?;
+
+        match node.node_type {
+            NodeType::Leaf => {
+                if let Some(existing_index) = node.keys.iter().position(|k| k == &key) {
+                    node.values[existing_index] = value;
+                    node.to_page(&mut page)?;
+                    self.write_page(page)?;
+                    return Ok(None);
+                }
+
+                if node.keys.len() < crate::btree::node::MAX_KEYS
+                    && node.can_insert_key_value(&key, &value)
+                {
+                    node.insert_leaf(key, value)?;
+                    node.to_page(&mut page)?;
+                    self.write_page(page)?;
+                    Ok(None)
+                } else {
+                    let (new_key, new_page_id) = node.split_leaf(self, key, value)?;
+                    Ok(Some((new_key, new_page_id)))
+                }
+            }
+            NodeType::Internal => {
+                let child_page_id = node.find_child(&key);
+                let split_result = self.insert_btree_recursive(child_page_id, key, value)?;
+
+                if let Some((split_key, split_page_id)) = split_result {
+                    if node.keys.len() < crate::btree::node::MAX_KEYS
+                        && node.can_insert_key_child(&split_key)
+                    {
+                        node.insert_internal(split_key, split_page_id)?;
+                        node.to_page(&mut page)?;
+                        self.write_page(page)?;
+                        Ok(None)
+                    } else {
+                        let (new_key, new_page_id) =
+                            node.split_internal(self, split_key, split_page_id)?;
+                        Ok(Some((new_key, new_page_id)))
+                    }
+                } else {
+                    Ok(None)
+                }
+            }
+        }
     }
 
     pub fn replace_table_rows(&mut self, table_name: &str, rows: Vec<StoredRow>) -> Result<()> {
@@ -910,24 +976,41 @@ impl StorageEngine {
             metadata.root_page_id
         };
 
-        let mut page_ids = vec![root_page_id];
-        let mut current_page_id = root_page_id;
-        loop {
-            let page = self.read_page(current_page_id)?;
-            let header = self.table_manager.read_page_header(&page)?;
-            if header.next_page_id == PageId::invalid() {
-                break;
+        match self.table_storage_kind(root_page_id)? {
+            TableStorageKind::LegacyPageChain => {
+                let mut page_ids = vec![root_page_id];
+                let mut current_page_id = root_page_id;
+                loop {
+                    let page = self.read_page(current_page_id)?;
+                    let header = self.table_manager.read_page_header(&page)?;
+                    if header.next_page_id == PageId::invalid() {
+                        break;
+                    }
+                    current_page_id = header.next_page_id;
+                    page_ids.push(current_page_id);
+                }
+
+                let root_page =
+                    self.initialize_table_page(root_page_id, PageId::invalid(), PageId::invalid())?;
+                self.write_page(root_page)?;
+
+                for page_id in page_ids.into_iter().skip(1) {
+                    self.deallocate_page(page_id)?;
+                }
             }
-            current_page_id = header.next_page_id;
-            page_ids.push(current_page_id);
-        }
-
-        let root_page =
-            self.initialize_table_page(root_page_id, PageId::invalid(), PageId::invalid())?;
-        self.write_page(root_page)?;
-
-        for page_id in page_ids.into_iter().skip(1) {
-            self.deallocate_page(page_id)?;
+            TableStorageKind::RowidBtree => {
+                let mut page_ids = Vec::new();
+                self.collect_btree_page_ids(root_page_id, &mut page_ids)?;
+                for page_id in page_ids {
+                    if page_id != root_page_id {
+                        self.deallocate_page(page_id)?;
+                    }
+                }
+                let mut root_page = Page::new(root_page_id);
+                let root = BTreeNode::new_leaf(root_page_id);
+                root.to_page(&mut root_page)?;
+                self.write_page(root_page)?;
+            }
         }
 
         let next_row_id = self
@@ -1039,23 +1122,39 @@ impl StorageEngine {
         rowid: u64,
     ) -> Result<bool> {
         let key = BTreeKey::new(rowid.to_be_bytes().to_vec());
-        let mut root_page = self.read_page(root_page_id)?;
-        let mut root = BTreeNode::from_page(root_page.clone())?;
-        if root.node_type != NodeType::Leaf {
-            return Err(crate::error::HematiteError::StorageError(
-                "Rowid B-tree delete for internal roots is not implemented yet".to_string(),
-            ));
-        }
-        let deleted = root.delete_from_leaf(&key)?.is_some();
+        let deleted = self.delete_btree_recursive(root_page_id, &key)?;
         if !deleted {
             return Ok(false);
         }
-        root.to_page(&mut root_page)?;
-        self.write_page(root_page)?;
         if let Some(metadata) = self.table_manager.get_table_metadata_mut(table_name) {
             metadata.row_count = metadata.row_count.saturating_sub(1);
         }
         Ok(true)
+    }
+
+    fn delete_btree_recursive(&mut self, page_id: PageId, key: &BTreeKey) -> Result<bool> {
+        let mut page = self.read_page(page_id)?;
+        let mut node = BTreeNode::from_page(page.clone())?;
+
+        match node.node_type {
+            NodeType::Leaf => {
+                let deleted = node.delete_from_leaf(key)?.is_some();
+                if deleted {
+                    node.to_page(&mut page)?;
+                    self.write_page(page)?;
+                }
+                Ok(deleted)
+            }
+            NodeType::Internal => {
+                let child_page_id = node.find_child(key);
+                let deleted = self.delete_btree_recursive(child_page_id, key)?;
+                if deleted {
+                    node.to_page(&mut page)?;
+                    self.write_page(page)?;
+                }
+                Ok(deleted)
+            }
+        }
     }
 
     fn insert_stored_row(&mut self, table_name: &str, row: StoredRow) -> Result<()> {
@@ -1072,62 +1171,79 @@ impl StorageEngine {
             metadata.root_page_id
         };
 
-        let serialized_row =
-            crate::storage::serialization::RowSerializer::serialize_stored_row(&row)?;
-        if TABLE_PAGE_HEADER_SIZE + serialized_row.len() > crate::storage::PAGE_SIZE {
-            return Err(crate::error::HematiteError::StorageError(
-                "Row too large to fit in a table page".to_string(),
-            ));
-        }
-
-        let mut current_page_id = root_page_id;
-
-        loop {
-            let mut page = self.read_page(current_page_id)?;
-            let mut header = self.table_manager.read_page_header(&page)?;
-            let offset = Self::row_data_end(&page, header.row_count)?;
-
-            if header.row_count < crate::storage::MAX_ROWS_PER_PAGE as u32
-                && offset + serialized_row.len() <= crate::storage::PAGE_SIZE
-            {
-                page.data[offset..offset + serialized_row.len()].copy_from_slice(&serialized_row);
-                header.row_count += 1;
-                self.table_manager.write_page_header(&mut page, &header)?;
-                self.write_page(page)?;
-
-                if let Some(metadata) = self.table_manager.get_table_metadata_mut(table_name) {
-                    metadata.row_count += 1;
+        match self.table_storage_kind(root_page_id)? {
+            TableStorageKind::LegacyPageChain => {
+                let serialized_row =
+                    crate::storage::serialization::RowSerializer::serialize_stored_row(&row)?;
+                if TABLE_PAGE_HEADER_SIZE + serialized_row.len() > crate::storage::PAGE_SIZE {
+                    return Err(crate::error::HematiteError::StorageError(
+                        "Row too large to fit in a table page".to_string(),
+                    ));
                 }
 
-                return Ok(());
+                let mut current_page_id = root_page_id;
+                loop {
+                    let mut page = self.read_page(current_page_id)?;
+                    let mut header = self.table_manager.read_page_header(&page)?;
+                    let offset = Self::row_data_end(&page, header.row_count)?;
+
+                    if header.row_count < crate::storage::MAX_ROWS_PER_PAGE as u32
+                        && offset + serialized_row.len() <= crate::storage::PAGE_SIZE
+                    {
+                        page.data[offset..offset + serialized_row.len()]
+                            .copy_from_slice(&serialized_row);
+                        header.row_count += 1;
+                        self.table_manager.write_page_header(&mut page, &header)?;
+                        self.write_page(page)?;
+
+                        if let Some(metadata) =
+                            self.table_manager.get_table_metadata_mut(table_name)
+                        {
+                            metadata.row_count += 1;
+                        }
+
+                        return Ok(());
+                    }
+
+                    if header.next_page_id != PageId::invalid() {
+                        current_page_id = header.next_page_id;
+                        continue;
+                    }
+
+                    let new_page_id = self.allocate_page()?;
+                    let mut new_page = self.initialize_table_page(
+                        new_page_id,
+                        current_page_id,
+                        PageId::invalid(),
+                    )?;
+
+                    header.next_page_id = new_page_id;
+                    self.table_manager.write_page_header(&mut page, &header)?;
+                    self.write_page(page)?;
+
+                    new_page.data
+                        [TABLE_PAGE_HEADER_SIZE..TABLE_PAGE_HEADER_SIZE + serialized_row.len()]
+                        .copy_from_slice(&serialized_row);
+                    let mut new_header = self.table_manager.read_page_header(&new_page)?;
+                    new_header.row_count = 1;
+                    self.table_manager
+                        .write_page_header(&mut new_page, &new_header)?;
+                    self.write_page(new_page)?;
+
+                    if let Some(metadata) = self.table_manager.get_table_metadata_mut(table_name) {
+                        metadata.row_count += 1;
+                    }
+
+                    return Ok(());
+                }
             }
-
-            if header.next_page_id != PageId::invalid() {
-                current_page_id = header.next_page_id;
-                continue;
-            }
-
-            let new_page_id = self.allocate_page()?;
-            let mut new_page =
-                self.initialize_table_page(new_page_id, current_page_id, PageId::invalid())?;
-
-            header.next_page_id = new_page_id;
-            self.table_manager.write_page_header(&mut page, &header)?;
-            self.write_page(page)?;
-
-            new_page.data[TABLE_PAGE_HEADER_SIZE..TABLE_PAGE_HEADER_SIZE + serialized_row.len()]
-                .copy_from_slice(&serialized_row);
-            let mut new_header = self.table_manager.read_page_header(&new_page)?;
-            new_header.row_count = 1;
-            self.table_manager
-                .write_page_header(&mut new_page, &new_header)?;
-            self.write_page(new_page)?;
-
-            if let Some(metadata) = self.table_manager.get_table_metadata_mut(table_name) {
-                metadata.row_count += 1;
-            }
-
-            return Ok(());
+            TableStorageKind::RowidBtree => self.insert_btree_row_with_id(
+                table_name,
+                root_page_id,
+                row.row_id,
+                row.values,
+                false,
+            ),
         }
     }
 
@@ -1139,23 +1255,46 @@ impl StorageEngine {
             ))
         })?;
 
-        let mut current_page_id = metadata.root_page_id;
-        loop {
-            let page = self.read_page(current_page_id)?;
-            let header = self.table_manager.read_page_header(&page)?;
-            let next_page_id = header.next_page_id;
-            self.deallocate_page(current_page_id)?;
+        match self.table_storage_kind(metadata.root_page_id)? {
+            TableStorageKind::LegacyPageChain => {
+                let mut current_page_id = metadata.root_page_id;
+                loop {
+                    let page = self.read_page(current_page_id)?;
+                    let header = self.table_manager.read_page_header(&page)?;
+                    let next_page_id = header.next_page_id;
+                    self.deallocate_page(current_page_id)?;
 
-            if next_page_id == PageId::invalid() {
-                break;
+                    if next_page_id == PageId::invalid() {
+                        break;
+                    }
+
+                    current_page_id = next_page_id;
+                }
             }
-
-            current_page_id = next_page_id;
+            TableStorageKind::RowidBtree => {
+                let mut page_ids = Vec::new();
+                self.collect_btree_page_ids(metadata.root_page_id, &mut page_ids)?;
+                for page_id in page_ids {
+                    self.deallocate_page(page_id)?;
+                }
+            }
         }
 
         self.primary_key_indexes.remove(table_name);
         self.secondary_indexes.remove(table_name);
 
+        Ok(())
+    }
+
+    fn collect_btree_page_ids(&mut self, page_id: PageId, out: &mut Vec<PageId>) -> Result<()> {
+        out.push(page_id);
+        let page = self.read_page(page_id)?;
+        let node = BTreeNode::from_page(page)?;
+        if node.node_type == NodeType::Internal {
+            for child_page_id in node.children {
+                self.collect_btree_page_ids(child_page_id, out)?;
+            }
+        }
         Ok(())
     }
 

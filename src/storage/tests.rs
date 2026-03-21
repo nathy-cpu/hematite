@@ -244,6 +244,7 @@ mod database_tests {
 }
 
 mod mod_tests {
+    use crate::btree::{BTreeNode, BTreeValue, NodeType};
     use crate::catalog::Value;
     use crate::storage::*;
     use crate::test_utils::TestDbFile;
@@ -396,7 +397,14 @@ mod mod_tests {
         storage.write_page(page)?;
 
         let err = storage.validate_integrity().unwrap_err();
-        assert!(err.to_string().contains("Corrupted data"));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Corrupted data")
+                || msg.contains("Unsupported B-tree version")
+                || msg.contains("Invalid magic number")
+                || msg.contains("Invalid page type"),
+            "unexpected corruption error message: {msg}"
+        );
 
         Ok(())
     }
@@ -411,15 +419,24 @@ mod mod_tests {
         let _ = storage.insert_into_table("users", vec![Value::Integer(2)])?;
 
         let mut page = storage.read_page(root_page_id)?;
-        let mut offset = TABLE_PAGE_HEADER_SIZE;
+        let mut node = BTreeNode::from_page(page.clone())?;
+        assert_eq!(node.node_type, NodeType::Leaf);
+        assert!(node.values.len() >= 2);
 
-        let first_len = crate::storage::serialization::RowSerializer::read_row_length(
-            &page.data[offset..offset + 4],
+        let first = crate::storage::serialization::RowSerializer::deserialize_stored_row(
+            &node.values[0].data,
         )?;
-        offset += 4 + first_len;
+        let mut second = crate::storage::serialization::RowSerializer::deserialize_stored_row(
+            &node.values[1].data,
+        )?;
 
         // Corrupt second row's row_id to be <= first row_id.
-        page.data[offset + 4..offset + 12].copy_from_slice(&1u64.to_le_bytes());
+        second.row_id = first.row_id;
+        let mut corrupted =
+            crate::storage::serialization::RowSerializer::serialize_stored_row(&second)?;
+        corrupted.drain(0..4);
+        node.values[1] = BTreeValue::new(corrupted);
+        node.to_page(&mut page)?;
         storage.write_page(page)?;
 
         let err = storage.validate_integrity().unwrap_err();
@@ -547,7 +564,7 @@ mod mod_tests {
         let _ = storage.create_table("users")?;
 
         let payload = "x".repeat(500);
-        for i in 0..12 {
+        for i in 0..220 {
             let _ = storage.insert_into_table(
                 "users",
                 vec![Value::Integer(i), Value::Text(format!("{payload}-{i}"))],
@@ -560,13 +577,13 @@ mod mod_tests {
             .expect("table metadata should exist")
             .clone();
         let root_page = storage.read_page(metadata.root_page_id)?;
-        let root_header = storage.read_page_header(&root_page)?;
+        let root_node = BTreeNode::from_page(root_page)?;
 
-        assert_ne!(root_header.next_page_id, PageId::invalid());
-        assert_eq!(metadata.row_count, 12);
+        assert_eq!(root_node.node_type, NodeType::Internal);
+        assert_eq!(metadata.row_count, 220);
 
         let rows = storage.read_from_table("users")?;
-        assert_eq!(rows.len(), 12);
+        assert_eq!(rows.len(), 220);
         assert_eq!(
             rows.first(),
             Some(&vec![
@@ -577,8 +594,8 @@ mod mod_tests {
         assert_eq!(
             rows.last(),
             Some(&vec![
-                Value::Integer(11),
-                Value::Text(format!("{payload}-11"))
+                Value::Integer(219),
+                Value::Text(format!("{payload}-219"))
             ])
         );
 
