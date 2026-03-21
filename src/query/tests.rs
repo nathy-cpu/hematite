@@ -237,6 +237,61 @@ mod executor_tests {
     }
 
     #[test]
+    fn test_select_executor_rowid_lookup() -> Result<()> {
+        let mut catalog = Schema::new();
+        let columns = vec![
+            Column::new(
+                crate::catalog::ColumnId::new(1),
+                "id".to_string(),
+                DataType::Integer,
+            )
+            .primary_key(true),
+            Column::new(
+                crate::catalog::ColumnId::new(2),
+                "name".to_string(),
+                DataType::Text,
+            ),
+        ];
+        catalog.create_table("users".to_string(), columns)?;
+
+        let db = TestDbFile::new("_test_select_executor_rowid_lookup");
+        let mut storage = StorageEngine::new(db.path())?;
+        let _ = storage.create_table("users")?;
+
+        let rowid_1 = storage.insert_into_table(
+            "users",
+            vec![Value::Integer(1), Value::Text("Alice".to_string())],
+        )?;
+        let _rowid_2 = storage.insert_into_table(
+            "users",
+            vec![Value::Integer(2), Value::Text("Bob".to_string())],
+        )?;
+
+        let mut ctx = ExecutionContext::for_read(&catalog, &mut storage);
+        let statement = SelectStatement {
+            columns: vec![SelectItem::Column("id".to_string())],
+            from: TableReference::Table("users".to_string()),
+            where_clause: Some(WhereClause {
+                conditions: vec![Condition::Comparison {
+                    left: Expression::Column("rowid".to_string()),
+                    operator: ComparisonOperator::Equal,
+                    right: Expression::Literal(Value::Integer(rowid_1 as i32)),
+                }],
+            }),
+            order_by: Vec::new(),
+            limit: None,
+        };
+
+        let mut executor = SelectExecutor::new(
+            statement,
+            crate::query::planner::SelectAccessPath::RowIdLookup,
+        );
+        let result = executor.execute(&mut ctx)?;
+        assert_eq!(result.rows, vec![vec![Value::Integer(1)]]);
+        Ok(())
+    }
+
+    #[test]
     fn test_insert_executor() -> Result<()> {
         let mut catalog = Schema::new();
 
@@ -477,6 +532,50 @@ mod planner_tests {
             other => panic!("expected select plan node, got {:?}", other),
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_query_planner_select_uses_rowid_lookup() -> Result<()> {
+        let mut catalog = Schema::new();
+
+        let columns = vec![
+            crate::catalog::Column::new(
+                crate::catalog::ColumnId::new(1),
+                "id".to_string(),
+                DataType::Integer,
+            )
+            .primary_key(true),
+            crate::catalog::Column::new(
+                crate::catalog::ColumnId::new(2),
+                "name".to_string(),
+                DataType::Text,
+            ),
+        ];
+        catalog.create_table("users".to_string(), columns)?;
+
+        let planner = QueryPlanner::new(catalog);
+        let statement = SelectStatement {
+            columns: vec![SelectItem::Column("id".to_string())],
+            from: TableReference::Table("users".to_string()),
+            where_clause: Some(WhereClause {
+                conditions: vec![Condition::Comparison {
+                    left: Expression::Column("rowid".to_string()),
+                    operator: ComparisonOperator::Equal,
+                    right: Expression::Literal(Value::Integer(7)),
+                }],
+            }),
+            order_by: Vec::new(),
+            limit: None,
+        };
+
+        let plan = planner.plan(Statement::Select(statement))?;
+        match &plan.node {
+            PlanNode::Select(node) => {
+                assert_eq!(node.access_path, SelectAccessPath::RowIdLookup);
+            }
+            other => panic!("expected select plan node, got {:?}", other),
+        }
         Ok(())
     }
 

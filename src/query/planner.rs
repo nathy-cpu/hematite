@@ -1,6 +1,6 @@
 //! Query planning and optimization
 
-use crate::catalog::{Schema, Table};
+use crate::catalog::{Schema, Table, Value};
 use crate::error::Result;
 use crate::parser::ast::*;
 use crate::query::executor::{
@@ -54,6 +54,7 @@ pub struct SelectPlanNode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelectAccessPath {
     FullTableScan,
+    RowIdLookup,
     PrimaryKeyLookup,
     SecondaryIndexLookup(String),
 }
@@ -249,7 +250,9 @@ impl QueryPlanner {
         statement: &SelectStatement,
         analysis: &SelectAnalysis,
     ) -> SelectPlanNode {
-        let access_path = if analysis
+        let access_path = if self.extract_rowid_lookup(statement).is_some() {
+            SelectAccessPath::RowIdLookup
+        } else if analysis
             .usable_indexes
             .iter()
             .any(|usage| matches!(usage.index_type, IndexType::PrimaryKey))
@@ -309,6 +312,34 @@ impl QueryPlanner {
                 .map(|item| item.column.clone())
                 .collect(),
             limit: statement.limit,
+        }
+    }
+
+    fn extract_rowid_lookup(&self, statement: &SelectStatement) -> Option<u64> {
+        let where_clause = statement.where_clause.as_ref()?;
+        if where_clause.conditions.len() != 1 {
+            return None;
+        }
+
+        match &where_clause.conditions[0] {
+            Condition::Comparison {
+                left,
+                operator: ComparisonOperator::Equal,
+                right,
+            } => match (left, right) {
+                (Expression::Column(column_name), Expression::Literal(Value::Integer(v)))
+                    if column_name.eq_ignore_ascii_case("rowid") && *v >= 0 =>
+                {
+                    Some(*v as u64)
+                }
+                (Expression::Literal(Value::Integer(v)), Expression::Column(column_name))
+                    if column_name.eq_ignore_ascii_case("rowid") && *v >= 0 =>
+                {
+                    Some(*v as u64)
+                }
+                _ => None,
+            },
+            _ => None,
         }
     }
 

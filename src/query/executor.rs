@@ -425,6 +425,34 @@ impl SelectExecutor {
             _ => None,
         }
     }
+
+    fn extract_rowid_lookup(&self) -> Option<u64> {
+        let where_clause = self.statement.where_clause.as_ref()?;
+        if where_clause.conditions.len() != 1 {
+            return None;
+        }
+
+        match &where_clause.conditions[0] {
+            Condition::Comparison {
+                left,
+                operator: ComparisonOperator::Equal,
+                right,
+            } => match (left, right) {
+                (Expression::Column(column_name), Expression::Literal(Value::Integer(v)))
+                    if column_name.eq_ignore_ascii_case("rowid") && *v >= 0 =>
+                {
+                    Some(*v as u64)
+                }
+                (Expression::Literal(Value::Integer(v)), Expression::Column(column_name))
+                    if column_name.eq_ignore_ascii_case("rowid") && *v >= 0 =>
+                {
+                    Some(*v as u64)
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
 }
 
 impl QueryExecutor for SelectExecutor {
@@ -441,6 +469,17 @@ impl QueryExecutor for SelectExecutor {
         })?;
 
         let all_rows = match self.access_path {
+            SelectAccessPath::RowIdLookup => {
+                let rowid = self.extract_rowid_lookup().ok_or_else(|| {
+                    HematiteError::InternalError(
+                        "Planner selected rowid lookup without a matching predicate".to_string(),
+                    )
+                })?;
+                ctx.storage
+                    .lookup_row_by_rowid(&table_name, rowid)?
+                    .map(|row| vec![row.values])
+                    .unwrap_or_default()
+            }
             SelectAccessPath::PrimaryKeyLookup => {
                 let primary_key_values =
                     self.extract_primary_key_lookup(table).ok_or_else(|| {
@@ -472,21 +511,26 @@ impl QueryExecutor for SelectExecutor {
             SelectAccessPath::FullTableScan => ctx.storage.read_from_table(&table_name)?,
         };
 
-        // Apply WHERE clause filtering
+        // Apply WHERE clause filtering.
         let mut filtered_rows = Vec::new();
+        let skip_filter = matches!(self.access_path, SelectAccessPath::RowIdLookup);
         for row in &all_rows {
-            let include = match &self.statement.where_clause {
-                Some(where_clause) => {
-                    let mut all_conditions_met = true;
-                    for condition in &where_clause.conditions {
-                        if self.evaluate_condition(ctx, condition, row)? != Some(true) {
-                            all_conditions_met = false;
-                            break;
+            let include = if skip_filter {
+                true
+            } else {
+                match &self.statement.where_clause {
+                    Some(where_clause) => {
+                        let mut all_conditions_met = true;
+                        for condition in &where_clause.conditions {
+                            if self.evaluate_condition(ctx, condition, row)? != Some(true) {
+                                all_conditions_met = false;
+                                break;
+                            }
                         }
+                        all_conditions_met
                     }
-                    all_conditions_met
+                    None => true,
                 }
-                None => true,
             };
 
             if include {

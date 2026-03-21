@@ -371,6 +371,10 @@ impl Expression {
 }
 
 impl SelectStatement {
+    fn is_hidden_rowid(name: &str) -> bool {
+        name.eq_ignore_ascii_case("rowid")
+    }
+
     pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
         let table = match &self.from {
             TableReference::Table(table_name) => {
@@ -404,7 +408,7 @@ impl SelectStatement {
         for item in &self.columns {
             match item {
                 SelectItem::Column(name) => {
-                    if table.get_column_by_name(name).is_none() {
+                    if table.get_column_by_name(name).is_none() && !Self::is_hidden_rowid(name) {
                         let TableReference::Table(table_name) = &self.from;
                         return Err(HematiteError::ParseError(format!(
                             "Column '{}' does not exist in table '{}'",
@@ -413,7 +417,8 @@ impl SelectStatement {
                     }
                 }
                 SelectItem::Aggregate { column, .. } => {
-                    if table.get_column_by_name(column).is_none() {
+                    if table.get_column_by_name(column).is_none() && !Self::is_hidden_rowid(column)
+                    {
                         let TableReference::Table(table_name) = &self.from;
                         return Err(HematiteError::ParseError(format!(
                             "Column '{}' does not exist in table '{}'",
@@ -432,7 +437,9 @@ impl SelectStatement {
         }
 
         for item in &self.order_by {
-            if table.get_column_by_name(&item.column).is_none() {
+            if table.get_column_by_name(&item.column).is_none()
+                && !Self::is_hidden_rowid(&item.column)
+            {
                 let TableReference::Table(table_name) = &self.from;
                 return Err(HematiteError::ParseError(format!(
                     "Column '{}' does not exist in table '{}'",
@@ -472,7 +479,7 @@ impl SelectStatement {
         from: &TableReference,
     ) -> Result<()> {
         if let Expression::Column(name) = expr {
-            if table.get_column_by_name(name).is_none() {
+            if table.get_column_by_name(name).is_none() && !Self::is_hidden_rowid(name) {
                 let TableReference::Table(table_name) = from;
                 return Err(HematiteError::ParseError(format!(
                     "Column '{}' does not exist in table '{}'",
