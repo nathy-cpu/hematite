@@ -1046,6 +1046,67 @@ mod rowid_table_tests {
     }
 }
 
+mod cursor_tests {
+    use crate::storage::cursor::{IndexCursor, IndexEntry, TableCursor};
+    use crate::storage::StoredRow;
+
+    #[test]
+    fn test_table_cursor_first_next_seek_current() {
+        let rows = vec![
+            StoredRow {
+                row_id: 20,
+                values: vec![crate::catalog::Value::Integer(2)],
+            },
+            StoredRow {
+                row_id: 10,
+                values: vec![crate::catalog::Value::Integer(1)],
+            },
+            StoredRow {
+                row_id: 30,
+                values: vec![crate::catalog::Value::Integer(3)],
+            },
+        ];
+        let mut cursor = TableCursor::new(rows);
+
+        assert!(cursor.first());
+        assert_eq!(cursor.current().map(|r| r.row_id), Some(10));
+        assert!(cursor.next());
+        assert_eq!(cursor.current().map(|r| r.row_id), Some(20));
+        assert!(cursor.seek_rowid(30));
+        assert_eq!(cursor.current().map(|r| r.row_id), Some(30));
+        assert!(!cursor.next());
+        assert!(!cursor.is_valid());
+    }
+
+    #[test]
+    fn test_index_cursor_first_next_seek_current() {
+        let entries = vec![
+            IndexEntry {
+                key: b"b".to_vec(),
+                row_id: 2,
+            },
+            IndexEntry {
+                key: b"a".to_vec(),
+                row_id: 1,
+            },
+            IndexEntry {
+                key: b"c".to_vec(),
+                row_id: 3,
+            },
+        ];
+        let mut cursor = IndexCursor::new(entries);
+
+        assert!(cursor.first());
+        assert_eq!(cursor.current().map(|e| e.key.clone()), Some(b"a".to_vec()));
+        assert!(cursor.next());
+        assert_eq!(cursor.current().map(|e| e.key.clone()), Some(b"b".to_vec()));
+        assert!(cursor.seek_key(b"c"));
+        assert_eq!(cursor.current().map(|e| e.row_id), Some(3));
+        assert!(!cursor.next());
+        assert!(!cursor.is_valid());
+    }
+}
+
 mod serialization_tests {
     use crate::catalog::Value;
     use crate::error::{HematiteError, Result};

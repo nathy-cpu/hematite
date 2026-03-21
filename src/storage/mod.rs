@@ -1,6 +1,7 @@
 //! Storage engine module for Hematite database
 
 pub mod buffer_pool;
+pub mod cursor;
 pub mod database;
 pub mod engine;
 pub mod file_manager;
