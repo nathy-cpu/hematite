@@ -98,11 +98,27 @@ impl Pager {
 
     pub fn flush(&mut self) -> Result<()> {
         let dirty_ids = self.dirty_pages.iter().copied().collect::<Vec<_>>();
-        for page_id in dirty_ids {
+        let mut metadata_page_dirty = false;
+
+        // Persist all non-metadata dirty pages first.
+        for page_id in dirty_ids.iter().copied() {
+            if page_id == STORAGE_METADATA_PAGE_ID {
+                metadata_page_dirty = true;
+                continue;
+            }
+
             if let Some(page) = self.buffer_pool.get(page_id) {
                 self.file_manager.write_page(page)?;
             }
             self.dirty_pages.remove(&page_id);
+        }
+
+        // Persist metadata page last so it reflects already-persisted state.
+        if metadata_page_dirty {
+            if let Some(page) = self.buffer_pool.get(STORAGE_METADATA_PAGE_ID) {
+                self.file_manager.write_page(page)?;
+            }
+            self.dirty_pages.remove(&STORAGE_METADATA_PAGE_ID);
         }
         self.file_manager.flush()
     }

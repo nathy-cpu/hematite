@@ -733,6 +733,106 @@ mod mod_tests {
     }
 }
 
+mod randomized_pager_lifecycle_tests {
+    use crate::storage::StorageEngine;
+    use crate::test_utils::TestDbFile;
+    use std::collections::HashSet;
+
+    #[derive(Debug, Clone)]
+    struct LcgRng {
+        state: u64,
+    }
+
+    impl LcgRng {
+        fn new(seed: u64) -> Self {
+            Self { state: seed }
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            self.state = self
+                .state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.state
+        }
+
+        fn choose_index(&mut self, len: usize) -> usize {
+            (self.next_u64() % len as u64) as usize
+        }
+
+        fn chance(&mut self, numerator: u64, denominator: u64) -> bool {
+            debug_assert!(denominator > 0);
+            (self.next_u64() % denominator) < numerator
+        }
+    }
+
+    fn remove_random(live_pages: &mut HashSet<u32>, rng: &mut LcgRng) -> Option<u32> {
+        if live_pages.is_empty() {
+            return None;
+        }
+
+        let idx = rng.choose_index(live_pages.len());
+        let page_id = *live_pages
+            .iter()
+            .nth(idx)
+            .expect("index from set length should be valid");
+        live_pages.remove(&page_id);
+        Some(page_id)
+    }
+
+    #[test]
+    fn test_randomized_allocation_reuse_reopen_cycles() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_storage_randomized_alloc_reuse_reopen");
+        let mut storage = StorageEngine::new(test_db.path())?;
+        let mut rng = LcgRng::new(0xD1CE_BA5E_2026_0317);
+
+        let mut live_pages: HashSet<u32> = HashSet::new();
+        let mut retired_pages: HashSet<u32> = HashSet::new();
+        let mut reuse_hits = 0usize;
+
+        for step in 0..600usize {
+            let should_allocate = live_pages.is_empty() || rng.chance(3, 5);
+            if should_allocate {
+                let page_id = storage.allocate_page()?;
+                let id = page_id.as_u32();
+
+                assert!(id >= 2, "allocator returned reserved page {}", id);
+                assert!(
+                    !live_pages.contains(&id),
+                    "allocator returned an already-live page {}",
+                    id
+                );
+
+                if retired_pages.remove(&id) {
+                    reuse_hits += 1;
+                }
+                live_pages.insert(id);
+            } else if let Some(id) = remove_random(&mut live_pages, &mut rng) {
+                storage.deallocate_page(crate::storage::PageId::new(id))?;
+                retired_pages.insert(id);
+            }
+
+            if rng.chance(1, 10) {
+                storage.flush()?;
+                storage = StorageEngine::new(test_db.path())?;
+                let _ = storage.validate_integrity()?;
+            }
+
+            if step % 50 == 0 {
+                let _ = storage.validate_integrity()?;
+            }
+        }
+
+        storage.flush()?;
+        storage = StorageEngine::new(test_db.path())?;
+        let report = storage.validate_integrity()?;
+        assert!(report.pager.free_page_count <= retired_pages.len());
+        assert!(reuse_hits > 0, "expected at least one reused page id");
+
+        Ok(())
+    }
+}
+
 mod serialization_tests {
     use crate::catalog::Value;
     use crate::error::{HematiteError, Result};
