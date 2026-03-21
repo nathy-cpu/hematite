@@ -398,6 +398,49 @@ mod mod_tests {
         Ok(())
     }
 
+    #[test]
+    fn test_rebalance_after_large_right_side_deletes() -> Result<()> {
+        let path = tmp_db();
+        let storage = new_storage(&path)?;
+        let mut btree = BTreeIndex::new_with_init(storage)?;
+
+        for i in 0u8..140u8 {
+            btree.insert(BTreeKey::new(vec![i]), BTreeValue::new(vec![i, i]))?;
+        }
+
+        // Delete heavily from the upper key range to force repeated underflow handling
+        // in right-side subtrees (borrow and eventually merge paths).
+        for i in 80u8..140u8 {
+            let deleted = btree.delete(&BTreeKey::new(vec![i]))?;
+            assert!(deleted.is_some(), "expected key {} to be deleted", i);
+        }
+
+        // Remaining keys should still be searchable.
+        for i in 0u8..80u8 {
+            let found = btree.search(&BTreeKey::new(vec![i]))?;
+            assert!(found.is_some(), "expected key {} to still exist", i);
+        }
+
+        // Deleted keys should be absent.
+        for i in 80u8..140u8 {
+            let found = btree.search(&BTreeKey::new(vec![i]))?;
+            assert!(found.is_none(), "expected key {} to be gone", i);
+        }
+
+        // Cursor order should remain strictly increasing with no duplicates.
+        let mut cursor = btree.cursor()?;
+        let mut expected = 0u8;
+        while cursor.is_valid() {
+            let (key, _value) = cursor.current().expect("valid cursor should have current");
+            assert_eq!(key.as_bytes(), &[expected]);
+            expected = expected.wrapping_add(1);
+            cursor.next()?;
+        }
+        assert_eq!(expected, 80u8);
+
+        Ok(())
+    }
+
     // Edge case tests
     #[test]
     fn test_empty_tree_operations() -> Result<()> {

@@ -17,6 +17,13 @@ pub struct BTreeIndex {
 }
 
 impl BTreeIndex {
+    fn min_keys_for(node_type: NodeType) -> usize {
+        match node_type {
+            NodeType::Leaf => node::MAX_KEYS / 2,
+            NodeType::Internal => (node::MAX_KEYS - 1) / 2,
+        }
+    }
+
     pub fn new(storage: StorageEngine, root_page_id: PageId) -> Self {
         Self {
             storage: Arc::new(Mutex::new(storage)),
@@ -299,22 +306,51 @@ impl BTreeIndex {
         let mut child_page = self.storage.lock().unwrap().read_page(child_id)?;
         let mut child_node = BTreeNode::from_page(child_page.clone())?;
 
-        if let Some(_) = child_node.borrow_from_sibling(&mut left_sibling, true)? {
-            // Update parent separator key to the new last key of left sibling
-            if let Some(new_separator) = left_sibling.keys.last() {
-                parent.keys[child_index - 1] = new_separator.clone();
-            }
-
-            // Write back changes
-            left_sibling.to_page(&mut left_page)?;
-            child_node.to_page(&mut child_page)?;
-            self.storage.lock().unwrap().write_page(left_page)?;
-            self.storage.lock().unwrap().write_page(child_page)?;
-
-            Ok(true)
-        } else {
-            Ok(false)
+        if left_sibling.node_type != child_node.node_type {
+            return Err(HematiteError::StorageError(
+                "Sibling node type mismatch during left borrow".to_string(),
+            ));
         }
+
+        let min_keys = Self::min_keys_for(left_sibling.node_type);
+        if left_sibling.keys.len() <= min_keys {
+            return Ok(false);
+        }
+
+        match child_node.node_type {
+            NodeType::Leaf => {
+                let key = left_sibling.keys.pop().ok_or_else(|| {
+                    HematiteError::StorageError("Left leaf sibling missing key".to_string())
+                })?;
+                let value = left_sibling.values.pop().ok_or_else(|| {
+                    HematiteError::StorageError("Left leaf sibling missing value".to_string())
+                })?;
+                child_node.keys.insert(0, key);
+                child_node.values.insert(0, value);
+                parent.keys[child_index - 1] = child_node.keys[0].clone();
+            }
+            NodeType::Internal => {
+                let rotate_up_key = left_sibling.keys.pop().ok_or_else(|| {
+                    HematiteError::StorageError("Left internal sibling missing key".to_string())
+                })?;
+                let rotate_child = left_sibling.children.pop().ok_or_else(|| {
+                    HematiteError::StorageError("Left internal sibling missing child".to_string())
+                })?;
+                let parent_separator = parent.keys[child_index - 1].clone();
+
+                child_node.keys.insert(0, parent_separator);
+                child_node.children.insert(0, rotate_child);
+                parent.keys[child_index - 1] = rotate_up_key;
+            }
+        }
+
+        // Write back changes
+        left_sibling.to_page(&mut left_page)?;
+        child_node.to_page(&mut child_page)?;
+        self.storage.lock().unwrap().write_page(left_page)?;
+        self.storage.lock().unwrap().write_page(child_page)?;
+
+        Ok(true)
     }
 
     fn try_borrow_from_right_sibling(
@@ -330,22 +366,49 @@ impl BTreeIndex {
         let mut child_page = self.storage.lock().unwrap().read_page(child_id)?;
         let mut child_node = BTreeNode::from_page(child_page.clone())?;
 
-        if let Some(_) = child_node.borrow_from_sibling(&mut right_sibling, false)? {
-            // Update parent separator key to the new first key of right sibling
-            if let Some(new_separator) = right_sibling.keys.first() {
+        if right_sibling.node_type != child_node.node_type {
+            return Err(HematiteError::StorageError(
+                "Sibling node type mismatch during right borrow".to_string(),
+            ));
+        }
+
+        let min_keys = Self::min_keys_for(right_sibling.node_type);
+        if right_sibling.keys.len() <= min_keys {
+            return Ok(false);
+        }
+
+        match child_node.node_type {
+            NodeType::Leaf => {
+                let key = right_sibling.keys.remove(0);
+                let value = right_sibling.values.remove(0);
+                child_node.keys.push(key);
+                child_node.values.push(value);
+
+                let new_separator = right_sibling.keys.first().ok_or_else(|| {
+                    HematiteError::StorageError(
+                        "Right leaf sibling became empty after borrow".to_string(),
+                    )
+                })?;
                 parent.keys[child_index] = new_separator.clone();
             }
+            NodeType::Internal => {
+                let parent_separator = parent.keys[child_index].clone();
+                let rotate_child = right_sibling.children.remove(0);
+                let rotate_up_key = right_sibling.keys.remove(0);
 
-            // Write back changes
-            right_sibling.to_page(&mut right_page)?;
-            child_node.to_page(&mut child_page)?;
-            self.storage.lock().unwrap().write_page(right_page)?;
-            self.storage.lock().unwrap().write_page(child_page)?;
-
-            Ok(true)
-        } else {
-            Ok(false)
+                child_node.keys.push(parent_separator);
+                child_node.children.push(rotate_child);
+                parent.keys[child_index] = rotate_up_key;
+            }
         }
+
+        // Write back changes
+        right_sibling.to_page(&mut right_page)?;
+        child_node.to_page(&mut child_page)?;
+        self.storage.lock().unwrap().write_page(right_page)?;
+        self.storage.lock().unwrap().write_page(child_page)?;
+
+        Ok(true)
     }
 
     fn merge_with_left_sibling(
