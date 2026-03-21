@@ -7,6 +7,12 @@ pub const OVERFLOW_MAGIC: &[u8; 4] = b"OVR1";
 pub const OVERFLOW_HEADER_SIZE: usize = 12; // magic(4) + next_page_id(4) + chunk_len(4)
 pub const OVERFLOW_CHUNK_CAPACITY: usize = PAGE_SIZE - OVERFLOW_HEADER_SIZE;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverflowChainReport {
+    pub page_count: usize,
+    pub payload_len: usize,
+}
+
 pub fn write_overflow_chain(storage: &mut StorageEngine, payload: &[u8]) -> Result<Option<PageId>> {
     if payload.is_empty() {
         return Ok(None);
@@ -131,4 +137,68 @@ pub fn free_overflow_chain(storage: &mut StorageEngine, first_page: Option<PageI
     }
 
     Ok(())
+}
+
+pub fn validate_overflow_chain(
+    storage: &mut StorageEngine,
+    first_page: Option<PageId>,
+    expected_len: usize,
+) -> Result<OverflowChainReport> {
+    if first_page.is_none() {
+        if expected_len == 0 {
+            return Ok(OverflowChainReport {
+                page_count: 0,
+                payload_len: 0,
+            });
+        }
+        return Err(HematiteError::CorruptedData(
+            "Missing overflow chain head for non-empty payload".to_string(),
+        ));
+    }
+
+    let mut current = first_page.unwrap_or(PageId::invalid());
+    let mut visited = std::collections::HashSet::new();
+    let mut total_payload = 0usize;
+    let mut pages = 0usize;
+
+    while current != PageId::invalid() && total_payload < expected_len {
+        if !visited.insert(current) {
+            return Err(HematiteError::CorruptedData(
+                "Overflow chain cycle detected during validation".to_string(),
+            ));
+        }
+        let page = storage.read_page(current)?;
+        if &page.data[0..4] != OVERFLOW_MAGIC {
+            return Err(HematiteError::CorruptedData(
+                "Overflow page magic mismatch during validation".to_string(),
+            ));
+        }
+        let next_page = PageId::new(u32::from_le_bytes([
+            page.data[4],
+            page.data[5],
+            page.data[6],
+            page.data[7],
+        ]));
+        let chunk_len =
+            u32::from_le_bytes([page.data[8], page.data[9], page.data[10], page.data[11]]) as usize;
+        if chunk_len > OVERFLOW_CHUNK_CAPACITY {
+            return Err(HematiteError::CorruptedData(
+                "Overflow chunk length exceeds page capacity during validation".to_string(),
+            ));
+        }
+        total_payload += chunk_len;
+        pages += 1;
+        current = next_page;
+    }
+
+    if total_payload < expected_len {
+        return Err(HematiteError::CorruptedData(
+            "Overflow chain payload shorter than expected length".to_string(),
+        ));
+    }
+
+    Ok(OverflowChainReport {
+        page_count: pages,
+        payload_len: total_payload,
+    })
 }

@@ -835,7 +835,7 @@ mod randomized_pager_lifecycle_tests {
 
 mod rowid_table_tests {
     use crate::storage::overflow::{
-        free_overflow_chain, read_overflow_chain, write_overflow_chain,
+        free_overflow_chain, read_overflow_chain, validate_overflow_chain, write_overflow_chain,
     };
     use crate::storage::rowid_table::{
         decode_stored_row_record, encode_stored_row_record, RowidInternalCell, RowidLeafCell,
@@ -915,10 +915,47 @@ mod rowid_table_tests {
 
         let read_back = read_overflow_chain(&mut storage, first, payload.len())?;
         assert_eq!(read_back, payload);
+        let report = validate_overflow_chain(&mut storage, first, payload.len())?;
+        assert!(report.page_count >= 3);
+        assert!(report.payload_len >= payload.len());
 
         free_overflow_chain(&mut storage, first)?;
         let reused = storage.allocate_page()?;
         assert_eq!(Some(reused), first);
+        Ok(())
+    }
+
+    #[test]
+    fn test_overflow_chain_validation_detects_cycle() -> crate::error::Result<()> {
+        let test_db = crate::test_utils::TestDbFile::new("_test_rowid_overflow_cycle");
+        let mut storage = crate::storage::StorageEngine::new(test_db.path())?;
+        let payload = vec![0x44; crate::storage::PAGE_SIZE + 5];
+        let first = write_overflow_chain(&mut storage, &payload)?
+            .expect("non-empty payload should allocate overflow chain");
+
+        let mut first_page = storage.read_page(first)?;
+        first_page.data[4..8].copy_from_slice(&first.as_u32().to_le_bytes());
+        storage.write_page(first_page)?;
+
+        let err = validate_overflow_chain(&mut storage, Some(first), payload.len()).unwrap_err();
+        assert!(err.to_string().contains("cycle"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_overflow_chain_validation_detects_truncation() -> crate::error::Result<()> {
+        let test_db = crate::test_utils::TestDbFile::new("_test_rowid_overflow_truncation");
+        let mut storage = crate::storage::StorageEngine::new(test_db.path())?;
+        let payload = vec![0x55; crate::storage::PAGE_SIZE + 50];
+        let first = write_overflow_chain(&mut storage, &payload)?
+            .expect("non-empty payload should allocate overflow chain");
+
+        let mut first_page = storage.read_page(first)?;
+        first_page.data[4..8].copy_from_slice(&PageId::invalid().as_u32().to_le_bytes());
+        storage.write_page(first_page)?;
+
+        let err = validate_overflow_chain(&mut storage, Some(first), payload.len()).unwrap_err();
+        assert!(err.to_string().contains("shorter"));
         Ok(())
     }
 
