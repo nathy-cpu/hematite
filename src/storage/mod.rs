@@ -5,6 +5,7 @@ pub mod database;
 pub mod engine;
 pub mod file_manager;
 pub mod free_list;
+pub mod overflow;
 pub mod page_manager;
 pub mod pager;
 pub mod rowid_table;

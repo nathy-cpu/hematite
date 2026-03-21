@@ -834,6 +834,9 @@ mod randomized_pager_lifecycle_tests {
 }
 
 mod rowid_table_tests {
+    use crate::storage::overflow::{
+        free_overflow_chain, read_overflow_chain, write_overflow_chain,
+    };
     use crate::storage::rowid_table::{
         RowidInternalCell, RowidLeafCell, RowidLeafCellLayout, ROWID_LEAF_FIXED_HEADER_SIZE,
     };
@@ -898,6 +901,24 @@ mod rowid_table_tests {
     fn test_local_payload_accounting_clamps_to_limit() {
         assert_eq!(RowidLeafCellLayout::local_payload_len_for(100, 64), 64);
         assert_eq!(RowidLeafCellLayout::local_payload_len_for(40, 64), 40);
+    }
+
+    #[test]
+    fn test_overflow_chain_roundtrip_and_free() -> crate::error::Result<()> {
+        let test_db = crate::test_utils::TestDbFile::new("_test_rowid_overflow_chain");
+        let mut storage = crate::storage::StorageEngine::new(test_db.path())?;
+
+        let payload = vec![0xAB; crate::storage::PAGE_SIZE * 2 + 57];
+        let first = write_overflow_chain(&mut storage, &payload)?;
+        assert!(first.is_some());
+
+        let read_back = read_overflow_chain(&mut storage, first, payload.len())?;
+        assert_eq!(read_back, payload);
+
+        free_overflow_chain(&mut storage, first)?;
+        let reused = storage.allocate_page()?;
+        assert_eq!(Some(reused), first);
+        Ok(())
     }
 }
 
