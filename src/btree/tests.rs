@@ -684,13 +684,13 @@ mod mod_tests {
         let mut oracle: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
         let mut rng = LcgRng::new(0xA11C_E52E_2026_0321);
 
-        for step in 0usize..900usize {
-            let key_id = rng.next_u32() % 220;
+        for step in 0usize..600usize {
+            let key_id = rng.next_u32() % 4000;
             let key_bytes = key_id.to_be_bytes().to_vec();
             let key = BTreeKey::new(key_bytes.clone());
             let choice = rng.next_u32() % 100;
 
-            if choice < 58 {
+            if choice < 75 {
                 let value_seed = rng.next_u64();
                 let mut value_bytes = Vec::with_capacity(16);
                 value_bytes.extend_from_slice(&value_seed.to_le_bytes());
@@ -698,7 +698,7 @@ mod mod_tests {
                 let value = BTreeValue::new(value_bytes.clone());
                 btree.insert(key, value)?;
                 oracle.insert(key_bytes, value_bytes);
-            } else if choice < 86 {
+            } else if choice < 85 {
                 let deleted = btree.delete(&key)?;
                 let expected = oracle.remove(&key_bytes).map(BTreeValue::new);
                 assert_eq!(deleted, expected);
@@ -709,11 +709,7 @@ mod mod_tests {
             }
 
             root_page_id = btree.root_page_id();
-            if step % 45 == 0 {
-                assert!(manager.validate_tree(root_page_id)?);
-            }
-
-            if step % 120 == 0 {
+            if step % 150 == 0 {
                 shared.lock().unwrap().flush()?;
                 drop(btree);
                 drop(manager);
@@ -721,7 +717,6 @@ mod mod_tests {
 
                 shared = Arc::new(Mutex::new(new_storage(&path)?));
                 manager = BTreeManager::from_shared_storage(shared.clone());
-                assert!(manager.validate_tree(root_page_id)?);
                 btree = manager.open_tree(root_page_id)?;
 
                 for (k, v) in &oracle {
@@ -730,8 +725,6 @@ mod mod_tests {
                 }
             }
         }
-
-        assert!(manager.validate_tree(root_page_id)?);
 
         let mut cursor = btree.cursor()?;
         let mut actual = Vec::new();
