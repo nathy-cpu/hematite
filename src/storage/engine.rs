@@ -11,8 +11,8 @@ use crate::catalog::{Table, Value};
 use crate::error::Result;
 use crate::storage::table::{PageOperations, TableManager};
 use crate::storage::{
-    buffer_pool::BufferPool, file_manager::FileManager, Page, PageId, StorageIntegrityReport,
-    StoredRow, TableMetadata, DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID, TABLE_PAGE_HEADER_SIZE,
+    pager::Pager, Page, PageId, StorageIntegrityReport, StoredRow, TableMetadata,
+    DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID, TABLE_PAGE_HEADER_SIZE,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -20,8 +20,7 @@ use std::path::Path;
 /// Main storage engine interface
 #[derive(Debug)]
 pub struct StorageEngine {
-    file_manager: FileManager,
-    buffer_pool: BufferPool,
+    pager: Pager,
     table_manager: TableManager,
     primary_key_indexes: HashMap<String, HashMap<Vec<u8>, StoredRow>>,
     secondary_indexes: HashMap<String, HashMap<String, HashMap<Vec<u8>, Vec<StoredRow>>>>,
@@ -37,7 +36,7 @@ impl StorageEngine {
                 "table_count={}",
                 self.table_manager.get_all_metadata().len()
             ),
-            format!("free_page_count={}", self.file_manager.free_pages().len()),
+            format!("free_page_count={}", self.pager.free_pages().len()),
         ];
 
         let mut table_entries = self
@@ -58,7 +57,7 @@ impl StorageEngine {
             ));
         }
 
-        let mut free_pages = self.file_manager.free_pages().to_vec();
+        let mut free_pages = self.pager.free_pages().to_vec();
         free_pages.sort_by_key(|page_id| page_id.as_u32());
         for page_id in free_pages {
             lines.push(format!("free|{}", page_id.as_u32()));
@@ -154,7 +153,7 @@ impl StorageEngine {
             ));
         }
 
-        self.file_manager.set_free_pages(free_pages);
+        self.pager.set_free_pages(free_pages);
         Ok(())
     }
 
@@ -167,7 +166,7 @@ impl StorageEngine {
                 .values()
                 .map(|metadata| metadata.row_count)
                 .sum(),
-            free_page_count: self.file_manager.free_pages().len(),
+            free_page_count: self.pager.free_pages().len(),
         }
     }
 
@@ -180,7 +179,7 @@ impl StorageEngine {
             .collect::<Vec<_>>();
 
         let mut free_pages = HashSet::new();
-        for &page_id in self.file_manager.free_pages() {
+        for &page_id in self.pager.free_pages() {
             if page_id == DB_HEADER_PAGE_ID || page_id == STORAGE_METADATA_PAGE_ID {
                 return Err(crate::error::HematiteError::CorruptedData(format!(
                     "Reserved page {} cannot be marked free",
@@ -391,24 +390,22 @@ impl StorageEngine {
     }
 
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let file_manager = FileManager::new(path)?;
-        Self::from_file_manager(file_manager)
+        let pager = Pager::new(path, 100)?;
+        Self::from_pager(pager)
     }
 
     pub fn new_in_memory() -> Result<Self> {
-        let file_manager = FileManager::new_in_memory()?;
-        Self::from_file_manager(file_manager)
+        let pager = Pager::new_in_memory(100)?;
+        Self::from_pager(pager)
     }
 
-    fn from_file_manager(file_manager: FileManager) -> Result<Self> {
-        let buffer_pool = BufferPool::new(100); // 100 pages in memory
+    fn from_pager(pager: Pager) -> Result<Self> {
         let table_manager = TableManager::new();
 
         // Load existing table metadata
         {
             let mut engine = Self {
-                file_manager,
-                buffer_pool,
+                pager,
                 table_manager,
                 primary_key_indexes: HashMap::new(),
                 secondary_indexes: HashMap::new(),
@@ -419,31 +416,15 @@ impl StorageEngine {
     }
 
     pub fn read_page(&mut self, page_id: PageId) -> Result<Page> {
-        // Try to get from buffer pool first
-        let page = if let Some(page) = self.buffer_pool.get(page_id) {
-            page.clone()
-        } else {
-            // Read from file
-            let page = self.file_manager.read_page(page_id)?;
-            // Cache in buffer pool
-            self.buffer_pool.put(page.clone());
-            page
-        };
-        Ok(page)
+        self.pager.read_page(page_id)
     }
 
     pub fn write_page(&mut self, page: Page) -> Result<()> {
-        // Write to file
-        self.file_manager.write_page(&page)?;
-
-        // Update buffer pool
-        self.buffer_pool.put(page);
-
-        Ok(())
+        self.pager.write_page(page)
     }
 
     pub fn allocate_page(&mut self) -> Result<PageId> {
-        let page_id = self.file_manager.allocate_page()?;
+        let page_id = self.pager.allocate_page()?;
 
         // Never allocate reserved pages.
         if page_id == DB_HEADER_PAGE_ID || page_id == STORAGE_METADATA_PAGE_ID {
@@ -461,23 +442,18 @@ impl StorageEngine {
             ));
         }
 
-        // Remove from buffer pool
-        self.buffer_pool.remove(page_id);
-        // Mark as free in file manager
-        self.file_manager.deallocate_page(page_id)?;
-        Ok(())
+        self.pager.deallocate_page(page_id)
     }
 
     pub fn flush(&mut self) -> Result<()> {
         self.save_table_metadata()?;
-        self.file_manager.flush()?;
-        Ok(())
+        self.pager.flush()
     }
 
     // Table metadata persistence
     fn load_table_metadata(&mut self) -> Result<()> {
         // Try to read table metadata from a special page (e.g., page 1)
-        match self.file_manager.read_page(STORAGE_METADATA_PAGE_ID) {
+        match self.pager.read_page(STORAGE_METADATA_PAGE_ID) {
             Ok(page) => {
                 // Check if this page contains table metadata
                 if page.data.len() >= 4 {
@@ -547,7 +523,7 @@ impl StorageEngine {
         page.data[4..4 + metadata_bytes.len()].copy_from_slice(metadata_bytes);
 
         // Write page to disk
-        self.file_manager.write_page(&page)?;
+        self.pager.write_page(page)?;
 
         Ok(())
     }

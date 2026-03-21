@@ -247,6 +247,7 @@ mod mod_tests {
         let _ = storage.insert_into_table("users", vec![Value::Integer(1)])?;
         let _ = storage.insert_into_table("users", vec![Value::Integer(2)])?;
         let free_page = storage.allocate_page()?;
+        let _tail_page = storage.allocate_page()?;
         storage.deallocate_page(free_page)?;
 
         let stats = storage.get_storage_stats();

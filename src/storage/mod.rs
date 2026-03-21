@@ -5,6 +5,7 @@ pub mod database;
 pub mod engine;
 pub mod file_manager;
 pub mod page_manager;
+pub mod pager;
 pub mod serialization;
 pub mod table;
 pub mod types;
