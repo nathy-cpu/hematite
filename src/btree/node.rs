@@ -562,29 +562,22 @@ impl BTreeNode {
         self.keys.insert(pos, new_key);
         self.values.insert(pos, new_value);
 
+        if self.keys.len() < 2 {
+            return Err(HematiteError::StorageError(
+                "Cannot split leaf with fewer than 2 keys".to_string(),
+            ));
+        }
+
         // Create new leaf node
         let new_page_id = storage.allocate_page()?;
         let mut new_page = Page::new(new_page_id);
         let mut new_node = Self::new_leaf(new_page_id);
 
-        // Split keys and values - median key moves up to parent
-        let split_pos = self.keys.len() / 2;
-
-        // Move keys AFTER the median to the right node
-        new_node.keys = self.keys.split_off(split_pos + 1);
-        new_node.values = self.values.split_off(split_pos + 1);
-
-        // In B+ tree, the split key should be the FIRST key of the right node
-        // BUT the original key stays in the leaf (we don't pop it)
-        let split_key = if new_node.keys.is_empty() {
-            // Edge case: if right node is empty, use the last key from left
-            self.keys.last().unwrap().clone()
-        } else {
-            new_node.keys[0].clone()
-        };
-
-        // NOTE: In B+ tree, we DON'T remove the split key from the leaf
-        // All keys must remain in leaf nodes. The split_key is just copied up.
+        // Choose a split point that balances payload bytes across leaf pages.
+        let split_pos = self.best_leaf_split_pos();
+        new_node.keys = self.keys.split_off(split_pos);
+        new_node.values = self.values.split_off(split_pos);
+        let split_key = new_node.keys[0].clone();
 
         // Write both nodes
         let mut current_page = storage.read_page(self.page_id)?;
@@ -611,13 +604,19 @@ impl BTreeNode {
         self.keys.insert(pos, new_key);
         self.children.insert(pos + 1, new_child);
 
+        if self.keys.len() < 2 {
+            return Err(HematiteError::StorageError(
+                "Cannot split internal node with fewer than 2 keys".to_string(),
+            ));
+        }
+
         // Create new internal node
         let new_page_id = storage.allocate_page()?;
         let mut new_page = Page::new(new_page_id);
         let mut new_node = Self::new_internal(new_page_id);
 
-        // Split keys and children - median key moves up to parent
-        let split_pos = self.keys.len() / 2;
+        // Choose a split point that balances payload bytes while keeping key separators valid.
+        let split_pos = self.best_internal_split_pos();
         let split_key = self.keys[split_pos].clone();
 
         // Move keys AFTER the median to the right node
@@ -635,6 +634,74 @@ impl BTreeNode {
         storage.write_page(new_page)?;
 
         Ok((split_key, new_page_id))
+    }
+
+    fn leaf_entry_size(key: &BTreeKey, value: &BTreeValue) -> usize {
+        KEY_LENGTH_SIZE + key.data.len() + VALUE_LENGTH_SIZE + value.data.len()
+    }
+
+    fn internal_key_wire_size(key: &BTreeKey) -> usize {
+        KEY_LENGTH_SIZE + key.data.len()
+    }
+
+    fn best_leaf_split_pos(&self) -> usize {
+        let len = self.keys.len();
+        let mut prefix = vec![0usize; len + 1];
+        for i in 0..len {
+            prefix[i + 1] = prefix[i] + Self::leaf_entry_size(&self.keys[i], &self.values[i]);
+        }
+        let total = prefix[len];
+
+        let mut best_pos = len / 2;
+        let mut best_score = usize::MAX;
+        let mut best_min = 0usize;
+
+        for pos in 1..len {
+            let left = prefix[pos];
+            let right = total - left;
+            let score = left.abs_diff(right);
+            let min_side = left.min(right);
+            if score < best_score || (score == best_score && min_side > best_min) {
+                best_score = score;
+                best_min = min_side;
+                best_pos = pos;
+            }
+        }
+
+        best_pos
+    }
+
+    fn best_internal_split_pos(&self) -> usize {
+        let key_len = self.keys.len();
+        let mut key_prefix = vec![0usize; key_len + 1];
+        for i in 0..key_len {
+            key_prefix[i + 1] = key_prefix[i] + Self::internal_key_wire_size(&self.keys[i]);
+        }
+        let total_key_bytes = key_prefix[key_len];
+
+        let mut best_pos = key_len / 2;
+        let mut best_score = usize::MAX;
+        let mut best_min = 0usize;
+
+        // split_pos is the promoted separator key; left/right must both keep at least one key.
+        for split_pos in 1..key_len - 1 {
+            let left_key_bytes = key_prefix[split_pos];
+            let right_key_bytes = total_key_bytes - key_prefix[split_pos + 1];
+            let left_children = split_pos + 1;
+            let right_children = key_len - split_pos;
+
+            let left_payload = left_key_bytes + left_children * CHILD_ID_SIZE;
+            let right_payload = right_key_bytes + right_children * CHILD_ID_SIZE;
+            let score = left_payload.abs_diff(right_payload);
+            let min_side = left_payload.min(right_payload);
+            if score < best_score || (score == best_score && min_side > best_min) {
+                best_score = score;
+                best_min = min_side;
+                best_pos = split_pos;
+            }
+        }
+
+        best_pos
     }
 
     // Delete operations

@@ -362,6 +362,42 @@ mod mod_tests {
         Ok(())
     }
 
+    #[test]
+    fn test_duplicate_key_update_on_dense_tree() -> Result<()> {
+        let path = tmp_db();
+        let storage = new_storage(&path)?;
+        let mut btree = BTreeIndex::new_with_init(storage)?;
+
+        // Grow the tree so duplicate update happens in a dense structure.
+        for i in 0u32..300u32 {
+            let key = BTreeKey::new(i.to_le_bytes().to_vec());
+            let value = BTreeValue::new(format!("v{i}").into_bytes());
+            btree.insert(key, value)?;
+        }
+
+        let target_key = BTreeKey::new(42u32.to_le_bytes().to_vec());
+        let replacement = BTreeValue::new(b"replacement-value".to_vec());
+        btree.insert(target_key.clone(), replacement.clone())?;
+
+        let found = btree.search(&target_key)?;
+        assert_eq!(found, Some(replacement));
+
+        // Ensure duplicate update did not create multiple entries.
+        let mut cursor = btree.cursor()?;
+        let mut seen = 0usize;
+        while cursor.is_valid() {
+            if let Some((key, _)) = cursor.current() {
+                if key == &target_key {
+                    seen += 1;
+                }
+            }
+            cursor.next()?;
+        }
+        assert_eq!(seen, 1);
+
+        Ok(())
+    }
+
     // Edge case tests
     #[test]
     fn test_empty_tree_operations() -> Result<()> {
