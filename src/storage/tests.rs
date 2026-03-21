@@ -834,7 +834,9 @@ mod randomized_pager_lifecycle_tests {
 }
 
 mod rowid_table_tests {
-    use crate::storage::rowid_table::{RowidInternalCell, RowidLeafCell};
+    use crate::storage::rowid_table::{
+        RowidInternalCell, RowidLeafCell, RowidLeafCellLayout, ROWID_LEAF_FIXED_HEADER_SIZE,
+    };
     use crate::storage::PageId;
 
     #[test]
@@ -872,6 +874,30 @@ mod rowid_table_tests {
     #[test]
     fn test_rowid_internal_cell_rejects_wrong_size() {
         assert!(RowidInternalCell::decode(&[0u8; 11]).is_err());
+    }
+
+    #[test]
+    fn test_rowid_fixed_leaf_cell_roundtrip() -> crate::error::Result<()> {
+        let cell = RowidLeafCellLayout {
+            rowid: 77,
+            total_payload_len: 1000,
+            local_payload: vec![9, 8, 7, 6, 5],
+            overflow_first_page: PageId::new(120),
+        };
+        let encoded = cell.encode()?;
+        assert_eq!(
+            encoded.len(),
+            ROWID_LEAF_FIXED_HEADER_SIZE + cell.local_payload.len()
+        );
+        let decoded = RowidLeafCellLayout::decode(&encoded)?;
+        assert_eq!(decoded, cell);
+        Ok(())
+    }
+
+    #[test]
+    fn test_local_payload_accounting_clamps_to_limit() {
+        assert_eq!(RowidLeafCellLayout::local_payload_len_for(100, 64), 64);
+        assert_eq!(RowidLeafCellLayout::local_payload_len_for(40, 64), 40);
     }
 }
 

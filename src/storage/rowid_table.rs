@@ -11,6 +11,73 @@ pub struct RowidLeafCell {
     pub payload: Vec<u8>,
 }
 
+pub const ROWID_LEAF_FIXED_HEADER_SIZE: usize = 20;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowidLeafCellLayout {
+    pub rowid: u64,
+    pub total_payload_len: u32,
+    pub local_payload: Vec<u8>,
+    pub overflow_first_page: PageId,
+}
+
+impl RowidLeafCellLayout {
+    pub fn local_payload_len_for(total_payload_len: usize, max_local_payload: usize) -> usize {
+        total_payload_len.min(max_local_payload)
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        if self.local_payload.len() > self.total_payload_len as usize {
+            return Err(HematiteError::StorageError(
+                "Local payload cannot exceed total payload length".to_string(),
+            ));
+        }
+
+        let local_len = self.local_payload.len() as u32;
+        let mut out = Vec::with_capacity(ROWID_LEAF_FIXED_HEADER_SIZE + self.local_payload.len());
+        out.extend_from_slice(&self.rowid.to_le_bytes());
+        out.extend_from_slice(&self.total_payload_len.to_le_bytes());
+        out.extend_from_slice(&local_len.to_le_bytes());
+        out.extend_from_slice(&self.overflow_first_page.as_u32().to_le_bytes());
+        out.extend_from_slice(&self.local_payload);
+        Ok(out)
+    }
+
+    pub fn decode(data: &[u8]) -> Result<Self> {
+        if data.len() < ROWID_LEAF_FIXED_HEADER_SIZE {
+            return Err(HematiteError::CorruptedData(
+                "Rowid fixed leaf cell header is truncated".to_string(),
+            ));
+        }
+
+        let rowid = u64::from_le_bytes([
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+        ]);
+        let total_payload_len = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
+        let local_len = u32::from_le_bytes([data[12], data[13], data[14], data[15]]) as usize;
+        let overflow_first_page =
+            PageId::new(u32::from_le_bytes([data[16], data[17], data[18], data[19]]));
+
+        if ROWID_LEAF_FIXED_HEADER_SIZE + local_len != data.len() {
+            return Err(HematiteError::CorruptedData(
+                "Rowid fixed leaf local payload length mismatch".to_string(),
+            ));
+        }
+        if local_len > total_payload_len as usize {
+            return Err(HematiteError::CorruptedData(
+                "Rowid fixed leaf local payload exceeds total payload length".to_string(),
+            ));
+        }
+
+        Ok(Self {
+            rowid,
+            total_payload_len,
+            local_payload: data[ROWID_LEAF_FIXED_HEADER_SIZE..].to_vec(),
+            overflow_first_page,
+        })
+    }
+}
+
 impl RowidLeafCell {
     pub const HEADER_SIZE: usize = 12; // rowid(u64) + payload_len(u32)
 
