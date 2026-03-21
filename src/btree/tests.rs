@@ -505,9 +505,10 @@ mod mod_tests {
 }
 
 mod tree_tests {
+    use crate::btree::node::{BTREE_PAGE_FORMAT_VERSION, BTREE_PAGE_HEADER_SIZE};
     use crate::btree::{BTreeKey, BTreeNode, BTreeValue, NodeType};
     use crate::error::Result;
-    use crate::storage::{Page, PageId};
+    use crate::storage::{Page, PageId, PAGE_SIZE};
 
     #[test]
     fn test_btree_key_comparison() {
@@ -559,6 +560,44 @@ mod tree_tests {
         for (i, value) in node.values.iter().enumerate() {
             assert_eq!(deserialized_node.values[i].data, value.data);
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_btree_page_rejects_unsupported_version() -> Result<()> {
+        let page_id = PageId::new(1);
+        let mut node = BTreeNode::new_leaf(page_id);
+        node.keys.push(BTreeKey::new(vec![1, 2, 3]));
+        node.values.push(BTreeValue::new(vec![7, 8, 9]));
+
+        let mut page = Page::new(page_id);
+        BTreeNode::to_page(&node, &mut page)?;
+        page.data[4] = BTREE_PAGE_FORMAT_VERSION.saturating_add(1);
+
+        let err = BTreeNode::from_page(page).unwrap_err();
+        assert!(err.to_string().contains("Unsupported B-tree version"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_btree_page_rejects_invalid_payload_length() -> Result<()> {
+        let page_id = PageId::new(1);
+        let mut node = BTreeNode::new_leaf(page_id);
+        node.keys.push(BTreeKey::new(vec![1, 2, 3]));
+        node.values.push(BTreeValue::new(vec![7, 8, 9]));
+
+        let mut page = Page::new(page_id);
+        BTreeNode::to_page(&node, &mut page)?;
+
+        // Corrupt payload_len to exceed page boundary.
+        page.data[14..18].copy_from_slice(&((PAGE_SIZE as u32) + 1).to_le_bytes());
+        let err = BTreeNode::from_page(page).unwrap_err();
+        assert!(err.to_string().contains("Payload length"));
+
+        // Keep a guard that the header offset contract is stable.
+        assert_eq!(BTREE_PAGE_HEADER_SIZE, 18);
 
         Ok(())
     }
