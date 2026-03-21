@@ -7,6 +7,8 @@
 //! - During migration to table B-tree storage, rowid remains the physical table key.
 //! - The storage file is expected to evolve into a forest of B-trees (catalog/table/index).
 
+use crate::btree::node::SearchResult;
+use crate::btree::{BTreeKey, BTreeNode, BTreeValue, NodeType};
 use crate::catalog::{Table, Value};
 use crate::error::Result;
 use crate::storage::free_list::FreeList;
@@ -17,6 +19,12 @@ use crate::storage::{
 };
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TableStorageKind {
+    LegacyPageChain,
+    RowidBtree,
+}
 
 /// Main storage engine interface
 #[derive(Debug)]
@@ -317,7 +325,14 @@ impl StorageEngine {
             }
 
             let (table_pages, counted_rows, max_row_id) =
-                self.validate_table_page_chain(&table_name, &metadata)?;
+                match self.table_storage_kind(metadata.root_page_id)? {
+                    TableStorageKind::LegacyPageChain => {
+                        self.validate_table_page_chain(&table_name, &metadata)?
+                    }
+                    TableStorageKind::RowidBtree => {
+                        self.validate_table_btree_pages(&table_name, metadata.root_page_id)?
+                    }
+                };
 
             for page_id in table_pages {
                 if free_pages.contains(&page_id) {
@@ -486,6 +501,62 @@ impl StorageEngine {
         }
 
         Ok((pages, row_count, max_row_id))
+    }
+
+    fn validate_table_btree_pages(
+        &mut self,
+        table_name: &str,
+        root_page_id: PageId,
+    ) -> Result<(Vec<PageId>, u64, u64)> {
+        let mut visited = HashSet::new();
+        let mut row_count = 0u64;
+        let mut max_row_id = 0u64;
+        self.walk_table_btree(
+            root_page_id,
+            table_name,
+            &mut visited,
+            &mut row_count,
+            &mut max_row_id,
+        )?;
+        Ok((visited.into_iter().collect(), row_count, max_row_id))
+    }
+
+    fn walk_table_btree(
+        &mut self,
+        page_id: PageId,
+        table_name: &str,
+        visited: &mut HashSet<PageId>,
+        row_count: &mut u64,
+        max_row_id: &mut u64,
+    ) -> Result<()> {
+        if !visited.insert(page_id) {
+            return Err(crate::error::HematiteError::CorruptedData(format!(
+                "Cycle detected in B-tree for table '{}'",
+                table_name
+            )));
+        }
+
+        let page = self.read_page(page_id)?;
+        let node = BTreeNode::from_page(page)?;
+
+        match node.node_type {
+            NodeType::Leaf => {
+                for value in node.values {
+                    let row = crate::storage::serialization::RowSerializer::deserialize_stored_row(
+                        &value.data,
+                    )?;
+                    *row_count += 1;
+                    *max_row_id = (*max_row_id).max(row.row_id);
+                }
+            }
+            NodeType::Internal => {
+                for child in node.children {
+                    self.walk_table_btree(child, table_name, visited, row_count, max_row_id)?;
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn row_data_end(page: &Page, row_count: u32) -> Result<usize> {
@@ -703,6 +774,23 @@ impl StorageEngine {
             (metadata.root_page_id, metadata.next_row_id)
         };
 
+        match self.table_storage_kind(root_page_id)? {
+            TableStorageKind::LegacyPageChain => {
+                self.insert_into_table_legacy(table_name, root_page_id, row, row_id)
+            }
+            TableStorageKind::RowidBtree => {
+                self.insert_into_table_btree(table_name, root_page_id, row_id, row)
+            }
+        }
+    }
+
+    fn insert_into_table_legacy(
+        &mut self,
+        table_name: &str,
+        root_page_id: PageId,
+        row: Vec<crate::catalog::Value>,
+        row_id: u64,
+    ) -> Result<u64> {
         let serialized_row =
             crate::storage::serialization::RowSerializer::serialize_stored_row(&StoredRow {
                 row_id,
@@ -766,6 +854,46 @@ impl StorageEngine {
 
             return Ok(row_id);
         }
+    }
+
+    fn insert_into_table_btree(
+        &mut self,
+        table_name: &str,
+        root_page_id: PageId,
+        row_id: u64,
+        row: Vec<crate::catalog::Value>,
+    ) -> Result<u64> {
+        let key = BTreeKey::new(row_id.to_be_bytes().to_vec());
+        let value = BTreeValue::new(
+            crate::storage::serialization::RowSerializer::serialize_stored_row(&StoredRow {
+                row_id,
+                values: row,
+            })?,
+        );
+
+        let mut root_page = self.read_page(root_page_id)?;
+        let mut root = BTreeNode::from_page(root_page.clone())?;
+        if root.node_type != NodeType::Leaf {
+            return Err(crate::error::HematiteError::StorageError(
+                "Rowid B-tree insert for internal roots is not implemented yet".to_string(),
+            ));
+        }
+        if root.keys.len() >= crate::btree::node::MAX_KEYS
+            || !root.can_insert_key_value(&key, &value)
+        {
+            return Err(crate::error::HematiteError::StorageError(
+                "Rowid B-tree root split is not implemented yet".to_string(),
+            ));
+        }
+        root.insert_leaf(key, value)?;
+        root.to_page(&mut root_page)?;
+        self.write_page(root_page)?;
+
+        if let Some(metadata) = self.table_manager.get_table_metadata_mut(table_name) {
+            metadata.row_count += 1;
+            metadata.next_row_id += 1;
+        }
+        Ok(row_id)
     }
 
     pub fn replace_table_rows(&mut self, table_name: &str, rows: Vec<StoredRow>) -> Result<()> {
@@ -835,6 +963,22 @@ impl StorageEngine {
             metadata.root_page_id
         };
 
+        match self.table_storage_kind(root_page_id)? {
+            TableStorageKind::LegacyPageChain => {
+                self.delete_from_table_by_rowid_legacy(table_name, root_page_id, rowid)
+            }
+            TableStorageKind::RowidBtree => {
+                self.delete_from_table_by_rowid_btree(table_name, root_page_id, rowid)
+            }
+        }
+    }
+
+    fn delete_from_table_by_rowid_legacy(
+        &mut self,
+        table_name: &str,
+        root_page_id: PageId,
+        rowid: u64,
+    ) -> Result<bool> {
         let mut current_page_id = root_page_id;
         loop {
             let mut page = self.read_page(current_page_id)?;
@@ -886,6 +1030,32 @@ impl StorageEngine {
             }
             current_page_id = header.next_page_id;
         }
+    }
+
+    fn delete_from_table_by_rowid_btree(
+        &mut self,
+        table_name: &str,
+        root_page_id: PageId,
+        rowid: u64,
+    ) -> Result<bool> {
+        let key = BTreeKey::new(rowid.to_be_bytes().to_vec());
+        let mut root_page = self.read_page(root_page_id)?;
+        let mut root = BTreeNode::from_page(root_page.clone())?;
+        if root.node_type != NodeType::Leaf {
+            return Err(crate::error::HematiteError::StorageError(
+                "Rowid B-tree delete for internal roots is not implemented yet".to_string(),
+            ));
+        }
+        let deleted = root.delete_from_leaf(&key)?.is_some();
+        if !deleted {
+            return Ok(false);
+        }
+        root.to_page(&mut root_page)?;
+        self.write_page(root_page)?;
+        if let Some(metadata) = self.table_manager.get_table_metadata_mut(table_name) {
+            metadata.row_count = metadata.row_count.saturating_sub(1);
+        }
+        Ok(true)
     }
 
     fn insert_stored_row(&mut self, table_name: &str, row: StoredRow) -> Result<()> {
@@ -990,11 +1160,43 @@ impl StorageEngine {
     }
 
     pub fn open_table_cursor(&mut self, table_name: &str) -> Result<TableCursor> {
-        let rows = self.read_rows_with_ids_from_pages(table_name)?;
+        let rows = self.read_rows_with_ids_from_table_storage(table_name)?;
         Ok(TableCursor::new(rows))
     }
 
-    fn read_rows_with_ids_from_pages(&mut self, table_name: &str) -> Result<Vec<StoredRow>> {
+    fn table_storage_kind(&mut self, root_page_id: PageId) -> Result<TableStorageKind> {
+        let root_page = self.read_page(root_page_id)?;
+        if root_page.data[0..4] == *b"BTRE" {
+            Ok(TableStorageKind::RowidBtree)
+        } else {
+            Ok(TableStorageKind::LegacyPageChain)
+        }
+    }
+
+    fn read_rows_with_ids_from_table_storage(
+        &mut self,
+        table_name: &str,
+    ) -> Result<Vec<StoredRow>> {
+        let root_page_id = self
+            .table_manager
+            .get_table_metadata(table_name)
+            .ok_or_else(|| {
+                crate::error::HematiteError::StorageError(format!(
+                    "Table '{}' does not exist",
+                    table_name
+                ))
+            })?
+            .root_page_id;
+
+        match self.table_storage_kind(root_page_id)? {
+            TableStorageKind::LegacyPageChain => {
+                self.read_rows_with_ids_from_legacy_pages(table_name)
+            }
+            TableStorageKind::RowidBtree => self.read_rows_with_ids_from_btree(root_page_id),
+        }
+    }
+
+    fn read_rows_with_ids_from_legacy_pages(&mut self, table_name: &str) -> Result<Vec<StoredRow>> {
         let metadata = self
             .table_manager
             .get_table_metadata(table_name)
@@ -1048,6 +1250,36 @@ impl StorageEngine {
         Ok(rows)
     }
 
+    fn read_rows_with_ids_from_btree(&mut self, root_page_id: PageId) -> Result<Vec<StoredRow>> {
+        let mut rows = Vec::new();
+        self.collect_rows_from_btree(root_page_id, &mut rows)?;
+        rows.sort_unstable_by_key(|row| row.row_id);
+        Ok(rows)
+    }
+
+    fn collect_rows_from_btree(&mut self, page_id: PageId, out: &mut Vec<StoredRow>) -> Result<()> {
+        let page = self.read_page(page_id)?;
+        let node = BTreeNode::from_page(page)?;
+
+        match node.node_type {
+            NodeType::Leaf => {
+                for value in node.values {
+                    let row = crate::storage::serialization::RowSerializer::deserialize_stored_row(
+                        &value.data,
+                    )?;
+                    out.push(row);
+                }
+            }
+            NodeType::Internal => {
+                for child_page_id in node.children {
+                    self.collect_rows_from_btree(child_page_id, out)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn read_rows_with_ids(&mut self, table_name: &str) -> Result<Vec<StoredRow>> {
         let mut cursor = self.open_table_cursor(table_name)?;
         let mut rows = Vec::new();
@@ -1077,11 +1309,53 @@ impl StorageEngine {
         table_name: &str,
         rowid: u64,
     ) -> Result<Option<StoredRow>> {
-        let mut cursor = self.open_table_cursor(table_name)?;
-        if !cursor.seek_rowid(rowid) {
-            return Ok(None);
+        let root_page_id = self
+            .table_manager
+            .get_table_metadata(table_name)
+            .ok_or_else(|| {
+                crate::error::HematiteError::StorageError(format!(
+                    "Table '{}' does not exist",
+                    table_name
+                ))
+            })?
+            .root_page_id;
+        match self.table_storage_kind(root_page_id)? {
+            TableStorageKind::LegacyPageChain => {
+                let mut cursor = self.open_table_cursor(table_name)?;
+                if !cursor.seek_rowid(rowid) {
+                    return Ok(None);
+                }
+                Ok(cursor.current().cloned())
+            }
+            TableStorageKind::RowidBtree => self.lookup_row_by_rowid_btree(root_page_id, rowid),
         }
-        Ok(cursor.current().cloned())
+    }
+
+    fn lookup_row_by_rowid_btree(
+        &mut self,
+        root_page_id: PageId,
+        rowid: u64,
+    ) -> Result<Option<StoredRow>> {
+        let key = BTreeKey::new(rowid.to_be_bytes().to_vec());
+        let mut current_page_id = root_page_id;
+        loop {
+            let page = self.read_page(current_page_id)?;
+            let node = BTreeNode::from_page(page)?;
+            match node.search(&key) {
+                SearchResult::Found(value) => {
+                    let row = crate::storage::serialization::RowSerializer::deserialize_stored_row(
+                        &value.data,
+                    )?;
+                    return Ok(Some(row));
+                }
+                SearchResult::NotFound(next_child) => {
+                    if node.node_type == NodeType::Leaf {
+                        return Ok(None);
+                    }
+                    current_page_id = next_child;
+                }
+            }
+        }
     }
 
     pub fn table_exists(&self, table_name: &str) -> bool {
