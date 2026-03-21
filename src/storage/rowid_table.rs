@@ -3,7 +3,9 @@
 //! This module defines stable byte-level encodings for rowid-keyed table cells.
 
 use crate::error::{HematiteError, Result};
+use crate::storage::serialization::RowSerializer;
 use crate::storage::PageId;
+use crate::storage::StoredRow;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RowidLeafCell {
@@ -76,6 +78,47 @@ impl RowidLeafCellLayout {
             overflow_first_page,
         })
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedRowidRecord {
+    pub cell: RowidLeafCellLayout,
+    pub overflow_payload: Vec<u8>,
+}
+
+pub fn encode_stored_row_record(
+    row: &StoredRow,
+    max_local_payload: usize,
+) -> Result<EncodedRowidRecord> {
+    let mut payload = RowSerializer::serialize_stored_row(&StoredRow {
+        row_id: 0,
+        values: row.values.clone(),
+    })?;
+    if payload.len() < 4 {
+        return Err(HematiteError::CorruptedData(
+            "Stored row payload is truncated".to_string(),
+        ));
+    }
+    payload.drain(0..4);
+    let local_len = RowidLeafCellLayout::local_payload_len_for(payload.len(), max_local_payload);
+    let local_payload = payload[0..local_len].to_vec();
+    let overflow_payload = payload[local_len..].to_vec();
+
+    Ok(EncodedRowidRecord {
+        cell: RowidLeafCellLayout {
+            rowid: row.row_id,
+            total_payload_len: payload.len() as u32,
+            local_payload,
+            overflow_first_page: PageId::invalid(),
+        },
+        overflow_payload,
+    })
+}
+
+pub fn decode_stored_row_record(rowid: u64, payload: &[u8]) -> Result<StoredRow> {
+    let mut row = RowSerializer::deserialize_stored_row(payload)?;
+    row.row_id = rowid;
+    Ok(row)
 }
 
 impl RowidLeafCell {

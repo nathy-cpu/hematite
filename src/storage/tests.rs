@@ -838,7 +838,8 @@ mod rowid_table_tests {
         free_overflow_chain, read_overflow_chain, write_overflow_chain,
     };
     use crate::storage::rowid_table::{
-        RowidInternalCell, RowidLeafCell, RowidLeafCellLayout, ROWID_LEAF_FIXED_HEADER_SIZE,
+        decode_stored_row_record, encode_stored_row_record, RowidInternalCell, RowidLeafCell,
+        RowidLeafCellLayout, ROWID_LEAF_FIXED_HEADER_SIZE,
     };
     use crate::storage::PageId;
 
@@ -918,6 +919,29 @@ mod rowid_table_tests {
         free_overflow_chain(&mut storage, first)?;
         let reused = storage.allocate_page()?;
         assert_eq!(Some(reused), first);
+        Ok(())
+    }
+
+    #[test]
+    fn test_rowid_record_encode_decode_with_local_split() -> crate::error::Result<()> {
+        let row = crate::storage::StoredRow {
+            row_id: 501,
+            values: vec![
+                crate::catalog::Value::Integer(9),
+                crate::catalog::Value::Text("x".repeat(300)),
+                crate::catalog::Value::Boolean(true),
+            ],
+        };
+
+        let encoded = encode_stored_row_record(&row, 64)?;
+        assert_eq!(encoded.cell.rowid, row.row_id);
+        assert_eq!(encoded.cell.local_payload.len(), 64);
+        assert!(!encoded.overflow_payload.is_empty());
+
+        let mut full_payload = encoded.cell.local_payload.clone();
+        full_payload.extend_from_slice(&encoded.overflow_payload);
+        let decoded = decode_stored_row_record(row.row_id, &full_payload)?;
+        assert_eq!(decoded, row);
         Ok(())
     }
 }
