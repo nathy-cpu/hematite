@@ -350,6 +350,40 @@ impl StorageEngine {
                 )));
             }
 
+            let mut cursor = self.open_table_cursor(&table_name)?;
+            let mut cursor_rows = 0u64;
+            let mut previous_rowid: Option<u64> = None;
+            if cursor.first() {
+                loop {
+                    let row = cursor.current().ok_or_else(|| {
+                        crate::error::HematiteError::CorruptedData(format!(
+                            "Cursor became invalid while scanning table '{}'",
+                            table_name
+                        ))
+                    })?;
+                    if let Some(prev) = previous_rowid {
+                        if row.row_id <= prev {
+                            return Err(crate::error::HematiteError::CorruptedData(format!(
+                                "Cursor-visible rowid order violation for table '{}': {} then {}",
+                                table_name, prev, row.row_id
+                            )));
+                        }
+                    }
+                    previous_rowid = Some(row.row_id);
+                    cursor_rows += 1;
+                    if !cursor.next() {
+                        break;
+                    }
+                }
+            }
+
+            if cursor_rows != counted_rows {
+                return Err(crate::error::HematiteError::CorruptedData(format!(
+                    "Cursor-visible row count mismatch for table '{}': chain={}, cursor={}",
+                    table_name, counted_rows, cursor_rows
+                )));
+            }
+
             total_rows += counted_rows;
         }
 

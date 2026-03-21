@@ -402,6 +402,34 @@ mod mod_tests {
     }
 
     #[test]
+    fn test_storage_integrity_rejects_cursor_rowid_order_violation() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_storage_integrity_cursor_rowid_order");
+        let mut storage = StorageEngine::new(test_db.path())?;
+
+        let root_page_id = storage.create_table("users")?;
+        let _ = storage.insert_into_table("users", vec![Value::Integer(1)])?;
+        let _ = storage.insert_into_table("users", vec![Value::Integer(2)])?;
+
+        let mut page = storage.read_page(root_page_id)?;
+        let mut offset = TABLE_PAGE_HEADER_SIZE;
+
+        let first_len = crate::storage::serialization::RowSerializer::read_row_length(
+            &page.data[offset..offset + 4],
+        )?;
+        offset += 4 + first_len;
+
+        // Corrupt second row's row_id to be <= first row_id.
+        page.data[offset + 4..offset + 12].copy_from_slice(&1u64.to_le_bytes());
+        storage.write_page(page)?;
+
+        let err = storage.validate_integrity().unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Cursor-visible rowid order violation"));
+        Ok(())
+    }
+
+    #[test]
     fn test_versioned_storage_metadata_persists_across_reopen() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_versioned_storage_metadata");
 
