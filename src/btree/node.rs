@@ -752,7 +752,40 @@ impl BTreeNode {
     }
 
     pub fn can_merge_with(&self, other: &BTreeNode) -> bool {
-        self.keys.len() + other.keys.len() <= MAX_KEYS
+        if self.node_type != other.node_type {
+            return false;
+        }
+
+        match self.node_type {
+            NodeType::Leaf => {
+                let mut merged = self.clone();
+                merged.keys.extend(other.keys.clone());
+                merged.values.extend(other.values.clone());
+                merged.keys.len() <= MAX_KEYS && merged.will_fit_in_page()
+            }
+            NodeType::Internal => {
+                // Internal merges need an explicit separator key from the parent.
+                // Callers should use `can_merge_internal_with_separator`.
+                false
+            }
+        }
+    }
+
+    pub fn can_merge_internal_with_separator(
+        &self,
+        other: &BTreeNode,
+        separator_key: &BTreeKey,
+    ) -> bool {
+        if self.node_type != NodeType::Internal || other.node_type != NodeType::Internal {
+            return false;
+        }
+
+        let mut merged = self.clone();
+        merged.keys.push(separator_key.clone());
+        merged.keys.extend(other.keys.clone());
+        merged.children.extend(other.children.clone());
+
+        merged.keys.len() <= MAX_KEYS && merged.will_fit_in_page()
     }
 
     pub fn merge_leaf(&mut self, other: &mut BTreeNode, storage: &mut StorageEngine) -> Result<()> {
@@ -789,7 +822,7 @@ impl BTreeNode {
             ));
         }
 
-        if !self.can_merge_with(other) {
+        if !self.can_merge_internal_with_separator(other, &separator_key) {
             return Err(HematiteError::StorageError(
                 "Nodes cannot be merged".to_string(),
             ));

@@ -594,7 +594,7 @@ mod tree_tests {
     use crate::btree::node::{BTREE_PAGE_FORMAT_VERSION, BTREE_PAGE_HEADER_SIZE};
     use crate::btree::{BTreeKey, BTreeNode, BTreeValue, NodeType};
     use crate::error::Result;
-    use crate::storage::{Page, PageId, PAGE_SIZE};
+    use crate::storage::{Page, PageId, StorageEngine, PAGE_SIZE};
 
     #[test]
     fn test_btree_key_comparison() {
@@ -684,6 +684,55 @@ mod tree_tests {
 
         // Keep a guard that the header offset contract is stable.
         assert_eq!(BTREE_PAGE_HEADER_SIZE, 18);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_leaf_merge_rejects_oversized_result() -> Result<()> {
+        let mut storage = StorageEngine::new_in_memory()?;
+        let left_page = storage.allocate_page()?;
+        let right_page = storage.allocate_page()?;
+
+        let mut left = BTreeNode::new_leaf(left_page);
+        let mut right = BTreeNode::new_leaf(right_page);
+
+        for i in 0u32..10u32 {
+            left.keys.push(BTreeKey::new(i.to_le_bytes().to_vec()));
+            left.values.push(BTreeValue::new(vec![1u8; 200]));
+        }
+        for i in 10u32..20u32 {
+            right.keys.push(BTreeKey::new(i.to_le_bytes().to_vec()));
+            right.values.push(BTreeValue::new(vec![2u8; 200]));
+        }
+
+        let err = left.merge_leaf(&mut right, &mut storage).unwrap_err();
+        assert!(err.to_string().contains("Nodes cannot be merged"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_leaf_merge_deallocates_other_page() -> Result<()> {
+        let mut storage = StorageEngine::new_in_memory()?;
+        let left_page = storage.allocate_page()?;
+        let right_page = storage.allocate_page()?;
+
+        let mut left = BTreeNode::new_leaf(left_page);
+        let mut right = BTreeNode::new_leaf(right_page);
+
+        left.keys.push(BTreeKey::new(vec![1]));
+        left.values.push(BTreeValue::new(vec![11]));
+        right.keys.push(BTreeKey::new(vec![2]));
+        right.values.push(BTreeValue::new(vec![22]));
+
+        left.merge_leaf(&mut right, &mut storage)?;
+        assert_eq!(left.keys.len(), 2);
+        assert_eq!(left.values.len(), 2);
+
+        // Right page should have been returned to freelist and reused first.
+        let reused = storage.allocate_page()?;
+        assert_eq!(reused, right_page);
 
         Ok(())
     }
