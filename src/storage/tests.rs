@@ -835,6 +835,34 @@ mod mod_tests {
         assert_eq!(seen.len(), 3);
         Ok(())
     }
+
+    #[test]
+    fn test_delete_from_table_by_rowid_removes_only_target_row() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_storage_delete_by_rowid");
+        let mut storage = StorageEngine::new(test_db.path())?;
+        let _ = storage.create_table("users")?;
+
+        let row1 = storage.insert_into_table("users", vec![Value::Integer(1)])?;
+        let row2 = storage.insert_into_table("users", vec![Value::Integer(2)])?;
+        let row3 = storage.insert_into_table("users", vec![Value::Integer(3)])?;
+
+        assert!(storage.delete_from_table_by_rowid("users", row2)?);
+        assert!(!storage.delete_from_table_by_rowid("users", row2)?);
+
+        let remaining = storage.read_rows_with_ids("users")?;
+        let remaining_rowids = remaining.iter().map(|row| row.row_id).collect::<Vec<_>>();
+        let remaining_values = remaining
+            .iter()
+            .map(|row| row.values[0].clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(remaining_rowids, vec![row1, row3]);
+        assert_eq!(remaining_values, vec![Value::Integer(1), Value::Integer(3)]);
+
+        let metadata = storage.get_table_metadata().get("users").unwrap();
+        assert_eq!(metadata.row_count, 2);
+        Ok(())
+    }
 }
 
 mod randomized_pager_lifecycle_tests {

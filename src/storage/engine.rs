@@ -821,6 +821,73 @@ impl StorageEngine {
         Ok(())
     }
 
+    pub fn delete_from_table_by_rowid(&mut self, table_name: &str, rowid: u64) -> Result<bool> {
+        let root_page_id = {
+            let metadata = self
+                .table_manager
+                .get_table_metadata(table_name)
+                .ok_or_else(|| {
+                    crate::error::HematiteError::StorageError(format!(
+                        "Table '{}' does not exist",
+                        table_name
+                    ))
+                })?;
+            metadata.root_page_id
+        };
+
+        let mut current_page_id = root_page_id;
+        loop {
+            let mut page = self.read_page(current_page_id)?;
+            let mut header = self.table_manager.read_page_header(&page)?;
+            let mut offset = TABLE_PAGE_HEADER_SIZE;
+            let page_end = Self::row_data_end(&page, header.row_count)?;
+
+            for _ in 0..header.row_count {
+                if offset + 4 > crate::storage::PAGE_SIZE {
+                    return Err(crate::error::HematiteError::CorruptedData(
+                        "Row length exceeds page bounds".to_string(),
+                    ));
+                }
+
+                let row_len = crate::storage::serialization::RowSerializer::read_row_length(
+                    &page.data[offset..offset + 4],
+                )?;
+                let payload_start = offset + 4;
+                let payload_end = payload_start + row_len;
+                if payload_end > crate::storage::PAGE_SIZE {
+                    return Err(crate::error::HematiteError::CorruptedData(
+                        "Row payload exceeds page bounds".to_string(),
+                    ));
+                }
+
+                let row = crate::storage::serialization::RowSerializer::deserialize_stored_row(
+                    &page.data[payload_start..payload_end],
+                )?;
+                if row.row_id == rowid {
+                    page.data.copy_within(payload_end..page_end, offset);
+                    let new_end = page_end - (payload_end - offset);
+                    page.data[new_end..page_end].fill(0);
+
+                    header.row_count -= 1;
+                    self.table_manager.write_page_header(&mut page, &header)?;
+                    self.write_page(page)?;
+
+                    if let Some(metadata) = self.table_manager.get_table_metadata_mut(table_name) {
+                        metadata.row_count = metadata.row_count.saturating_sub(1);
+                    }
+                    return Ok(true);
+                }
+
+                offset = payload_end;
+            }
+
+            if header.next_page_id == PageId::invalid() {
+                return Ok(false);
+            }
+            current_page_id = header.next_page_id;
+        }
+    }
+
     fn insert_stored_row(&mut self, table_name: &str, row: StoredRow) -> Result<()> {
         let root_page_id = {
             let metadata = self
