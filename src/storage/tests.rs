@@ -833,6 +833,30 @@ mod randomized_pager_lifecycle_tests {
     }
 }
 
+mod rowid_table_tests {
+    use crate::storage::rowid_table::RowidLeafCell;
+
+    #[test]
+    fn test_rowid_leaf_cell_roundtrip() -> crate::error::Result<()> {
+        let cell = RowidLeafCell {
+            rowid: 42,
+            payload: vec![1, 2, 3, 4, 5],
+        };
+
+        let encoded = cell.encode();
+        let decoded = RowidLeafCell::decode(&encoded)?;
+        assert_eq!(decoded, cell);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_rowid_leaf_cell_rejects_length_mismatch() {
+        let bad = vec![0u8; RowidLeafCell::HEADER_SIZE + 3];
+        assert!(RowidLeafCell::decode(&bad).is_err());
+    }
+}
+
 mod serialization_tests {
     use crate::catalog::Value;
     use crate::error::{HematiteError, Result};

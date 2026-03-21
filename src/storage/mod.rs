@@ -7,6 +7,7 @@ pub mod file_manager;
 pub mod free_list;
 pub mod page_manager;
 pub mod pager;
+pub mod rowid_table;
 pub mod serialization;
 pub mod table;
 pub mod types;
