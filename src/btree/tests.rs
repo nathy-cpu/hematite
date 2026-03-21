@@ -3,7 +3,7 @@
 mod mod_tests {
     use crate::btree::index::BTreeIndex;
     use crate::btree::tree::BTreeManager;
-    use crate::btree::{BTreeKey, BTreeValue};
+    use crate::btree::{BTreeKey, BTreeValue, KeyValueCodec};
     use crate::error::Result;
     use crate::storage::StorageEngine;
     use crate::test_utils::TestDbFile;
@@ -14,6 +14,37 @@ mod mod_tests {
 
     fn new_storage(db: &TestDbFile) -> Result<StorageEngine> {
         StorageEngine::new(db.path().to_string())
+    }
+
+    #[derive(Debug, Clone, Copy, Default)]
+    struct U32StringCodec;
+
+    impl KeyValueCodec for U32StringCodec {
+        type Key = u32;
+        type Value = String;
+
+        fn encode_key(key: &Self::Key) -> Result<Vec<u8>> {
+            Ok(key.to_le_bytes().to_vec())
+        }
+
+        fn decode_key(bytes: &[u8]) -> Result<Self::Key> {
+            if bytes.len() != 4 {
+                return Err(crate::error::HematiteError::StorageError(
+                    "Invalid u32 key encoding".to_string(),
+                ));
+            }
+            Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        }
+
+        fn encode_value(value: &Self::Value) -> Result<Vec<u8>> {
+            Ok(value.as_bytes().to_vec())
+        }
+
+        fn decode_value(bytes: &[u8]) -> Result<Self::Value> {
+            String::from_utf8(bytes.to_vec()).map_err(|e| {
+                crate::error::HematiteError::StorageError(format!("Invalid UTF-8 value: {}", e))
+            })
+        }
     }
 
     #[test]
@@ -52,6 +83,25 @@ mod mod_tests {
         let key_missing = BTreeKey::new(vec![99, 0, 0]);
         let found_missing = btree.search(&key_missing)?;
         assert!(found_missing.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_btree_typed_codec_boundary() -> Result<()> {
+        let path = tmp_db();
+        let storage = new_storage(&path)?;
+        let mut btree = BTreeIndex::new_with_init(storage)?;
+
+        btree.insert_typed::<U32StringCodec>(&7, &"seven".to_string())?;
+        btree.insert_typed::<U32StringCodec>(&9, &"nine".to_string())?;
+
+        let found = btree.search_typed::<U32StringCodec>(&7)?;
+        assert_eq!(found, Some("seven".to_string()));
+
+        let deleted = btree.delete_typed::<U32StringCodec>(&9)?;
+        assert_eq!(deleted, Some("nine".to_string()));
+        assert_eq!(btree.search_typed::<U32StringCodec>(&9)?, None);
 
         Ok(())
     }

@@ -2,15 +2,41 @@
 
 use crate::btree::tree::BTreeManager;
 use crate::btree::BTreeIndex;
+use crate::btree::KeyValueCodec;
 use crate::catalog::column::Column;
 use crate::catalog::header::DatabaseHeader;
 use crate::catalog::ids::TableId;
 use crate::catalog::schema::Schema;
 use crate::catalog::table::{SecondaryIndex, Table};
-use crate::error::Result;
+use crate::error::{HematiteError, Result};
 use crate::storage::{Page, PageId, StorageEngine, StorageIntegrityReport, DB_HEADER_PAGE_ID};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+
+#[derive(Debug, Clone, Copy, Default)]
+struct CatalogSchemaCodec;
+
+impl KeyValueCodec for CatalogSchemaCodec {
+    type Key = String;
+    type Value = Table;
+
+    fn encode_key(key: &Self::Key) -> Result<Vec<u8>> {
+        Ok(key.as_bytes().to_vec())
+    }
+
+    fn decode_key(bytes: &[u8]) -> Result<Self::Key> {
+        String::from_utf8(bytes.to_vec())
+            .map_err(|e| HematiteError::StorageError(format!("Invalid table name: {}", e)))
+    }
+
+    fn encode_value(value: &Self::Value) -> Result<Vec<u8>> {
+        value.to_bytes()
+    }
+
+    fn decode_value(bytes: &[u8]) -> Result<Self::Value> {
+        Table::from_bytes(bytes)
+    }
+}
 
 /// SQLite-style catalog manager with B-tree schema persistence
 #[derive(Debug)]
@@ -57,6 +83,7 @@ impl Catalog {
                 let mut header_page = Page::new(DB_HEADER_PAGE_ID);
                 new_header.serialize(&mut header_page)?;
                 storage_guard.write_page(header_page)?;
+                storage_guard.flush()?;
 
                 new_header
             }
@@ -87,10 +114,8 @@ impl Catalog {
 
         while cursor.is_valid() {
             if let (Some(key), Some(value)) = (cursor.key(), cursor.value()) {
-                let table_name = String::from_utf8(key.data.clone()).map_err(|e| {
-                    crate::error::HematiteError::StorageError(format!("Invalid table name: {}", e))
-                })?;
-                let mut table = Table::from_bytes(&value.data)?;
+                let table_name = CatalogSchemaCodec::decode_key(key.as_bytes())?;
+                let mut table = CatalogSchemaCodec::decode_value(value.as_bytes())?;
                 // Ensure the persisted name matches the key to avoid inconsistencies.
                 table.name = table_name;
                 schema.insert_table(table)?;
@@ -112,13 +137,7 @@ impl Catalog {
             .list_tables()
             .into_iter()
             .filter_map(|(table_id, _name)| self.schema.get_table(table_id).cloned())
-            .map(|table| {
-                Ok((
-                    crate::btree::BTreeKey::new(table.name.as_bytes().to_vec()),
-                    crate::btree::BTreeValue::new(table.to_bytes()?),
-                ))
-            })
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Vec<_>>();
 
         let old_schema_root = self.schema_root;
         let mut manager = BTreeManager::from_shared_storage(self.storage.clone());
@@ -128,8 +147,8 @@ impl Catalog {
         let mut btree =
             crate::btree::BTreeIndex::from_shared_storage(self.storage.clone(), new_schema_root);
 
-        for (key, value) in table_entries {
-            btree.insert(key, value)?;
+        for table in table_entries {
+            btree.insert_typed::<CatalogSchemaCodec>(&table.name, &table)?;
         }
 
         let mut storage_guard = self.storage.lock().unwrap();
@@ -140,6 +159,7 @@ impl Catalog {
         let mut updated = Page::new(DB_HEADER_PAGE_ID);
         header.serialize(&mut updated)?;
         storage_guard.write_page(updated)?;
+        storage_guard.flush()?;
 
         self.schema_root = new_schema_root;
         self.schema_dirty = false;
@@ -179,6 +199,7 @@ impl Catalog {
 
         self.schema.insert_table(table.clone())?;
         self.schema_dirty = true;
+        self.save_schema_to_btree()?;
 
         Ok(table_id)
     }
@@ -205,6 +226,7 @@ impl Catalog {
         // Remove from in-memory schema
         self.schema.drop_table(table_id)?;
         self.schema_dirty = true;
+        self.save_schema_to_btree()?;
 
         Ok(())
     }
@@ -284,6 +306,7 @@ impl Catalog {
         // Update in-memory schema
         self.schema.set_table_root_page(table_id, root_page)?;
         self.schema_dirty = true;
+        self.save_schema_to_btree()?;
 
         Ok(())
     }
@@ -306,6 +329,7 @@ impl Catalog {
     pub fn add_secondary_index(&mut self, table_id: TableId, index: SecondaryIndex) -> Result<()> {
         self.schema.add_secondary_index(table_id, index)?;
         self.schema_dirty = true;
+        self.save_schema_to_btree()?;
 
         Ok(())
     }
@@ -463,6 +487,7 @@ impl Catalog {
 
         self.schema.insert_table(table.clone())?;
         self.schema_dirty = true;
+        self.save_schema_to_btree()?;
 
         Ok(table_id)
     }

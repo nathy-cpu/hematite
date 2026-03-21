@@ -2,6 +2,7 @@
 
 use crate::btree::cursor::BTreeCursor;
 use crate::btree::node::SearchResult;
+use crate::btree::KeyValueCodec;
 use crate::btree::{BTreeKey, BTreeNode, BTreeValue, NodeType};
 use crate::error::{HematiteError, Result};
 use crate::storage::{Page, PageId, StorageEngine};
@@ -66,6 +67,15 @@ impl BTreeIndex {
         }
     }
 
+    pub fn search_typed<C: KeyValueCodec>(&mut self, key: &C::Key) -> Result<Option<C::Value>> {
+        let encoded_key = C::encode_key(key)?;
+        let raw = self.search(&BTreeKey::new(encoded_key))?;
+        match raw {
+            Some(value) => Ok(Some(C::decode_value(value.as_bytes())?)),
+            None => Ok(None),
+        }
+    }
+
     pub fn insert(&mut self, key: BTreeKey, value: BTreeValue) -> Result<()> {
         // Validate key and value sizes at the top level
         BTreeNode::validate_key_size(&key)?;
@@ -80,6 +90,12 @@ impl BTreeIndex {
         }
 
         Ok(())
+    }
+
+    pub fn insert_typed<C: KeyValueCodec>(&mut self, key: &C::Key, value: &C::Value) -> Result<()> {
+        let encoded_key = C::encode_key(key)?;
+        let encoded_value = C::encode_value(value)?;
+        self.insert(BTreeKey::new(encoded_key), BTreeValue::new(encoded_value))
     }
 
     fn insert_recursive(
@@ -155,6 +171,15 @@ impl BTreeIndex {
             self.root_page_id = new_root;
         }
         Ok(result)
+    }
+
+    pub fn delete_typed<C: KeyValueCodec>(&mut self, key: &C::Key) -> Result<Option<C::Value>> {
+        let encoded_key = C::encode_key(key)?;
+        let raw = self.delete(&BTreeKey::new(encoded_key))?;
+        match raw {
+            Some(value) => Ok(Some(C::decode_value(value.as_bytes())?)),
+            None => Ok(None),
+        }
     }
 
     pub fn cursor(&self) -> Result<BTreeCursor> {
