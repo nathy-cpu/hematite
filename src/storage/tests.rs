@@ -757,6 +757,24 @@ mod mod_tests {
         assert_eq!(cursor_rows, rows);
         Ok(())
     }
+
+    #[test]
+    fn test_rowid_lookup_via_cursor_seek() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_storage_rowid_lookup_via_cursor");
+        let mut storage = StorageEngine::new(test_db.path())?;
+        let _ = storage.create_table("users")?;
+
+        let first = storage.insert_into_table("users", vec![Value::Integer(10)])?;
+        let _second = storage.insert_into_table("users", vec![Value::Integer(20)])?;
+
+        let found = storage.lookup_row_by_rowid("users", first)?;
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().values, vec![Value::Integer(10)]);
+
+        let missing = storage.lookup_row_by_rowid("users", first + 99)?;
+        assert!(missing.is_none());
+        Ok(())
+    }
 }
 
 mod randomized_pager_lifecycle_tests {

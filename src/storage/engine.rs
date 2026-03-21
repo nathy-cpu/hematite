@@ -971,6 +971,18 @@ impl StorageEngine {
             .collect())
     }
 
+    pub fn lookup_row_by_rowid(
+        &mut self,
+        table_name: &str,
+        rowid: u64,
+    ) -> Result<Option<StoredRow>> {
+        let mut cursor = self.open_table_cursor(table_name)?;
+        if !cursor.seek_rowid(rowid) {
+            return Ok(None);
+        }
+        Ok(cursor.current().cloned())
+    }
+
     pub fn table_exists(&self, table_name: &str) -> bool {
         self.table_manager.table_exists(table_name)
     }
