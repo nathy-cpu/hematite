@@ -441,6 +441,22 @@ mod mod_tests {
         Ok(())
     }
 
+    #[test]
+    fn test_validate_tree_reports_healthy_tree() -> Result<()> {
+        let path = tmp_db();
+        let storage = new_storage(&path)?;
+        let mut manager = BTreeManager::new(storage);
+        let root = manager.create_tree()?;
+        let mut index = manager.open_tree(root)?;
+
+        for i in 0u8..40u8 {
+            index.insert(BTreeKey::new(vec![i]), BTreeValue::new(vec![i]))?;
+        }
+
+        assert!(manager.validate_tree(index.root_page_id())?);
+        Ok(())
+    }
+
     // Edge case tests
     #[test]
     fn test_empty_tree_operations() -> Result<()> {
@@ -635,6 +651,7 @@ mod mod_tests {
 
 mod tree_tests {
     use crate::btree::node::{BTREE_PAGE_FORMAT_VERSION, BTREE_PAGE_HEADER_SIZE};
+    use crate::btree::tree::BTreeManager;
     use crate::btree::{BTreeKey, BTreeNode, BTreeValue, NodeType};
     use crate::error::Result;
     use crate::storage::{Page, PageId, StorageEngine, PAGE_SIZE};
@@ -776,6 +793,90 @@ mod tree_tests {
         // Right page should have been returned to freelist and reused first.
         let reused = storage.allocate_page()?;
         assert_eq!(reused, right_page);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_validate_tree_rejects_unsorted_leaf_keys() -> Result<()> {
+        let test_db = crate::test_utils::TestDbFile::new("_test_btree_validate_unsorted_leaf");
+        let mut storage = StorageEngine::new(test_db.path())?;
+        let root = storage.allocate_page()?;
+
+        let mut leaf = BTreeNode::new_leaf(root);
+        leaf.keys.push(BTreeKey::new(vec![2]));
+        leaf.values.push(BTreeValue::new(vec![20]));
+        leaf.keys.push(BTreeKey::new(vec![1]));
+        leaf.values.push(BTreeValue::new(vec![10]));
+
+        let mut page = Page::new(root);
+        leaf.to_page(&mut page)?;
+        storage.write_page(page)?;
+        storage.flush()?;
+
+        let mut manager = BTreeManager::new(storage);
+        assert!(!manager.validate_tree(root)?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_validate_tree_rejects_mixed_leaf_depths() -> Result<()> {
+        let test_db =
+            crate::test_utils::TestDbFile::new("_test_btree_validate_leaf_depth_mismatch");
+        let mut storage = StorageEngine::new(test_db.path())?;
+
+        let root = storage.allocate_page()?;
+        let left_leaf_page = storage.allocate_page()?;
+        let right_internal_page = storage.allocate_page()?;
+        let right_left_leaf_page = storage.allocate_page()?;
+        let right_right_leaf_page = storage.allocate_page()?;
+
+        let mut left_leaf = BTreeNode::new_leaf(left_leaf_page);
+        left_leaf.keys.push(BTreeKey::new(vec![1]));
+        left_leaf.values.push(BTreeValue::new(vec![11]));
+
+        let mut right_left_leaf = BTreeNode::new_leaf(right_left_leaf_page);
+        right_left_leaf.keys.push(BTreeKey::new(vec![6]));
+        right_left_leaf.values.push(BTreeValue::new(vec![66]));
+
+        let mut right_right_leaf = BTreeNode::new_leaf(right_right_leaf_page);
+        right_right_leaf.keys.push(BTreeKey::new(vec![9]));
+        right_right_leaf.values.push(BTreeValue::new(vec![99]));
+
+        let mut right_internal = BTreeNode::new_internal(right_internal_page);
+        right_internal.keys.push(BTreeKey::new(vec![8]));
+        right_internal.children.push(right_left_leaf_page);
+        right_internal.children.push(right_right_leaf_page);
+
+        let mut root_node = BTreeNode::new_internal(root);
+        root_node.keys.push(BTreeKey::new(vec![5]));
+        root_node.children.push(left_leaf_page);
+        root_node.children.push(right_internal_page);
+
+        let mut root_page = Page::new(root);
+        root_node.to_page(&mut root_page)?;
+        storage.write_page(root_page)?;
+
+        let mut left_page = Page::new(left_leaf_page);
+        left_leaf.to_page(&mut left_page)?;
+        storage.write_page(left_page)?;
+
+        let mut right_internal_page_data = Page::new(right_internal_page);
+        right_internal.to_page(&mut right_internal_page_data)?;
+        storage.write_page(right_internal_page_data)?;
+
+        let mut right_left_page = Page::new(right_left_leaf_page);
+        right_left_leaf.to_page(&mut right_left_page)?;
+        storage.write_page(right_left_page)?;
+
+        let mut right_right_page = Page::new(right_right_leaf_page);
+        right_right_leaf.to_page(&mut right_right_page)?;
+        storage.write_page(right_right_page)?;
+        storage.flush()?;
+
+        let mut manager = BTreeManager::new(storage);
+        assert!(!manager.validate_tree(root)?);
 
         Ok(())
     }

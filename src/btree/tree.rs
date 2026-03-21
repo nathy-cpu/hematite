@@ -8,7 +8,8 @@
 
 use crate::btree::{BTreeIndex, BTreeNode, NodeType};
 use crate::error::Result;
-use crate::storage::{Page, PageId, StorageEngine};
+use crate::storage::{Page, PageId, StorageEngine, DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID};
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 pub struct BTreeManager {
@@ -75,17 +76,59 @@ impl BTreeManager {
     }
 
     pub fn validate_tree(&mut self, root_page_id: PageId) -> Result<bool> {
-        let page = self.storage.lock().unwrap().read_page(root_page_id)?;
-        let root_node = BTreeNode::from_page(page)?;
+        if root_page_id == PageId::invalid()
+            || root_page_id == DB_HEADER_PAGE_ID
+            || root_page_id == STORAGE_METADATA_PAGE_ID
+        {
+            return Ok(false);
+        }
 
-        self.validate_node_recursive(&root_node)
+        let mut state = TreeValidationState {
+            visited: HashSet::new(),
+            leaf_depth: None,
+        };
+
+        self.validate_node_recursive(root_page_id, None, None, 0, &mut state)
     }
 
-    fn validate_node_recursive(&mut self, node: &BTreeNode) -> Result<bool> {
-        // Check key ordering
+    fn validate_node_recursive(
+        &mut self,
+        page_id: PageId,
+        lower_bound: Option<Vec<u8>>,
+        upper_bound: Option<Vec<u8>>,
+        depth: usize,
+        state: &mut TreeValidationState,
+    ) -> Result<bool> {
+        if page_id == PageId::invalid()
+            || page_id == DB_HEADER_PAGE_ID
+            || page_id == STORAGE_METADATA_PAGE_ID
+        {
+            return Ok(false);
+        }
+
+        if !state.visited.insert(page_id) {
+            return Ok(false);
+        }
+
+        let page = self.storage.lock().unwrap().read_page(page_id)?;
+        let node = BTreeNode::from_page(page)?;
+
+        // Check key ordering and per-node key bounds.
         for i in 1..node.keys.len() {
             if node.keys[i - 1] >= node.keys[i] {
                 return Ok(false);
+            }
+        }
+        for key in &node.keys {
+            if let Some(lower) = &lower_bound {
+                if key.as_bytes() <= lower.as_slice() {
+                    return Ok(false);
+                }
+            }
+            if let Some(upper) = &upper_bound {
+                if key.as_bytes() >= upper.as_slice() {
+                    return Ok(false);
+                }
             }
         }
 
@@ -95,6 +138,16 @@ impl BTreeManager {
                 if node.keys.len() != node.values.len() {
                     return Ok(false);
                 }
+
+                // All leaves should be at the same depth.
+                if let Some(expected_depth) = state.leaf_depth {
+                    if expected_depth != depth {
+                        return Ok(false);
+                    }
+                } else {
+                    state.leaf_depth = Some(depth);
+                }
+
                 Ok(true)
             }
             NodeType::Internal => {
@@ -102,13 +155,30 @@ impl BTreeManager {
                 if node.children.len() != node.keys.len() + 1 {
                     return Ok(false);
                 }
+                if !node.values.is_empty() {
+                    return Ok(false);
+                }
 
-                // Recursively validate children
-                for child_page_id in &node.children {
-                    let page = self.storage.lock().unwrap().read_page(*child_page_id)?;
-                    let child_node = BTreeNode::from_page(page)?;
+                // Recursively validate children with tightened key ranges.
+                for (child_index, child_page_id) in node.children.iter().copied().enumerate() {
+                    let child_lower = if child_index == 0 {
+                        lower_bound.clone()
+                    } else {
+                        Some(node.keys[child_index - 1].as_bytes().to_vec())
+                    };
+                    let child_upper = if child_index == node.keys.len() {
+                        upper_bound.clone()
+                    } else {
+                        Some(node.keys[child_index].as_bytes().to_vec())
+                    };
 
-                    if !self.validate_node_recursive(&child_node)? {
+                    if !self.validate_node_recursive(
+                        child_page_id,
+                        child_lower,
+                        child_upper,
+                        depth + 1,
+                        state,
+                    )? {
                         return Ok(false);
                     }
                 }
@@ -155,6 +225,12 @@ impl BTreeManager {
 
         Ok(())
     }
+}
+
+#[derive(Debug, Default)]
+struct TreeValidationState {
+    visited: HashSet<PageId>,
+    leaf_depth: Option<usize>,
 }
 
 #[derive(Debug, Default)]

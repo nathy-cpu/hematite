@@ -38,6 +38,10 @@ impl BTreeIndex {
         }
     }
 
+    pub fn root_page_id(&self) -> PageId {
+        self.root_page_id
+    }
+
     pub fn new_with_init(storage: StorageEngine) -> Result<Self> {
         // Allocate a page for root
         let storage_arc = Arc::new(Mutex::new(storage));
