@@ -3,9 +3,10 @@
 //! This module defines stable byte-level encodings for rowid-keyed table cells.
 
 use crate::error::{HematiteError, Result};
+use crate::storage::overflow::{free_overflow_chain, read_overflow_chain, write_overflow_chain};
 use crate::storage::serialization::RowSerializer;
-use crate::storage::PageId;
 use crate::storage::StoredRow;
+use crate::storage::{PageId, StorageEngine};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RowidLeafCell {
@@ -119,6 +120,53 @@ pub fn decode_stored_row_record(rowid: u64, payload: &[u8]) -> Result<StoredRow>
     let mut row = RowSerializer::deserialize_stored_row(payload)?;
     row.row_id = rowid;
     Ok(row)
+}
+
+pub fn materialize_row_record_cell(
+    storage: &mut StorageEngine,
+    row: &StoredRow,
+    max_local_payload: usize,
+) -> Result<Vec<u8>> {
+    let mut encoded = encode_stored_row_record(row, max_local_payload)?;
+    let overflow_first = write_overflow_chain(storage, &encoded.overflow_payload)?;
+    encoded.cell.overflow_first_page = overflow_first.unwrap_or(PageId::invalid());
+    encoded.cell.encode()
+}
+
+pub fn hydrate_row_record_cell(
+    storage: &mut StorageEngine,
+    cell_bytes: &[u8],
+) -> Result<StoredRow> {
+    let cell = RowidLeafCellLayout::decode(cell_bytes)?;
+    let local_len = cell.local_payload.len();
+    let total_len = cell.total_payload_len as usize;
+    if local_len > total_len {
+        return Err(HematiteError::CorruptedData(
+            "Cell local payload exceeds total payload length".to_string(),
+        ));
+    }
+
+    let overflow_len = total_len - local_len;
+    let overflow_first = if cell.overflow_first_page == PageId::invalid() {
+        None
+    } else {
+        Some(cell.overflow_first_page)
+    };
+    let overflow_payload = read_overflow_chain(storage, overflow_first, overflow_len)?;
+
+    let mut payload = cell.local_payload;
+    payload.extend_from_slice(&overflow_payload);
+    decode_stored_row_record(cell.rowid, &payload)
+}
+
+pub fn free_row_record_overflow(storage: &mut StorageEngine, cell_bytes: &[u8]) -> Result<()> {
+    let cell = RowidLeafCellLayout::decode(cell_bytes)?;
+    let overflow_first = if cell.overflow_first_page == PageId::invalid() {
+        None
+    } else {
+        Some(cell.overflow_first_page)
+    };
+    free_overflow_chain(storage, overflow_first)
 }
 
 impl RowidLeafCell {

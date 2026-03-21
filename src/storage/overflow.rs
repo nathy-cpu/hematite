@@ -202,3 +202,38 @@ pub fn validate_overflow_chain(
         payload_len: total_payload,
     })
 }
+
+pub fn collect_overflow_page_ids(
+    storage: &mut StorageEngine,
+    first_page: Option<PageId>,
+) -> Result<Vec<PageId>> {
+    let mut ids = Vec::new();
+    let mut current = match first_page {
+        Some(page_id) => page_id,
+        None => return Ok(ids),
+    };
+    let mut visited = std::collections::HashSet::new();
+
+    while current != PageId::invalid() {
+        if !visited.insert(current) {
+            return Err(HematiteError::CorruptedData(
+                "Overflow chain cycle detected while collecting page ids".to_string(),
+            ));
+        }
+        let page = storage.read_page(current)?;
+        if &page.data[0..4] != OVERFLOW_MAGIC {
+            return Err(HematiteError::CorruptedData(
+                "Overflow page magic mismatch while collecting page ids".to_string(),
+            ));
+        }
+        ids.push(current);
+        current = PageId::new(u32::from_le_bytes([
+            page.data[4],
+            page.data[5],
+            page.data[6],
+            page.data[7],
+        ]));
+    }
+
+    Ok(ids)
+}
