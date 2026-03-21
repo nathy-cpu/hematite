@@ -9,6 +9,7 @@
 
 use crate::catalog::{Table, Value};
 use crate::error::Result;
+use crate::storage::free_list::FreeList;
 use crate::storage::table::{PageOperations, TableManager};
 use crate::storage::{
     pager::Pager, Page, PageId, StorageIntegrityReport, StoredRow, TableMetadata,
@@ -36,7 +37,6 @@ impl StorageEngine {
                 "table_count={}",
                 self.table_manager.get_all_metadata().len()
             ),
-            format!("free_page_count={}", self.pager.free_pages().len()),
         ];
 
         let mut table_entries = self
@@ -57,11 +57,8 @@ impl StorageEngine {
             ));
         }
 
-        let mut free_pages = self.pager.free_pages().to_vec();
-        free_pages.sort_by_key(|page_id| page_id.as_u32());
-        for page_id in free_pages {
-            lines.push(format!("free|{}", page_id.as_u32()));
-        }
+        let freelist = FreeList::from_page_ids(self.pager.free_pages().to_vec());
+        lines.extend(freelist.serialize_metadata_lines());
 
         Ok(lines.join("\n"))
     }
@@ -95,13 +92,12 @@ impl StorageEngine {
             )));
         }
 
-        let mut free_pages = Vec::new();
+        let mut freelist_version = None;
+        let mut freelist_count = None;
+        let mut freelist_records = Vec::new();
 
         for line in metadata_str.lines().skip(1) {
-            if line.is_empty()
-                || line.starts_with("table_count=")
-                || line.starts_with("free_page_count=")
-            {
+            if line.is_empty() || line.starts_with("table_count=") {
                 continue;
             }
 
@@ -138,13 +134,28 @@ impl StorageEngine {
                 continue;
             }
 
-            if let Some(payload) = line.strip_prefix("free|") {
-                let page_id = payload.parse::<u32>().map(PageId::new).map_err(|_| {
+            if let Some(payload) = line.strip_prefix("freelist_version=") {
+                let parsed = payload.parse::<u32>().map_err(|_| {
                     crate::error::HematiteError::StorageError(
-                        "Invalid free page metadata".to_string(),
+                        "Invalid freelist metadata version".to_string(),
                     )
                 })?;
-                free_pages.push(page_id);
+                freelist_version = Some(parsed);
+                continue;
+            }
+
+            if let Some(payload) = line.strip_prefix("freelist_count=") {
+                let parsed = payload.parse::<usize>().map_err(|_| {
+                    crate::error::HematiteError::StorageError(
+                        "Invalid freelist metadata count".to_string(),
+                    )
+                })?;
+                freelist_count = Some(parsed);
+                continue;
+            }
+
+            if line.starts_with("freelist|") {
+                freelist_records.push(line.to_string());
                 continue;
             }
 
@@ -153,7 +164,20 @@ impl StorageEngine {
             ));
         }
 
-        self.pager.set_free_pages(free_pages);
+        let freelist = FreeList::deserialize_metadata_lines(
+            freelist_version.ok_or_else(|| {
+                crate::error::HematiteError::StorageError(
+                    "Missing freelist metadata version".to_string(),
+                )
+            })?,
+            freelist_count.ok_or_else(|| {
+                crate::error::HematiteError::StorageError(
+                    "Missing freelist metadata count".to_string(),
+                )
+            })?,
+            &freelist_records,
+        )?;
+        self.pager.set_free_pages(freelist.into_page_ids());
         Ok(())
     }
 

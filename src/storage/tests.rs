@@ -149,6 +149,20 @@ mod freelist_tests {
         assert_eq!(next_page_id, 11);
         assert_eq!(freelist.as_slice(), &[PageId::new(8), PageId::new(9)]);
     }
+
+    #[test]
+    fn test_freelist_metadata_count_validation() {
+        let result = FreeList::deserialize_metadata_lines(
+            FreeList::METADATA_VERSION,
+            2,
+            &vec!["freelist|8".to_string()],
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Freelist metadata count mismatch"));
+    }
 }
 
 mod pager_tests {
@@ -409,14 +423,15 @@ mod mod_tests {
     #[test]
     fn test_storage_metadata_rejects_unsupported_version() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_storage_metadata_unsupported_version");
-        let mut storage = StorageEngine::new(test_db.path())?;
+        let mut pager = crate::storage::pager::Pager::new(test_db.path(), 8)?;
 
         let payload = b"version=2\n";
         let mut page = Page::new(STORAGE_METADATA_PAGE_ID);
         page.data[0..4].copy_from_slice(&(payload.len() as u32).to_le_bytes());
         page.data[4..4 + payload.len()].copy_from_slice(payload);
-        storage.write_page(page)?;
-        drop(storage);
+        pager.write_page(page)?;
+        pager.flush()?;
+        drop(pager);
 
         let reopened = StorageEngine::new(test_db.path());
         assert!(reopened.is_err());

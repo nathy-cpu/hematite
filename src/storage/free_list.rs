@@ -4,7 +4,12 @@
 //! - Encapsulates free-page bookkeeping behind a dedicated type instead of raw vectors.
 //! - Ensures idempotent deallocation tracking.
 //! - Supports trailing high-water compaction with `next_page_id`.
+//!
+//! M1.4 contract:
+//! - Freelist persistence uses dedicated versioned metadata records.
+//! - Deserialization validates version, record shape, and declared count.
 
+use crate::error::Result;
 use crate::storage::PageId;
 
 #[derive(Debug, Clone, Default)]
@@ -13,6 +18,8 @@ pub struct FreeList {
 }
 
 impl FreeList {
+    pub const METADATA_VERSION: u32 = 1;
+
     pub fn new() -> Self {
         Self { pages: Vec::new() }
     }
@@ -35,6 +42,14 @@ impl FreeList {
         self.pages = free_pages;
     }
 
+    pub fn from_page_ids(pages: Vec<PageId>) -> Self {
+        Self { pages }
+    }
+
+    pub fn into_page_ids(self) -> Vec<PageId> {
+        self.pages
+    }
+
     pub fn compact_trailing_pages(&mut self, next_page_id: &mut u32, minimum_next_page_id: u32) {
         while *next_page_id > minimum_next_page_id {
             let candidate = PageId::new(*next_page_id - 1);
@@ -45,5 +60,68 @@ impl FreeList {
                 break;
             }
         }
+    }
+
+    pub fn serialize_metadata_lines(&self) -> Vec<String> {
+        let mut lines = vec![
+            format!("freelist_version={}", Self::METADATA_VERSION),
+            format!("freelist_count={}", self.pages.len()),
+        ];
+
+        let mut pages = self.pages.clone();
+        pages.sort_by_key(|page_id| page_id.as_u32());
+        for page_id in pages {
+            lines.push(format!("freelist|{}", page_id.as_u32()));
+        }
+
+        lines
+    }
+
+    pub fn deserialize_metadata_lines(
+        version: u32,
+        expected_count: usize,
+        records: &[String],
+    ) -> Result<Self> {
+        if version != Self::METADATA_VERSION {
+            return Err(crate::error::HematiteError::StorageError(format!(
+                "Unsupported freelist metadata version: expected {}, got {}",
+                Self::METADATA_VERSION,
+                version
+            )));
+        }
+
+        let mut pages = Vec::with_capacity(records.len());
+        for record in records {
+            let payload = record.strip_prefix("freelist|").ok_or_else(|| {
+                crate::error::HematiteError::StorageError(
+                    "Invalid freelist metadata record prefix".to_string(),
+                )
+            })?;
+
+            let page_id = payload.parse::<u32>().map(PageId::new).map_err(|_| {
+                crate::error::HematiteError::StorageError(
+                    "Invalid freelist page id metadata".to_string(),
+                )
+            })?;
+
+            if pages.contains(&page_id) {
+                return Err(crate::error::HematiteError::StorageError(format!(
+                    "Duplicate freelist page id {} in metadata",
+                    page_id.as_u32()
+                )));
+            }
+
+            pages.push(page_id);
+        }
+
+        if pages.len() != expected_count {
+            return Err(crate::error::HematiteError::StorageError(format!(
+                "Freelist metadata count mismatch: expected {}, got {}",
+                expected_count,
+                pages.len()
+            )));
+        }
+
+        Ok(Self { pages })
     }
 }
