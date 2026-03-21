@@ -123,6 +123,53 @@ mod buffer_pool_tests {
     }
 }
 
+mod pager_tests {
+    use crate::storage::pager::Pager;
+    use crate::storage::Page;
+    use crate::test_utils::TestDbFile;
+
+    #[test]
+    fn test_pager_write_is_buffered_until_flush() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_write_is_buffered");
+        let mut pager = Pager::new(test_db.path(), 8)?;
+
+        let page_id = pager.allocate_page()?;
+        let mut page = Page::new(page_id);
+        page.data[0] = 99;
+        pager.write_page(page)?;
+
+        // Without flush, dirty write should not be visible to a fresh pager.
+        let mut before_flush = Pager::new(test_db.path(), 8)?;
+        let on_disk_before = before_flush.read_page(page_id)?;
+        assert_eq!(on_disk_before.data[0], 0);
+
+        pager.flush()?;
+
+        let mut after_flush = Pager::new(test_db.path(), 8)?;
+        let on_disk_after = after_flush.read_page(page_id)?;
+        assert_eq!(on_disk_after.data[0], 99);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_flush_clears_dirty_tracking() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_flush_clears_dirty");
+        let mut pager = Pager::new(test_db.path(), 8)?;
+        let page_id = pager.allocate_page()?;
+
+        let mut page = Page::new(page_id);
+        page.data[0..4].copy_from_slice(&[1, 2, 3, 4]);
+        pager.write_page(page)?;
+        assert_eq!(pager.dirty_page_count(), 1);
+
+        pager.flush()?;
+        assert_eq!(pager.dirty_page_count(), 0);
+
+        Ok(())
+    }
+}
+
 mod database_tests {
     use crate::error::Result;
     use crate::storage::database::*;
