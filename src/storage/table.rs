@@ -1,4 +1,10 @@
-//! Table operations and metadata management
+//! Table operations and metadata management.
+//!
+//! M0 storage contract notes:
+//! - This module represents the legacy heap-page table layout.
+//! - It remains in use until rowid-keyed table B-tree storage is fully migrated.
+//! - `TablePageHeader` and row-payload walking rules here define the current compatibility
+//!   envelope for existing tests; future M3/M5 work will replace this path.
 
 use crate::catalog::Value;
 use crate::error::{HematiteError, Result};

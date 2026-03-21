@@ -1,4 +1,10 @@
-//! B-tree operations and management
+//! B-tree operations and management.
+//!
+//! M0 storage contract notes:
+//! - Each logical tree is identified by a root page id.
+//! - The long-term storage model is a forest of trees (catalog + per-table + per-index).
+//! - Tree lifecycle operations here (create/open/delete/validate) are the control plane that
+//!   higher storage layers should use instead of direct page manipulation.
 
 use crate::btree::{BTreeIndex, BTreeNode, NodeType};
 use crate::error::Result;

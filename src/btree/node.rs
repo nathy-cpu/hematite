@@ -1,4 +1,10 @@
-//! B-tree node structure and operations
+//! B-tree node structure and operations.
+//!
+//! M0 storage contract notes:
+//! - B-tree pages are self-validating via magic, version, and page checksum.
+//! - Node payload format here is the authoritative encoding for current tree pages.
+//! - Planned table/index specialization (rowid table cells, overflow payloads, index key->rowid)
+//!   will build on this checksum/version discipline rather than bypass it.
 
 use crate::btree::{BTreeKey, BTreeValue, NodeType, BTREE_ORDER};
 use crate::error::{HematiteError, Result};

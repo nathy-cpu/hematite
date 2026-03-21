@@ -1,4 +1,11 @@
-//! File manager for handling single-file database operations
+//! File manager for handling single-file database operations.
+//!
+//! M0 storage contract notes:
+//! - The first 64 bytes are a file-level header region.
+//! - Logical page 0 and page 1 are reserved and never returned by allocation.
+//! - This module currently stores freelist state as an in-memory list hydrated from
+//!   storage metadata; M1 will move this toward a dedicated persisted freelist layout.
+//! - `next_page_id` tracks high-water allocation and compaction can move this backward.
 
 use crate::error::Result;
 use crate::storage::{Page, PageId, PAGE_SIZE, STORAGE_METADATA_PAGE_ID};
@@ -62,7 +69,7 @@ impl FileManager {
 
     fn write_header(&mut self) -> Result<()> {
         self.seek(SeekFrom::Start(0))?;
-        self.write_all(&[0; 64])?; // 64-byte header
+        self.write_all(&[0; 64])?; // Fixed file header region.
         self.next_page_id = 2; // Start page IDs from 2 (page 0 is header, page 1 is metadata)
         Ok(())
     }

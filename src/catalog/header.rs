@@ -1,11 +1,16 @@
-//! Database header management for Hematite database
+//! Database header management for Hematite database.
+//!
+//! M0 storage contract notes:
+//! - The database header is always stored at page 0.
+//! - Header versioning is strict: older on-disk versions are rejected.
+//! - Header checksum covers all semantic header fields to detect corruption.
 
 use super::ids::TableId;
 use crate::error::Result;
 use crate::storage::Page;
 use crate::storage::PageId;
 
-/// Database header structure stored on page 1
+/// Database header structure stored on page 0.
 #[derive(Debug, Clone)]
 pub struct DatabaseHeader {
     /// Magic bytes to identify Hematite database files
@@ -23,8 +28,11 @@ pub struct DatabaseHeader {
 impl DatabaseHeader {
     /// Magic bytes for Hematite database files
     pub const MAGIC: [u8; 4] = *b"HMTD";
-    /// Current database format version
-    pub const CURRENT_VERSION: u32 = 1;
+    /// Current database format version.
+    ///
+    /// Version 2 is the first version after the M0 storage reset that intentionally
+    /// breaks compatibility with previous files.
+    pub const CURRENT_VERSION: u32 = 2;
     /// Fixed page ID for database header (consistent with existing implementation)
     pub const HEADER_PAGE_ID: PageId = PageId::new(0);
 
@@ -109,6 +117,13 @@ impl DatabaseHeader {
             page.data[offset + 6],
             page.data[offset + 7],
         ]);
+        if version != Self::CURRENT_VERSION {
+            return Err(crate::error::HematiteError::StorageError(format!(
+                "Unsupported database header version: expected {}, got {}",
+                Self::CURRENT_VERSION,
+                version
+            )));
+        }
 
         // Read schema root page ID
         let schema_root_page = PageId::new(u32::from_le_bytes([

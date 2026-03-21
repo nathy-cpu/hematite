@@ -471,6 +471,38 @@ mod tests {
     }
 
     #[test]
+    fn test_database_header_rejects_unsupported_version() -> Result<()> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut page = Page::new(DatabaseHeader::HEADER_PAGE_ID);
+        page.data[0..4].copy_from_slice(&DatabaseHeader::MAGIC);
+
+        // Write an older on-disk version on purpose.
+        let unsupported_version = DatabaseHeader::CURRENT_VERSION - 1;
+        page.data[4..8].copy_from_slice(&unsupported_version.to_le_bytes());
+        page.data[8..12].copy_from_slice(&42u32.to_le_bytes()); // schema root page id
+        page.data[12..16].copy_from_slice(&1u32.to_le_bytes()); // next table id
+
+        // Checksum must match the bytes above so version mismatch is what fails.
+        let mut hasher = DefaultHasher::new();
+        DatabaseHeader::MAGIC.hash(&mut hasher);
+        unsupported_version.hash(&mut hasher);
+        PageId::new(42).hash(&mut hasher);
+        1u32.hash(&mut hasher);
+        let checksum = hasher.finish() as u32;
+        page.data[16..20].copy_from_slice(&checksum.to_le_bytes());
+
+        let result = DatabaseHeader::deserialize(&page);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported database header version"));
+        Ok(())
+    }
+
+    #[test]
     fn test_database_header_increment_table_id() {
         let mut header = DatabaseHeader::new(PageId::new(42));
 

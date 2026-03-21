@@ -315,8 +315,9 @@ mod mod_tests {
             let mut storage = StorageEngine::new(test_db.path())?;
             let _ = storage.create_table("users")?;
             let _ = storage.insert_into_table("users", vec![Value::Integer(1)])?;
-            let page = storage.allocate_page()?;
-            storage.deallocate_page(page)?;
+            let page_1 = storage.allocate_page()?;
+            let _page_2 = storage.allocate_page()?;
+            storage.deallocate_page(page_1)?;
             storage.flush()?;
         }
 
@@ -325,6 +326,28 @@ mod mod_tests {
         assert_eq!(stats.table_count, 1);
         assert_eq!(stats.total_rows, 1);
         assert_eq!(stats.free_page_count, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_storage_metadata_rejects_unsupported_version() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_storage_metadata_unsupported_version");
+        let mut storage = StorageEngine::new(test_db.path())?;
+
+        let payload = b"version=2\n";
+        let mut page = Page::new(STORAGE_METADATA_PAGE_ID);
+        page.data[0..4].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+        page.data[4..4 + payload.len()].copy_from_slice(payload);
+        storage.write_page(page)?;
+        drop(storage);
+
+        let reopened = StorageEngine::new(test_db.path());
+        assert!(reopened.is_err());
+        assert!(reopened
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported storage metadata version"));
 
         Ok(())
     }
