@@ -7,6 +7,8 @@ mod mod_tests {
     use crate::error::Result;
     use crate::storage::StorageEngine;
     use crate::test_utils::TestDbFile;
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
 
     fn tmp_db() -> TestDbFile {
         TestDbFile::new("_test_btree")
@@ -14,6 +16,29 @@ mod mod_tests {
 
     fn new_storage(db: &TestDbFile) -> Result<StorageEngine> {
         StorageEngine::new(db.path().to_string())
+    }
+
+    #[derive(Debug, Clone)]
+    struct LcgRng {
+        state: u64,
+    }
+
+    impl LcgRng {
+        fn new(seed: u64) -> Self {
+            Self { state: seed }
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            self.state = self
+                .state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.state
+        }
+
+        fn next_u32(&mut self) -> u32 {
+            (self.next_u64() >> 32) as u32
+        }
     }
 
     #[derive(Debug, Clone, Copy, Default)]
@@ -644,6 +669,81 @@ mod mod_tests {
             let found = btree.search(&key)?;
             assert!(found.is_some(), "Key {} should be found after deletions", i);
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_randomized_insert_delete_reopen_integrity() -> Result<()> {
+        let path = tmp_db();
+        let mut shared = Arc::new(Mutex::new(new_storage(&path)?));
+        let mut manager = BTreeManager::from_shared_storage(shared.clone());
+        let mut root_page_id = manager.create_tree()?;
+        let mut btree = manager.open_tree(root_page_id)?;
+
+        let mut oracle: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+        let mut rng = LcgRng::new(0xA11C_E52E_2026_0321);
+
+        for step in 0usize..900usize {
+            let key_id = rng.next_u32() % 220;
+            let key_bytes = key_id.to_be_bytes().to_vec();
+            let key = BTreeKey::new(key_bytes.clone());
+            let choice = rng.next_u32() % 100;
+
+            if choice < 58 {
+                let value_seed = rng.next_u64();
+                let mut value_bytes = Vec::with_capacity(16);
+                value_bytes.extend_from_slice(&value_seed.to_le_bytes());
+                value_bytes.extend_from_slice(&(step as u64).to_le_bytes());
+                let value = BTreeValue::new(value_bytes.clone());
+                btree.insert(key, value)?;
+                oracle.insert(key_bytes, value_bytes);
+            } else if choice < 86 {
+                let deleted = btree.delete(&key)?;
+                let expected = oracle.remove(&key_bytes).map(BTreeValue::new);
+                assert_eq!(deleted, expected);
+            } else {
+                let found = btree.search(&key)?;
+                let expected = oracle.get(&key_bytes).cloned().map(BTreeValue::new);
+                assert_eq!(found, expected);
+            }
+
+            root_page_id = btree.root_page_id();
+            if step % 45 == 0 {
+                assert!(manager.validate_tree(root_page_id)?);
+            }
+
+            if step % 120 == 0 {
+                shared.lock().unwrap().flush()?;
+                drop(btree);
+                drop(manager);
+                drop(shared);
+
+                shared = Arc::new(Mutex::new(new_storage(&path)?));
+                manager = BTreeManager::from_shared_storage(shared.clone());
+                assert!(manager.validate_tree(root_page_id)?);
+                btree = manager.open_tree(root_page_id)?;
+
+                for (k, v) in &oracle {
+                    let found = btree.search(&BTreeKey::new(k.clone()))?;
+                    assert_eq!(found, Some(BTreeValue::new(v.clone())));
+                }
+            }
+        }
+
+        assert!(manager.validate_tree(root_page_id)?);
+
+        let mut cursor = btree.cursor()?;
+        let mut actual = Vec::new();
+        while cursor.is_valid() {
+            if let Some((k, v)) = cursor.current() {
+                actual.push((k.as_bytes().to_vec(), v.as_bytes().to_vec()));
+            }
+            cursor.next()?;
+        }
+
+        let expected = oracle.into_iter().collect::<Vec<_>>();
+        assert_eq!(actual, expected);
 
         Ok(())
     }
