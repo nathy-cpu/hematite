@@ -4,6 +4,7 @@ pub mod buffer_pool;
 pub mod database;
 pub mod engine;
 pub mod file_manager;
+pub mod free_list;
 pub mod page_manager;
 pub mod pager;
 pub mod serialization;

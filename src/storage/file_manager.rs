@@ -8,6 +8,7 @@
 //! - `next_page_id` tracks high-water allocation and compaction can move this backward.
 
 use crate::error::Result;
+use crate::storage::free_list::FreeList;
 use crate::storage::{Page, PageId, PAGE_SIZE, STORAGE_METADATA_PAGE_ID};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -18,7 +19,7 @@ pub struct FileManager {
     backend: FileBackend,
     position: u64,
     next_page_id: u32,
-    free_pages: Vec<PageId>,
+    free_list: FreeList,
 }
 
 #[derive(Debug)]
@@ -39,7 +40,7 @@ impl FileManager {
             backend: FileBackend::Disk(file),
             position: 0,
             next_page_id: 0,
-            free_pages: Vec::new(),
+            free_list: FreeList::new(),
         };
 
         manager.initialize()?;
@@ -51,7 +52,7 @@ impl FileManager {
             backend: FileBackend::Memory(Vec::new()),
             position: 0,
             next_page_id: 0,
-            free_pages: Vec::new(),
+            free_list: FreeList::new(),
         };
 
         manager.initialize()?;
@@ -108,7 +109,7 @@ impl FileManager {
 
     pub fn allocate_page(&mut self) -> Result<PageId> {
         // Try to reuse a free page first
-        if let Some(free_page_id) = self.free_pages.pop() {
+        if let Some(free_page_id) = self.free_list.pop_free_page() {
             Ok(free_page_id)
         } else {
             // Allocate new page
@@ -135,37 +136,23 @@ impl FileManager {
 
     pub fn deallocate_page(&mut self, page_id: PageId) -> Result<()> {
         // Add to free list for reuse
-        if !self.free_pages.contains(&page_id) {
-            self.free_pages.push(page_id);
-        }
+        self.free_list.push_free_page(page_id);
         self.compact_trailing_free_pages()?;
         Ok(())
     }
 
     pub fn free_pages(&self) -> &[PageId] {
-        &self.free_pages
+        self.free_list.as_slice()
     }
 
     pub fn set_free_pages(&mut self, free_pages: Vec<PageId>) {
-        self.free_pages = free_pages;
+        self.free_list.replace(free_pages);
     }
 
     fn compact_trailing_free_pages(&mut self) -> Result<()> {
-        while self.next_page_id > 2 {
-            let candidate = PageId::new(self.next_page_id - 1);
-            if let Some(position) = self
-                .free_pages
-                .iter()
-                .position(|page_id| *page_id == candidate)
-            {
-                self.free_pages.swap_remove(position);
-                self.next_page_id -= 1;
-            } else {
-                break;
-            }
-        }
-
         let minimum_next_page_id = STORAGE_METADATA_PAGE_ID.as_u32() + 1;
+        self.free_list
+            .compact_trailing_pages(&mut self.next_page_id, minimum_next_page_id);
         let target_next_page_id = self.next_page_id.max(minimum_next_page_id);
         let target_len = 64 + target_next_page_id as u64 * PAGE_SIZE as u64;
         let current_len = self.len()?;

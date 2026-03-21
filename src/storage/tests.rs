@@ -123,6 +123,34 @@ mod buffer_pool_tests {
     }
 }
 
+mod freelist_tests {
+    use crate::storage::free_list::FreeList;
+    use crate::storage::PageId;
+
+    #[test]
+    fn test_freelist_push_is_idempotent() {
+        let mut freelist = FreeList::new();
+        freelist.push_free_page(PageId::new(10));
+        freelist.push_free_page(PageId::new(10));
+        assert_eq!(freelist.as_slice(), &[PageId::new(10)]);
+    }
+
+    #[test]
+    fn test_freelist_compacts_trailing_pages() {
+        let mut freelist = FreeList::new();
+        freelist.push_free_page(PageId::new(8));
+        freelist.push_free_page(PageId::new(9));
+        freelist.push_free_page(PageId::new(11));
+        freelist.push_free_page(PageId::new(12));
+
+        let mut next_page_id = 13;
+        freelist.compact_trailing_pages(&mut next_page_id, 2);
+
+        assert_eq!(next_page_id, 11);
+        assert_eq!(freelist.as_slice(), &[PageId::new(8), PageId::new(9)]);
+    }
+}
+
 mod pager_tests {
     use crate::storage::pager::Pager;
     use crate::storage::Page;
