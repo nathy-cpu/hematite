@@ -775,6 +775,38 @@ mod mod_tests {
         assert!(missing.is_none());
         Ok(())
     }
+
+    #[test]
+    fn test_table_cursor_order_survives_reopen() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_storage_cursor_reopen_order");
+
+        {
+            let mut storage = StorageEngine::new(test_db.path())?;
+            let _ = storage.create_table("users")?;
+            let _ = storage.insert_into_table("users", vec![Value::Integer(1)])?;
+            let _ = storage.insert_into_table("users", vec![Value::Integer(2)])?;
+            let _ = storage.insert_into_table("users", vec![Value::Integer(3)])?;
+            storage.flush()?;
+        }
+
+        let mut reopened = StorageEngine::new(test_db.path())?;
+        let mut cursor = reopened.open_table_cursor("users")?;
+        let mut seen = Vec::new();
+        if cursor.first() {
+            loop {
+                seen.push(cursor.current().expect("row").row_id);
+                if !cursor.next() {
+                    break;
+                }
+            }
+        }
+
+        let mut sorted = seen.clone();
+        sorted.sort_unstable();
+        assert_eq!(seen, sorted);
+        assert_eq!(seen.len(), 3);
+        Ok(())
+    }
 }
 
 mod randomized_pager_lifecycle_tests {
@@ -1148,6 +1180,24 @@ mod cursor_tests {
         assert_eq!(cursor.current().map(|e| e.row_id), Some(3));
         assert!(!cursor.next());
         assert!(!cursor.is_valid());
+    }
+
+    #[test]
+    fn test_cursor_invariants_for_empty_and_seek_miss() {
+        let mut table = TableCursor::new(Vec::new());
+        assert!(!table.first());
+        assert!(!table.is_valid());
+        assert!(!table.seek_rowid(1));
+        assert!(table.current().is_none());
+
+        let entries = vec![IndexEntry {
+            key: b"k1".to_vec(),
+            row_id: 10,
+        }];
+        let mut index = IndexCursor::new(entries);
+        assert!(!index.seek_key(b"missing"));
+        assert!(index.current().is_none());
+        assert!(!index.next());
     }
 }
 
