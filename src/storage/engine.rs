@@ -60,6 +60,17 @@ impl StorageEngine {
         let freelist = FreeList::from_page_ids(self.pager.free_pages().to_vec());
         lines.extend(freelist.serialize_metadata_lines());
 
+        let mut checksum_entries = self.pager.checksum_entries();
+        checksum_entries.sort_by_key(|(page_id, _)| page_id.as_u32());
+        lines.push(format!(
+            "checksum_version={}",
+            Pager::CHECKSUM_METADATA_VERSION
+        ));
+        lines.push(format!("checksum_count={}", checksum_entries.len()));
+        for (page_id, checksum) in checksum_entries {
+            lines.push(format!("checksum|{}|{}", page_id.as_u32(), checksum));
+        }
+
         Ok(lines.join("\n"))
     }
 
@@ -95,6 +106,9 @@ impl StorageEngine {
         let mut freelist_version = None;
         let mut freelist_count = None;
         let mut freelist_records = Vec::new();
+        let mut checksum_version = None;
+        let mut checksum_count = None;
+        let mut checksum_records: Vec<(PageId, u32)> = Vec::new();
 
         for line in metadata_str.lines().skip(1) {
             if line.is_empty() || line.starts_with("table_count=") {
@@ -159,6 +173,47 @@ impl StorageEngine {
                 continue;
             }
 
+            if let Some(payload) = line.strip_prefix("checksum_version=") {
+                let parsed = payload.parse::<u32>().map_err(|_| {
+                    crate::error::HematiteError::StorageError(
+                        "Invalid checksum metadata version".to_string(),
+                    )
+                })?;
+                checksum_version = Some(parsed);
+                continue;
+            }
+
+            if let Some(payload) = line.strip_prefix("checksum_count=") {
+                let parsed = payload.parse::<usize>().map_err(|_| {
+                    crate::error::HematiteError::StorageError(
+                        "Invalid checksum metadata count".to_string(),
+                    )
+                })?;
+                checksum_count = Some(parsed);
+                continue;
+            }
+
+            if let Some(payload) = line.strip_prefix("checksum|") {
+                let parts = payload.split('|').collect::<Vec<_>>();
+                if parts.len() != 2 {
+                    return Err(crate::error::HematiteError::StorageError(
+                        "Invalid checksum metadata record".to_string(),
+                    ));
+                }
+                let page_id = parts[0].parse::<u32>().map(PageId::new).map_err(|_| {
+                    crate::error::HematiteError::StorageError(
+                        "Invalid checksum page id metadata".to_string(),
+                    )
+                })?;
+                let checksum = parts[1].parse::<u32>().map_err(|_| {
+                    crate::error::HematiteError::StorageError(
+                        "Invalid checksum value metadata".to_string(),
+                    )
+                })?;
+                checksum_records.push((page_id, checksum));
+                continue;
+            }
+
             return Err(crate::error::HematiteError::StorageError(
                 "Unknown storage metadata record".to_string(),
             ));
@@ -178,6 +233,41 @@ impl StorageEngine {
             &freelist_records,
         )?;
         self.pager.set_free_pages(freelist.into_page_ids());
+
+        let checksum_version = checksum_version.ok_or_else(|| {
+            crate::error::HematiteError::StorageError(
+                "Missing checksum metadata version".to_string(),
+            )
+        })?;
+        if checksum_version != Pager::CHECKSUM_METADATA_VERSION {
+            return Err(crate::error::HematiteError::StorageError(format!(
+                "Unsupported checksum metadata version: expected {}, got {}",
+                Pager::CHECKSUM_METADATA_VERSION,
+                checksum_version
+            )));
+        }
+
+        let expected_checksum_count = checksum_count.ok_or_else(|| {
+            crate::error::HematiteError::StorageError("Missing checksum metadata count".to_string())
+        })?;
+        if expected_checksum_count != checksum_records.len() {
+            return Err(crate::error::HematiteError::StorageError(format!(
+                "Checksum metadata count mismatch: expected {}, got {}",
+                expected_checksum_count,
+                checksum_records.len()
+            )));
+        }
+
+        let mut checksum_map = HashMap::new();
+        for (page_id, checksum) in checksum_records {
+            if checksum_map.insert(page_id, checksum).is_some() {
+                return Err(crate::error::HematiteError::StorageError(format!(
+                    "Duplicate checksum metadata entry for page {}",
+                    page_id.as_u32()
+                )));
+            }
+        }
+        self.pager.replace_checksums(checksum_map);
         Ok(())
     }
 

@@ -9,10 +9,16 @@
 //! - `write_page` is write-back into the cache and marks a page as dirty.
 //! - `flush` is the persistence boundary that writes all dirty pages to disk and fsyncs.
 //! - Dirty state is tracked by page id and cleared only after successful flush/deallocation.
+//!
+//! M1.5 contract:
+//! - Pager tracks deterministic page checksums for persisted pages.
+//! - On cache-miss reads, persisted checksum records are verified before returning data.
 
 use crate::error::Result;
-use crate::storage::{buffer_pool::BufferPool, file_manager::FileManager, Page, PageId};
-use std::collections::HashSet;
+use crate::storage::{
+    buffer_pool::BufferPool, file_manager::FileManager, Page, PageId, STORAGE_METADATA_PAGE_ID,
+};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 #[derive(Debug)]
@@ -20,15 +26,19 @@ pub struct Pager {
     file_manager: FileManager,
     buffer_pool: BufferPool,
     dirty_pages: HashSet<PageId>,
+    page_checksums: HashMap<PageId, u32>,
 }
 
 impl Pager {
+    pub const CHECKSUM_METADATA_VERSION: u32 = 1;
+
     pub fn new<P: AsRef<Path>>(path: P, cache_capacity: usize) -> Result<Self> {
         let file_manager = FileManager::new(path)?;
         Ok(Self {
             file_manager,
             buffer_pool: BufferPool::new(cache_capacity),
             dirty_pages: HashSet::new(),
+            page_checksums: HashMap::new(),
         })
     }
 
@@ -38,6 +48,7 @@ impl Pager {
             file_manager,
             buffer_pool: BufferPool::new(cache_capacity),
             dirty_pages: HashSet::new(),
+            page_checksums: HashMap::new(),
         })
     }
 
@@ -47,12 +58,27 @@ impl Pager {
         }
 
         let page = self.file_manager.read_page(page_id)?;
+        if let Some(expected_checksum) = self.page_checksums.get(&page_id) {
+            let actual_checksum = Self::calculate_page_checksum(&page);
+            if actual_checksum != *expected_checksum {
+                return Err(crate::error::HematiteError::CorruptedData(format!(
+                    "Page checksum mismatch for page {}: expected {}, got {}",
+                    page_id.as_u32(),
+                    expected_checksum,
+                    actual_checksum
+                )));
+            }
+        }
         self.buffer_pool.put(page.clone());
         Ok(page)
     }
 
     pub fn write_page(&mut self, page: Page) -> Result<()> {
         let page_id = page.id;
+        if page_id != STORAGE_METADATA_PAGE_ID {
+            self.page_checksums
+                .insert(page_id, Self::calculate_page_checksum(&page));
+        }
         self.buffer_pool.put(page);
         self.dirty_pages.insert(page_id);
         Ok(())
@@ -65,6 +91,7 @@ impl Pager {
     pub fn deallocate_page(&mut self, page_id: PageId) -> Result<()> {
         self.buffer_pool.remove(page_id);
         self.dirty_pages.remove(&page_id);
+        self.page_checksums.remove(&page_id);
         self.file_manager.deallocate_page(page_id)
     }
 
@@ -85,6 +112,27 @@ impl Pager {
 
     pub fn set_free_pages(&mut self, free_pages: Vec<PageId>) {
         self.file_manager.set_free_pages(free_pages);
+    }
+
+    pub fn checksum_entries(&self) -> Vec<(PageId, u32)> {
+        self.page_checksums
+            .iter()
+            .map(|(page_id, checksum)| (*page_id, *checksum))
+            .collect()
+    }
+
+    pub fn replace_checksums(&mut self, checksums: HashMap<PageId, u32>) {
+        self.page_checksums = checksums;
+    }
+
+    fn calculate_page_checksum(page: &Page) -> u32 {
+        // FNV-1a over page bytes for deterministic cross-process checksums using std only.
+        let mut hash: u32 = 0x811C9DC5;
+        for byte in &page.data {
+            hash ^= u32::from(*byte);
+            hash = hash.wrapping_mul(0x01000193);
+        }
+        hash
     }
 
     #[cfg(test)]

@@ -247,6 +247,7 @@ mod mod_tests {
     use crate::catalog::Value;
     use crate::storage::*;
     use crate::test_utils::TestDbFile;
+    use std::io::{Seek, SeekFrom, Write};
 
     // ... (rest of the code remains the same)
 
@@ -439,6 +440,38 @@ mod mod_tests {
             .unwrap_err()
             .to_string()
             .contains("Unsupported storage metadata version"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_page_checksum_detects_on_disk_corruption() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_page_checksum_detects_corruption");
+
+        let corrupted_page_id = {
+            let mut storage = StorageEngine::new(test_db.path())?;
+            let page_id = storage.allocate_page()?;
+            let mut page = Page::new(page_id);
+            page.data[0..4].copy_from_slice(&[7, 7, 7, 7]);
+            storage.write_page(page)?;
+            storage.flush()?;
+            page_id
+        };
+
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(test_db.path())?;
+            let offset = 64 + (corrupted_page_id.as_u32() as u64 * PAGE_SIZE as u64);
+            file.seek(SeekFrom::Start(offset))?;
+            file.write_all(&[9])?;
+            file.flush()?;
+        }
+
+        let mut reopened = StorageEngine::new(test_db.path())?;
+        let err = reopened.read_page(corrupted_page_id).unwrap_err();
+        assert!(err.to_string().contains("Page checksum mismatch"));
 
         Ok(())
     }
