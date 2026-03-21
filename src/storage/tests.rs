@@ -731,6 +731,32 @@ mod mod_tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_table_scan_via_cursor_matches_row_reads() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_storage_table_scan_via_cursor");
+        let mut storage = StorageEngine::new(test_db.path())?;
+        let _ = storage.create_table("users")?;
+        let _ = storage.insert_into_table("users", vec![Value::Integer(2)])?;
+        let _ = storage.insert_into_table("users", vec![Value::Integer(1)])?;
+        let _ = storage.insert_into_table("users", vec![Value::Integer(3)])?;
+
+        let rows = storage.read_rows_with_ids("users")?;
+
+        let mut cursor = storage.open_table_cursor("users")?;
+        let mut cursor_rows = Vec::new();
+        if cursor.first() {
+            loop {
+                cursor_rows.push(cursor.current().cloned().expect("cursor row"));
+                if !cursor.next() {
+                    break;
+                }
+            }
+        }
+
+        assert_eq!(cursor_rows, rows);
+        Ok(())
+    }
 }
 
 mod randomized_pager_lifecycle_tests {

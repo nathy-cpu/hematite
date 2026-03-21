@@ -12,8 +12,8 @@ use crate::error::Result;
 use crate::storage::free_list::FreeList;
 use crate::storage::table::{PageOperations, TableManager};
 use crate::storage::{
-    pager::Pager, Page, PageId, StorageIntegrityReport, StoredRow, TableMetadata,
-    DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID, TABLE_PAGE_HEADER_SIZE,
+    cursor::TableCursor, pager::Pager, Page, PageId, StorageIntegrityReport, StoredRow,
+    TableMetadata, DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID, TABLE_PAGE_HEADER_SIZE,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -888,7 +888,12 @@ impl StorageEngine {
         Ok(())
     }
 
-    pub fn read_rows_with_ids(&mut self, table_name: &str) -> Result<Vec<StoredRow>> {
+    pub fn open_table_cursor(&mut self, table_name: &str) -> Result<TableCursor> {
+        let rows = self.read_rows_with_ids_from_pages(table_name)?;
+        Ok(TableCursor::new(rows))
+    }
+
+    fn read_rows_with_ids_from_pages(&mut self, table_name: &str) -> Result<Vec<StoredRow>> {
         let metadata = self
             .table_manager
             .get_table_metadata(table_name)
@@ -939,6 +944,22 @@ impl StorageEngine {
             current_page_id = header.next_page_id;
         }
 
+        Ok(rows)
+    }
+
+    pub fn read_rows_with_ids(&mut self, table_name: &str) -> Result<Vec<StoredRow>> {
+        let mut cursor = self.open_table_cursor(table_name)?;
+        let mut rows = Vec::new();
+        if cursor.first() {
+            loop {
+                if let Some(row) = cursor.current() {
+                    rows.push(row.clone());
+                }
+                if !cursor.next() {
+                    break;
+                }
+            }
+        }
         Ok(rows)
     }
 
