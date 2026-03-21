@@ -542,6 +542,40 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_delete_does_not_rewrite_table_storage() -> Result<()> {
+        let db = TestDbFile::new("_test_delete_does_not_rewrite_table_storage");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
+        for i in 1..=40 {
+            conn.execute(&format!(
+                "INSERT INTO test (id, name) VALUES ({}, 'name{}');",
+                i, i
+            ))?;
+        }
+        conn.close()?;
+
+        let size_before_delete = fs::metadata(db.path())?.len();
+
+        let mut conn = Connection::new(db.path())?;
+        conn.execute("DELETE FROM test WHERE id = 20;")?;
+        conn.close()?;
+
+        let size_after_delete = fs::metadata(db.path())?.len();
+        assert_eq!(size_after_delete, size_before_delete);
+
+        let mut conn = Connection::new(db.path())?;
+        let result = conn.execute("SELECT * FROM test ORDER BY id;")?;
+        assert_eq!(result.rows.len(), 39);
+        assert!(!result
+            .rows
+            .iter()
+            .any(|row| row[0] == crate::catalog::Value::Integer(20)));
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_drop_table_removes_schema_and_storage() -> Result<()> {
         let db = TestDbFile::new("_test_drop_table_removes_schema_and_storage");
 

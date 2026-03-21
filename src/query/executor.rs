@@ -886,8 +886,7 @@ impl QueryExecutor for DeleteExecutor {
             SelectAccessPath::FullTableScan,
         );
 
-        let mut survivors = Vec::new();
-        let mut deleted_rows = 0usize;
+        let mut rowids_to_delete = Vec::new();
         for stored_row in all_rows {
             let row = stored_row.values.clone();
             let delete_row = match &self.statement.where_clause {
@@ -905,15 +904,22 @@ impl QueryExecutor for DeleteExecutor {
             };
 
             if delete_row {
-                deleted_rows += 1;
-            } else {
-                survivors.push(stored_row);
+                rowids_to_delete.push(stored_row.row_id);
             }
         }
 
-        let _ = table;
-        ctx.storage
-            .replace_table_rows(&self.statement.table, survivors)?;
+        for rowid in &rowids_to_delete {
+            let deleted = ctx
+                .storage
+                .delete_from_table_by_rowid(&self.statement.table, *rowid)?;
+            if !deleted {
+                return Err(HematiteError::CorruptedData(format!(
+                    "Rowid {} vanished during delete execution for table '{}'",
+                    rowid, self.statement.table
+                )));
+            }
+        }
+
         let refreshed_rows = ctx.storage.read_rows_with_ids(&self.statement.table)?;
         ctx.storage
             .rebuild_primary_key_index(table, &refreshed_rows)?;
@@ -921,7 +927,7 @@ impl QueryExecutor for DeleteExecutor {
             .rebuild_secondary_indexes(table, &refreshed_rows)?;
 
         Ok(QueryResult {
-            affected_rows: deleted_rows,
+            affected_rows: rowids_to_delete.len(),
             columns: Vec::new(),
             rows: Vec::new(),
         })
