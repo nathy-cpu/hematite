@@ -834,7 +834,8 @@ mod randomized_pager_lifecycle_tests {
 }
 
 mod rowid_table_tests {
-    use crate::storage::rowid_table::RowidLeafCell;
+    use crate::storage::rowid_table::{RowidInternalCell, RowidLeafCell};
+    use crate::storage::PageId;
 
     #[test]
     fn test_rowid_leaf_cell_roundtrip() -> crate::error::Result<()> {
@@ -854,6 +855,23 @@ mod rowid_table_tests {
     fn test_rowid_leaf_cell_rejects_length_mismatch() {
         let bad = vec![0u8; RowidLeafCell::HEADER_SIZE + 3];
         assert!(RowidLeafCell::decode(&bad).is_err());
+    }
+
+    #[test]
+    fn test_rowid_internal_cell_roundtrip() -> crate::error::Result<()> {
+        let cell = RowidInternalCell {
+            separator_rowid: 144,
+            child_page_id: PageId::new(99),
+        };
+        let encoded = cell.encode();
+        let decoded = RowidInternalCell::decode(&encoded)?;
+        assert_eq!(decoded, cell);
+        Ok(())
+    }
+
+    #[test]
+    fn test_rowid_internal_cell_rejects_wrong_size() {
+        assert!(RowidInternalCell::decode(&[0u8; 11]).is_err());
     }
 }
 
