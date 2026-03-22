@@ -8,12 +8,14 @@
 
 use crate::btree::BTreeNode;
 use crate::catalog::{Table, Value};
-use crate::error::Result;
+use crate::error::{HematiteError, Result};
 use crate::storage::free_list::FreeList;
-use crate::storage::index_cache::TransientIndexStore;
 use crate::storage::{
-    cursor::TableCursor, pager::Pager, table_btree, Page, PageId, StorageIntegrityReport,
-    StoredRow, TableMetadata, DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID,
+    cursor::{IndexCursor, TableCursor},
+    index_btree,
+    pager::Pager,
+    table_btree, Page, PageId, StorageIntegrityReport, StoredRow, TableMetadata, DB_HEADER_PAGE_ID,
+    STORAGE_METADATA_PAGE_ID,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -23,7 +25,6 @@ use std::path::Path;
 pub struct StorageEngine {
     pager: Pager,
     table_metadata: HashMap<String, TableMetadata>,
-    transient_indexes: TransientIndexStore,
 }
 
 impl StorageEngine {
@@ -430,7 +431,6 @@ impl StorageEngine {
             let mut engine = Self {
                 pager,
                 table_metadata: HashMap::new(),
-                transient_indexes: TransientIndexStore::default(),
             };
             engine.load_table_metadata()?;
             Ok(engine)
@@ -666,7 +666,35 @@ impl StorageEngine {
             self.deallocate_page(page_id)?;
         }
 
-        self.transient_indexes.remove_table(table_name);
+        Ok(())
+    }
+
+    pub fn drop_table_with_indexes(&mut self, table: &Table) -> Result<()> {
+        self.drop_table(&table.name)?;
+
+        if table.primary_key_index_root_page_id.as_u32() != 0 {
+            let mut page_ids = Vec::new();
+            index_btree::collect_page_ids(
+                self,
+                table.primary_key_index_root_page_id,
+                &mut page_ids,
+            )?;
+            for page_id in page_ids {
+                self.deallocate_page(page_id)?;
+            }
+        }
+
+        for index in &table.secondary_indexes {
+            if index.root_page_id.as_u32() == 0 {
+                continue;
+            }
+
+            let mut page_ids = Vec::new();
+            index_btree::collect_page_ids(self, index.root_page_id, &mut page_ids)?;
+            for page_id in page_ids {
+                self.deallocate_page(page_id)?;
+            }
+        }
 
         Ok(())
     }
@@ -719,14 +747,50 @@ impl StorageEngine {
         table: &Table,
         key_values: &[Value],
     ) -> Result<Option<StoredRow>> {
-        self.ensure_primary_key_index(table)?;
-        let key = Self::encode_primary_key(key_values)?;
-        Ok(self.transient_indexes.lookup_primary_key(&table.name, &key))
+        let root_page_id = self.require_index_root_page(
+            table.primary_key_index_root_page_id,
+            &format!("primary-key index for table '{}'", table.name),
+        )?;
+        let Some(rowid) = index_btree::lookup_primary_key(self, root_page_id, key_values)? else {
+            return Ok(None);
+        };
+        self.lookup_row_by_rowid(&table.name, rowid)
     }
 
     pub fn register_primary_key_row(&mut self, table: &Table, row: StoredRow) -> Result<()> {
-        self.transient_indexes
-            .register_primary_key_row(table, row, Self::encode_primary_key)
+        let root_page_id = self.require_index_root_page(
+            table.primary_key_index_root_page_id,
+            &format!("primary-key index for table '{}'", table.name),
+        )?;
+
+        if index_btree::lookup_primary_key(
+            self,
+            root_page_id,
+            &table.get_primary_key_values(&row.values)?,
+        )?
+        .is_some()
+        {
+            return Err(HematiteError::StorageError(format!(
+                "Duplicate primary key for table '{}'",
+                table.name
+            )));
+        }
+
+        if let Some(new_root_page_id) = index_btree::insert_primary_key(
+            self,
+            root_page_id,
+            &table.get_primary_key_values(&row.values)?,
+            row.row_id,
+        )? {
+            return Err(HematiteError::StorageError(format!(
+                "Primary-key index root for table '{}' split from {} to {} without catalog update support in this path",
+                table.name,
+                root_page_id.as_u32(),
+                new_root_page_id.as_u32()
+            )));
+        }
+
+        Ok(())
     }
 
     pub fn lookup_rows_by_secondary_index(
@@ -735,52 +799,224 @@ impl StorageEngine {
         index_name: &str,
         key_values: &[Value],
     ) -> Result<Vec<StoredRow>> {
-        self.ensure_secondary_indexes(table)?;
-        let key = Self::encode_index_key(key_values)?;
-        Ok(self
-            .transient_indexes
-            .lookup_secondary_index(&table.name, index_name, &key))
+        let index = table.get_secondary_index(index_name).ok_or_else(|| {
+            HematiteError::StorageError(format!(
+                "Secondary index '{}' does not exist on table '{}'",
+                index_name, table.name
+            ))
+        })?;
+        let root_page_id = self.require_index_root_page(
+            index.root_page_id,
+            &format!("secondary index '{}' on table '{}'", index.name, table.name),
+        )?;
+
+        let rowids = index_btree::lookup_secondary_rowids(self, root_page_id, key_values)?;
+        let mut rows = Vec::with_capacity(rowids.len());
+        for rowid in rowids {
+            if let Some(row) = self.lookup_row_by_rowid(&table.name, rowid)? {
+                rows.push(row);
+            }
+        }
+        Ok(rows)
     }
 
     pub fn register_secondary_index_row(&mut self, table: &Table, row: StoredRow) -> Result<()> {
-        self.transient_indexes
-            .register_secondary_index_row(table, row, Self::encode_index_key)
+        for index in &table.secondary_indexes {
+            let root_page_id = self.require_index_root_page(
+                index.root_page_id,
+                &format!("secondary index '{}' on table '{}'", index.name, table.name),
+            )?;
+            let key_values = index
+                .column_indices
+                .iter()
+                .map(|&column_index| row.values[column_index].clone())
+                .collect::<Vec<_>>();
+
+            if let Some(new_root_page_id) =
+                index_btree::insert_secondary_key(self, root_page_id, &key_values, row.row_id)?
+            {
+                return Err(HematiteError::StorageError(format!(
+                    "Secondary index '{}' on table '{}' split from {} to {} without catalog update support in this path",
+                    index.name,
+                    table.name,
+                    root_page_id.as_u32(),
+                    new_root_page_id.as_u32()
+                )));
+            }
+        }
+
+        Ok(())
     }
 
     pub fn rebuild_primary_key_index(&mut self, table: &Table, rows: &[StoredRow]) -> Result<()> {
-        self.transient_indexes
-            .rebuild_primary_key_index(table, rows, Self::encode_primary_key)
+        let root_page_id = self.require_index_root_page(
+            table.primary_key_index_root_page_id,
+            &format!("primary-key index for table '{}'", table.name),
+        )?;
+        index_btree::reset_tree(self, root_page_id)?;
+        let mut seen_keys = HashSet::new();
+
+        for row in rows {
+            let key_values = table.get_primary_key_values(&row.values)?;
+            let encoded_key = index_btree::encode_index_key(&key_values)?;
+            if !seen_keys.insert(encoded_key) {
+                return Err(HematiteError::StorageError(format!(
+                    "Duplicate primary key encountered while rebuilding table '{}'",
+                    table.name
+                )));
+            }
+            if let Some(new_root_page_id) =
+                index_btree::insert_primary_key(self, root_page_id, &key_values, row.row_id)?
+            {
+                return Err(HematiteError::StorageError(format!(
+                    "Primary-key index root for table '{}' split from {} to {} during rebuild without catalog update support",
+                    table.name,
+                    root_page_id.as_u32(),
+                    new_root_page_id.as_u32()
+                )));
+            }
+        }
+
+        Ok(())
     }
 
     pub fn rebuild_secondary_indexes(&mut self, table: &Table, rows: &[StoredRow]) -> Result<()> {
-        self.transient_indexes
-            .rebuild_secondary_indexes(table, rows, Self::encode_index_key)
-    }
-
-    fn ensure_primary_key_index(&mut self, table: &Table) -> Result<()> {
-        if self.transient_indexes.has_primary_key_index(&table.name) {
-            return Ok(());
+        for index in &table.secondary_indexes {
+            let root_page_id = self.require_index_root_page(
+                index.root_page_id,
+                &format!("secondary index '{}' on table '{}'", index.name, table.name),
+            )?;
+            index_btree::reset_tree(self, root_page_id)?;
+            for row in rows {
+                let key_values = index
+                    .column_indices
+                    .iter()
+                    .map(|&column_index| row.values[column_index].clone())
+                    .collect::<Vec<_>>();
+                if let Some(new_root_page_id) =
+                    index_btree::insert_secondary_key(self, root_page_id, &key_values, row.row_id)?
+                {
+                    return Err(HematiteError::StorageError(format!(
+                        "Secondary index '{}' on table '{}' split from {} to {} during rebuild without catalog update support",
+                        index.name,
+                        table.name,
+                        root_page_id.as_u32(),
+                        new_root_page_id.as_u32()
+                    )));
+                }
+            }
         }
 
-        let rows = self.read_rows_with_ids(&table.name)?;
-        self.rebuild_primary_key_index(table, &rows)
+        Ok(())
     }
 
-    fn ensure_secondary_indexes(&mut self, table: &Table) -> Result<()> {
-        if self.transient_indexes.has_secondary_indexes(&table.name) {
-            return Ok(());
+    pub fn delete_primary_key_row(&mut self, table: &Table, row: &StoredRow) -> Result<bool> {
+        let root_page_id = self.require_index_root_page(
+            table.primary_key_index_root_page_id,
+            &format!("primary-key index for table '{}'", table.name),
+        )?;
+        index_btree::delete_primary_key(
+            self,
+            root_page_id,
+            &table.get_primary_key_values(&row.values)?,
+        )
+    }
+
+    pub fn delete_secondary_index_row(&mut self, table: &Table, row: &StoredRow) -> Result<()> {
+        for index in &table.secondary_indexes {
+            let root_page_id = self.require_index_root_page(
+                index.root_page_id,
+                &format!("secondary index '{}' on table '{}'", index.name, table.name),
+            )?;
+            let key_values = index
+                .column_indices
+                .iter()
+                .map(|&column_index| row.values[column_index].clone())
+                .collect::<Vec<_>>();
+            index_btree::delete_secondary_key(self, root_page_id, &key_values, row.row_id)?;
+        }
+        Ok(())
+    }
+
+    pub fn open_secondary_index_cursor(
+        &mut self,
+        table: &Table,
+        index_name: &str,
+    ) -> Result<IndexCursor> {
+        let index = table.get_secondary_index(index_name).ok_or_else(|| {
+            HematiteError::StorageError(format!(
+                "Secondary index '{}' does not exist on table '{}'",
+                index_name, table.name
+            ))
+        })?;
+        let root_page_id = self.require_index_root_page(
+            index.root_page_id,
+            &format!("secondary index '{}' on table '{}'", index.name, table.name),
+        )?;
+        let entries = index_btree::read_entries(self, root_page_id)?;
+        Ok(IndexCursor::new(entries))
+    }
+
+    pub fn validate_table_indexes(&mut self, table: &Table) -> Result<()> {
+        let rows = self.read_rows_with_ids(&table.name)?;
+
+        let mut expected_primary = HashMap::new();
+        for row in &rows {
+            let key = index_btree::encode_index_key(&table.get_primary_key_values(&row.values)?)?;
+            if expected_primary.insert(key.clone(), row.row_id).is_some() {
+                return Err(HematiteError::CorruptedData(format!(
+                    "Duplicate primary key detected in table '{}'",
+                    table.name
+                )));
+            }
+            let stored_rowid = index_btree::lookup_primary_key(
+                self,
+                table.primary_key_index_root_page_id,
+                &table.get_primary_key_values(&row.values)?,
+            )?
+            .ok_or_else(|| {
+                HematiteError::CorruptedData(format!(
+                    "Primary-key index is missing a row for table '{}'",
+                    table.name
+                ))
+            })?;
+            if stored_rowid != row.row_id {
+                return Err(HematiteError::CorruptedData(format!(
+                    "Primary-key index rowid mismatch for table '{}': expected {}, got {}",
+                    table.name, row.row_id, stored_rowid
+                )));
+            }
         }
 
-        let rows = self.read_rows_with_ids(&table.name)?;
-        self.rebuild_secondary_indexes(table, &rows)
+        for index in &table.secondary_indexes {
+            for row in &rows {
+                let key_values = index
+                    .column_indices
+                    .iter()
+                    .map(|&column_index| row.values[column_index].clone())
+                    .collect::<Vec<_>>();
+                let rowids =
+                    index_btree::lookup_secondary_rowids(self, index.root_page_id, &key_values)?;
+                if !rowids.contains(&row.row_id) {
+                    return Err(HematiteError::CorruptedData(format!(
+                        "Secondary index '{}' is missing rowid {} for table '{}'",
+                        index.name, row.row_id, table.name
+                    )));
+                }
+            }
+        }
+
+        Ok(())
     }
 
-    fn encode_primary_key(values: &[Value]) -> Result<Vec<u8>> {
-        crate::storage::serialization::RowSerializer::serialize(values)
-    }
-
-    fn encode_index_key(values: &[Value]) -> Result<Vec<u8>> {
-        crate::storage::serialization::RowSerializer::serialize(values)
+    fn require_index_root_page(&self, root_page_id: PageId, label: &str) -> Result<PageId> {
+        if root_page_id == PageId::new(0) || root_page_id == PageId::invalid() {
+            return Err(HematiteError::StorageError(format!(
+                "Missing durable {} root page",
+                label
+            )));
+        }
+        Ok(root_page_id)
     }
 
     pub fn create_empty_btree(&mut self) -> Result<PageId> {

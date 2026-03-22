@@ -16,6 +16,7 @@ pub struct Table {
     pub primary_key_columns: Vec<usize>,
     pub secondary_indexes: Vec<SecondaryIndex>,
     pub root_page_id: crate::storage::PageId,
+    pub primary_key_index_root_page_id: crate::storage::PageId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +71,7 @@ impl Table {
             primary_key_columns,
             secondary_indexes: Vec::new(),
             root_page_id,
+            primary_key_index_root_page_id: crate::storage::PageId::new(0),
         })
     }
 
@@ -175,6 +177,7 @@ impl Table {
 
         // Root page ID (4 bytes)
         buffer.extend_from_slice(&self.root_page_id.as_u32().to_le_bytes());
+        buffer.extend_from_slice(&self.primary_key_index_root_page_id.as_u32().to_le_bytes());
 
         // Column count (4 bytes)
         buffer.extend_from_slice(&(self.columns.len() as u32).to_le_bytes());
@@ -209,7 +212,7 @@ impl Table {
     }
 
     pub fn deserialize(buffer: &[u8], offset: &mut usize) -> Result<Self> {
-        if *offset + 12 > buffer.len() {
+        if *offset + 16 > buffer.len() {
             return Err(HematiteError::CorruptedData(
                 "Invalid table header".to_string(),
             ));
@@ -244,6 +247,14 @@ impl Table {
 
         // Root page ID
         let root_page_id = crate::storage::PageId::new(u32::from_le_bytes([
+            buffer[*offset],
+            buffer[*offset + 1],
+            buffer[*offset + 2],
+            buffer[*offset + 3],
+        ]));
+        *offset += 4;
+
+        let primary_key_index_root_page_id = crate::storage::PageId::new(u32::from_le_bytes([
             buffer[*offset],
             buffer[*offset + 1],
             buffer[*offset + 2],
@@ -299,6 +310,7 @@ impl Table {
         }
 
         let mut table = Self::new(id, name, columns, root_page_id)?;
+        table.primary_key_index_root_page_id = primary_key_index_root_page_id;
 
         if *offset == buffer.len() {
             return Ok(table);

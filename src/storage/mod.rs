@@ -6,7 +6,7 @@ pub mod database;
 pub mod engine;
 pub mod file_manager;
 pub mod free_list;
-pub mod index_cache;
+pub mod index_btree;
 pub mod overflow;
 pub mod pager;
 pub mod row_id;

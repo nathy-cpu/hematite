@@ -605,6 +605,7 @@ impl InsertExecutor {
 
     fn ensure_primary_key_is_unique(
         &self,
+        ctx: &mut ExecutionContext,
         table: &Table,
         existing_rows: &[Vec<Value>],
         candidate_row: &[Value],
@@ -612,6 +613,17 @@ impl InsertExecutor {
         let candidate_pk = table.get_primary_key_values(candidate_row).map_err(|err| {
             HematiteError::ParseError(format!("Failed to extract primary key values: {}", err))
         })?;
+
+        if ctx
+            .storage
+            .lookup_row_by_primary_key(table, &candidate_pk)?
+            .is_some()
+        {
+            return Err(HematiteError::ParseError(format!(
+                "Duplicate primary key for table '{}': {:?}",
+                table.name, candidate_pk
+            )));
+        }
 
         for existing_row in existing_rows {
             let existing_pk = table.get_primary_key_values(existing_row).map_err(|err| {
@@ -704,33 +716,31 @@ impl QueryExecutor for InsertExecutor {
             .get_table_by_name(&self.statement.table)
             .ok_or_else(|| {
                 HematiteError::ParseError(format!("Table '{}' not found", self.statement.table))
-            })?;
-
-        let mut existing_rows = ctx.storage.read_from_table(&self.statement.table)?;
+            })?
+            .clone();
 
         // Insert data into storage
         for value_row in &self.statement.values {
-            let row_values = self.build_row(table, value_row)?;
-            self.ensure_primary_key_is_unique(table, &existing_rows, &row_values)?;
+            let row_values = self.build_row(&table, value_row)?;
+            self.ensure_primary_key_is_unique(ctx, &table, &[], &row_values)?;
 
             let row_id = ctx
                 .storage
                 .insert_into_table(&self.statement.table, row_values.clone())?;
             ctx.storage.register_primary_key_row(
-                table,
+                &table,
                 crate::storage::StoredRow {
                     row_id,
                     values: row_values.clone(),
                 },
             )?;
             ctx.storage.register_secondary_index_row(
-                table,
+                &table,
                 crate::storage::StoredRow {
                     row_id,
                     values: row_values.clone(),
                 },
             )?;
-            existing_rows.push(row_values);
         }
 
         Ok(QueryResult {
@@ -930,7 +940,7 @@ impl QueryExecutor for DeleteExecutor {
             SelectAccessPath::FullTableScan,
         );
 
-        let mut rowids_to_delete = Vec::new();
+        let mut rows_to_delete = Vec::new();
         for stored_row in all_rows {
             let row = stored_row.values.clone();
             let delete_row = match &self.statement.where_clause {
@@ -948,30 +958,32 @@ impl QueryExecutor for DeleteExecutor {
             };
 
             if delete_row {
-                rowids_to_delete.push(stored_row.row_id);
+                rows_to_delete.push(stored_row);
             }
         }
 
-        for rowid in &rowids_to_delete {
+        for row in &rows_to_delete {
+            ctx.storage.delete_secondary_index_row(table, row)?;
+            let deleted_pk = ctx.storage.delete_primary_key_row(table, row)?;
+            if !deleted_pk {
+                return Err(HematiteError::CorruptedData(format!(
+                    "Primary-key index entry vanished during delete execution for table '{}'",
+                    self.statement.table
+                )));
+            }
             let deleted = ctx
                 .storage
-                .delete_from_table_by_rowid(&self.statement.table, *rowid)?;
+                .delete_from_table_by_rowid(&self.statement.table, row.row_id)?;
             if !deleted {
                 return Err(HematiteError::CorruptedData(format!(
                     "Rowid {} vanished during delete execution for table '{}'",
-                    rowid, self.statement.table
+                    row.row_id, self.statement.table
                 )));
             }
         }
 
-        let refreshed_rows = ctx.storage.read_rows_with_ids(&self.statement.table)?;
-        ctx.storage
-            .rebuild_primary_key_index(table, &refreshed_rows)?;
-        ctx.storage
-            .rebuild_secondary_indexes(table, &refreshed_rows)?;
-
         Ok(QueryResult {
-            affected_rows: rowids_to_delete.len(),
+            affected_rows: rows_to_delete.len(),
             columns: Vec::new(),
             rows: Vec::new(),
         })
@@ -1020,14 +1032,15 @@ impl QueryExecutor for CreateExecutor {
 
         let columns = self.convert_column_definitions()?;
 
-        // Create table in catalog
-        let table_id = ctx
-            .catalog
-            .create_table(self.statement.table.clone(), columns)?;
-
-        // Create table in storage
+        // Create storage structures first so the catalog only persists the final roots once.
         let root_page_id = ctx.storage.create_table(&self.statement.table)?;
-        ctx.catalog.set_table_root_page(table_id, root_page_id)?;
+        let primary_key_root_page_id = ctx.storage.create_empty_btree()?;
+        ctx.catalog.create_table_with_roots(
+            self.statement.table.clone(),
+            columns,
+            root_page_id,
+            primary_key_root_page_id,
+        )?;
 
         Ok(QueryResult {
             affected_rows: 0,
@@ -1060,7 +1073,7 @@ impl QueryExecutor for DropExecutor {
             })?
             .clone();
 
-        ctx.storage.drop_table(&self.statement.table)?;
+        ctx.storage.drop_table_with_indexes(&table)?;
         ctx.catalog
             .drop_table(table.id)
             .map_err(|err| HematiteError::ParseError(err.to_string()))?;

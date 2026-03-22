@@ -61,6 +61,43 @@ impl Schema {
         Ok(table_id)
     }
 
+    pub fn create_table_with_roots(
+        &mut self,
+        name: String,
+        columns: Vec<Column>,
+        table_root_page_id: crate::storage::PageId,
+        primary_key_root_page_id: crate::storage::PageId,
+    ) -> Result<TableId> {
+        if self.table_names.contains_key(&name) {
+            return Err(HematiteError::ParseError(format!(
+                "Table '{}' already exists",
+                name
+            )));
+        }
+
+        let mut column_names = std::collections::HashSet::new();
+        for col in &columns {
+            if column_names.contains(&col.name) {
+                return Err(HematiteError::ParseError(format!(
+                    "Duplicate column name '{}'",
+                    col.name
+                )));
+            }
+            column_names.insert(col.name.clone());
+        }
+
+        let table_id = TableId::new(self.next_table_id);
+        self.next_table_id += 1;
+
+        let mut table = Table::new(table_id, name.clone(), columns, table_root_page_id)?;
+        table.primary_key_index_root_page_id = primary_key_root_page_id;
+
+        self.tables.insert(table_id, table);
+        self.table_names.insert(name, table_id);
+
+        Ok(table_id)
+    }
+
     pub fn get_table(&self, table_id: TableId) -> Option<&Table> {
         self.tables.get(&table_id)
     }
@@ -90,6 +127,34 @@ impl Schema {
             .get_mut(&table_id)
             .ok_or_else(|| HematiteError::StorageError("Table not found".to_string()))?;
         table.add_secondary_index(index)
+    }
+
+    pub fn set_table_primary_key_root_page(
+        &mut self,
+        table_id: TableId,
+        root_page_id: crate::storage::PageId,
+    ) -> Result<()> {
+        let table = self
+            .tables
+            .get_mut(&table_id)
+            .ok_or_else(|| HematiteError::StorageError("Table not found".to_string()))?;
+        table.primary_key_index_root_page_id = root_page_id;
+        Ok(())
+    }
+
+    pub fn set_table_storage_roots(
+        &mut self,
+        table_id: TableId,
+        table_root_page_id: crate::storage::PageId,
+        primary_key_root_page_id: crate::storage::PageId,
+    ) -> Result<()> {
+        let table = self
+            .tables
+            .get_mut(&table_id)
+            .ok_or_else(|| HematiteError::StorageError("Table not found".to_string()))?;
+        table.root_page_id = table_root_page_id;
+        table.primary_key_index_root_page_id = primary_key_root_page_id;
+        Ok(())
     }
 
     pub fn list_tables(&self) -> Vec<(TableId, String)> {

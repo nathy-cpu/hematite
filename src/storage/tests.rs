@@ -665,16 +665,17 @@ mod mod_tests {
         let mut storage = StorageEngine::new(test_db.path())?;
 
         let _ = storage.create_table("users")?;
+        let primary_key_root_page_id = storage.create_empty_btree()?;
         let first_id = storage.insert_into_table(
             "users",
             vec![Value::Integer(1), Value::Text("Alice".to_string())],
         )?;
-        let _ = storage.insert_into_table(
+        let second_id = storage.insert_into_table(
             "users",
             vec![Value::Integer(2), Value::Text("Bob".to_string())],
         )?;
 
-        let table = crate::catalog::Table::new(
+        let mut table = crate::catalog::Table::new(
             crate::catalog::TableId::new(1),
             "users".to_string(),
             vec![
@@ -695,6 +696,21 @@ mod mod_tests {
                 .get("users")
                 .expect("table metadata should exist")
                 .root_page_id,
+        )?;
+        table.primary_key_index_root_page_id = primary_key_root_page_id;
+        storage.register_primary_key_row(
+            &table,
+            crate::storage::StoredRow {
+                row_id: first_id,
+                values: vec![Value::Integer(1), Value::Text("Alice".to_string())],
+            },
+        )?;
+        storage.register_primary_key_row(
+            &table,
+            crate::storage::StoredRow {
+                row_id: second_id,
+                values: vec![Value::Integer(2), Value::Text("Bob".to_string())],
+            },
         )?;
 
         let found = storage.lookup_row_by_primary_key(&table, &[Value::Integer(1)])?;
@@ -718,6 +734,8 @@ mod mod_tests {
         let mut storage = StorageEngine::new(test_db.path())?;
 
         let root_page_id = storage.create_table("users")?;
+        let primary_key_root_page_id = storage.create_empty_btree()?;
+        let secondary_index_root_page_id = storage.create_empty_btree()?;
         let mut table = crate::catalog::Table::new(
             crate::catalog::TableId::new(1),
             "users".to_string(),
@@ -736,10 +754,11 @@ mod mod_tests {
             ],
             root_page_id,
         )?;
+        table.primary_key_index_root_page_id = primary_key_root_page_id;
         table.add_secondary_index(crate::catalog::SecondaryIndex {
             name: "idx_users_email".to_string(),
             column_indices: vec![1],
-            root_page_id: crate::storage::PageId::new(77),
+            root_page_id: secondary_index_root_page_id,
         })?;
 
         let row_id_1 = storage.insert_into_table(
@@ -750,6 +769,7 @@ mod mod_tests {
             row_id: row_id_1,
             values: vec![Value::Integer(1), Value::Text("a@example.com".to_string())],
         };
+        storage.register_primary_key_row(&table, row_1.clone())?;
         storage.register_secondary_index_row(&table, row_1.clone())?;
 
         let row_id_2 = storage.insert_into_table(
@@ -760,6 +780,7 @@ mod mod_tests {
             row_id: row_id_2,
             values: vec![Value::Integer(2), Value::Text("a@example.com".to_string())],
         };
+        storage.register_primary_key_row(&table, row_2.clone())?;
         storage.register_secondary_index_row(&table, row_2.clone())?;
 
         let matched = storage.lookup_rows_by_secondary_index(
@@ -790,6 +811,144 @@ mod mod_tests {
         )?;
         assert_eq!(new_key_rows.len(), 1);
         assert_eq!(new_key_rows[0].row_id, row_id_1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_durable_indexes_survive_reopen() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_durable_indexes_survive_reopen");
+
+        let (table, row_id) = {
+            let mut storage = StorageEngine::new(test_db.path())?;
+            let root_page_id = storage.create_table("users")?;
+            let primary_key_root_page_id = storage.create_empty_btree()?;
+            let secondary_index_root_page_id = storage.create_empty_btree()?;
+
+            let mut table = crate::catalog::Table::new(
+                crate::catalog::TableId::new(1),
+                "users".to_string(),
+                vec![
+                    crate::catalog::Column::new(
+                        crate::catalog::ColumnId::new(1),
+                        "id".to_string(),
+                        crate::catalog::DataType::Integer,
+                    )
+                    .primary_key(true),
+                    crate::catalog::Column::new(
+                        crate::catalog::ColumnId::new(2),
+                        "email".to_string(),
+                        crate::catalog::DataType::Text,
+                    ),
+                ],
+                root_page_id,
+            )?;
+            table.primary_key_index_root_page_id = primary_key_root_page_id;
+            table.add_secondary_index(crate::catalog::SecondaryIndex {
+                name: "idx_users_email".to_string(),
+                column_indices: vec![1],
+                root_page_id: secondary_index_root_page_id,
+            })?;
+
+            let row_id = storage.insert_into_table(
+                "users",
+                vec![
+                    Value::Integer(7),
+                    Value::Text("persist@example.com".to_string()),
+                ],
+            )?;
+            let row = crate::storage::StoredRow {
+                row_id,
+                values: vec![
+                    Value::Integer(7),
+                    Value::Text("persist@example.com".to_string()),
+                ],
+            };
+            storage.register_primary_key_row(&table, row.clone())?;
+            storage.register_secondary_index_row(&table, row)?;
+            storage.flush()?;
+            (table, row_id)
+        };
+
+        let mut reopened = StorageEngine::new(test_db.path())?;
+        let found = reopened.lookup_row_by_primary_key(&table, &[Value::Integer(7)])?;
+        assert_eq!(found.map(|row| row.row_id), Some(row_id));
+
+        let secondary = reopened.lookup_rows_by_secondary_index(
+            &table,
+            "idx_users_email",
+            &[Value::Text("persist@example.com".to_string())],
+        )?;
+        assert_eq!(secondary.len(), 1);
+        assert_eq!(secondary[0].row_id, row_id);
+        reopened.validate_table_indexes(&table)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_delete_updates_durable_indexes() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_delete_updates_durable_indexes");
+        let mut storage = StorageEngine::new(test_db.path())?;
+        let root_page_id = storage.create_table("users")?;
+        let primary_key_root_page_id = storage.create_empty_btree()?;
+        let secondary_index_root_page_id = storage.create_empty_btree()?;
+
+        let mut table = crate::catalog::Table::new(
+            crate::catalog::TableId::new(1),
+            "users".to_string(),
+            vec![
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(1),
+                    "id".to_string(),
+                    crate::catalog::DataType::Integer,
+                )
+                .primary_key(true),
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(2),
+                    "email".to_string(),
+                    crate::catalog::DataType::Text,
+                ),
+            ],
+            root_page_id,
+        )?;
+        table.primary_key_index_root_page_id = primary_key_root_page_id;
+        table.add_secondary_index(crate::catalog::SecondaryIndex {
+            name: "idx_users_email".to_string(),
+            column_indices: vec![1],
+            root_page_id: secondary_index_root_page_id,
+        })?;
+
+        let row_id = storage.insert_into_table(
+            "users",
+            vec![
+                Value::Integer(11),
+                Value::Text("gone@example.com".to_string()),
+            ],
+        )?;
+        let row = crate::storage::StoredRow {
+            row_id,
+            values: vec![
+                Value::Integer(11),
+                Value::Text("gone@example.com".to_string()),
+            ],
+        };
+        storage.register_primary_key_row(&table, row.clone())?;
+        storage.register_secondary_index_row(&table, row.clone())?;
+
+        assert!(storage.delete_primary_key_row(&table, &row)?);
+        storage.delete_secondary_index_row(&table, &row)?;
+        assert!(storage.delete_from_table_by_rowid("users", row_id)?);
+
+        assert!(storage
+            .lookup_row_by_primary_key(&table, &[Value::Integer(11)])?
+            .is_none());
+        assert!(storage
+            .lookup_rows_by_secondary_index(
+                &table,
+                "idx_users_email",
+                &[Value::Text("gone@example.com".to_string())],
+            )?
+            .is_empty());
 
         Ok(())
     }

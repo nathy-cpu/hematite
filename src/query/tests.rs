@@ -170,18 +170,22 @@ mod executor_tests {
                     DataType::Text,
                 ),
             ],
-            crate::storage::PageId::new(10),
+            crate::storage::PageId::new(0),
         )?;
-        table.add_secondary_index(crate::catalog::SecondaryIndex {
-            name: "idx_users_email".to_string(),
-            column_indices: vec![1],
-            root_page_id: crate::storage::PageId::new(11),
-        })?;
-        catalog.insert_table(table)?;
 
         let db = TestDbFile::new("_test_select_executor_secondary_index_lookup");
         let mut storage = StorageEngine::new(db.path())?;
-        let _ = storage.create_table("users")?;
+        let root_page_id = storage.create_table("users")?;
+        let primary_key_root_page_id = storage.create_empty_btree()?;
+        let secondary_index_root_page_id = storage.create_empty_btree()?;
+        table.root_page_id = root_page_id;
+        table.primary_key_index_root_page_id = primary_key_root_page_id;
+        table.add_secondary_index(crate::catalog::SecondaryIndex {
+            name: "idx_users_email".to_string(),
+            column_indices: vec![1],
+            root_page_id: secondary_index_root_page_id,
+        })?;
+        catalog.insert_table(table)?;
 
         let row_id_1 = storage.insert_into_table(
             "users",
@@ -200,7 +204,21 @@ mod executor_tests {
                 values: vec![Value::Integer(1), Value::Text("a@example.com".to_string())],
             },
         )?;
+        storage.register_primary_key_row(
+            table,
+            crate::storage::StoredRow {
+                row_id: row_id_1,
+                values: vec![Value::Integer(1), Value::Text("a@example.com".to_string())],
+            },
+        )?;
         storage.register_secondary_index_row(
+            table,
+            crate::storage::StoredRow {
+                row_id: row_id_2,
+                values: vec![Value::Integer(2), Value::Text("b@example.com".to_string())],
+            },
+        )?;
+        storage.register_primary_key_row(
             table,
             crate::storage::StoredRow {
                 row_id: row_id_2,
@@ -309,12 +327,15 @@ mod executor_tests {
                 DataType::Text,
             ),
         ];
-        catalog.create_table("users".to_string(), columns)?;
+        let table_id = catalog.create_table("users".to_string(), columns)?;
 
         let db = TestDbFile::new("_test_insert_executor");
         let mut storage = StorageEngine::new(db.path())?;
         // Create table in storage as well
-        let _ = storage.create_table("users")?;
+        let root_page_id = storage.create_table("users")?;
+        let primary_key_root_page_id = storage.create_empty_btree()?;
+        catalog.set_table_root_page(table_id, root_page_id)?;
+        catalog.set_table_primary_key_root_page(table_id, primary_key_root_page_id)?;
         let mut ctx = ExecutionContext::for_mutation(&catalog, &mut storage);
 
         let statement = InsertStatement {

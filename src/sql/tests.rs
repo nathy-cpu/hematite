@@ -639,7 +639,7 @@ mod connection_tests {
         let final_size = fs::metadata(db.path())?.len();
 
         assert!(after_cycles <= initial_size + (crate::storage::PAGE_SIZE as u64 * 2));
-        assert!(final_size <= after_cycles + crate::storage::PAGE_SIZE as u64);
+        assert!(final_size <= after_cycles + (crate::storage::PAGE_SIZE as u64 * 2));
 
         Ok(())
     }

@@ -204,6 +204,31 @@ impl Catalog {
         Ok(table_id)
     }
 
+    pub fn create_table_with_roots(
+        &mut self,
+        name: &str,
+        columns: Vec<Column>,
+        table_root_page_id: PageId,
+        primary_key_root_page_id: PageId,
+    ) -> Result<TableId> {
+        if self.schema.get_table_by_name(name).is_some() {
+            return Err(crate::error::HematiteError::StorageError(format!(
+                "Table '{}' already exists",
+                name
+            )));
+        }
+
+        let table_id = self.get_next_table_id()?;
+        let mut table = Table::new(table_id, name.to_string(), columns, table_root_page_id)?;
+        table.primary_key_index_root_page_id = primary_key_root_page_id;
+
+        self.schema.insert_table(table)?;
+        self.schema_dirty = true;
+        self.save_schema_to_btree()?;
+
+        Ok(table_id)
+    }
+
     /// Get a table by ID
     pub fn get_table(&self, table_id: TableId) -> Result<Option<Table>> {
         Ok(self.schema.get_table(table_id).cloned())
@@ -328,6 +353,48 @@ impl Catalog {
 
     pub fn add_secondary_index(&mut self, table_id: TableId, index: SecondaryIndex) -> Result<()> {
         self.schema.add_secondary_index(table_id, index)?;
+        self.schema_dirty = true;
+        self.save_schema_to_btree()?;
+
+        Ok(())
+    }
+
+    pub fn set_table_primary_key_root_page(
+        &mut self,
+        table_id: TableId,
+        root_page_id: PageId,
+    ) -> Result<()> {
+        if root_page_id.as_u32() == 0 {
+            return Err(crate::error::HematiteError::StorageError(
+                "Root page 0 is reserved for database header".to_string(),
+            ));
+        }
+
+        self.schema
+            .set_table_primary_key_root_page(table_id, root_page_id)?;
+        self.schema_dirty = true;
+        self.save_schema_to_btree()?;
+
+        Ok(())
+    }
+
+    pub fn set_table_storage_roots(
+        &mut self,
+        table_id: TableId,
+        table_root_page_id: PageId,
+        primary_key_root_page_id: PageId,
+    ) -> Result<()> {
+        if table_root_page_id.as_u32() == 0 || primary_key_root_page_id.as_u32() == 0 {
+            return Err(crate::error::HematiteError::StorageError(
+                "Root page 0 is reserved for database header".to_string(),
+            ));
+        }
+
+        self.schema.set_table_storage_roots(
+            table_id,
+            table_root_page_id,
+            primary_key_root_page_id,
+        )?;
         self.schema_dirty = true;
         self.save_schema_to_btree()?;
 
