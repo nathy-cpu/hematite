@@ -20,7 +20,10 @@ use crate::storage::{
     DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID,
 };
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
+use std::fs;
 use std::path::Path;
+use std::path::PathBuf;
 
 #[derive(Debug)]
 pub struct Pager {
@@ -28,19 +31,24 @@ pub struct Pager {
     buffer_pool: BufferPool,
     dirty_pages: HashSet<PageId>,
     page_checksums: HashMap<PageId, u32>,
+    checksum_store_path: Option<PathBuf>,
 }
 
 impl Pager {
     pub const CHECKSUM_METADATA_VERSION: u32 = 1;
 
     pub fn new<P: AsRef<Path>>(path: P, cache_capacity: usize) -> Result<Self> {
+        let checksum_store_path = Some(Self::checksum_store_path(path.as_ref()));
         let file_manager = FileManager::new(path)?;
-        Ok(Self {
+        let mut pager = Self {
             file_manager,
             buffer_pool: BufferPool::new(cache_capacity),
             dirty_pages: HashSet::new(),
             page_checksums: HashMap::new(),
-        })
+            checksum_store_path,
+        };
+        pager.load_persisted_checksums()?;
+        Ok(pager)
     }
 
     pub fn new_in_memory(cache_capacity: usize) -> Result<Self> {
@@ -50,6 +58,7 @@ impl Pager {
             buffer_pool: BufferPool::new(cache_capacity),
             dirty_pages: HashSet::new(),
             page_checksums: HashMap::new(),
+            checksum_store_path: None,
         })
     }
 
@@ -120,7 +129,8 @@ impl Pager {
             }
             self.dirty_pages.remove(&STORAGE_METADATA_PAGE_ID);
         }
-        self.file_manager.flush()
+        self.file_manager.flush()?;
+        self.persist_checksums()
     }
 
     pub fn free_pages(&self) -> &[PageId] {
@@ -244,5 +254,147 @@ impl Pager {
     #[cfg(test)]
     pub(crate) fn dirty_page_count(&self) -> usize {
         self.dirty_pages.len()
+    }
+
+    fn checksum_store_path(db_path: &Path) -> PathBuf {
+        let mut file_name = db_path
+            .file_name()
+            .map(OsString::from)
+            .unwrap_or_else(|| OsString::from("hematite.db"));
+        file_name.push(".pager_checksums");
+        match db_path.parent() {
+            Some(parent) => parent.join(file_name),
+            None => PathBuf::from(file_name),
+        }
+    }
+
+    fn load_persisted_checksums(&mut self) -> Result<()> {
+        let Some(path) = &self.checksum_store_path else {
+            return Ok(());
+        };
+
+        let contents = match fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(err.into()),
+        };
+
+        let mut lines = contents.lines();
+        let version = lines
+            .next()
+            .ok_or_else(|| {
+                crate::error::HematiteError::StorageError(
+                    "Missing pager checksum metadata version".to_string(),
+                )
+            })?
+            .strip_prefix("version=")
+            .ok_or_else(|| {
+                crate::error::HematiteError::StorageError(
+                    "Pager checksum metadata is missing version prefix".to_string(),
+                )
+            })?
+            .parse::<u32>()
+            .map_err(|_| {
+                crate::error::HematiteError::StorageError(
+                    "Invalid pager checksum metadata version".to_string(),
+                )
+            })?;
+
+        if version != Self::CHECKSUM_METADATA_VERSION {
+            return Err(crate::error::HematiteError::StorageError(format!(
+                "Unsupported pager checksum metadata version: expected {}, got {}",
+                Self::CHECKSUM_METADATA_VERSION,
+                version
+            )));
+        }
+
+        let expected_count = lines
+            .next()
+            .ok_or_else(|| {
+                crate::error::HematiteError::StorageError(
+                    "Missing pager checksum metadata count".to_string(),
+                )
+            })?
+            .strip_prefix("count=")
+            .ok_or_else(|| {
+                crate::error::HematiteError::StorageError(
+                    "Pager checksum metadata is missing count prefix".to_string(),
+                )
+            })?
+            .parse::<usize>()
+            .map_err(|_| {
+                crate::error::HematiteError::StorageError(
+                    "Invalid pager checksum metadata count".to_string(),
+                )
+            })?;
+
+        let mut checksums = HashMap::new();
+        for line in lines {
+            if line.is_empty() {
+                continue;
+            }
+            let payload = line.strip_prefix("checksum|").ok_or_else(|| {
+                crate::error::HematiteError::StorageError(
+                    "Invalid pager checksum metadata record".to_string(),
+                )
+            })?;
+            let parts = payload.split('|').collect::<Vec<_>>();
+            if parts.len() != 2 {
+                return Err(crate::error::HematiteError::StorageError(
+                    "Invalid pager checksum metadata record".to_string(),
+                ));
+            }
+            let page_id = PageId::new(parts[0].parse::<u32>().map_err(|_| {
+                crate::error::HematiteError::StorageError(
+                    "Invalid pager checksum page id".to_string(),
+                )
+            })?);
+            let checksum = parts[1].parse::<u32>().map_err(|_| {
+                crate::error::HematiteError::StorageError(
+                    "Invalid pager checksum value".to_string(),
+                )
+            })?;
+            if checksums.insert(page_id, checksum).is_some() {
+                return Err(crate::error::HematiteError::StorageError(format!(
+                    "Duplicate pager checksum entry for page {}",
+                    page_id.as_u32()
+                )));
+            }
+        }
+
+        if checksums.len() != expected_count {
+            return Err(crate::error::HematiteError::StorageError(format!(
+                "Pager checksum metadata count mismatch: expected {}, got {}",
+                expected_count,
+                checksums.len()
+            )));
+        }
+
+        self.page_checksums = checksums;
+        Ok(())
+    }
+
+    fn persist_checksums(&self) -> Result<()> {
+        let Some(path) = &self.checksum_store_path else {
+            return Ok(());
+        };
+
+        let mut entries = self
+            .page_checksums
+            .iter()
+            .map(|(page_id, checksum)| (*page_id, *checksum))
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|(page_id, _)| page_id.as_u32());
+
+        let mut lines = vec![
+            format!("version={}", Self::CHECKSUM_METADATA_VERSION),
+            format!("count={}", entries.len()),
+        ];
+        for (page_id, checksum) in entries {
+            lines.push(format!("checksum|{}|{}", page_id.as_u32(), checksum));
+        }
+
+        fs::write(path, lines.join("\n"))?;
+        Ok(())
     }
 }
