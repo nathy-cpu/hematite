@@ -206,6 +206,35 @@ mod mod_tests {
     }
 
     #[test]
+    fn test_byte_tree_range_and_prefix_helpers() -> Result<()> {
+        let path = tmp_db();
+        let storage = new_storage(&path)?;
+        let trees = ByteTreeStore::new(storage);
+        let root_page_id = trees.create_tree()?;
+        let mut tree = trees.open_tree(root_page_id)?;
+
+        tree.insert(b"alpha:1", b"a1")?;
+        tree.insert(b"alpha:2", b"a2")?;
+        tree.insert(b"beta:1", b"b1")?;
+        tree.insert(b"gamma:1", b"g1")?;
+
+        let from_beta = tree.entries_from(b"beta")?;
+        assert_eq!(from_beta.len(), 2);
+        assert_eq!(from_beta[0], (b"beta:1".to_vec(), b"b1".to_vec()));
+
+        let alpha_entries = tree.entries_with_prefix(b"alpha:")?;
+        assert_eq!(
+            alpha_entries,
+            vec![
+                (b"alpha:1".to_vec(), b"a1".to_vec()),
+                (b"alpha:2".to_vec(), b"a2".to_vec())
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn test_btree_delete() -> Result<()> {
         let path = tmp_db();
         let storage = new_storage(&path)?;

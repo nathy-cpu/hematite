@@ -89,19 +89,15 @@ impl Catalog {
     fn load_schema_from_btree(engine: &CatalogEngine, schema_root: u32) -> Result<Schema> {
         let trees = ByteTreeStore::from_shared_storage(engine.shared_pager());
         let btree = trees.open_tree(schema_root)?;
-        let mut cursor = btree.cursor()?;
 
         let mut schema = Schema::new();
 
-        while cursor.is_valid() {
-            if let (Some(key), Some(value)) = (cursor.key(), cursor.value()) {
-                let table_name = CatalogSchemaCodec::decode_key(key)?;
-                let mut table = CatalogSchemaCodec::decode_value(value)?;
-                // Ensure the persisted name matches the key to avoid inconsistencies.
-                table.name = table_name;
-                schema.insert_table(table)?;
-            }
-            cursor.next()?;
+        for (key, value) in btree.entries()? {
+            let table_name = CatalogSchemaCodec::decode_key(&key)?;
+            let mut table = CatalogSchemaCodec::decode_value(&value)?;
+            // Ensure the persisted name matches the key to avoid inconsistencies.
+            table.name = table_name;
+            schema.insert_table(table)?;
         }
 
         Ok(schema)

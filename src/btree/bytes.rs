@@ -105,6 +105,37 @@ impl ByteTree {
             .delete_typed_with_mutation::<RawBytesCodec>(&key.to_vec())
     }
 
+    pub fn entry(&mut self, key: &[u8]) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        Ok(self.get(key)?.map(|value| (key.to_vec(), value)))
+    }
+
+    pub fn entries(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let mut cursor = self.cursor()?;
+        cursor.collect_all()
+    }
+
+    pub fn entries_from(&self, start_key: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let mut cursor = self.cursor()?;
+        cursor.seek(start_key)?;
+        cursor.collect_remaining()
+    }
+
+    pub fn entries_with_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let mut cursor = self.cursor()?;
+        cursor.seek(prefix)?;
+        let mut entries = Vec::new();
+        while let Some((key, value)) = cursor.current_owned() {
+            if !key.starts_with(prefix) {
+                break;
+            }
+            entries.push((key, value));
+            if cursor.next().is_err() {
+                break;
+            }
+        }
+        Ok(entries)
+    }
+
     pub fn cursor(&self) -> Result<ByteTreeCursor> {
         Ok(ByteTreeCursor {
             inner: self.index.cursor()?,
@@ -145,5 +176,26 @@ impl ByteTreeCursor {
         self.inner
             .current()
             .map(|(key, value)| (key.as_bytes(), value.as_bytes()))
+    }
+
+    pub fn current_owned(&self) -> Option<(Vec<u8>, Vec<u8>)> {
+        self.current()
+            .map(|(key, value)| (key.to_vec(), value.to_vec()))
+    }
+
+    pub fn collect_all(&mut self) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        self.first()?;
+        self.collect_remaining()
+    }
+
+    pub fn collect_remaining(&mut self) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let mut entries = Vec::new();
+        while let Some(entry) = self.current_owned() {
+            entries.push(entry);
+            if self.next().is_err() {
+                break;
+            }
+        }
+        Ok(entries)
     }
 }
