@@ -1,6 +1,7 @@
 //! Centralized tests for the btree module
 
 mod mod_tests {
+    use crate::btree::bytes::ByteTreeStore;
     use crate::btree::index::BTreeIndex;
     use crate::btree::tree::BTreeManager;
     use crate::btree::{BTreeKey, BTreeValue, KeyValueCodec};
@@ -127,6 +128,28 @@ mod mod_tests {
         let deleted = btree.delete_typed::<U32StringCodec>(&9)?;
         assert_eq!(deleted, Some("nine".to_string()));
         assert_eq!(btree.search_typed::<U32StringCodec>(&9)?, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_byte_tree_store_raw_bytes_boundary() -> Result<()> {
+        let path = tmp_db();
+        let storage = new_storage(&path)?;
+        let trees = ByteTreeStore::new(storage);
+        let root_page_id = trees.create_tree()?;
+        let mut tree = trees.open_tree(root_page_id)?;
+
+        tree.insert(b"users", b"schema-entry")?;
+        tree.insert(b"orders", b"schema-entry-2")?;
+
+        assert_eq!(tree.get(b"users")?, Some(b"schema-entry".to_vec()));
+        assert_eq!(tree.delete(b"orders")?, Some(b"schema-entry-2".to_vec()));
+        assert_eq!(tree.get(b"orders")?, None);
+
+        let page_ids = trees.collect_page_ids(root_page_id)?;
+        assert!(!page_ids.is_empty());
+        assert!(trees.validate_tree(root_page_id)?);
 
         Ok(())
     }

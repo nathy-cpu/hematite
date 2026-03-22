@@ -1,11 +1,13 @@
 //! B-tree module with comprehensive testing
 
+pub mod bytes;
 pub mod codec;
 pub mod cursor;
 pub mod index;
 pub mod node;
 pub mod tree;
 
+pub use bytes::{ByteTree, ByteTreeStore};
 pub use codec::{KeyValueCodec, RawBytesCodec};
 pub use index::BTreeIndex;
 pub use node::BTreeNode;
