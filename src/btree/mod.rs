@@ -7,7 +7,7 @@ pub mod index;
 pub mod node;
 pub mod tree;
 
-pub use bytes::{ByteTree, ByteTreeStore};
+pub use bytes::{ByteTree, ByteTreeCursor, ByteTreeStore};
 pub use codec::{KeyValueCodec, RawBytesCodec};
 pub use index::BTreeIndex;
 pub use node::BTreeNode;

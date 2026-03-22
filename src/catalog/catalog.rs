@@ -95,8 +95,8 @@ impl Catalog {
 
         while cursor.is_valid() {
             if let (Some(key), Some(value)) = (cursor.key(), cursor.value()) {
-                let table_name = CatalogSchemaCodec::decode_key(key.as_bytes())?;
-                let mut table = CatalogSchemaCodec::decode_value(value.as_bytes())?;
+                let table_name = CatalogSchemaCodec::decode_key(key)?;
+                let mut table = CatalogSchemaCodec::decode_value(value)?;
                 // Ensure the persisted name matches the key to avoid inconsistencies.
                 table.name = table_name;
                 schema.insert_table(table)?;

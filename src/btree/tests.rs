@@ -155,6 +155,27 @@ mod mod_tests {
     }
 
     #[test]
+    fn test_byte_tree_cursor_uses_byte_slices() -> Result<()> {
+        let path = tmp_db();
+        let storage = new_storage(&path)?;
+        let trees = ByteTreeStore::new(storage);
+        let root_page_id = trees.create_tree()?;
+        let mut tree = trees.open_tree(root_page_id)?;
+
+        tree.insert(b"alpha", b"one")?;
+        tree.insert(b"beta", b"two")?;
+
+        let mut cursor = tree.cursor()?;
+        assert!(cursor.is_valid());
+        assert_eq!(cursor.current(), Some((&b"alpha"[..], &b"one"[..])));
+
+        cursor.seek(b"beta")?;
+        assert_eq!(cursor.current(), Some((&b"beta"[..], &b"two"[..])));
+
+        Ok(())
+    }
+
+    #[test]
     fn test_btree_delete() -> Result<()> {
         let path = tmp_db();
         let storage = new_storage(&path)?;

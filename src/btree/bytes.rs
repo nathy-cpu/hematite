@@ -96,7 +96,45 @@ impl ByteTree {
         self.index.delete_typed::<RawBytesCodec>(&key.to_vec())
     }
 
-    pub fn cursor(&self) -> Result<BTreeCursor> {
-        self.index.cursor()
+    pub fn cursor(&self) -> Result<ByteTreeCursor> {
+        Ok(ByteTreeCursor {
+            inner: self.index.cursor()?,
+        })
+    }
+}
+
+pub struct ByteTreeCursor {
+    inner: BTreeCursor,
+}
+
+impl ByteTreeCursor {
+    pub fn is_valid(&self) -> bool {
+        self.inner.is_valid()
+    }
+
+    pub fn first(&mut self) -> Result<()> {
+        self.inner.first()
+    }
+
+    pub fn next(&mut self) -> Result<()> {
+        self.inner.next()
+    }
+
+    pub fn seek(&mut self, key: &[u8]) -> Result<()> {
+        self.inner.seek(&crate::btree::BTreeKey::new(key.to_vec()))
+    }
+
+    pub fn key(&self) -> Option<&[u8]> {
+        self.inner.key().map(|key| key.as_bytes())
+    }
+
+    pub fn value(&self) -> Option<&[u8]> {
+        self.inner.value().map(|value| value.as_bytes())
+    }
+
+    pub fn current(&self) -> Option<(&[u8], &[u8])> {
+        self.inner
+            .current()
+            .map(|(key, value)| (key.as_bytes(), value.as_bytes()))
     }
 }
