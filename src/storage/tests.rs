@@ -261,7 +261,7 @@ mod pager_tests {
 }
 
 mod mod_tests {
-    use crate::btree::{BTreeNode, BTreeValue, NodeType};
+    use crate::btree::{BTreeKey, BTreeNode, NodeType};
     use crate::catalog::{CatalogEngine, Value};
     use crate::storage::{Page, Pager, PAGE_SIZE, STORAGE_METADATA_PAGE_ID};
     use crate::test_utils::TestDbFile;
@@ -450,16 +450,12 @@ mod mod_tests {
         let mut page = storage.read_page(root_page_id)?;
         let mut node = BTreeNode::from_page(page.clone())?;
         assert_eq!(node.node_type, NodeType::Leaf);
-        assert!(node.values.len() >= 2);
+        assert!(node.keys.len() >= 2);
 
-        let first = crate::catalog::RowSerializer::deserialize_stored_row(&node.values[0].data)?;
-        let mut second =
-            crate::catalog::RowSerializer::deserialize_stored_row(&node.values[1].data)?;
+        let first_row_id = u64::from_be_bytes(node.keys[0].data.as_slice().try_into().unwrap());
 
-        // Corrupt second row's row_id to be <= first row_id.
-        second.row_id = first.row_id;
-        let corrupted = crate::catalog::RowSerializer::serialize_stored_row(&second)?;
-        node.values[1] = BTreeValue::new(corrupted);
+        // Corrupt the second rowid key to be <= the first rowid key.
+        node.keys[1] = BTreeKey::new(first_row_id.to_be_bytes().to_vec());
         node.to_page(&mut page)?;
         storage.write_page(page)?;
 
