@@ -8,7 +8,8 @@ use crate::error::{HematiteError, Result};
 use crate::storage::{DB_HEADER_PAGE_ID, INVALID_PAGE_ID, STORAGE_METADATA_PAGE_ID};
 
 use super::engine::{CatalogEngine, CatalogIntegrityReport};
-use super::{index_store, table_btree};
+use super::index_store;
+use super::serialization::RowSerializer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CatalogTreeUsage {
@@ -35,6 +36,7 @@ pub(crate) fn validate_integrity(engine: &mut CatalogEngine) -> Result<CatalogIn
 
     let mut live_pages = HashSet::new();
     let mut total_rows = 0u64;
+    let trees = ByteTreeStore::from_shared_storage(engine.shared_pager());
 
     for (table_name, metadata) in metadata_entries {
         if metadata.root_page_id == INVALID_PAGE_ID
@@ -47,10 +49,40 @@ pub(crate) fn validate_integrity(engine: &mut CatalogEngine) -> Result<CatalogIn
             )));
         }
 
-        let (table_pages, counted_rows, max_row_id) = {
-            let mut pager = engine.pager.lock().unwrap();
-            table_btree::validate_pages(&mut pager, &table_name, metadata.root_page_id)?
-        };
+        let table_pages = trees.collect_page_ids(metadata.root_page_id)?;
+        let mut counted_rows = 0u64;
+        let mut max_row_id = 0u64;
+        let mut previous_row_id = None;
+        for (key, value) in trees.open_tree(metadata.root_page_id)?.entries()? {
+            if key.len() != 8 {
+                return Err(HematiteError::CorruptedData(format!(
+                    "Table '{}' contains a rowid key with invalid length {}",
+                    table_name,
+                    key.len()
+                )));
+            }
+
+            let row_id = u64::from_be_bytes(key.try_into().unwrap());
+            if let Some(last_row_id) = previous_row_id {
+                if row_id <= last_row_id {
+                    return Err(HematiteError::CorruptedData(format!(
+                        "Cursor-visible rowid order violation in table '{}': {} followed by {}",
+                        table_name, last_row_id, row_id
+                    )));
+                }
+            }
+            let row = RowSerializer::deserialize_stored_row(&value)?;
+            if row.row_id != row_id {
+                return Err(HematiteError::CorruptedData(format!(
+                    "Stored rowid mismatch in table '{}': key={}, row={}",
+                    table_name, row_id, row.row_id
+                )));
+            }
+
+            previous_row_id = Some(row_id);
+            counted_rows += 1;
+            max_row_id = max_row_id.max(row_id);
+        }
 
         for page_id in table_pages {
             if free_pages.contains(&page_id) {
