@@ -402,6 +402,41 @@ mod mod_tests {
     }
 
     #[test]
+    fn test_byte_tree_large_value_deletes_survive_rebalance() -> Result<()> {
+        let path = tmp_db();
+        let storage = new_storage(&path)?;
+        let trees = ByteTreeStore::new(storage);
+        let mut root_page_id = trees.create_tree()?;
+        let mut tree = trees.open_tree(root_page_id)?;
+
+        for i in 0..48u32 {
+            let key = i.to_be_bytes();
+            let value = vec![i as u8; crate::storage::PAGE_SIZE + 193];
+            let mutation = tree.insert_with_mutation(&key, &value)?;
+            root_page_id = mutation.root_page_id;
+        }
+
+        for i in 0..40u32 {
+            let key = i.to_be_bytes();
+            let (_deleted, mutation) = tree.delete_with_mutation(&key)?;
+            root_page_id = mutation.root_page_id;
+        }
+
+        drop(tree);
+        let mut reopened = trees.open_tree(root_page_id)?;
+        for key in 40u32..48 {
+            let value = reopened
+                .get(&key.to_be_bytes())?
+                .expect("value should remain after deletes");
+            assert_eq!(value, vec![key as u8; crate::storage::PAGE_SIZE + 193]);
+        }
+        assert!(trees.validate_tree_overflow(root_page_id).is_ok());
+        assert!(trees.validate_tree(root_page_id)?);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_btree_delete() -> Result<()> {
         let path = tmp_db();
         let storage = new_storage(&path)?;

@@ -482,7 +482,21 @@ impl BTreeIndex {
         let child_page = self.storage.lock().unwrap().read_page(child_id)?;
         let mut child_node = BTreeNode::from_page(child_page.clone())?;
 
-        let separator_key = parent.keys.remove(child_index - 1);
+        let separator_key = parent.keys[child_index - 1].clone();
+
+        let can_merge = match (left_sibling.node_type, child_node.node_type) {
+            (NodeType::Leaf, NodeType::Leaf) => left_sibling.can_merge_with(&child_node),
+            (NodeType::Internal, NodeType::Internal) => {
+                left_sibling.can_merge_internal_with_separator(&child_node, &separator_key)
+            }
+            _ => false,
+        };
+
+        if !can_merge {
+            return Ok(());
+        }
+
+        parent.keys.remove(child_index - 1);
         parent.children.remove(child_index);
 
         match (left_sibling.node_type, child_node.node_type) {
@@ -525,7 +539,21 @@ impl BTreeIndex {
         let right_page = self.storage.lock().unwrap().read_page(right_sibling_id)?;
         let mut right_sibling = BTreeNode::from_page(right_page.clone())?;
 
-        let separator_key = parent.keys.remove(child_index);
+        let separator_key = parent.keys[child_index].clone();
+
+        let can_merge = match (child_node.node_type, right_sibling.node_type) {
+            (NodeType::Leaf, NodeType::Leaf) => child_node.can_merge_with(&right_sibling),
+            (NodeType::Internal, NodeType::Internal) => {
+                child_node.can_merge_internal_with_separator(&right_sibling, &separator_key)
+            }
+            _ => false,
+        };
+
+        if !can_merge {
+            return Ok(());
+        }
+
+        parent.keys.remove(child_index);
         parent.children.remove(child_index + 1);
 
         match (child_node.node_type, right_sibling.node_type) {
