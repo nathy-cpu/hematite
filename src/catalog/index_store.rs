@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 
+use crate::btree::ByteTreeStore;
 use crate::catalog::{Table, Value};
 use crate::error::{HematiteError, Result};
 use crate::storage::{PageId, INVALID_PAGE_ID};
@@ -13,29 +14,17 @@ use super::table_store;
 
 pub(crate) fn drop_table_with_indexes(engine: &mut CatalogEngine, table: &Table) -> Result<()> {
     table_store::drop_table(engine, &table.name)?;
-    let mut pager = engine.pager.lock().unwrap();
+    let trees = ByteTreeStore::from_shared_storage(engine.shared_pager());
 
     if table.primary_key_index_root_page_id != 0 {
-        let mut page_ids = Vec::new();
-        index_btree::collect_page_ids(
-            &mut pager,
-            table.primary_key_index_root_page_id,
-            &mut page_ids,
-        )?;
-        for page_id in page_ids {
-            pager.deallocate_page(page_id)?;
-        }
+        trees.delete_tree(table.primary_key_index_root_page_id)?;
     }
 
     for index in &table.secondary_indexes {
         if index.root_page_id == 0 {
             continue;
         }
-        let mut page_ids = Vec::new();
-        index_btree::collect_page_ids(&mut pager, index.root_page_id, &mut page_ids)?;
-        for page_id in page_ids {
-            pager.deallocate_page(page_id)?;
-        }
+        trees.delete_tree(index.root_page_id)?;
     }
 
     Ok(())
@@ -153,8 +142,9 @@ pub(crate) fn rebuild_primary_key_index(
         table.primary_key_index_root_page_id,
         &format!("primary-key index for table '{}'", table.name),
     )?;
+    let trees = ByteTreeStore::from_shared_storage(engine.shared_pager());
+    trees.reset_tree(root_page_id)?;
     let mut pager = engine.pager.lock().unwrap();
-    index_btree::reset_tree(&mut pager, root_page_id)?;
     let mut seen = HashSet::new();
     for row in rows {
         let key_values = table.get_primary_key_values(&row.values)?;
@@ -175,13 +165,14 @@ pub(crate) fn rebuild_secondary_indexes(
     table: &Table,
     rows: &[StoredRow],
 ) -> Result<()> {
-    let mut pager = engine.pager.lock().unwrap();
+    let trees = ByteTreeStore::from_shared_storage(engine.shared_pager());
     for index in &table.secondary_indexes {
         let root_page_id = require_index_root_page(
             index.root_page_id,
             &format!("secondary index '{}' on table '{}'", index.name, table.name),
         )?;
-        index_btree::reset_tree(&mut pager, root_page_id)?;
+        trees.reset_tree(root_page_id)?;
+        let mut pager = engine.pager.lock().unwrap();
         for row in rows {
             let key_values = index
                 .column_indices
@@ -190,6 +181,7 @@ pub(crate) fn rebuild_secondary_indexes(
                 .collect::<Vec<_>>();
             index_btree::insert_secondary_key(&mut pager, root_page_id, &key_values, row.row_id)?;
         }
+        drop(pager);
     }
     Ok(())
 }

@@ -84,10 +84,8 @@ pub(crate) fn replace_table_rows(
     rows: Vec<StoredRow>,
 ) -> Result<()> {
     let root_page_id = engine_metadata::lookup_table_metadata(engine, table_name)?.root_page_id;
-    {
-        let mut pager = engine.pager.lock().unwrap();
-        table_btree::reset_tree(&mut pager, root_page_id)?;
-    }
+    let trees = ByteTreeStore::from_shared_storage(engine.shared_pager());
+    trees.reset_tree(root_page_id)?;
 
     let next_row_id = engine
         .table_metadata
@@ -138,17 +136,8 @@ pub(crate) fn drop_table(engine: &mut CatalogEngine, table_name: &str) -> Result
     let metadata = engine.table_metadata.remove(table_name).ok_or_else(|| {
         HematiteError::StorageError(format!("Table '{}' does not exist", table_name))
     })?;
-
-    let mut page_ids = Vec::new();
-    {
-        let mut pager = engine.pager.lock().unwrap();
-        table_btree::collect_page_ids(&mut pager, metadata.root_page_id, &mut page_ids)?;
-        for page_id in page_ids {
-            pager.deallocate_page(page_id)?;
-        }
-    }
-
-    Ok(())
+    let trees = ByteTreeStore::from_shared_storage(engine.shared_pager());
+    trees.delete_tree(metadata.root_page_id)
 }
 
 pub(crate) fn open_table_cursor(
