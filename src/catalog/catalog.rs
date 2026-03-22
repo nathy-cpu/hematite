@@ -4,7 +4,7 @@ use crate::btree::tree::BTreeManager;
 use crate::btree::BTreeIndex;
 use crate::btree::KeyValueCodec;
 use crate::catalog::column::Column;
-use crate::catalog::engine::{CatalogEngine, CatalogIntegrityReport};
+use crate::catalog::engine::{CatalogEngine, CatalogEngineSnapshot, CatalogIntegrityReport};
 use crate::catalog::header::DatabaseHeader;
 use crate::catalog::ids::TableId;
 use crate::catalog::schema::Schema;
@@ -47,6 +47,14 @@ pub struct Catalog {
     schema: Schema,
     schema_root: PageId,
     schema_dirty: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CatalogSnapshot {
+    schema: Schema,
+    schema_root: PageId,
+    schema_dirty: bool,
+    engine: CatalogEngineSnapshot,
 }
 
 impl Catalog {
@@ -152,6 +160,7 @@ impl Catalog {
             btree.insert_typed::<CatalogSchemaCodec>(&table.name, &table)?;
         }
 
+        let transaction_active = self.engine.transaction_active();
         let mut pager_guard = self.pager.lock().unwrap();
         let header_page = pager_guard.read_page(DB_HEADER_PAGE_ID)?;
         let mut header = DatabaseHeader::deserialize(&header_page)?;
@@ -160,7 +169,9 @@ impl Catalog {
         let mut updated = Page::new(DB_HEADER_PAGE_ID);
         header.serialize(&mut updated)?;
         pager_guard.write_page(updated)?;
-        pager_guard.flush()?;
+        if !transaction_active {
+            pager_guard.flush()?;
+        }
 
         self.schema_root = new_schema_root;
         self.schema_dirty = false;
@@ -278,6 +289,35 @@ impl Catalog {
         F: FnOnce(&mut CatalogEngine) -> Result<T>,
     {
         f(&mut self.engine)
+    }
+
+    pub(crate) fn snapshot(&self) -> CatalogSnapshot {
+        CatalogSnapshot {
+            schema: self.schema.clone(),
+            schema_root: self.schema_root,
+            schema_dirty: self.schema_dirty,
+            engine: self.engine.snapshot(),
+        }
+    }
+
+    pub(crate) fn restore_snapshot(&mut self, snapshot: CatalogSnapshot) {
+        self.schema = snapshot.schema;
+        self.schema_root = snapshot.schema_root;
+        self.schema_dirty = snapshot.schema_dirty;
+        self.engine.restore_snapshot(snapshot.engine);
+    }
+
+    pub(crate) fn begin_transaction(&mut self) -> Result<()> {
+        self.engine.begin_transaction()
+    }
+
+    pub(crate) fn commit_transaction(&mut self) -> Result<()> {
+        self.save_schema_to_btree()?;
+        self.engine.commit_transaction()
+    }
+
+    pub(crate) fn rollback_transaction(&mut self) -> Result<()> {
+        self.engine.rollback_transaction()
     }
 
     /// Force schema persistence to B-tree

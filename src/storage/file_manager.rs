@@ -149,6 +149,17 @@ impl FileManager {
         self.free_list.replace(free_pages);
     }
 
+    pub fn file_len(&self) -> Result<u64> {
+        self.len()
+    }
+
+    pub fn restore_file_len(&mut self, len: u64) -> Result<()> {
+        self.set_len(len)?;
+        let page_regions = len.saturating_sub(64) / PAGE_SIZE as u64;
+        self.next_page_id = (page_regions as u32).max(2);
+        Ok(())
+    }
+
     pub(crate) fn next_page_id(&self) -> u32 {
         self.next_page_id
     }

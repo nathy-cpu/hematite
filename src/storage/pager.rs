@@ -13,17 +13,33 @@
 //! M1.5 contract:
 //! - Pager tracks deterministic page checksums for persisted pages.
 //! - On cache-miss reads, persisted checksum records are verified before returning data.
+//!
+//! M7 contract:
+//! - The pager owns rollback journaling and crash recovery for page/checksum state.
+//! - Writes journal original page images before first modification in a transaction.
+//! - Recovery is process-crash only and replays the rollback journal on open.
 
 use crate::error::Result;
+use crate::storage::journal::{JournalRecord, JournalState, RollbackJournal};
 use crate::storage::{
     buffer_pool::BufferPool, file_manager::FileManager, Page, PageId, PagerIntegrityReport,
     DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID,
 };
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+
+#[derive(Debug, Clone)]
+struct PagerTransaction {
+    original_file_len: u64,
+    original_free_pages: Vec<PageId>,
+    original_checksums: HashMap<PageId, u32>,
+    journaled_pages: HashSet<PageId>,
+    page_records: Vec<JournalRecord>,
+}
 
 #[derive(Debug)]
 pub struct Pager {
@@ -32,6 +48,9 @@ pub struct Pager {
     dirty_pages: HashSet<PageId>,
     page_checksums: HashMap<PageId, u32>,
     checksum_store_path: Option<PathBuf>,
+    journal_path: Option<PathBuf>,
+    transaction: Option<PagerTransaction>,
+    buffer_pool_capacity: usize,
 }
 
 impl Pager {
@@ -39,6 +58,7 @@ impl Pager {
 
     pub fn new<P: AsRef<Path>>(path: P, cache_capacity: usize) -> Result<Self> {
         let checksum_store_path = Some(Self::checksum_store_path(path.as_ref()));
+        let journal_path = Some(Self::journal_path(path.as_ref()));
         let file_manager = FileManager::new(path)?;
         let mut pager = Self {
             file_manager,
@@ -46,8 +66,12 @@ impl Pager {
             dirty_pages: HashSet::new(),
             page_checksums: HashMap::new(),
             checksum_store_path,
+            journal_path,
+            transaction: None,
+            buffer_pool_capacity: cache_capacity,
         };
-        pager.load_persisted_checksums()?;
+        pager.recover_if_needed()?;
+        pager.load_persisted_state()?;
         Ok(pager)
     }
 
@@ -59,6 +83,9 @@ impl Pager {
             dirty_pages: HashSet::new(),
             page_checksums: HashMap::new(),
             checksum_store_path: None,
+            journal_path: None,
+            transaction: None,
+            buffer_pool_capacity: cache_capacity,
         })
     }
 
@@ -85,6 +112,7 @@ impl Pager {
 
     pub fn write_page(&mut self, page: Page) -> Result<()> {
         let page_id = page.id;
+        self.snapshot_original_page(page_id)?;
         if page_id != STORAGE_METADATA_PAGE_ID {
             self.page_checksums
                 .insert(page_id, Self::calculate_page_checksum(&page));
@@ -99,6 +127,7 @@ impl Pager {
     }
 
     pub fn deallocate_page(&mut self, page_id: PageId) -> Result<()> {
+        self.snapshot_original_page(page_id)?;
         self.buffer_pool.remove(page_id);
         self.dirty_pages.remove(&page_id);
         self.page_checksums.remove(&page_id);
@@ -131,6 +160,55 @@ impl Pager {
         }
         self.file_manager.flush()?;
         self.persist_checksums()
+    }
+
+    pub fn begin_transaction(&mut self) -> Result<()> {
+        if self.transaction.is_some() {
+            return Err(crate::error::HematiteError::StorageError(
+                "Pager transaction is already active".to_string(),
+            ));
+        }
+
+        let transaction = PagerTransaction {
+            original_file_len: self.file_manager.file_len()?,
+            original_free_pages: self.file_manager.free_pages().to_vec(),
+            original_checksums: self.page_checksums.clone(),
+            journaled_pages: HashSet::new(),
+            page_records: Vec::new(),
+        };
+        self.transaction = Some(transaction);
+        self.persist_journal(JournalState::Active)
+    }
+
+    pub fn commit_transaction(&mut self) -> Result<()> {
+        if self.transaction.is_none() {
+            return Err(crate::error::HematiteError::StorageError(
+                "Pager transaction is not active".to_string(),
+            ));
+        }
+
+        self.flush()?;
+        self.persist_journal(JournalState::Committed)?;
+        self.remove_journal_file()?;
+        self.transaction = None;
+        Ok(())
+    }
+
+    pub fn rollback_transaction(&mut self) -> Result<()> {
+        if self.transaction.is_none() {
+            return Err(crate::error::HematiteError::StorageError(
+                "Pager transaction is not active".to_string(),
+            ));
+        }
+
+        self.rollback_from_active_transaction()?;
+        self.remove_journal_file()?;
+        self.transaction = None;
+        Ok(())
+    }
+
+    pub fn transaction_active(&self) -> bool {
+        self.transaction.is_some()
     }
 
     pub fn free_pages(&self) -> &[PageId] {
@@ -268,7 +346,19 @@ impl Pager {
         }
     }
 
-    fn load_persisted_checksums(&mut self) -> Result<()> {
+    fn journal_path(db_path: &Path) -> PathBuf {
+        let mut file_name = db_path
+            .file_name()
+            .map(OsString::from)
+            .unwrap_or_else(|| OsString::from("hematite.db"));
+        file_name.push(".journal");
+        match db_path.parent() {
+            Some(parent) => parent.join(file_name),
+            None => PathBuf::from(file_name),
+        }
+    }
+
+    fn load_persisted_state(&mut self) -> Result<()> {
         let Some(path) = &self.checksum_store_path else {
             return Ok(());
         };
@@ -308,6 +398,50 @@ impl Pager {
             )));
         }
 
+        let expected_free_count = lines
+            .next()
+            .ok_or_else(|| {
+                crate::error::HematiteError::StorageError(
+                    "Missing pager freelist metadata count".to_string(),
+                )
+            })?
+            .strip_prefix("free_count=")
+            .ok_or_else(|| {
+                crate::error::HematiteError::StorageError(
+                    "Pager freelist metadata is missing count prefix".to_string(),
+                )
+            })?
+            .parse::<usize>()
+            .map_err(|_| {
+                crate::error::HematiteError::StorageError(
+                    "Invalid pager freelist metadata count".to_string(),
+                )
+            })?;
+
+        let mut free_pages = Vec::with_capacity(expected_free_count);
+        for _ in 0..expected_free_count {
+            let line = lines.next().ok_or_else(|| {
+                crate::error::HematiteError::StorageError(
+                    "Pager freelist metadata ended early".to_string(),
+                )
+            })?;
+            let page_id = line
+                .strip_prefix("free|")
+                .ok_or_else(|| {
+                    crate::error::HematiteError::StorageError(
+                        "Invalid pager freelist metadata record".to_string(),
+                    )
+                })?
+                .parse::<u32>()
+                .map(PageId::new)
+                .map_err(|_| {
+                    crate::error::HematiteError::StorageError(
+                        "Invalid pager freelist page id".to_string(),
+                    )
+                })?;
+            free_pages.push(page_id);
+        }
+
         let expected_count = lines
             .next()
             .ok_or_else(|| {
@@ -315,7 +449,7 @@ impl Pager {
                     "Missing pager checksum metadata count".to_string(),
                 )
             })?
-            .strip_prefix("count=")
+            .strip_prefix("checksum_count=")
             .ok_or_else(|| {
                 crate::error::HematiteError::StorageError(
                     "Pager checksum metadata is missing count prefix".to_string(),
@@ -370,6 +504,7 @@ impl Pager {
             )));
         }
 
+        self.file_manager.set_free_pages(free_pages);
         self.page_checksums = checksums;
         Ok(())
     }
@@ -388,13 +523,139 @@ impl Pager {
 
         let mut lines = vec![
             format!("version={}", Self::CHECKSUM_METADATA_VERSION),
-            format!("count={}", entries.len()),
+            format!("free_count={}", self.file_manager.free_pages().len()),
         ];
+        for page_id in self.file_manager.free_pages() {
+            lines.push(format!("free|{}", page_id.as_u32()));
+        }
+        lines.push(format!("checksum_count={}", entries.len()));
         for (page_id, checksum) in entries {
             lines.push(format!("checksum|{}|{}", page_id.as_u32(), checksum));
         }
 
         fs::write(path, lines.join("\n"))?;
         Ok(())
+    }
+
+    fn snapshot_original_page(&mut self, page_id: PageId) -> Result<()> {
+        let Some(transaction) = &mut self.transaction else {
+            return Ok(());
+        };
+
+        if transaction.journaled_pages.contains(&page_id) {
+            return Ok(());
+        }
+
+        let page_end = 64 + ((page_id.as_u32() as u64 + 1) * crate::storage::PAGE_SIZE as u64);
+        if page_end > transaction.original_file_len {
+            return Ok(());
+        }
+
+        let page = self.file_manager.read_page(page_id)?;
+        transaction.page_records.push(JournalRecord {
+            page_id,
+            data: page.data,
+        });
+        transaction.journaled_pages.insert(page_id);
+        self.persist_journal(JournalState::Active)
+    }
+
+    fn persist_journal(&self, state: JournalState) -> Result<()> {
+        let Some(transaction) = &self.transaction else {
+            return Ok(());
+        };
+        let Some(path) = &self.journal_path else {
+            return Ok(());
+        };
+
+        let journal = RollbackJournal {
+            state,
+            original_file_len: transaction.original_file_len,
+            original_free_pages: transaction.original_free_pages.clone(),
+            original_checksums: transaction
+                .original_checksums
+                .iter()
+                .map(|(page_id, checksum)| (*page_id, *checksum))
+                .collect(),
+            page_records: transaction.page_records.clone(),
+        };
+        let bytes = journal.encode()?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        Ok(())
+    }
+
+    fn remove_journal_file(&self) -> Result<()> {
+        let Some(path) = &self.journal_path else {
+            return Ok(());
+        };
+        match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    fn recover_if_needed(&mut self) -> Result<()> {
+        let Some(path) = &self.journal_path else {
+            return Ok(());
+        };
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(err.into()),
+        };
+
+        let journal = RollbackJournal::decode(&bytes)?;
+        match journal.state {
+            JournalState::Active => {
+                self.restore_from_journal(&journal)?;
+                self.remove_journal_file()?;
+            }
+            JournalState::Committed => {
+                self.remove_journal_file()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn rollback_from_active_transaction(&mut self) -> Result<()> {
+        let transaction = self.transaction.clone().ok_or_else(|| {
+            crate::error::HematiteError::StorageError("Pager transaction is not active".to_string())
+        })?;
+        let journal = RollbackJournal {
+            state: JournalState::Active,
+            original_file_len: transaction.original_file_len,
+            original_free_pages: transaction.original_free_pages,
+            original_checksums: transaction
+                .original_checksums
+                .into_iter()
+                .collect::<Vec<_>>(),
+            page_records: transaction.page_records,
+        };
+        self.restore_from_journal(&journal)
+    }
+
+    fn restore_from_journal(&mut self, journal: &RollbackJournal) -> Result<()> {
+        self.buffer_pool = BufferPool::new(self.buffer_pool_capacity);
+        self.dirty_pages.clear();
+        self.file_manager
+            .restore_file_len(journal.original_file_len)?;
+        self.file_manager
+            .set_free_pages(journal.original_free_pages.clone());
+
+        for record in &journal.page_records {
+            let page = Page::from_bytes(record.page_id, record.data.clone())?;
+            self.file_manager.write_page(&page)?;
+        }
+        self.file_manager.flush()?;
+
+        self.page_checksums = journal.original_checksums.iter().copied().collect();
+        self.persist_checksums()
     }
 }

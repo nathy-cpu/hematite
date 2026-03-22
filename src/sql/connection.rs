@@ -9,9 +9,15 @@ use crate::query::{ExecutionContext, QueryPlanner, QueryResult};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+#[derive(Debug, Clone)]
+struct ConnectionTransaction {
+    snapshot: crate::catalog::catalog::CatalogSnapshot,
+}
+
 #[derive(Debug)]
 pub struct Connection {
     catalog: Arc<Mutex<Catalog>>,
+    transaction: Option<ConnectionTransaction>,
 }
 
 impl Connection {
@@ -19,6 +25,7 @@ impl Connection {
         let catalog = Catalog::open_or_create(database_path)?;
         Ok(Self {
             catalog: Arc::new(Mutex::new(catalog)),
+            transaction: None,
         })
     }
 
@@ -26,6 +33,7 @@ impl Connection {
         let catalog = Catalog::open_in_memory()?;
         Ok(Self {
             catalog: Arc::new(Mutex::new(catalog)),
+            transaction: None,
         })
     }
 
@@ -71,6 +79,7 @@ impl Connection {
         &mut self,
         statement: crate::parser::ast::Statement,
     ) -> Result<QueryResult> {
+        let explicit_transaction = self.transaction.is_some();
         let persists_schema = statement.mutates_schema();
         let (schema, table_row_counts) = {
             let mut catalog_guard = self.catalog.lock().unwrap();
@@ -84,21 +93,59 @@ impl Connection {
         let plan = planner.plan(statement)?;
         let mut executor = plan.executor;
 
-        let (result, updated_schema) = {
+        let implicit_snapshot = if explicit_transaction {
+            None
+        } else {
+            let mut catalog_guard = self.catalog.lock().unwrap();
+            let snapshot = catalog_guard.snapshot();
+            catalog_guard.begin_transaction()?;
+            Some(snapshot)
+        };
+
+        let execution_result = {
             let mut catalog_guard = self.catalog.lock().unwrap();
             catalog_guard.with_engine(|engine| {
                 let mut ctx = ExecutionContext::for_mutation(&schema, engine);
                 let result = executor.execute(&mut ctx)?;
                 Ok((result, ctx.catalog))
-            })?
+            })
         };
 
-        if persists_schema {
-            let mut catalog_guard = self.catalog.lock().unwrap();
-            catalog_guard.replace_schema(updated_schema)?;
-        }
+        match execution_result {
+            Ok((result, updated_schema)) => {
+                if persists_schema {
+                    let mut catalog_guard = self.catalog.lock().unwrap();
+                    if let Err(err) = catalog_guard.replace_schema(updated_schema) {
+                        if let Some(snapshot) = implicit_snapshot {
+                            let _ = catalog_guard.rollback_transaction();
+                            catalog_guard.restore_snapshot(snapshot);
+                        }
+                        return Err(err);
+                    }
+                }
 
-        Ok(result)
+                if !explicit_transaction {
+                    let mut catalog_guard = self.catalog.lock().unwrap();
+                    if let Err(err) = catalog_guard.commit_transaction() {
+                        if let Some(snapshot) = implicit_snapshot {
+                            let _ = catalog_guard.rollback_transaction();
+                            catalog_guard.restore_snapshot(snapshot);
+                        }
+                        return Err(err);
+                    }
+                }
+
+                Ok(result)
+            }
+            Err(err) => {
+                if let Some(snapshot) = implicit_snapshot {
+                    let mut catalog_guard = self.catalog.lock().unwrap();
+                    let _ = catalog_guard.rollback_transaction();
+                    catalog_guard.restore_snapshot(snapshot);
+                }
+                Err(err)
+            }
+        }
     }
 
     fn collect_table_row_counts(engine: &CatalogEngine) -> HashMap<String, usize> {
@@ -110,6 +157,11 @@ impl Connection {
     }
 
     pub fn close(&mut self) -> Result<()> {
+        if self.transaction.is_some() {
+            return Err(HematiteError::InternalError(
+                "Cannot close connection with an active transaction".to_string(),
+            ));
+        }
         let mut catalog_guard = self.catalog.lock().unwrap();
         catalog_guard.flush()
     }
@@ -142,9 +194,22 @@ impl Connection {
     }
 
     pub fn begin_transaction(&'_ mut self) -> Result<Transaction<'_>> {
-        Err(HematiteError::InternalError(
-            "Transactions are not supported yet".to_string(),
-        ))
+        if self.transaction.is_some() {
+            return Err(HematiteError::InternalError(
+                "Transaction is already active".to_string(),
+            ));
+        }
+
+        let mut catalog_guard = self.catalog.lock().unwrap();
+        let snapshot = catalog_guard.snapshot();
+        catalog_guard.begin_transaction()?;
+        drop(catalog_guard);
+
+        self.transaction = Some(ConnectionTransaction { snapshot });
+        Ok(Transaction {
+            connection: self,
+            completed: false,
+        })
     }
 
     #[cfg(test)]
@@ -221,28 +286,43 @@ impl PreparedStatement {
 
 #[derive(Debug)]
 pub struct Transaction<'a> {
-    #[allow(dead_code)]
     connection: &'a mut Connection,
+    completed: bool,
 }
 
 impl<'a> Transaction<'a> {
     pub fn execute(&mut self, sql: &str) -> Result<QueryResult> {
-        Err(HematiteError::InternalError(format!(
-            "Transactions are not supported yet; cannot execute '{}'",
-            sql
-        )))
+        self.connection.execute(sql)
     }
 
     pub fn commit(&mut self) -> Result<()> {
-        Err(HematiteError::InternalError(
-            "Transactions are not supported yet".to_string(),
-        ))
+        if self.completed {
+            return Err(HematiteError::InternalError(
+                "Transaction is already completed".to_string(),
+            ));
+        }
+        self.connection.commit_active_transaction()?;
+        self.completed = true;
+        Ok(())
     }
 
     pub fn rollback(&mut self) -> Result<()> {
-        Err(HematiteError::InternalError(
-            "Transactions are not supported yet".to_string(),
-        ))
+        if self.completed {
+            return Err(HematiteError::InternalError(
+                "Transaction is already completed".to_string(),
+            ));
+        }
+        self.connection.rollback_active_transaction()?;
+        self.completed = true;
+        Ok(())
+    }
+}
+
+impl<'a> Drop for Transaction<'a> {
+    fn drop(&mut self) {
+        if !self.completed {
+            let _ = self.connection.rollback_active_transaction();
+        }
     }
 }
 
@@ -270,5 +350,40 @@ impl Database {
 impl Default for Database {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Connection {
+    fn commit_active_transaction(&mut self) -> Result<()> {
+        if self.transaction.is_none() {
+            return Err(HematiteError::InternalError(
+                "No active transaction to commit".to_string(),
+            ));
+        }
+
+        let mut catalog_guard = self.catalog.lock().unwrap();
+        match catalog_guard.commit_transaction() {
+            Ok(()) => {
+                self.transaction = None;
+                Ok(())
+            }
+            Err(err) => {
+                if let Some(state) = self.transaction.take() {
+                    let _ = catalog_guard.rollback_transaction();
+                    catalog_guard.restore_snapshot(state.snapshot);
+                }
+                Err(err)
+            }
+        }
+    }
+
+    fn rollback_active_transaction(&mut self) -> Result<()> {
+        let state = self.transaction.take().ok_or_else(|| {
+            HematiteError::InternalError("No active transaction to roll back".to_string())
+        })?;
+        let mut catalog_guard = self.catalog.lock().unwrap();
+        catalog_guard.rollback_transaction()?;
+        catalog_guard.restore_snapshot(state.snapshot);
+        Ok(())
     }
 }

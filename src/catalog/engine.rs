@@ -3,7 +3,6 @@
 use crate::btree::BTreeNode;
 use crate::catalog::{Table, Value};
 use crate::error::{HematiteError, Result};
-use crate::storage::free_list::FreeList;
 use crate::storage::{
     Page, PageId, Pager, PagerIntegrityReport, DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID,
 };
@@ -42,6 +41,11 @@ pub struct CatalogIntegrityReport {
 pub struct StoredRow {
     pub row_id: u64,
     pub values: Vec<Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CatalogEngineSnapshot {
+    table_metadata: HashMap<String, TableRuntimeMetadata>,
 }
 
 #[derive(Debug)]
@@ -104,6 +108,33 @@ impl CatalogEngine {
     pub fn flush(&mut self) -> Result<()> {
         self.save_table_metadata()?;
         self.pager.lock().unwrap().flush()
+    }
+
+    pub fn begin_transaction(&mut self) -> Result<()> {
+        self.pager.lock().unwrap().begin_transaction()
+    }
+
+    pub fn commit_transaction(&mut self) -> Result<()> {
+        self.save_table_metadata()?;
+        self.pager.lock().unwrap().commit_transaction()
+    }
+
+    pub fn rollback_transaction(&mut self) -> Result<()> {
+        self.pager.lock().unwrap().rollback_transaction()
+    }
+
+    pub fn transaction_active(&self) -> bool {
+        self.pager.lock().unwrap().transaction_active()
+    }
+
+    pub fn snapshot(&self) -> CatalogEngineSnapshot {
+        CatalogEngineSnapshot {
+            table_metadata: self.table_metadata.clone(),
+        }
+    }
+
+    pub fn restore_snapshot(&mut self, snapshot: CatalogEngineSnapshot) {
+        self.table_metadata = snapshot.table_metadata;
     }
 
     pub fn create_empty_btree(&self) -> Result<PageId> {
@@ -677,10 +708,6 @@ impl CatalogEngine {
             ));
         }
 
-        let pager = self.pager.lock().unwrap();
-        let freelist = FreeList::from_page_ids(pager.free_pages().to_vec());
-        lines.extend(freelist.serialize_metadata_lines());
-
         Ok(lines.join("\n"))
     }
 
@@ -709,9 +736,6 @@ impl CatalogEngine {
             )));
         }
 
-        let mut freelist_version = None;
-        let mut freelist_count = None;
-        let mut freelist_records = Vec::new();
         for line in metadata_str.lines().skip(1) {
             if line.is_empty() || line.starts_with("table_count=") {
                 continue;
@@ -741,39 +765,10 @@ impl CatalogEngine {
                 }
                 continue;
             }
-            if let Some(payload) = line.strip_prefix("freelist_version=") {
-                freelist_version = Some(payload.parse::<u32>().map_err(|_| {
-                    HematiteError::StorageError("Invalid freelist metadata version".to_string())
-                })?);
-                continue;
-            }
-            if let Some(payload) = line.strip_prefix("freelist_count=") {
-                freelist_count = Some(payload.parse::<usize>().map_err(|_| {
-                    HematiteError::StorageError("Invalid freelist metadata count".to_string())
-                })?);
-                continue;
-            }
-            if line.starts_with("freelist|") {
-                freelist_records.push(line.to_string());
-                continue;
-            }
             return Err(HematiteError::StorageError(
                 "Unknown storage metadata record".to_string(),
             ));
         }
-
-        let freelist = FreeList::deserialize_metadata_lines(
-            freelist_version.ok_or_else(|| {
-                HematiteError::StorageError("Missing freelist metadata version".to_string())
-            })?,
-            freelist_count.ok_or_else(|| {
-                HematiteError::StorageError("Missing freelist metadata count".to_string())
-            })?,
-            &freelist_records,
-        )?;
-
-        let mut pager = self.pager.lock().unwrap();
-        pager.set_free_pages(freelist.into_page_ids());
         Ok(())
     }
 

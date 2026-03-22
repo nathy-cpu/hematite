@@ -3,6 +3,7 @@
 pub mod buffer_pool;
 pub mod file_manager;
 pub mod free_list;
+pub mod journal;
 pub mod overflow;
 pub mod pager;
 pub mod types;

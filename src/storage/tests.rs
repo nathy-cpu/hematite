@@ -210,6 +210,55 @@ mod pager_tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_pager_transaction_commit_persists_changes() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_transaction_commit");
+        let page_id = {
+            let mut pager = Pager::new(test_db.path(), 8)?;
+            let page_id = pager.allocate_page()?;
+            let mut page = Page::new(page_id);
+            page.data[0] = 10;
+            pager.write_page(page)?;
+            pager.flush()?;
+
+            pager.begin_transaction()?;
+            let mut updated = pager.read_page(page_id)?;
+            updated.data[0] = 99;
+            pager.write_page(updated)?;
+            pager.commit_transaction()?;
+            page_id
+        };
+
+        let mut reopened = Pager::new(test_db.path(), 8)?;
+        let page = reopened.read_page(page_id)?;
+        assert_eq!(page.data[0], 99);
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_recovery_rolls_back_active_journal_on_open() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_recovery_rolls_back_active_journal");
+        let page_id = {
+            let mut pager = Pager::new(test_db.path(), 8)?;
+            let page_id = pager.allocate_page()?;
+            let mut page = Page::new(page_id);
+            page.data[0] = 10;
+            pager.write_page(page)?;
+            pager.flush()?;
+
+            pager.begin_transaction()?;
+            let mut updated = pager.read_page(page_id)?;
+            updated.data[0] = 99;
+            pager.write_page(updated)?;
+            page_id
+        };
+
+        let mut reopened = Pager::new(test_db.path(), 8)?;
+        let page = reopened.read_page(page_id)?;
+        assert_eq!(page.data[0], 10);
+        Ok(())
+    }
 }
 
 mod mod_tests {

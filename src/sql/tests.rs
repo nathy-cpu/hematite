@@ -114,8 +114,30 @@ mod connection_tests {
 
         conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
 
-        let result = conn.begin_transaction();
-        assert!(result.is_err());
+        {
+            let mut tx = conn.begin_transaction()?;
+            tx.execute("INSERT INTO test (id, name) VALUES (1, 'Alice');")?;
+            tx.rollback()?;
+        }
+
+        let result = conn.execute("SELECT * FROM test;")?;
+        assert!(result.rows.is_empty());
+
+        {
+            let mut tx = conn.begin_transaction()?;
+            tx.execute("INSERT INTO test (id, name) VALUES (2, 'Bob');")?;
+            tx.commit()?;
+        }
+
+        let result = conn.execute("SELECT * FROM test;")?;
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0],
+            vec![
+                crate::catalog::Value::Integer(2),
+                crate::catalog::Value::Text("Bob".to_string()),
+            ]
+        );
 
         conn.close()?;
         Ok(())
@@ -224,14 +246,7 @@ mod connection_tests {
         assert!(result.is_err());
 
         let result = conn.execute("SELECT * FROM test;")?;
-        assert_eq!(result.rows.len(), 1);
-        assert_eq!(
-            result.rows[0],
-            vec![
-                crate::catalog::Value::Integer(1),
-                crate::catalog::Value::Text("Alice".to_string()),
-            ]
-        );
+        assert!(result.rows.is_empty());
 
         conn.close()?;
         Ok(())
@@ -885,8 +900,14 @@ mod interface_tests {
         // Create table
         db.execute("CREATE TABLE test (id INTEGER PRIMARY KEY);")?;
 
-        let result = db.transaction();
-        assert!(result.is_err());
+        {
+            let mut tx = db.transaction()?;
+            tx.execute("INSERT INTO test (id) VALUES (1);")?;
+            tx.commit()?;
+        }
+
+        let rows = db.query("SELECT * FROM test;")?;
+        assert_eq!(rows.len(), 1);
 
         Ok(())
     }
