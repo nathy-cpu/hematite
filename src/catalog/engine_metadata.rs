@@ -1,42 +1,10 @@
-//! Catalog engine metadata persistence and table runtime metadata helpers.
+//! Catalog engine metadata persistence codec.
 
 use crate::error::{HematiteError, Result};
-use crate::storage::{Page, PageId, STORAGE_METADATA_PAGE_ID};
+use crate::storage::{Page, STORAGE_METADATA_PAGE_ID};
 
-use super::engine::{CatalogEngine, TableRuntimeMetadata};
-
-pub(crate) fn create_table_metadata(
-    engine: &mut CatalogEngine,
-    table_name: &str,
-    root_page_id: PageId,
-) -> Result<()> {
-    if engine.table_metadata.contains_key(table_name) {
-        return Err(HematiteError::StorageError(format!(
-            "Table '{}' already exists",
-            table_name
-        )));
-    }
-
-    engine.table_metadata.insert(
-        table_name.to_string(),
-        TableRuntimeMetadata {
-            name: table_name.to_string(),
-            root_page_id,
-            row_count: 0,
-            next_row_id: 1,
-        },
-    );
-    Ok(())
-}
-
-pub(crate) fn lookup_table_metadata<'a>(
-    engine: &'a CatalogEngine,
-    table_name: &str,
-) -> Result<&'a TableRuntimeMetadata> {
-    engine.table_metadata.get(table_name).ok_or_else(|| {
-        HematiteError::StorageError(format!("Table '{}' does not exist", table_name))
-    })
-}
+use super::engine::CatalogEngine;
+use super::runtime_metadata;
 
 pub(crate) fn load_table_metadata(engine: &mut CatalogEngine) -> Result<()> {
     let maybe_page = {
@@ -154,7 +122,7 @@ fn parse_storage_metadata(engine: &mut CatalogEngine, metadata_str: &str) -> Res
                 HematiteError::StorageError("Invalid table next_row_id metadata".to_string())
             })?;
 
-            create_table_metadata(engine, name, root_page_id)?;
+            runtime_metadata::create_table_metadata(engine, name, root_page_id)?;
             if let Some(metadata) = engine.table_metadata.get_mut(name) {
                 metadata.row_count = row_count;
                 metadata.next_row_id = next_row_id;

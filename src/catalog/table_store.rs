@@ -1,11 +1,10 @@
 //! Table storage operations for catalog-managed rowid tables.
 
 use crate::catalog::Value;
-use crate::error::{HematiteError, Result};
+use crate::error::Result;
 
 use super::cursor::TableCursor;
 use super::engine::{CatalogEngine, CatalogStorageStats, StoredRow};
-use super::engine_metadata;
 use super::serialization::RowSerializer;
 
 pub(crate) fn get_storage_stats(engine: &CatalogEngine) -> CatalogStorageStats {
@@ -43,7 +42,7 @@ pub(crate) fn get_storage_stats(engine: &CatalogEngine) -> CatalogStorageStats {
 
 pub(crate) fn create_table(engine: &mut CatalogEngine, table_name: &str) -> Result<u32> {
     let root_page_id = engine.create_tree()?;
-    engine_metadata::create_table_metadata(engine, table_name, root_page_id)?;
+    engine.create_runtime_table_metadata(table_name, root_page_id)?;
     Ok(root_page_id)
 }
 
@@ -53,7 +52,7 @@ pub(crate) fn insert_into_table(
     row: Vec<Value>,
 ) -> Result<u64> {
     let (root_page_id, row_id) = {
-        let metadata = engine_metadata::lookup_table_metadata(engine, table_name)?;
+        let metadata = engine.table_runtime_metadata(table_name)?;
         (metadata.root_page_id, metadata.next_row_id)
     };
 
@@ -66,13 +65,7 @@ pub(crate) fn insert_into_table(
         .insert_with_mutation(&row_id.to_be_bytes(), &encoded_row)?
         .root_page_id;
 
-    if let Some(metadata) = engine.table_metadata.get_mut(table_name) {
-        metadata.root_page_id = new_root_page_id;
-    }
-    if let Some(metadata) = engine.table_metadata.get_mut(table_name) {
-        metadata.row_count += 1;
-        metadata.next_row_id += 1;
-    }
+    engine.record_generated_row_insert(table_name, new_root_page_id, row_id);
     Ok(row_id)
 }
 
@@ -81,20 +74,9 @@ pub(crate) fn replace_table_rows(
     table_name: &str,
     rows: Vec<StoredRow>,
 ) -> Result<()> {
-    let root_page_id = engine_metadata::lookup_table_metadata(engine, table_name)?.root_page_id;
+    let root_page_id = engine.table_runtime_metadata(table_name)?.root_page_id;
     engine.reset_tree(root_page_id)?;
-
-    let next_row_id = engine
-        .table_metadata
-        .get(table_name)
-        .map(|metadata| metadata.next_row_id)
-        .unwrap_or(1);
-
-    if let Some(metadata) = engine.table_metadata.get_mut(table_name) {
-        metadata.row_count = 0;
-        metadata.next_row_id =
-            next_row_id.max(rows.iter().map(|row| row.row_id).max().unwrap_or(0) + 1);
-    }
+    engine.prepare_table_replace(table_name, &rows);
 
     for row in rows {
         insert_stored_row(engine, table_name, row)?;
@@ -116,24 +98,15 @@ pub(crate) fn delete_from_table_by_rowid(
     table_name: &str,
     rowid: u64,
 ) -> Result<bool> {
-    let root_page_id = engine_metadata::lookup_table_metadata(engine, table_name)?.root_page_id;
+    let root_page_id = engine.table_runtime_metadata(table_name)?.root_page_id;
     let mut tree = engine.open_tree(root_page_id)?;
     let (deleted, mutation) = tree.delete_with_mutation(&rowid.to_be_bytes())?;
-    if let Some(metadata) = engine.table_metadata.get_mut(table_name) {
-        metadata.root_page_id = mutation.root_page_id;
-    }
-    if deleted.is_some() {
-        if let Some(metadata) = engine.table_metadata.get_mut(table_name) {
-            metadata.row_count = metadata.row_count.saturating_sub(1);
-        }
-    }
+    engine.record_row_delete(table_name, mutation.root_page_id, deleted.is_some());
     Ok(deleted.is_some())
 }
 
 pub(crate) fn drop_table(engine: &mut CatalogEngine, table_name: &str) -> Result<()> {
-    let metadata = engine.table_metadata.remove(table_name).ok_or_else(|| {
-        HematiteError::StorageError(format!("Table '{}' does not exist", table_name))
-    })?;
+    let metadata = engine.remove_runtime_table_metadata(table_name)?;
     engine.delete_tree(metadata.root_page_id)
 }
 
@@ -141,13 +114,12 @@ pub(crate) fn open_table_cursor(
     engine: &mut CatalogEngine,
     table_name: &str,
 ) -> Result<TableCursor> {
-    let root_page_id = engine_metadata::lookup_table_metadata(engine, table_name)?.root_page_id;
-    let tree = engine.open_tree(root_page_id)?;
-    let rows = tree
-        .entries()?
-        .into_iter()
-        .map(|(_key, value)| RowSerializer::deserialize_stored_row(&value))
-        .collect::<Result<Vec<_>>>()?;
+    let root_page_id = engine.table_runtime_metadata(table_name)?.root_page_id;
+    let mut rows = Vec::new();
+    engine.visit_tree_entries(root_page_id, |_key, value| {
+        rows.push(RowSerializer::deserialize_stored_row(value)?);
+        Ok(())
+    })?;
     Ok(TableCursor::new(rows))
 }
 
@@ -185,7 +157,7 @@ pub(crate) fn lookup_row_by_rowid(
     table_name: &str,
     rowid: u64,
 ) -> Result<Option<StoredRow>> {
-    let root_page_id = engine_metadata::lookup_table_metadata(engine, table_name)?.root_page_id;
+    let root_page_id = engine.table_runtime_metadata(table_name)?.root_page_id;
     let mut tree = engine.open_tree(root_page_id)?;
     match tree.get(&rowid.to_be_bytes())? {
         Some(value) => Ok(Some(RowSerializer::deserialize_stored_row(&value)?)),
@@ -198,18 +170,13 @@ pub(crate) fn insert_stored_row(
     table_name: &str,
     row: StoredRow,
 ) -> Result<()> {
-    let root_page_id = engine_metadata::lookup_table_metadata(engine, table_name)?.root_page_id;
+    let root_page_id = engine.table_runtime_metadata(table_name)?.root_page_id;
     let mut tree = engine.open_tree(root_page_id)?;
     let encoded_row = RowSerializer::serialize_stored_row(&row)?;
     let new_root_page_id = tree
         .insert_with_mutation(&row.row_id.to_be_bytes(), &encoded_row)?
         .root_page_id;
 
-    if let Some(metadata) = engine.table_metadata.get_mut(table_name) {
-        metadata.root_page_id = new_root_page_id;
-    }
-    if let Some(metadata) = engine.table_metadata.get_mut(table_name) {
-        metadata.row_count += 1;
-    }
+    engine.record_explicit_row_insert(table_name, new_root_page_id);
     Ok(())
 }

@@ -45,11 +45,11 @@ pub(crate) fn lookup_primary_key_rowid(
     table: &Table,
     key_values: &[Value],
 ) -> Result<Option<u64>> {
-    let root_page_id = require_index_root_page(
+    let mut tree = open_required_tree(
+        engine,
         table.primary_key_index_root_page_id,
         &format!("primary-key index for table '{}'", table.name),
     )?;
-    let mut tree = engine.open_tree(root_page_id)?;
     match tree.get(&encode_index_key(key_values)?)? {
         Some(value) => decode_rowid_value(&value).map(Some),
         None => Ok(None),
@@ -61,12 +61,12 @@ pub(crate) fn register_primary_key_row(
     table: &Table,
     row: StoredRow,
 ) -> Result<()> {
-    let root_page_id = require_index_root_page(
+    let key_values = table.get_primary_key_values(&row.values)?;
+    let mut tree = open_required_tree(
+        engine,
         table.primary_key_index_root_page_id,
         &format!("primary-key index for table '{}'", table.name),
     )?;
-    let key_values = table.get_primary_key_values(&row.values)?;
-    let mut tree = engine.open_tree(root_page_id)?;
     let encoded_key = encode_index_key(&key_values)?;
     if tree.get(&encoded_key)?.is_some() {
         return Err(HematiteError::StorageError(format!(
@@ -100,17 +100,12 @@ pub(crate) fn lookup_secondary_index_rowids(
     index_name: &str,
     key_values: &[Value],
 ) -> Result<Vec<u64>> {
-    let index = table.get_secondary_index(index_name).ok_or_else(|| {
-        HematiteError::StorageError(format!(
-            "Secondary index '{}' does not exist on table '{}'",
-            index_name, table.name
-        ))
-    })?;
-    let root_page_id = require_index_root_page(
+    let index = get_secondary_index(table, index_name)?;
+    let tree = open_required_tree(
+        engine,
         index.root_page_id,
         &format!("secondary index '{}' on table '{}'", index.name, table.name),
     )?;
-    let tree = engine.open_tree(root_page_id)?;
     tree.entries_with_prefix(&encode_index_key(key_values)?)?
         .into_iter()
         .map(|(_key, value)| decode_rowid_value(&value))
@@ -123,16 +118,12 @@ pub(crate) fn register_secondary_index_row(
     row: StoredRow,
 ) -> Result<()> {
     for index in &table.secondary_indexes {
-        let root_page_id = require_index_root_page(
+        let key_values = secondary_index_values(index, &row);
+        let mut tree = open_required_tree(
+            engine,
             index.root_page_id,
             &format!("secondary index '{}' on table '{}'", index.name, table.name),
         )?;
-        let key_values = index
-            .column_indices
-            .iter()
-            .map(|&column_index| row.values[column_index].clone())
-            .collect::<Vec<_>>();
-        let mut tree = engine.open_tree(root_page_id)?;
         tree.insert_with_mutation(
             &encode_secondary_key(&key_values, row.row_id)?,
             &row.row_id.to_be_bytes(),
@@ -180,11 +171,7 @@ pub(crate) fn rebuild_secondary_indexes(
         engine.reset_tree(root_page_id)?;
         let mut tree = engine.open_tree(root_page_id)?;
         for row in rows {
-            let key_values = index
-                .column_indices
-                .iter()
-                .map(|&column_index| row.values[column_index].clone())
-                .collect::<Vec<_>>();
+            let key_values = secondary_index_values(index, row);
             tree.insert_with_mutation(
                 &encode_secondary_key(&key_values, row.row_id)?,
                 &row.row_id.to_be_bytes(),
@@ -199,12 +186,12 @@ pub(crate) fn delete_primary_key_row(
     table: &Table,
     row: &StoredRow,
 ) -> Result<bool> {
-    let root_page_id = require_index_root_page(
+    let key_values = table.get_primary_key_values(&row.values)?;
+    let mut tree = open_required_tree(
+        engine,
         table.primary_key_index_root_page_id,
         &format!("primary-key index for table '{}'", table.name),
     )?;
-    let key_values = table.get_primary_key_values(&row.values)?;
-    let mut tree = engine.open_tree(root_page_id)?;
     Ok(tree.delete(&encode_index_key(&key_values)?)?.is_some())
 }
 
@@ -214,11 +201,7 @@ pub(crate) fn delete_secondary_index_row(
     row: &StoredRow,
 ) -> Result<()> {
     for index in &table.secondary_indexes {
-        let key_values = index
-            .column_indices
-            .iter()
-            .map(|&column_index| row.values[column_index].clone())
-            .collect::<Vec<_>>();
+        let key_values = secondary_index_values(index, row);
         let mut tree = engine.open_tree(index.root_page_id)?;
         let _ = tree.delete(&encode_secondary_key(&key_values, row.row_id)?)?;
     }
@@ -241,17 +224,14 @@ pub(crate) fn open_primary_key_cursor(
         table.primary_key_index_root_page_id,
         &format!("primary-key index for table '{}'", table.name),
     )?;
-    let tree = engine.open_tree(root_page_id)?;
-    let entries = tree
-        .entries()?
-        .into_iter()
-        .map(|(key, value)| {
-            Ok(super::cursor::IndexEntry {
-                row_id: decode_rowid_value(&value)?,
-                key,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let mut entries = Vec::new();
+    engine.visit_tree_entries(root_page_id, |key, value| {
+        entries.push(super::cursor::IndexEntry {
+            row_id: decode_rowid_value(value)?,
+            key: key.to_vec(),
+        });
+        Ok(())
+    })?;
     Ok(IndexCursor::new(entries))
 }
 
@@ -260,22 +240,16 @@ pub(crate) fn open_secondary_index_cursor(
     table: &Table,
     index_name: &str,
 ) -> Result<IndexCursor> {
-    let index = table.get_secondary_index(index_name).ok_or_else(|| {
-        HematiteError::StorageError(format!(
-            "Secondary index '{}' does not exist on table '{}'",
-            index_name, table.name
-        ))
-    })?;
+    let index = get_secondary_index(table, index_name)?;
     let root_page_id = require_index_root_page(
         index.root_page_id,
         &format!("secondary index '{}' on table '{}'", index.name, table.name),
     )?;
-    let tree = engine.open_tree(root_page_id)?;
-    let entries = tree
-        .entries()?
-        .into_iter()
-        .map(|(key, value)| decode_secondary_entry(&key, &value))
-        .collect::<Result<Vec<_>>>()?;
+    let mut entries = Vec::new();
+    engine.visit_tree_entries(root_page_id, |key, value| {
+        entries.push(decode_secondary_entry(key, value)?);
+        Ok(())
+    })?;
     Ok(IndexCursor::new(entries))
 }
 
@@ -283,7 +257,11 @@ pub(crate) fn validate_table_indexes(engine: &mut CatalogEngine, table: &Table) 
     let rows = table_store::read_rows_with_ids(engine, &table.name)?;
     for row in &rows {
         let key_values = table.get_primary_key_values(&row.values)?;
-        let mut tree = engine.open_tree(table.primary_key_index_root_page_id)?;
+        let mut tree = open_required_tree(
+            engine,
+            table.primary_key_index_root_page_id,
+            &format!("primary-key index for table '{}'", table.name),
+        )?;
         let stored_rowid = tree
             .get(&encode_index_key(&key_values)?)?
             .map(|value| decode_rowid_value(&value))
@@ -305,12 +283,12 @@ pub(crate) fn validate_table_indexes(engine: &mut CatalogEngine, table: &Table) 
 
     for index in &table.secondary_indexes {
         for row in &rows {
-            let key_values = index
-                .column_indices
-                .iter()
-                .map(|&column_index| row.values[column_index].clone())
-                .collect::<Vec<_>>();
-            let tree = engine.open_tree(index.root_page_id)?;
+            let key_values = secondary_index_values(index, row);
+            let tree = open_required_tree(
+                engine,
+                index.root_page_id,
+                &format!("secondary index '{}' on table '{}'", index.name, table.name),
+            )?;
             let rowids = tree
                 .entries_with_prefix(&encode_index_key(&key_values)?)?
                 .into_iter()
@@ -326,6 +304,37 @@ pub(crate) fn validate_table_indexes(engine: &mut CatalogEngine, table: &Table) 
     }
 
     Ok(())
+}
+
+fn open_required_tree(
+    engine: &CatalogEngine,
+    root_page_id: u32,
+    label: &str,
+) -> Result<crate::btree::ByteTree> {
+    engine.open_tree(require_index_root_page(root_page_id, label)?)
+}
+
+fn get_secondary_index<'a>(
+    table: &'a Table,
+    index_name: &str,
+) -> Result<&'a crate::catalog::table::SecondaryIndex> {
+    table.get_secondary_index(index_name).ok_or_else(|| {
+        HematiteError::StorageError(format!(
+            "Secondary index '{}' does not exist on table '{}'",
+            index_name, table.name
+        ))
+    })
+}
+
+fn secondary_index_values(
+    index: &crate::catalog::table::SecondaryIndex,
+    row: &StoredRow,
+) -> Vec<Value> {
+    index
+        .column_indices
+        .iter()
+        .map(|&column_index| row.values[column_index].clone())
+        .collect()
 }
 
 pub(crate) fn require_index_root_page(root_page_id: u32, label: &str) -> Result<u32> {

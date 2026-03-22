@@ -1,38 +1,12 @@
 //! Catalog - SQLite-style schema management with B-tree persistence
 
-use crate::btree::KeyValueCodec;
 use crate::catalog::column::Column;
 use crate::catalog::engine::{CatalogEngine, CatalogEngineSnapshot, CatalogIntegrityReport};
 use crate::catalog::ids::TableId;
 use crate::catalog::schema::Schema;
 use crate::catalog::table::{SecondaryIndex, Table};
-use crate::error::{HematiteError, Result};
+use crate::error::Result;
 use std::collections::HashMap;
-
-#[derive(Debug, Clone, Copy, Default)]
-struct CatalogSchemaCodec;
-
-impl KeyValueCodec for CatalogSchemaCodec {
-    type Key = String;
-    type Value = Table;
-
-    fn encode_key(key: &Self::Key) -> Result<Vec<u8>> {
-        Ok(key.as_bytes().to_vec())
-    }
-
-    fn decode_key(bytes: &[u8]) -> Result<Self::Key> {
-        String::from_utf8(bytes.to_vec())
-            .map_err(|e| HematiteError::StorageError(format!("Invalid table name: {}", e)))
-    }
-
-    fn encode_value(value: &Self::Value) -> Result<Vec<u8>> {
-        value.to_bytes()
-    }
-
-    fn decode_value(bytes: &[u8]) -> Result<Self::Value> {
-        Table::from_bytes(bytes)
-    }
-}
 
 /// SQLite-style catalog manager with B-tree schema persistence
 #[derive(Debug)]
@@ -74,7 +48,7 @@ impl Catalog {
         };
 
         // Load schema from B-tree
-        let schema = Self::load_schema_from_btree(&engine, header.schema_root_page)?;
+        let schema = engine.load_schema(header.schema_root_page)?;
 
         Ok(Self {
             engine,
@@ -84,46 +58,13 @@ impl Catalog {
         })
     }
 
-    /// Load schema from the schema B-tree
-    fn load_schema_from_btree(engine: &CatalogEngine, schema_root: u32) -> Result<Schema> {
-        let mut schema = Schema::new();
-
-        for (key, value) in engine.read_tree_entries(schema_root)? {
-            let table_name = CatalogSchemaCodec::decode_key(&key)?;
-            let mut table = CatalogSchemaCodec::decode_value(&value)?;
-            // Ensure the persisted name matches the key to avoid inconsistencies.
-            table.name = table_name;
-            schema.insert_table(table)?;
-        }
-
-        Ok(schema)
-    }
-
     /// Save schema to the B-tree (transactional)
     fn save_schema_to_btree(&mut self) -> Result<()> {
         if !self.schema_dirty {
             return Ok(());
         }
 
-        let table_entries = self
-            .schema
-            .list_tables()
-            .into_iter()
-            .filter_map(|(table_id, _name)| self.schema.get_table(table_id).cloned())
-            .collect::<Vec<_>>();
-
-        let old_schema_root = self.schema_root;
-        self.engine.delete_tree(old_schema_root)?;
-        let new_schema_root = self.engine.create_tree()?;
-
-        let mut current_schema_root = new_schema_root;
-        for table in table_entries {
-            let key = CatalogSchemaCodec::encode_key(&table.name)?;
-            let value = CatalogSchemaCodec::encode_value(&table)?;
-            current_schema_root =
-                self.engine
-                    .insert_tree_entry(current_schema_root, &key, &value)?;
-        }
+        let current_schema_root = self.engine.save_schema(&self.schema, self.schema_root)?;
 
         let transaction_active = self.engine.transaction_active();
         self.engine.update_database_header(|header| {

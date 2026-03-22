@@ -10,7 +10,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use super::cursor::{IndexCursor, TableCursor};
-use super::{engine_metadata, index_store, integrity, table_store};
+use super::{
+    engine_metadata, index_store, integrity, runtime_metadata, schema_store, table_store, Schema,
+};
 
 #[derive(Debug, Clone)]
 pub struct TableRuntimeMetadata {
@@ -214,6 +216,14 @@ impl CatalogEngine {
         &self.table_metadata
     }
 
+    pub(crate) fn load_schema(&self, schema_root: PageId) -> Result<Schema> {
+        schema_store::load_schema(self, schema_root)
+    }
+
+    pub(crate) fn save_schema(&mut self, schema: &Schema, current_root: PageId) -> Result<PageId> {
+        schema_store::save_schema(self, schema, current_root)
+    }
+
     pub(crate) fn tree_store(&self) -> ByteTreeStore {
         ByteTreeStore::from_shared_storage(self.pager.clone())
     }
@@ -239,6 +249,22 @@ impl CatalogEngine {
         root_page_id: PageId,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         self.open_tree(root_page_id)?.entries()
+    }
+
+    pub(crate) fn visit_tree_entries<F>(&self, root_page_id: PageId, mut visit: F) -> Result<()>
+    where
+        F: FnMut(&[u8], &[u8]) -> Result<()>,
+    {
+        let tree = self.open_tree(root_page_id)?;
+        let mut cursor = tree.cursor()?;
+        cursor.first()?;
+        while let Some((key, value)) = cursor.current()? {
+            visit(&key, &value)?;
+            if cursor.next().is_err() {
+                break;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn insert_tree_entry(
@@ -273,6 +299,55 @@ impl CatalogEngine {
 
     pub fn get_storage_stats(&self) -> CatalogStorageStats {
         table_store::get_storage_stats(self)
+    }
+
+    pub(crate) fn create_runtime_table_metadata(
+        &mut self,
+        table_name: &str,
+        root_page_id: PageId,
+    ) -> Result<()> {
+        runtime_metadata::create_table_metadata(self, table_name, root_page_id)
+    }
+
+    pub(crate) fn table_runtime_metadata(&self, table_name: &str) -> Result<&TableRuntimeMetadata> {
+        runtime_metadata::lookup_table_metadata(self, table_name)
+    }
+
+    pub(crate) fn remove_runtime_table_metadata(
+        &mut self,
+        table_name: &str,
+    ) -> Result<TableRuntimeMetadata> {
+        runtime_metadata::remove_table_metadata(self, table_name)
+    }
+
+    pub(crate) fn record_generated_row_insert(
+        &mut self,
+        table_name: &str,
+        new_root_page_id: PageId,
+        row_id: u64,
+    ) {
+        runtime_metadata::apply_insert(self, table_name, new_root_page_id, Some(row_id + 1));
+    }
+
+    pub(crate) fn record_explicit_row_insert(
+        &mut self,
+        table_name: &str,
+        new_root_page_id: PageId,
+    ) {
+        runtime_metadata::apply_insert(self, table_name, new_root_page_id, None);
+    }
+
+    pub(crate) fn record_row_delete(
+        &mut self,
+        table_name: &str,
+        new_root_page_id: PageId,
+        deleted: bool,
+    ) {
+        runtime_metadata::apply_delete(self, table_name, new_root_page_id, deleted);
+    }
+
+    pub(crate) fn prepare_table_replace(&mut self, table_name: &str, rows: &[StoredRow]) {
+        runtime_metadata::prepare_replace(self, table_name, rows);
     }
 
     pub fn create_table(&mut self, table_name: &str) -> Result<PageId> {
