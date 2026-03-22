@@ -89,9 +89,20 @@ pub fn delete_secondary_key(
     )
 }
 
-pub fn read_entries(pager: &mut Pager, root_page_id: PageId) -> Result<Vec<IndexEntry>> {
+pub fn read_primary_entries(pager: &mut Pager, root_page_id: PageId) -> Result<Vec<IndexEntry>> {
     let mut entries = Vec::new();
-    collect_entries(pager, root_page_id, &mut entries)?;
+    collect_primary_entries(pager, root_page_id, &mut entries)?;
+    entries.sort_by(|left, right| {
+        left.key
+            .cmp(&right.key)
+            .then(left.row_id.cmp(&right.row_id))
+    });
+    Ok(entries)
+}
+
+pub fn read_secondary_entries(pager: &mut Pager, root_page_id: PageId) -> Result<Vec<IndexEntry>> {
+    let mut entries = Vec::new();
+    collect_secondary_entries(pager, root_page_id, &mut entries)?;
     entries.sort_by(|left, right| {
         left.key
             .cmp(&right.key)
@@ -241,6 +252,39 @@ fn delete_recursive(pager: &mut Pager, page_id: PageId, key: &BTreeKey) -> Resul
 }
 
 fn collect_entries(pager: &mut Pager, page_id: PageId, out: &mut Vec<IndexEntry>) -> Result<()> {
+    collect_secondary_entries(pager, page_id, out)
+}
+
+fn collect_primary_entries(
+    pager: &mut Pager,
+    page_id: PageId,
+    out: &mut Vec<IndexEntry>,
+) -> Result<()> {
+    let page = pager.read_page(page_id)?;
+    let node = BTreeNode::from_page(page)?;
+    match node.node_type {
+        NodeType::Leaf => {
+            for (key, value) in node.keys.into_iter().zip(node.values.into_iter()) {
+                out.push(IndexEntry {
+                    row_id: decode_rowid_value(value.data)?,
+                    key: key.data,
+                });
+            }
+        }
+        NodeType::Internal => {
+            for child_page_id in node.children {
+                collect_primary_entries(pager, child_page_id, out)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collect_secondary_entries(
+    pager: &mut Pager,
+    page_id: PageId,
+    out: &mut Vec<IndexEntry>,
+) -> Result<()> {
     let page = pager.read_page(page_id)?;
     let node = BTreeNode::from_page(page)?;
     match node.node_type {
@@ -254,7 +298,7 @@ fn collect_entries(pager: &mut Pager, page_id: PageId, out: &mut Vec<IndexEntry>
         }
         NodeType::Internal => {
             for child_page_id in node.children {
-                collect_entries(pager, child_page_id, out)?;
+                collect_secondary_entries(pager, child_page_id, out)?;
             }
         }
     }

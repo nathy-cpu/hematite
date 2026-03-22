@@ -255,6 +255,88 @@ mod executor_tests {
     }
 
     #[test]
+    fn test_select_executor_primary_key_lookup() -> Result<()> {
+        let mut catalog = Schema::new();
+
+        let mut table = crate::catalog::Table::new(
+            crate::catalog::TableId::new(1),
+            "users".to_string(),
+            vec![
+                Column::new(
+                    crate::catalog::ColumnId::new(1),
+                    "id".to_string(),
+                    DataType::Integer,
+                )
+                .primary_key(true),
+                Column::new(
+                    crate::catalog::ColumnId::new(2),
+                    "name".to_string(),
+                    DataType::Text,
+                ),
+            ],
+            crate::storage::PageId::new(0),
+        )?;
+
+        let db = TestDbFile::new("_test_select_executor_primary_key_lookup");
+        let mut storage = CatalogEngine::new(db.path())?;
+        let root_page_id = storage.create_table("users")?;
+        let primary_key_root_page_id = storage.create_empty_btree()?;
+        table.root_page_id = root_page_id;
+        table.primary_key_index_root_page_id = primary_key_root_page_id;
+        catalog.insert_table(table)?;
+
+        let row_id_1 = storage.insert_into_table(
+            "users",
+            vec![Value::Integer(1), Value::Text("Alice".to_string())],
+        )?;
+        let row_id_2 = storage.insert_into_table(
+            "users",
+            vec![Value::Integer(2), Value::Text("Bob".to_string())],
+        )?;
+
+        let table = catalog.get_table_by_name("users").unwrap();
+        storage.register_primary_key_row(
+            table,
+            crate::catalog::StoredRow {
+                row_id: row_id_1,
+                values: vec![Value::Integer(1), Value::Text("Alice".to_string())],
+            },
+        )?;
+        storage.register_primary_key_row(
+            table,
+            crate::catalog::StoredRow {
+                row_id: row_id_2,
+                values: vec![Value::Integer(2), Value::Text("Bob".to_string())],
+            },
+        )?;
+
+        let mut ctx = ExecutionContext::for_read(&catalog, &mut storage);
+        let statement = SelectStatement {
+            columns: vec![SelectItem::Column("name".to_string())],
+            from: TableReference::Table("users".to_string()),
+            where_clause: Some(WhereClause {
+                conditions: vec![Condition::Comparison {
+                    left: Expression::Column("id".to_string()),
+                    operator: ComparisonOperator::Equal,
+                    right: Expression::Literal(Value::Integer(2)),
+                }],
+            }),
+            order_by: Vec::new(),
+            limit: None,
+        };
+
+        let mut executor = SelectExecutor::new(
+            statement,
+            crate::query::planner::SelectAccessPath::PrimaryKeyLookup,
+        );
+        let result = executor.execute(&mut ctx)?;
+
+        assert_eq!(result.rows, vec![vec![Value::Text("Bob".to_string())]]);
+        storage.flush()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_select_executor_rowid_lookup() -> Result<()> {
         let mut catalog = Schema::new();
         let columns = vec![

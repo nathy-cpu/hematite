@@ -1444,6 +1444,30 @@ mod cursor_tests {
     }
 
     #[test]
+    fn test_index_cursor_seek_key_lands_on_first_duplicate() {
+        let entries = vec![
+            IndexEntry {
+                key: b"k".to_vec(),
+                row_id: 30,
+            },
+            IndexEntry {
+                key: b"k".to_vec(),
+                row_id: 10,
+            },
+            IndexEntry {
+                key: b"k".to_vec(),
+                row_id: 20,
+            },
+        ];
+        let mut cursor = IndexCursor::new(entries);
+
+        assert!(cursor.seek_key(b"k"));
+        assert_eq!(cursor.current().map(|e| e.row_id), Some(10));
+        assert!(cursor.next());
+        assert_eq!(cursor.current().map(|e| e.row_id), Some(20));
+    }
+
+    #[test]
     fn test_cursor_invariants_for_empty_and_seek_miss() {
         let mut table = TableCursor::new(Vec::new());
         assert!(!table.first());

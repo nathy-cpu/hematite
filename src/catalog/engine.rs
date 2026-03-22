@@ -328,18 +328,24 @@ impl CatalogEngine {
         table: &Table,
         key_values: &[Value],
     ) -> Result<Option<StoredRow>> {
-        let root_page_id = self.require_index_root_page(
-            table.primary_key_index_root_page_id,
-            &format!("primary-key index for table '{}'", table.name),
-        )?;
-        let rowid = {
-            let mut pager = self.pager.lock().unwrap();
-            index_btree::lookup_primary_key(&mut pager, root_page_id, key_values)?
-        };
+        let rowid = self.lookup_primary_key_rowid(table, key_values)?;
         match rowid {
             Some(rowid) => self.lookup_row_by_rowid(&table.name, rowid),
             None => Ok(None),
         }
+    }
+
+    pub fn lookup_primary_key_rowid(
+        &mut self,
+        table: &Table,
+        key_values: &[Value],
+    ) -> Result<Option<u64>> {
+        let root_page_id = self.require_index_root_page(
+            table.primary_key_index_root_page_id,
+            &format!("primary-key index for table '{}'", table.name),
+        )?;
+        let mut pager = self.pager.lock().unwrap();
+        index_btree::lookup_primary_key(&mut pager, root_page_id, key_values)
     }
 
     pub fn register_primary_key_row(&mut self, table: &Table, row: StoredRow) -> Result<()> {
@@ -365,6 +371,22 @@ impl CatalogEngine {
         index_name: &str,
         key_values: &[Value],
     ) -> Result<Vec<StoredRow>> {
+        let rowids = self.lookup_secondary_index_rowids(table, index_name, key_values)?;
+        let mut rows = Vec::with_capacity(rowids.len());
+        for rowid in rowids {
+            if let Some(row) = self.lookup_row_by_rowid(&table.name, rowid)? {
+                rows.push(row);
+            }
+        }
+        Ok(rows)
+    }
+
+    pub fn lookup_secondary_index_rowids(
+        &mut self,
+        table: &Table,
+        index_name: &str,
+        key_values: &[Value],
+    ) -> Result<Vec<u64>> {
         let index = table.get_secondary_index(index_name).ok_or_else(|| {
             HematiteError::StorageError(format!(
                 "Secondary index '{}' does not exist on table '{}'",
@@ -379,13 +401,7 @@ impl CatalogEngine {
             let mut pager = self.pager.lock().unwrap();
             index_btree::lookup_secondary_rowids(&mut pager, root_page_id, key_values)?
         };
-        let mut rows = Vec::with_capacity(rowids.len());
-        for rowid in rowids {
-            if let Some(row) = self.lookup_row_by_rowid(&table.name, rowid)? {
-                rows.push(row);
-            }
-        }
-        Ok(rows)
+        Ok(rowids)
     }
 
     pub fn register_secondary_index_row(&mut self, table: &Table, row: StoredRow) -> Result<()> {
@@ -480,6 +496,26 @@ impl CatalogEngine {
         Ok(())
     }
 
+    pub fn encode_primary_key(&self, key_values: &[Value]) -> Result<Vec<u8>> {
+        index_btree::encode_index_key(key_values)
+    }
+
+    pub fn encode_secondary_index_key(&self, key_values: &[Value]) -> Result<Vec<u8>> {
+        index_btree::encode_index_key(key_values)
+    }
+
+    pub fn open_primary_key_cursor(&mut self, table: &Table) -> Result<IndexCursor> {
+        let root_page_id = self.require_index_root_page(
+            table.primary_key_index_root_page_id,
+            &format!("primary-key index for table '{}'", table.name),
+        )?;
+        let entries = {
+            let mut pager = self.pager.lock().unwrap();
+            index_btree::read_primary_entries(&mut pager, root_page_id)?
+        };
+        Ok(IndexCursor::new(entries))
+    }
+
     pub fn open_secondary_index_cursor(
         &mut self,
         table: &Table,
@@ -497,7 +533,7 @@ impl CatalogEngine {
         )?;
         let entries = {
             let mut pager = self.pager.lock().unwrap();
-            index_btree::read_entries(&mut pager, root_page_id)?
+            index_btree::read_secondary_entries(&mut pager, root_page_id)?
         };
         Ok(IndexCursor::new(entries))
     }

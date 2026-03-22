@@ -103,10 +103,23 @@ impl IndexCursor {
     }
 
     pub fn seek_key(&mut self, key: &[u8]) -> bool {
+        let mut left = 0usize;
+        let mut right = self.entries.len();
+
+        while left < right {
+            let mid = left + (right - left) / 2;
+            if self.entries[mid].key.as_slice() < key {
+                left = mid + 1;
+            } else {
+                right = mid;
+            }
+        }
+
         let found = self
             .entries
-            .binary_search_by(|entry| entry.key.as_slice().cmp(key))
-            .ok();
+            .get(left)
+            .filter(|entry| entry.key.as_slice() == key)
+            .map(|_| left);
         self.position = found;
         found.is_some()
     }

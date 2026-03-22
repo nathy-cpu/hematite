@@ -488,10 +488,23 @@ impl QueryExecutor for SelectExecutor {
                                 .to_string(),
                         )
                     })?;
-                ctx.engine
-                    .lookup_row_by_primary_key(table, &primary_key_values)?
-                    .map(|row| vec![row.values])
-                    .unwrap_or_default()
+                let encoded_key = ctx.engine.encode_primary_key(&primary_key_values)?;
+                let mut index_cursor = ctx.engine.open_primary_key_cursor(table)?;
+                let rowid = index_cursor
+                    .seek_key(&encoded_key)
+                    .then(|| index_cursor.current().map(|entry| entry.row_id))
+                    .flatten();
+                match rowid {
+                    Some(rowid) => {
+                        let mut table_cursor = ctx.engine.open_table_cursor(&table_name)?;
+                        table_cursor
+                            .seek_rowid(rowid)
+                            .then(|| table_cursor.current().map(|row| vec![row.values.clone()]))
+                            .flatten()
+                            .unwrap_or_default()
+                    }
+                    None => Vec::new(),
+                }
             }
             SelectAccessPath::SecondaryIndexLookup(ref index_name) => {
                 let key_values = self
@@ -502,11 +515,31 @@ impl QueryExecutor for SelectExecutor {
                             index_name
                         ))
                     })?;
-                ctx.engine
-                    .lookup_rows_by_secondary_index(table, index_name, &key_values)?
-                    .into_iter()
-                    .map(|row| row.values)
-                    .collect()
+                let encoded_key = ctx.engine.encode_secondary_index_key(&key_values)?;
+                let mut index_cursor = ctx.engine.open_secondary_index_cursor(table, index_name)?;
+                let mut table_cursor = ctx.engine.open_table_cursor(&table_name)?;
+                let mut rows = Vec::new();
+
+                if index_cursor.seek_key(&encoded_key) {
+                    loop {
+                        let Some(entry) = index_cursor.current() else {
+                            break;
+                        };
+                        if entry.key.as_slice() != encoded_key.as_slice() {
+                            break;
+                        }
+                        if table_cursor.seek_rowid(entry.row_id) {
+                            if let Some(row) = table_cursor.current() {
+                                rows.push(row.values.clone());
+                            }
+                        }
+                        if !index_cursor.next() {
+                            break;
+                        }
+                    }
+                }
+
+                rows
             }
             SelectAccessPath::FullTableScan => ctx.engine.read_from_table(&table_name)?,
         };
