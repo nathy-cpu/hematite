@@ -62,7 +62,7 @@ impl Connection {
 
         let planner = QueryPlanner::new(schema.clone()).with_table_row_counts(table_row_counts);
         let plan = planner.plan(statement)?;
-        let mut executor = plan.executor;
+        let mut executor = plan.into_executor();
 
         let result = {
             let mut catalog_guard = self.catalog.lock().unwrap();
@@ -91,7 +91,7 @@ impl Connection {
 
         let planner = QueryPlanner::new(schema.clone()).with_table_row_counts(table_row_counts);
         let plan = planner.plan(statement)?;
-        let mut executor = plan.executor;
+        let mut executor = plan.into_executor();
 
         let implicit_snapshot = if explicit_transaction {
             None

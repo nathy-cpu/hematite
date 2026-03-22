@@ -7,7 +7,6 @@
 
 use super::ids::TableId;
 use crate::error::Result;
-use crate::storage::PageId;
 
 /// Database header structure stored on page 0.
 #[derive(Debug, Clone)]
@@ -36,7 +35,7 @@ impl DatabaseHeader {
     pub const HEADER_PAGE_ID: u32 = 0;
 
     /// Create a new database header with default values
-    pub fn new(schema_root_page: PageId) -> Self {
+    pub fn new(schema_root_page: u32) -> Self {
         let mut header = Self {
             magic: Self::MAGIC,
             version: Self::CURRENT_VERSION,

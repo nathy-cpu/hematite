@@ -1348,7 +1348,9 @@ mod rowid_table_tests {
                 ],
             };
 
-            let cell_bytes = materialize_row_record_cell(&mut storage, &row, 64)?;
+            let cell_bytes = materialize_row_record_cell(&row, 64, |payload| {
+                write_overflow_chain(&mut storage, payload)
+            })?;
             let cell = RowidLeafCellLayout::decode(&cell_bytes)?;
             let overflow_ids = collect_overflow_page_ids(
                 &mut storage,
@@ -1374,7 +1376,9 @@ mod rowid_table_tests {
         let size =
             u32::from_le_bytes([page.data[0], page.data[1], page.data[2], page.data[3]]) as usize;
         let cell_bytes = page.data[4..4 + size].to_vec();
-        let restored = hydrate_row_record_cell(&mut reopened, &cell_bytes)?;
+        let restored = hydrate_row_record_cell(&cell_bytes, |first, len| {
+            read_overflow_chain(&mut reopened, first, len)
+        })?;
         assert_eq!(restored.row_id, 9001);
         assert_eq!(restored.values[0], crate::catalog::Value::Integer(123));
 
@@ -1387,7 +1391,9 @@ mod rowid_table_tests {
                 Some(cell.overflow_first_page)
             },
         )?;
-        free_row_record_overflow(&mut reopened, &cell_bytes)?;
+        free_row_record_overflow(&cell_bytes, |first| {
+            free_overflow_chain(&mut reopened, first)
+        })?;
         let reused = reopened.allocate_page()?;
         assert!(overflow_ids.contains(&reused));
 

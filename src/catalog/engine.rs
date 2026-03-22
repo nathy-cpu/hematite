@@ -1,7 +1,7 @@
 //! Relational storage engine built on top of the pager and generic B-trees.
 
 use crate::btree::tree::create_tree_root;
-use crate::catalog::{Table, Value};
+use crate::catalog::{DatabaseHeader, Table, TableId, Value};
 use crate::error::{HematiteError, Result};
 use crate::storage::{
     Page, PageId, Pager, PagerIntegrityReport, DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID,
@@ -87,6 +87,65 @@ impl CatalogEngine {
 
     pub fn shared_pager(&self) -> Arc<Mutex<Pager>> {
         self.pager.clone()
+    }
+
+    pub fn read_database_header(&self) -> Result<Option<DatabaseHeader>> {
+        let mut pager = self.pager.lock().unwrap();
+        match pager.read_page(DB_HEADER_PAGE_ID) {
+            Ok(page) => Ok(Some(DatabaseHeader::deserialize(&page.data)?)),
+            Err(_) => Ok(None),
+        }
+    }
+
+    pub fn initialize_database_header(&mut self, schema_root_page: u32) -> Result<DatabaseHeader> {
+        let header = DatabaseHeader::new(schema_root_page);
+        let mut page = Page::new(DB_HEADER_PAGE_ID);
+        header.serialize(&mut page.data)?;
+
+        let mut pager = self.pager.lock().unwrap();
+        pager.write_page(page)?;
+        pager.flush()?;
+        Ok(header)
+    }
+
+    pub fn allocate_table_id(&mut self) -> Result<TableId> {
+        let mut pager = self.pager.lock().unwrap();
+        let header_page = pager.read_page(DB_HEADER_PAGE_ID)?;
+        let mut header = DatabaseHeader::deserialize(&header_page.data)?;
+        let table_id = header.increment_table_id();
+
+        let mut updated_page = Page::new(DB_HEADER_PAGE_ID);
+        header.serialize(&mut updated_page.data)?;
+        pager.write_page(updated_page)?;
+        Ok(table_id)
+    }
+
+    pub fn set_next_table_id(&mut self, next_table_id: u32) -> Result<()> {
+        self.update_database_header(|header| {
+            header.next_table_id = next_table_id;
+        })
+    }
+
+    pub fn peek_next_table_id(&self) -> Result<TableId> {
+        let header = self
+            .read_database_header()?
+            .ok_or_else(|| HematiteError::StorageError("Database header is missing".to_string()))?;
+        Ok(TableId::new(header.next_table_id))
+    }
+
+    pub fn update_database_header<F>(&mut self, update: F) -> Result<()>
+    where
+        F: FnOnce(&mut DatabaseHeader),
+    {
+        let mut pager = self.pager.lock().unwrap();
+        let header_page = pager.read_page(DB_HEADER_PAGE_ID)?;
+        let mut header = DatabaseHeader::deserialize(&header_page.data)?;
+        update(&mut header);
+        header.checksum = header.calculate_checksum();
+
+        let mut updated_page = Page::new(DB_HEADER_PAGE_ID);
+        header.serialize(&mut updated_page.data)?;
+        pager.write_page(updated_page)
     }
 
     pub fn read_page(&self, page_id: PageId) -> Result<Page> {
@@ -287,6 +346,13 @@ impl CatalogEngine {
 
     pub fn validate_table_indexes(&mut self, table: &Table) -> Result<()> {
         integrity::validate_table_indexes(self, table)
+    }
+
+    pub(crate) fn validate_catalog_layout(
+        &mut self,
+        tables: &[Table],
+    ) -> Result<integrity::CatalogTreeUsage> {
+        integrity::validate_catalog_layout(self, tables)
     }
 
     pub fn validate_integrity(&mut self) -> Result<CatalogIntegrityReport> {

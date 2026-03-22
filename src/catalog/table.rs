@@ -3,7 +3,6 @@
 use super::column::Column;
 use super::ids::TableId;
 use super::types::Value;
-use crate::storage::PageId;
 use crate::HematiteError;
 use crate::Result;
 use std::collections::HashMap;
@@ -32,7 +31,7 @@ impl Table {
         id: TableId,
         name: String,
         mut columns: Vec<Column>,
-        root_page_id: PageId,
+        root_page_id: u32,
     ) -> Result<Self> {
         let mut column_indices = HashMap::new();
         let mut primary_key_columns = Vec::new();

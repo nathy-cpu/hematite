@@ -1,11 +1,11 @@
 //! Rowid table cell formats for relational tables.
 
 use crate::error::{HematiteError, Result};
-use crate::storage::overflow::{free_overflow_chain, read_overflow_chain, write_overflow_chain};
-use crate::storage::{PageId, Pager, INVALID_PAGE_ID};
 
 use super::engine::StoredRow;
 use super::serialization::RowSerializer;
+
+pub const INVALID_PAGE_ID: u32 = u32::MAX;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RowidLeafCell {
@@ -20,7 +20,7 @@ pub struct RowidLeafCellLayout {
     pub rowid: u64,
     pub total_payload_len: u32,
     pub local_payload: Vec<u8>,
-    pub overflow_first_page: PageId,
+    pub overflow_first_page: u32,
 }
 
 impl RowidLeafCellLayout {
@@ -123,18 +123,27 @@ pub fn decode_stored_row_record(rowid: u64, payload: &[u8]) -> Result<StoredRow>
     Ok(row)
 }
 
-pub fn materialize_row_record_cell(
-    pager: &mut Pager,
+pub fn materialize_row_record_cell<F>(
     row: &StoredRow,
     max_local_payload: usize,
-) -> Result<Vec<u8>> {
+    mut write_overflow_chain: F,
+) -> Result<Vec<u8>>
+where
+    F: FnMut(&[u8]) -> Result<Option<u32>>,
+{
     let mut encoded = encode_stored_row_record(row, max_local_payload)?;
-    let overflow_first = write_overflow_chain(pager, &encoded.overflow_payload)?;
+    let overflow_first = write_overflow_chain(&encoded.overflow_payload)?;
     encoded.cell.overflow_first_page = overflow_first.unwrap_or(INVALID_PAGE_ID);
     encoded.cell.encode()
 }
 
-pub fn hydrate_row_record_cell(pager: &mut Pager, cell_bytes: &[u8]) -> Result<StoredRow> {
+pub fn hydrate_row_record_cell<F>(
+    cell_bytes: &[u8],
+    mut read_overflow_chain: F,
+) -> Result<StoredRow>
+where
+    F: FnMut(Option<u32>, usize) -> Result<Vec<u8>>,
+{
     let cell = RowidLeafCellLayout::decode(cell_bytes)?;
     let local_len = cell.local_payload.len();
     let total_len = cell.total_payload_len as usize;
@@ -150,21 +159,24 @@ pub fn hydrate_row_record_cell(pager: &mut Pager, cell_bytes: &[u8]) -> Result<S
     } else {
         Some(cell.overflow_first_page)
     };
-    let overflow_payload = read_overflow_chain(pager, overflow_first, overflow_len)?;
+    let overflow_payload = read_overflow_chain(overflow_first, overflow_len)?;
 
     let mut payload = cell.local_payload;
     payload.extend_from_slice(&overflow_payload);
     decode_stored_row_record(cell.rowid, &payload)
 }
 
-pub fn free_row_record_overflow(pager: &mut Pager, cell_bytes: &[u8]) -> Result<()> {
+pub fn free_row_record_overflow<F>(cell_bytes: &[u8], mut free_overflow_chain: F) -> Result<()>
+where
+    F: FnMut(Option<u32>) -> Result<()>,
+{
     let cell = RowidLeafCellLayout::decode(cell_bytes)?;
     let overflow_first = if cell.overflow_first_page == INVALID_PAGE_ID {
         None
     } else {
         Some(cell.overflow_first_page)
     };
-    free_overflow_chain(pager, overflow_first)
+    free_overflow_chain(overflow_first)
 }
 
 impl RowidLeafCell {
@@ -205,7 +217,7 @@ impl RowidLeafCell {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RowidInternalCell {
     pub separator_rowid: u64,
-    pub child_page_id: PageId,
+    pub child_page_id: u32,
 }
 
 impl RowidInternalCell {

@@ -1,13 +1,16 @@
 //! Query plan structures and access-path descriptions.
 
 use crate::parser::ast::AggregateFunction;
+use crate::parser::ast::{
+    CreateStatement, DeleteStatement, DropStatement, InsertStatement, SelectStatement,
+    UpdateStatement,
+};
 
 use super::optimizer::SelectOptimizations;
-use super::runtime::QueryExecutor;
 
 pub struct QueryPlan {
     pub node: PlanNode,
-    pub executor: Box<dyn QueryExecutor>,
+    pub program: ExecutionProgram,
     pub estimated_cost: f64,
     pub select_analysis: Option<SelectAnalysis>,
     pub optimizations: Option<SelectOptimizations>,
@@ -20,9 +23,34 @@ impl std::fmt::Debug for QueryPlan {
             .field("estimated_cost", &self.estimated_cost)
             .field("select_analysis", &self.select_analysis)
             .field("optimizations", &self.optimizations)
-            .field("executor", &"<QueryExecutor>")
+            .field("program", &self.program)
             .finish()
     }
+}
+
+#[derive(Debug, Clone)]
+pub enum ExecutionProgram {
+    Select {
+        statement: SelectStatement,
+        access_path: SelectAccessPath,
+    },
+    Insert {
+        statement: InsertStatement,
+    },
+    Update {
+        statement: UpdateStatement,
+        access_path: SelectAccessPath,
+    },
+    Delete {
+        statement: DeleteStatement,
+        access_path: SelectAccessPath,
+    },
+    Create {
+        statement: CreateStatement,
+    },
+    Drop {
+        statement: DropStatement,
+    },
 }
 
 #[derive(Debug, Clone)]

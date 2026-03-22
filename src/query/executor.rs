@@ -4,9 +4,35 @@ use crate::catalog::StoredRow;
 use crate::catalog::{Column, DataType, Table, Value};
 use crate::error::{HematiteError, Result};
 use crate::parser::ast::*;
-use crate::query::plan::SelectAccessPath;
+use crate::query::plan::{ExecutionProgram, QueryPlan, SelectAccessPath};
 pub use crate::query::runtime::{ExecutionContext, QueryExecutor, QueryResult};
 use std::cmp::Ordering;
+
+impl QueryPlan {
+    pub fn into_executor(self) -> Box<dyn QueryExecutor> {
+        build_executor(self.program)
+    }
+}
+
+pub fn build_executor(program: ExecutionProgram) -> Box<dyn QueryExecutor> {
+    match program {
+        ExecutionProgram::Select {
+            statement,
+            access_path,
+        } => Box::new(SelectExecutor::new(statement, access_path)),
+        ExecutionProgram::Insert { statement } => Box::new(InsertExecutor::new(statement)),
+        ExecutionProgram::Update {
+            statement,
+            access_path,
+        } => Box::new(UpdateExecutor::new(statement, access_path)),
+        ExecutionProgram::Delete {
+            statement,
+            access_path,
+        } => Box::new(DeleteExecutor::new(statement, access_path)),
+        ExecutionProgram::Create { statement } => Box::new(CreateExecutor::new(statement)),
+        ExecutionProgram::Drop { statement } => Box::new(DropExecutor::new(statement)),
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct SelectExecutor {

@@ -3,9 +3,6 @@
 use crate::catalog::{Schema, Table, Value};
 use crate::error::Result;
 use crate::parser::ast::*;
-use crate::query::executor::{
-    CreateExecutor, DeleteExecutor, DropExecutor, InsertExecutor, SelectExecutor, UpdateExecutor,
-};
 use crate::query::optimizer::QueryOptimizer;
 pub use crate::query::plan::*;
 use crate::HematiteError;
@@ -51,16 +48,17 @@ impl QueryPlanner {
         // Analyze the query to determine optimal execution strategy
         let analysis = self.analyze_select(&statement)?;
         let node = self.build_select_plan_node(&statement, &analysis);
-
-        // Create executor based on analysis
-        let executor = Box::new(SelectExecutor::new(statement, node.access_path.clone()));
+        let access_path = node.access_path.clone();
 
         // Estimate cost (simplified cost model)
         let estimated_cost = self.estimate_select_cost(&analysis);
 
         Ok(QueryPlan {
             node: PlanNode::Select(node),
-            executor,
+            program: ExecutionProgram::Select {
+                statement,
+                access_path,
+            },
             estimated_cost,
             select_analysis: Some(analysis),
             optimizations: None,
@@ -74,11 +72,10 @@ impl QueryPlanner {
             table_name: statement.table.clone(),
             row_count: statement.values.len(),
         });
-        let executor = Box::new(InsertExecutor::new(statement));
 
         Ok(QueryPlan {
             node,
-            executor,
+            program: ExecutionProgram::Insert { statement },
             estimated_cost,
             select_analysis: None,
             optimizations: None,
@@ -91,14 +88,13 @@ impl QueryPlanner {
             table_name: statement.table.clone(),
             column_count: statement.columns.len(),
         });
-        let executor = Box::new(CreateExecutor::new(statement));
 
         // Cost estimation for CREATE is fixed
         let estimated_cost = 1.0;
 
         Ok(QueryPlan {
             node,
-            executor,
+            program: ExecutionProgram::Create { statement },
             estimated_cost,
             select_analysis: None,
             optimizations: None,
@@ -115,12 +111,14 @@ impl QueryPlanner {
             has_filter: statement.where_clause.is_some(),
             access_path: access_path.clone(),
         });
-        let executor = Box::new(UpdateExecutor::new(statement, access_path.clone()));
         let estimated_cost = self.estimate_update_cost(&analysis, &access_path, assignment_count);
 
         Ok(QueryPlan {
             node,
-            executor,
+            program: ExecutionProgram::Update {
+                statement,
+                access_path,
+            },
             estimated_cost,
             select_analysis: None,
             optimizations: None,
@@ -135,12 +133,14 @@ impl QueryPlanner {
             has_filter: statement.where_clause.is_some(),
             access_path: access_path.clone(),
         });
-        let executor = Box::new(DeleteExecutor::new(statement, access_path.clone()));
         let estimated_cost = self.estimate_delete_cost(&analysis, &access_path);
 
         Ok(QueryPlan {
             node,
-            executor,
+            program: ExecutionProgram::Delete {
+                statement,
+                access_path,
+            },
             estimated_cost,
             select_analysis: None,
             optimizations: None,
@@ -151,12 +151,11 @@ impl QueryPlanner {
         let node = PlanNode::Drop(DropPlanNode {
             table_name: statement.table.clone(),
         });
-        let executor = Box::new(DropExecutor::new(statement));
         let estimated_cost = 1.0;
 
         Ok(QueryPlan {
             node,
-            executor,
+            program: ExecutionProgram::Drop { statement },
             estimated_cost,
             select_analysis: None,
             optimizations: None,

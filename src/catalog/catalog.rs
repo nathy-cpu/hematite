@@ -5,15 +5,11 @@ use crate::btree::BTreeIndex;
 use crate::btree::KeyValueCodec;
 use crate::catalog::column::Column;
 use crate::catalog::engine::{CatalogEngine, CatalogEngineSnapshot, CatalogIntegrityReport};
-use crate::catalog::header::DatabaseHeader;
 use crate::catalog::ids::TableId;
 use crate::catalog::schema::Schema;
 use crate::catalog::table::{SecondaryIndex, Table};
-use crate::catalog::{index_btree, table_btree};
 use crate::error::{HematiteError, Result};
-use crate::storage::{Page, PageId, Pager, DB_HEADER_PAGE_ID};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Copy, Default)]
 struct CatalogSchemaCodec;
@@ -43,17 +39,16 @@ impl KeyValueCodec for CatalogSchemaCodec {
 /// SQLite-style catalog manager with B-tree schema persistence
 #[derive(Debug)]
 pub struct Catalog {
-    pager: Arc<Mutex<Pager>>,
     engine: CatalogEngine,
     schema: Schema,
-    schema_root: PageId,
+    schema_root: u32,
     schema_dirty: bool,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct CatalogSnapshot {
     schema: Schema,
-    schema_root: PageId,
+    schema_root: u32,
     schema_dirty: bool,
     engine: CatalogEngineSnapshot,
 }
@@ -61,53 +56,30 @@ pub(crate) struct CatalogSnapshot {
 impl Catalog {
     /// Open or create a database with SQLite-style schema management
     pub fn open_or_create<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
-        let pager = Pager::new(path, 100)?;
-        Self::open_with_pager(pager)
+        Self::open_with_engine(CatalogEngine::new(path)?)
     }
 
     pub fn open_in_memory() -> Result<Self> {
-        let pager = Pager::new_in_memory(100)?;
-        Self::open_with_pager(pager)
+        Self::open_with_engine(CatalogEngine::new_in_memory()?)
     }
 
-    fn open_with_pager(pager: Pager) -> Result<Self> {
-        let pager = Arc::new(Mutex::new(pager));
-        let engine = CatalogEngine::from_shared_pager(pager.clone())?;
-
-        // Try to read existing database header
-        let existing_header = {
-            let mut pager_guard = pager.lock().unwrap();
-            match pager_guard.read_page(DB_HEADER_PAGE_ID) {
-                Ok(page) => Some(DatabaseHeader::deserialize(&page.data)?),
-                Err(_) => None,
-            }
-        };
+    fn open_with_engine(mut engine: CatalogEngine) -> Result<Self> {
+        let existing_header = engine.read_database_header()?;
 
         let header = match existing_header {
             Some(header) => header,
             None => {
                 // New database - create header and schema B-tree
-                let mut manager = BTreeManager::from_shared_storage(pager.clone());
+                let mut manager = BTreeManager::from_shared_storage(engine.shared_pager());
                 let schema_root = manager.create_tree()?;
-
-                let mut header = DatabaseHeader::new(schema_root);
-                header.checksum = header.calculate_checksum();
-
-                let mut pager_guard = pager.lock().unwrap();
-                let mut header_page = Page::new(DB_HEADER_PAGE_ID);
-                header.serialize(&mut header_page.data)?;
-                pager_guard.write_page(header_page)?;
-                pager_guard.flush()?;
-
-                header
+                engine.initialize_database_header(schema_root)?
             }
         };
 
         // Load schema from B-tree
-        let schema = Self::load_schema_from_btree(&pager, header.schema_root_page)?;
+        let schema = Self::load_schema_from_btree(&engine, header.schema_root_page)?;
 
         Ok(Self {
-            pager,
             engine,
             schema,
             schema_root: header.schema_root_page,
@@ -116,8 +88,8 @@ impl Catalog {
     }
 
     /// Load schema from the schema B-tree
-    fn load_schema_from_btree(pager: &Arc<Mutex<Pager>>, schema_root: PageId) -> Result<Schema> {
-        let btree = BTreeIndex::from_shared_storage(pager.clone(), schema_root);
+    fn load_schema_from_btree(engine: &CatalogEngine, schema_root: u32) -> Result<Schema> {
+        let btree = BTreeIndex::from_shared_storage(engine.shared_pager(), schema_root);
         let mut cursor = btree.cursor()?;
 
         let mut schema = Schema::new();
@@ -150,28 +122,24 @@ impl Catalog {
             .collect::<Vec<_>>();
 
         let old_schema_root = self.schema_root;
-        let mut manager = BTreeManager::from_shared_storage(self.pager.clone());
+        let shared_pager = self.engine.shared_pager();
+        let mut manager = BTreeManager::from_shared_storage(shared_pager.clone());
         manager.delete_tree(old_schema_root)?;
         let new_schema_root = manager.create_tree()?;
 
         let mut btree =
-            crate::btree::BTreeIndex::from_shared_storage(self.pager.clone(), new_schema_root);
+            crate::btree::BTreeIndex::from_shared_storage(shared_pager, new_schema_root);
 
         for table in table_entries {
             btree.insert_typed::<CatalogSchemaCodec>(&table.name, &table)?;
         }
 
         let transaction_active = self.engine.transaction_active();
-        let mut pager_guard = self.pager.lock().unwrap();
-        let header_page = pager_guard.read_page(DB_HEADER_PAGE_ID)?;
-        let mut header = DatabaseHeader::deserialize(&header_page.data)?;
-        header.schema_root_page = new_schema_root;
-        header.checksum = header.calculate_checksum();
-        let mut updated = Page::new(DB_HEADER_PAGE_ID);
-        header.serialize(&mut updated.data)?;
-        pager_guard.write_page(updated)?;
+        self.engine.update_database_header(|header| {
+            header.schema_root_page = new_schema_root;
+        })?;
         if !transaction_active {
-            pager_guard.flush()?;
+            self.engine.flush()?;
         }
 
         self.schema_root = new_schema_root;
@@ -180,18 +148,8 @@ impl Catalog {
     }
 
     /// Get the next table ID from database header
-    fn get_next_table_id(&self) -> Result<TableId> {
-        let mut pager_guard = self.pager.lock().unwrap();
-        let header_page = pager_guard.read_page(DB_HEADER_PAGE_ID)?;
-        let mut header = DatabaseHeader::deserialize(&header_page.data)?;
-        let table_id = header.increment_table_id();
-
-        // Update header with new table ID
-        let mut updated_page = Page::new(DB_HEADER_PAGE_ID);
-        header.serialize(&mut updated_page.data)?;
-        pager_guard.write_page(updated_page)?;
-
-        Ok(table_id)
+    fn get_next_table_id(&mut self) -> Result<TableId> {
+        self.engine.allocate_table_id()
     }
 
     /// Create a new table in the catalog
@@ -221,8 +179,8 @@ impl Catalog {
         &mut self,
         name: &str,
         columns: Vec<Column>,
-        table_root_page_id: PageId,
-        primary_key_root_page_id: PageId,
+        table_root_page_id: u32,
+        primary_key_root_page_id: u32,
     ) -> Result<TableId> {
         if self.schema.get_table_by_name(name).is_some() {
             return Err(crate::error::HematiteError::StorageError(format!(
@@ -337,22 +295,11 @@ impl Catalog {
         self.schema = schema;
         self.schema_dirty = true;
         self.save_schema_to_btree()?;
-
-        let mut pager_guard = self.pager.lock().unwrap();
-        let header_page = pager_guard.read_page(DB_HEADER_PAGE_ID)?;
-        let mut header = DatabaseHeader::deserialize(&header_page.data)?;
-        header.next_table_id = self.schema.next_table_id();
-        header.checksum = header.calculate_checksum();
-
-        let mut updated = Page::new(DB_HEADER_PAGE_ID);
-        header.serialize(&mut updated.data)?;
-        pager_guard.write_page(updated)?;
-
-        Ok(())
+        self.engine.set_next_table_id(self.schema.next_table_id())
     }
 
     /// Set the root page for a table's B-tree
-    pub fn set_table_root_page(&mut self, table_id: TableId, root_page: PageId) -> Result<()> {
+    pub fn set_table_root_page(&mut self, table_id: TableId, root_page: u32) -> Result<()> {
         // Validate table exists
         if self.schema.get_table(table_id).is_none() {
             return Err(crate::error::HematiteError::StorageError(format!(
@@ -377,7 +324,7 @@ impl Catalog {
     }
 
     /// Get the root page for a table's B-tree
-    pub fn get_table_root_page(&self, table_id: TableId) -> Result<Option<PageId>> {
+    pub fn get_table_root_page(&self, table_id: TableId) -> Result<Option<u32>> {
         if let Some(table) = self.schema.get_table(table_id) {
             // Validate that root page is properly set
             if table.root_page_id == 0 {
@@ -402,7 +349,7 @@ impl Catalog {
     pub fn set_table_primary_key_root_page(
         &mut self,
         table_id: TableId,
-        root_page_id: PageId,
+        root_page_id: u32,
     ) -> Result<()> {
         if root_page_id == 0 {
             return Err(crate::error::HematiteError::StorageError(
@@ -421,8 +368,8 @@ impl Catalog {
     pub fn set_table_storage_roots(
         &mut self,
         table_id: TableId,
-        table_root_page_id: PageId,
-        primary_key_root_page_id: PageId,
+        table_root_page_id: u32,
+        primary_key_root_page_id: u32,
     ) -> Result<()> {
         if table_root_page_id == 0 || primary_key_root_page_id == 0 {
             return Err(crate::error::HematiteError::StorageError(
@@ -513,109 +460,16 @@ impl Catalog {
             }
         }
 
-        let mut report = self.engine.validate_integrity()?;
-        let pager_arc = self.engine.shared_pager();
-        let mut pager = pager_arc.lock().unwrap();
-        let free_pages = pager
-            .free_pages()
-            .iter()
-            .copied()
-            .collect::<std::collections::HashSet<_>>();
-        let mut table_pages = std::collections::HashSet::new();
-        let mut index_pages = std::collections::HashSet::new();
         let tables = self
             .schema
             .list_tables()
             .into_iter()
             .filter_map(|(table_id, _)| self.schema.get_table(table_id).cloned())
             .collect::<Vec<_>>();
-
-        for table in &tables {
-            let mut table_page_ids = Vec::new();
-            table_btree::collect_page_ids(&mut pager, table.root_page_id, &mut table_page_ids)?;
-            for page_id in table_page_ids {
-                if free_pages.contains(&page_id) {
-                    return Err(crate::error::HematiteError::CorruptedData(format!(
-                        "Table page {} for '{}' is also present in the freelist",
-                        page_id, table.name
-                    )));
-                }
-                if !table_pages.insert(page_id) {
-                    return Err(crate::error::HematiteError::CorruptedData(format!(
-                        "Table page {} is shared across multiple table trees",
-                        page_id
-                    )));
-                }
-            }
-
-            if table.primary_key_index_root_page_id != 0 {
-                let mut index_page_ids = Vec::new();
-                index_btree::collect_page_ids(
-                    &mut pager,
-                    table.primary_key_index_root_page_id,
-                    &mut index_page_ids,
-                )?;
-                for page_id in index_page_ids {
-                    if free_pages.contains(&page_id) {
-                        return Err(crate::error::HematiteError::CorruptedData(format!(
-                            "Primary-key index page {} for '{}' is also present in the freelist",
-                            page_id, table.name
-                        )));
-                    }
-                    if table_pages.contains(&page_id) {
-                        return Err(crate::error::HematiteError::CorruptedData(format!(
-                            "Primary-key index page {} for '{}' overlaps table storage",
-                            page_id, table.name
-                        )));
-                    }
-                    if !index_pages.insert(page_id) {
-                        return Err(crate::error::HematiteError::CorruptedData(format!(
-                            "Index page {} is shared across multiple index trees",
-                            page_id
-                        )));
-                    }
-                }
-            }
-
-            for index in &table.secondary_indexes {
-                if index.root_page_id == 0 {
-                    return Err(crate::error::HematiteError::CorruptedData(format!(
-                        "Secondary index '{}' on '{}' is missing a root page",
-                        index.name, table.name
-                    )));
-                }
-                let mut index_page_ids = Vec::new();
-                index_btree::collect_page_ids(&mut pager, index.root_page_id, &mut index_page_ids)?;
-                for page_id in index_page_ids {
-                    if free_pages.contains(&page_id) {
-                        return Err(crate::error::HematiteError::CorruptedData(format!(
-                            "Secondary index page {} for '{}.{}' is also present in the freelist",
-                            page_id, table.name, index.name
-                        )));
-                    }
-                    if table_pages.contains(&page_id) {
-                        return Err(crate::error::HematiteError::CorruptedData(format!(
-                            "Secondary index page {} for '{}.{}' overlaps table storage",
-                            page_id, table.name, index.name
-                        )));
-                    }
-                    if !index_pages.insert(page_id) {
-                        return Err(crate::error::HematiteError::CorruptedData(format!(
-                            "Index page {} is shared across multiple index trees",
-                            page_id
-                        )));
-                    }
-                }
-            }
-        }
-
-        drop(pager);
-        for table in &tables {
-            self.engine.validate_table_indexes(table)?;
-        }
-
-        report.live_page_count = table_pages.len();
-        report.index_page_count = index_pages.len();
+        let mut report = self.engine.validate_integrity()?;
+        let usage = self.engine.validate_catalog_layout(&tables)?;
+        report.live_page_count = usage.live_table_pages;
+        report.index_page_count = usage.live_index_pages;
         Ok(report)
     }
 
@@ -666,11 +520,7 @@ impl Catalog {
 
     /// Get the next available table ID without incrementing
     pub fn peek_next_table_id(&self) -> Result<TableId> {
-        let mut pager_guard = self.pager.lock().unwrap();
-        let header_page = pager_guard.read_page(0)?;
-        let header = DatabaseHeader::deserialize(&header_page.data)?;
-        drop(pager_guard);
-        Ok(TableId::new(header.next_table_id))
+        self.engine.peek_next_table_id()
     }
 
     /// Create a table with a specific root page (useful for B-tree setup)
@@ -678,7 +528,7 @@ impl Catalog {
         &mut self,
         name: &str,
         columns: Vec<Column>,
-        root_page: PageId,
+        root_page: u32,
     ) -> Result<TableId> {
         // Validate table name doesn't exist
         if self.schema.get_table_by_name(name).is_some() {

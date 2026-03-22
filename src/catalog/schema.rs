@@ -4,7 +4,6 @@ use super::column::Column;
 use super::ids::TableId;
 use super::table::{SecondaryIndex, Table};
 use crate::error::HematiteError;
-use crate::storage::PageId;
 use crate::Result;
 use std::collections::HashMap;
 
@@ -66,8 +65,8 @@ impl Schema {
         &mut self,
         name: String,
         columns: Vec<Column>,
-        table_root_page_id: PageId,
-        primary_key_root_page_id: PageId,
+        table_root_page_id: u32,
+        primary_key_root_page_id: u32,
     ) -> Result<TableId> {
         if self.table_names.contains_key(&name) {
             return Err(HematiteError::ParseError(format!(
@@ -133,7 +132,7 @@ impl Schema {
     pub fn set_table_primary_key_root_page(
         &mut self,
         table_id: TableId,
-        root_page_id: PageId,
+        root_page_id: u32,
     ) -> Result<()> {
         let table = self
             .tables
@@ -146,8 +145,8 @@ impl Schema {
     pub fn set_table_storage_roots(
         &mut self,
         table_id: TableId,
-        table_root_page_id: PageId,
-        primary_key_root_page_id: PageId,
+        table_root_page_id: u32,
+        primary_key_root_page_id: u32,
     ) -> Result<()> {
         let table = self
             .tables
@@ -280,7 +279,7 @@ impl Schema {
         Ok(schema)
     }
 
-    pub fn set_table_root_page(&mut self, table_id: TableId, root_page_id: PageId) -> Result<()> {
+    pub fn set_table_root_page(&mut self, table_id: TableId, root_page_id: u32) -> Result<()> {
         let table = self
             .tables
             .get_mut(&table_id)
