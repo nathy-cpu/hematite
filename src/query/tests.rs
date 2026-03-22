@@ -517,6 +517,91 @@ mod executor_tests {
     }
 
     #[test]
+    fn test_update_executor_primary_key_lookup() -> Result<()> {
+        let mut catalog = Schema::new();
+
+        let columns = vec![
+            Column::new(
+                crate::catalog::ColumnId::new(1),
+                "id".to_string(),
+                DataType::Integer,
+            )
+            .primary_key(true),
+            Column::new(
+                crate::catalog::ColumnId::new(2),
+                "name".to_string(),
+                DataType::Text,
+            ),
+        ];
+        let table_id = catalog.create_table("users".to_string(), columns)?;
+
+        let db = TestDbFile::new("_test_update_executor_primary_key_lookup");
+        let mut storage = CatalogEngine::new(db.path())?;
+        let root_page_id = storage.create_table("users")?;
+        let primary_key_root_page_id = storage.create_empty_btree()?;
+        catalog.set_table_root_page(table_id, root_page_id)?;
+        catalog.set_table_primary_key_root_page(table_id, primary_key_root_page_id)?;
+
+        let table = catalog.get_table_by_name("users").unwrap().clone();
+        let row_id_1 = storage.insert_into_table(
+            "users",
+            vec![Value::Integer(1), Value::Text("Alice".to_string())],
+        )?;
+        let row_id_2 = storage.insert_into_table(
+            "users",
+            vec![Value::Integer(2), Value::Text("Bob".to_string())],
+        )?;
+        storage.register_primary_key_row(
+            &table,
+            crate::catalog::StoredRow {
+                row_id: row_id_1,
+                values: vec![Value::Integer(1), Value::Text("Alice".to_string())],
+            },
+        )?;
+        storage.register_primary_key_row(
+            &table,
+            crate::catalog::StoredRow {
+                row_id: row_id_2,
+                values: vec![Value::Integer(2), Value::Text("Bob".to_string())],
+            },
+        )?;
+
+        let mut ctx = ExecutionContext::for_mutation(&catalog, &mut storage);
+        let statement = UpdateStatement {
+            table: "users".to_string(),
+            assignments: vec![UpdateAssignment {
+                column: "name".to_string(),
+                value: Expression::Literal(Value::Text("Bobby".to_string())),
+            }],
+            where_clause: Some(WhereClause {
+                conditions: vec![Condition::Comparison {
+                    left: Expression::Column("id".to_string()),
+                    operator: ComparisonOperator::Equal,
+                    right: Expression::Literal(Value::Integer(2)),
+                }],
+            }),
+        };
+
+        let mut executor = UpdateExecutor::new(
+            statement,
+            crate::query::planner::SelectAccessPath::PrimaryKeyLookup,
+        );
+        let result = executor.execute(&mut ctx)?;
+
+        assert_eq!(result.affected_rows, 1);
+        let row = ctx
+            .engine
+            .lookup_row_by_primary_key(&table, &[Value::Integer(2)])?
+            .expect("updated row should exist");
+        assert_eq!(
+            row.values,
+            vec![Value::Integer(2), Value::Text("Bobby".to_string())]
+        );
+        storage.flush()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_create_executor() -> Result<()> {
         let catalog = Schema::new();
         let db = TestDbFile::new("_test_create_executor");
@@ -756,6 +841,54 @@ mod planner_tests {
                 assert_eq!(node.access_path, SelectAccessPath::PrimaryKeyLookup);
             }
             other => panic!("expected delete plan node, got {:?}", other),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_query_planner_update_uses_primary_key_lookup() -> Result<()> {
+        let mut catalog = Schema::new();
+
+        let columns = vec![
+            crate::catalog::Column::new(
+                crate::catalog::ColumnId::new(1),
+                "id".to_string(),
+                DataType::Integer,
+            )
+            .primary_key(true),
+            crate::catalog::Column::new(
+                crate::catalog::ColumnId::new(2),
+                "name".to_string(),
+                DataType::Text,
+            ),
+        ];
+        catalog.create_table("users".to_string(), columns)?;
+
+        let planner = QueryPlanner::new(catalog);
+        let statement = UpdateStatement {
+            table: "users".to_string(),
+            assignments: vec![UpdateAssignment {
+                column: "name".to_string(),
+                value: Expression::Literal(Value::Text("Updated".to_string())),
+            }],
+            where_clause: Some(WhereClause {
+                conditions: vec![Condition::Comparison {
+                    left: Expression::Column("id".to_string()),
+                    operator: ComparisonOperator::Equal,
+                    right: Expression::Literal(Value::Integer(1)),
+                }],
+            }),
+        };
+
+        let plan = planner.plan(Statement::Update(statement))?;
+
+        match &plan.node {
+            PlanNode::Update(node) => {
+                assert!(node.has_filter);
+                assert_eq!(node.access_path, SelectAccessPath::PrimaryKeyLookup);
+            }
+            other => panic!("expected update plan node, got {:?}", other),
         }
 
         Ok(())

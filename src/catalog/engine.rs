@@ -219,6 +219,10 @@ impl CatalogEngine {
         Ok(())
     }
 
+    pub fn insert_row_with_rowid(&mut self, table_name: &str, row: StoredRow) -> Result<()> {
+        self.insert_stored_row(table_name, row)
+    }
+
     pub fn delete_from_table_by_rowid(&mut self, table_name: &str, rowid: u64) -> Result<bool> {
         let root_page_id = self.lookup_table_metadata(table_name)?.root_page_id;
         let deleted = {

@@ -844,6 +844,43 @@ impl UpdateExecutor {
 
         Ok(())
     }
+
+    fn ensure_updated_primary_keys_remain_unique(
+        &self,
+        ctx: &mut ExecutionContext<'_>,
+        table: &Table,
+        updated_rows: &[StoredRow],
+    ) -> Result<()> {
+        self.ensure_primary_keys_unique(
+            table,
+            &updated_rows
+                .iter()
+                .map(|row| row.values.clone())
+                .collect::<Vec<_>>(),
+        )?;
+
+        for row in updated_rows {
+            let candidate_pk = table.get_primary_key_values(&row.values).map_err(|err| {
+                HematiteError::ParseError(format!("Failed to extract primary key values: {}", err))
+            })?;
+            if let Some(existing_rowid) =
+                ctx.engine.lookup_primary_key_rowid(table, &candidate_pk)?
+            {
+                if existing_rowid != row.row_id
+                    && !updated_rows
+                        .iter()
+                        .any(|updated_row| updated_row.row_id == existing_rowid)
+                {
+                    return Err(HematiteError::ParseError(format!(
+                        "Duplicate primary key for table '{}': {:?}",
+                        table.name, candidate_pk
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl QueryExecutor for UpdateExecutor {
@@ -858,7 +895,6 @@ impl QueryExecutor for UpdateExecutor {
             })?
             .clone();
 
-        let all_rows = ctx.engine.read_rows_with_ids(&self.statement.table)?;
         let select_executor = SelectExecutor::new(
             SelectStatement {
                 columns: vec![SelectItem::Wildcard],
@@ -867,74 +903,78 @@ impl QueryExecutor for UpdateExecutor {
                 order_by: Vec::new(),
                 limit: None,
             },
-            SelectAccessPath::FullTableScan,
+            self.access_path.clone(),
         );
 
-        let mut rewritten_rows = Vec::with_capacity(all_rows.len());
+        let rows_to_update = locate_rows_for_access_path(
+            ctx,
+            &table,
+            &self.statement.table,
+            &self.access_path,
+            &select_executor,
+        )?;
+        let mut updated_rows_data = Vec::with_capacity(rows_to_update.len());
         let mut updated_rows = 0usize;
 
-        for stored_row in all_rows {
-            let row = stored_row.values.clone();
-            let should_update = match &self.statement.where_clause {
-                Some(where_clause) => {
-                    let mut matches_where = true;
-                    for condition in &where_clause.conditions {
-                        if select_executor.evaluate_condition(ctx, condition, &row)? != Some(true) {
-                            matches_where = false;
-                            break;
-                        }
-                    }
-                    matches_where
-                }
-                None => true,
-            };
+        for stored_row in rows_to_update {
+            let mut updated_row = stored_row.values.clone();
+            for assignment in &self.statement.assignments {
+                let column_index = table.get_column_index(&assignment.column).ok_or_else(|| {
+                    HematiteError::ParseError(format!(
+                        "Column '{}' does not exist in table '{}'",
+                        assignment.column, self.statement.table
+                    ))
+                })?;
+                let column = &table.columns[column_index];
+                let value =
+                    select_executor.evaluate_expression(ctx, &assignment.value, &updated_row)?;
+                updated_row[column_index] = self.coerce_assignment_value(column, value)?;
+            }
 
-            if should_update {
-                let mut updated_row = row.clone();
-                for assignment in &self.statement.assignments {
-                    let column_index =
-                        table.get_column_index(&assignment.column).ok_or_else(|| {
-                            HematiteError::ParseError(format!(
-                                "Column '{}' does not exist in table '{}'",
-                                assignment.column, self.statement.table
-                            ))
-                        })?;
-                    let column = &table.columns[column_index];
-                    let value = select_executor.evaluate_expression(
-                        ctx,
-                        &assignment.value,
-                        &updated_row,
-                    )?;
-                    updated_row[column_index] = self.coerce_assignment_value(column, value)?;
-                }
+            table
+                .validate_row(&updated_row)
+                .map_err(|err| HematiteError::ParseError(err.to_string()))?;
+            updated_rows_data.push(StoredRow {
+                row_id: stored_row.row_id,
+                values: updated_row,
+            });
+            updated_rows += 1;
+        }
 
-                table
-                    .validate_row(&updated_row)
-                    .map_err(|err| HematiteError::ParseError(err.to_string()))?;
-                rewritten_rows.push(StoredRow {
-                    row_id: stored_row.row_id,
-                    values: updated_row,
-                });
-                updated_rows += 1;
-            } else {
-                rewritten_rows.push(stored_row);
+        self.ensure_updated_primary_keys_remain_unique(ctx, &table, &updated_rows_data)?;
+
+        for original_row in &updated_rows_data {
+            if let Some(existing_row) = ctx
+                .engine
+                .lookup_row_by_rowid(&self.statement.table, original_row.row_id)?
+            {
+                ctx.engine
+                    .delete_secondary_index_row(&table, &existing_row)?;
+                let deleted_pk = ctx.engine.delete_primary_key_row(&table, &existing_row)?;
+                if !deleted_pk {
+                    return Err(HematiteError::CorruptedData(format!(
+                        "Primary-key index entry vanished during update execution for table '{}'",
+                        self.statement.table
+                    )));
+                }
+                let deleted = ctx
+                    .engine
+                    .delete_from_table_by_rowid(&self.statement.table, existing_row.row_id)?;
+                if !deleted {
+                    return Err(HematiteError::CorruptedData(format!(
+                        "Rowid {} vanished during update execution for table '{}'",
+                        existing_row.row_id, self.statement.table
+                    )));
+                }
             }
         }
 
-        self.ensure_primary_keys_unique(
-            &table,
-            &rewritten_rows
-                .iter()
-                .map(|row| row.values.clone())
-                .collect::<Vec<_>>(),
-        )?;
-        ctx.engine
-            .replace_table_rows(&self.statement.table, rewritten_rows)?;
-        let refreshed_rows = ctx.engine.read_rows_with_ids(&self.statement.table)?;
-        ctx.engine
-            .rebuild_primary_key_index(&table, &refreshed_rows)?;
-        ctx.engine
-            .rebuild_secondary_indexes(&table, &refreshed_rows)?;
+        for row in updated_rows_data {
+            ctx.engine
+                .insert_row_with_rowid(&self.statement.table, row.clone())?;
+            ctx.engine.register_primary_key_row(&table, row.clone())?;
+            ctx.engine.register_secondary_index_row(&table, row)?;
+        }
 
         Ok(QueryResult {
             affected_rows: updated_rows,
