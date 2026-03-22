@@ -81,12 +81,14 @@ pub struct UpdatePlanNode {
     pub table_name: String,
     pub assignment_count: usize,
     pub has_filter: bool,
+    pub access_path: SelectAccessPath,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeletePlanNode {
     pub table_name: String,
     pub has_filter: bool,
+    pub access_path: SelectAccessPath,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -195,12 +197,15 @@ impl QueryPlanner {
     }
 
     fn plan_update(&self, statement: UpdateStatement) -> Result<QueryPlan> {
+        let analysis = self.analyze_table_access(&statement.table, &statement.where_clause)?;
+        let access_path = self.choose_access_path(&analysis);
         let node = PlanNode::Update(UpdatePlanNode {
             table_name: statement.table.clone(),
             assignment_count: statement.assignments.len(),
             has_filter: statement.where_clause.is_some(),
+            access_path: access_path.clone(),
         });
-        let executor = Box::new(UpdateExecutor::new(statement));
+        let executor = Box::new(UpdateExecutor::new(statement, access_path));
         let estimated_cost = 1000.0;
 
         Ok(QueryPlan {
@@ -213,11 +218,14 @@ impl QueryPlanner {
     }
 
     fn plan_delete(&self, statement: DeleteStatement) -> Result<QueryPlan> {
+        let analysis = self.analyze_table_access(&statement.table, &statement.where_clause)?;
+        let access_path = self.choose_access_path(&analysis);
         let node = PlanNode::Delete(DeletePlanNode {
             table_name: statement.table.clone(),
             has_filter: statement.where_clause.is_some(),
+            access_path: access_path.clone(),
         });
-        let executor = Box::new(DeleteExecutor::new(statement));
+        let executor = Box::new(DeleteExecutor::new(statement, access_path));
         let estimated_cost = 1000.0;
 
         Ok(QueryPlan {
@@ -250,28 +258,7 @@ impl QueryPlanner {
         statement: &SelectStatement,
         analysis: &SelectAnalysis,
     ) -> SelectPlanNode {
-        let access_path = if analysis.rowid_lookup.is_some() {
-            SelectAccessPath::RowIdLookup
-        } else if analysis
-            .usable_indexes
-            .iter()
-            .any(|usage| matches!(usage.index_type, IndexType::PrimaryKey))
-        {
-            SelectAccessPath::PrimaryKeyLookup
-        } else if let Some(index_usage) = analysis
-            .usable_indexes
-            .iter()
-            .find(|usage| matches!(usage.index_type, IndexType::Secondary))
-        {
-            SelectAccessPath::SecondaryIndexLookup(
-                index_usage
-                    .index_name
-                    .clone()
-                    .unwrap_or_else(|| "unnamed_secondary_index".to_string()),
-            )
-        } else {
-            SelectAccessPath::FullTableScan
-        };
+        let access_path = self.choose_access_path(analysis);
 
         let projection = if statement
             .columns
@@ -348,17 +335,33 @@ impl QueryPlanner {
             TableReference::Table(name) => name.clone(),
         };
 
+        self.analyze_table_access(&table_name, &statement.where_clause)
+    }
+
+    fn analyze_table_access(
+        &self,
+        table_name: &str,
+        where_clause: &Option<WhereClause>,
+    ) -> Result<SelectAnalysis> {
+        let table_name = table_name.to_string();
         let table = self.catalog.get_table_by_name(&table_name).ok_or_else(|| {
             HematiteError::ParseError(format!("Table '{}' not found", table_name))
         })?;
 
-        let rowid_lookup = self.extract_rowid_lookup(statement);
+        let synthetic_select = SelectStatement {
+            columns: vec![SelectItem::Wildcard],
+            from: TableReference::Table(table_name.clone()),
+            where_clause: where_clause.clone(),
+            order_by: Vec::new(),
+            limit: None,
+        };
+        let rowid_lookup = self.extract_rowid_lookup(&synthetic_select);
 
         // Analyze WHERE clause for index usage opportunities
-        let usable_indexes = self.analyze_where_clause(&statement.where_clause, table)?;
+        let usable_indexes = self.analyze_where_clause(where_clause, table)?;
 
         // Analyze column access patterns
-        let accessed_columns = self.analyze_column_access(&statement.columns, table)?;
+        let accessed_columns = self.analyze_column_access(&synthetic_select.columns, table)?;
 
         Ok(SelectAnalysis {
             table_name,
@@ -368,6 +371,31 @@ impl QueryPlanner {
             usable_indexes,
             accessed_columns,
         })
+    }
+
+    fn choose_access_path(&self, analysis: &SelectAnalysis) -> SelectAccessPath {
+        if analysis.rowid_lookup.is_some() {
+            SelectAccessPath::RowIdLookup
+        } else if analysis
+            .usable_indexes
+            .iter()
+            .any(|usage| matches!(usage.index_type, IndexType::PrimaryKey))
+        {
+            SelectAccessPath::PrimaryKeyLookup
+        } else if let Some(index_usage) = analysis
+            .usable_indexes
+            .iter()
+            .find(|usage| matches!(usage.index_type, IndexType::Secondary))
+        {
+            SelectAccessPath::SecondaryIndexLookup(
+                index_usage
+                    .index_name
+                    .clone()
+                    .unwrap_or_else(|| "unnamed_secondary_index".to_string()),
+            )
+        } else {
+            SelectAccessPath::FullTableScan
+        }
     }
 
     fn analyze_where_clause(

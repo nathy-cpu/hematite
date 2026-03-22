@@ -787,11 +787,15 @@ impl QueryExecutor for InsertExecutor {
 #[derive(Debug, Clone)]
 pub struct UpdateExecutor {
     pub statement: UpdateStatement,
+    pub access_path: SelectAccessPath,
 }
 
 impl UpdateExecutor {
-    pub fn new(statement: UpdateStatement) -> Self {
-        Self { statement }
+    pub fn new(statement: UpdateStatement, access_path: SelectAccessPath) -> Self {
+        Self {
+            statement,
+            access_path,
+        }
     }
 
     fn coerce_assignment_value(
@@ -851,7 +855,8 @@ impl QueryExecutor for UpdateExecutor {
             .get_table_by_name(&self.statement.table)
             .ok_or_else(|| {
                 HematiteError::ParseError(format!("Table '{}' not found", self.statement.table))
-            })?;
+            })?
+            .clone();
 
         let all_rows = ctx.engine.read_rows_with_ids(&self.statement.table)?;
         let select_executor = SelectExecutor::new(
@@ -917,7 +922,7 @@ impl QueryExecutor for UpdateExecutor {
         }
 
         self.ensure_primary_keys_unique(
-            table,
+            &table,
             &rewritten_rows
                 .iter()
                 .map(|row| row.values.clone())
@@ -927,9 +932,9 @@ impl QueryExecutor for UpdateExecutor {
             .replace_table_rows(&self.statement.table, rewritten_rows)?;
         let refreshed_rows = ctx.engine.read_rows_with_ids(&self.statement.table)?;
         ctx.engine
-            .rebuild_primary_key_index(table, &refreshed_rows)?;
+            .rebuild_primary_key_index(&table, &refreshed_rows)?;
         ctx.engine
-            .rebuild_secondary_indexes(table, &refreshed_rows)?;
+            .rebuild_secondary_indexes(&table, &refreshed_rows)?;
 
         Ok(QueryResult {
             affected_rows: updated_rows,
@@ -942,12 +947,127 @@ impl QueryExecutor for UpdateExecutor {
 #[derive(Debug, Clone)]
 pub struct DeleteExecutor {
     pub statement: DeleteStatement,
+    pub access_path: SelectAccessPath,
 }
 
 impl DeleteExecutor {
-    pub fn new(statement: DeleteStatement) -> Self {
-        Self { statement }
+    pub fn new(statement: DeleteStatement, access_path: SelectAccessPath) -> Self {
+        Self {
+            statement,
+            access_path,
+        }
     }
+}
+
+fn locate_rowids_for_access_path(
+    ctx: &mut ExecutionContext<'_>,
+    table: &Table,
+    table_name: &str,
+    access_path: &SelectAccessPath,
+    select_executor: &SelectExecutor,
+) -> Result<Vec<u64>> {
+    match access_path {
+        SelectAccessPath::RowIdLookup => {
+            Ok(select_executor.extract_rowid_lookup().into_iter().collect())
+        }
+        SelectAccessPath::PrimaryKeyLookup => {
+            let Some(primary_key_values) = select_executor.extract_primary_key_lookup(table) else {
+                return Ok(Vec::new());
+            };
+            let encoded_key = ctx.engine.encode_primary_key(&primary_key_values)?;
+            let mut index_cursor = ctx.engine.open_primary_key_cursor(table)?;
+            Ok(index_cursor
+                .seek_key(&encoded_key)
+                .then(|| index_cursor.current().map(|entry| entry.row_id))
+                .flatten()
+                .into_iter()
+                .collect())
+        }
+        SelectAccessPath::SecondaryIndexLookup(index_name) => {
+            let Some(key_values) =
+                select_executor.extract_secondary_index_lookup(table, index_name)
+            else {
+                return Ok(Vec::new());
+            };
+            let encoded_key = ctx.engine.encode_secondary_index_key(&key_values)?;
+            let mut index_cursor = ctx.engine.open_secondary_index_cursor(table, index_name)?;
+            let mut rowids = Vec::new();
+
+            if index_cursor.seek_key(&encoded_key) {
+                loop {
+                    let Some(entry) = index_cursor.current() else {
+                        break;
+                    };
+                    if entry.key.as_slice() != encoded_key.as_slice() {
+                        break;
+                    }
+                    rowids.push(entry.row_id);
+                    if !index_cursor.next() {
+                        break;
+                    }
+                }
+            }
+
+            Ok(rowids)
+        }
+        SelectAccessPath::FullTableScan => {
+            let mut table_cursor = ctx.engine.open_table_cursor(table_name)?;
+            let mut rowids = Vec::new();
+            if table_cursor.first() {
+                loop {
+                    if let Some(row) = table_cursor.current() {
+                        rowids.push(row.row_id);
+                    }
+                    if !table_cursor.next() {
+                        break;
+                    }
+                }
+            }
+            Ok(rowids)
+        }
+    }
+}
+
+fn locate_rows_for_access_path(
+    ctx: &mut ExecutionContext<'_>,
+    table: &Table,
+    table_name: &str,
+    access_path: &SelectAccessPath,
+    select_executor: &SelectExecutor,
+) -> Result<Vec<StoredRow>> {
+    let rowids =
+        locate_rowids_for_access_path(ctx, table, table_name, access_path, select_executor)?;
+    let mut table_cursor = ctx.engine.open_table_cursor(table_name)?;
+    let mut rows = Vec::new();
+
+    for rowid in rowids {
+        if table_cursor.seek_rowid(rowid) {
+            if let Some(row) = table_cursor.current() {
+                let row = row.clone();
+                let include = match &select_executor.statement.where_clause {
+                    Some(where_clause) => {
+                        let mut matches_where = true;
+                        for condition in &where_clause.conditions {
+                            if select_executor.evaluate_condition(ctx, condition, &row.values)?
+                                != Some(true)
+                            {
+                                matches_where = false;
+                                break;
+                            }
+                        }
+                        matches_where
+                    }
+                    None => true,
+                };
+
+                if include {
+                    rows.push(row);
+                }
+            }
+        }
+    }
+
+    Ok(rows)
 }
 
 impl QueryExecutor for DeleteExecutor {
@@ -959,9 +1079,9 @@ impl QueryExecutor for DeleteExecutor {
             .get_table_by_name(&self.statement.table)
             .ok_or_else(|| {
                 HematiteError::ParseError(format!("Table '{}' not found", self.statement.table))
-            })?;
+            })?
+            .clone();
 
-        let all_rows = ctx.engine.read_rows_with_ids(&self.statement.table)?;
         let select_executor = SelectExecutor::new(
             SelectStatement {
                 columns: vec![SelectItem::Wildcard],
@@ -970,34 +1090,20 @@ impl QueryExecutor for DeleteExecutor {
                 order_by: Vec::new(),
                 limit: None,
             },
-            SelectAccessPath::FullTableScan,
+            self.access_path.clone(),
         );
 
-        let mut rows_to_delete = Vec::new();
-        for stored_row in all_rows {
-            let row = stored_row.values.clone();
-            let delete_row = match &self.statement.where_clause {
-                Some(where_clause) => {
-                    let mut matches_where = true;
-                    for condition in &where_clause.conditions {
-                        if select_executor.evaluate_condition(ctx, condition, &row)? != Some(true) {
-                            matches_where = false;
-                            break;
-                        }
-                    }
-                    matches_where
-                }
-                None => true,
-            };
-
-            if delete_row {
-                rows_to_delete.push(stored_row);
-            }
-        }
+        let rows_to_delete = locate_rows_for_access_path(
+            ctx,
+            &table,
+            &self.statement.table,
+            &self.access_path,
+            &select_executor,
+        )?;
 
         for row in &rows_to_delete {
-            ctx.engine.delete_secondary_index_row(table, row)?;
-            let deleted_pk = ctx.engine.delete_primary_key_row(table, row)?;
+            ctx.engine.delete_secondary_index_row(&table, row)?;
+            let deleted_pk = ctx.engine.delete_primary_key_row(&table, row)?;
             if !deleted_pk {
                 return Err(HematiteError::CorruptedData(format!(
                     "Primary-key index entry vanished during delete execution for table '{}'",
