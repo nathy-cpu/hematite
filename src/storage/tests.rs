@@ -603,6 +603,23 @@ mod mod_tests {
     }
 
     #[test]
+    fn test_new_table_root_uses_btree_page_format() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_storage_table_root_is_btree");
+        let mut storage = StorageEngine::new(test_db.path())?;
+
+        let root_page_id = storage.create_table("users")?;
+        let root_page = storage.read_page(root_page_id)?;
+        let root_node = BTreeNode::from_page(root_page)?;
+
+        assert_eq!(root_node.page_id, root_page_id);
+        assert_eq!(root_node.node_type, NodeType::Leaf);
+        assert!(root_node.keys.is_empty());
+        assert!(root_node.values.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
     fn test_row_ids_survive_table_rewrite() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_storage_row_ids_survive_rewrite");
         let mut storage = StorageEngine::new(test_db.path())?;

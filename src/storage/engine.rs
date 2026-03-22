@@ -12,19 +12,13 @@ use crate::btree::{BTreeKey, BTreeNode, BTreeValue, NodeType};
 use crate::catalog::{Table, Value};
 use crate::error::Result;
 use crate::storage::free_list::FreeList;
-use crate::storage::table::{PageOperations, TableManager};
+use crate::storage::table::TableManager;
 use crate::storage::{
     cursor::TableCursor, pager::Pager, Page, PageId, StorageIntegrityReport, StoredRow,
-    TableMetadata, DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID, TABLE_PAGE_HEADER_SIZE,
+    TableMetadata, DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TableStorageKind {
-    LegacyPageChain,
-    RowidBtree,
-}
 
 /// Main storage engine interface
 #[derive(Debug)]
@@ -325,14 +319,7 @@ impl StorageEngine {
             }
 
             let (table_pages, counted_rows, max_row_id) =
-                match self.table_storage_kind(metadata.root_page_id)? {
-                    TableStorageKind::LegacyPageChain => {
-                        self.validate_table_page_chain(&table_name, &metadata)?
-                    }
-                    TableStorageKind::RowidBtree => {
-                        self.validate_table_btree_pages(&table_name, metadata.root_page_id)?
-                    }
-                };
+                self.validate_table_btree_pages(&table_name, metadata.root_page_id)?;
 
             for page_id in table_pages {
                 if free_pages.contains(&page_id) {
@@ -411,98 +398,6 @@ impl StorageEngine {
         })
     }
 
-    fn validate_table_page_chain(
-        &mut self,
-        table_name: &str,
-        metadata: &TableMetadata,
-    ) -> Result<(Vec<PageId>, u64, u64)> {
-        let mut current_page_id = metadata.root_page_id;
-        let mut previous_page_id = PageId::invalid();
-        let mut visited = HashSet::new();
-        let mut pages = Vec::new();
-        let mut row_count = 0u64;
-        let mut max_row_id = 0u64;
-
-        loop {
-            if !visited.insert(current_page_id) {
-                return Err(crate::error::HematiteError::CorruptedData(format!(
-                    "Cycle detected in page chain for table '{}'",
-                    table_name
-                )));
-            }
-
-            let page = self.read_page(current_page_id)?;
-            let header = self.table_manager.read_page_header(&page)?;
-            if header.page_type != crate::storage::PageType::TableData {
-                return Err(crate::error::HematiteError::CorruptedData(format!(
-                    "Table '{}' references non-table-data page {}",
-                    table_name,
-                    current_page_id.as_u32()
-                )));
-            }
-
-            if header.prev_page_id != previous_page_id {
-                return Err(crate::error::HematiteError::CorruptedData(format!(
-                    "Broken prev_page_id chain for table '{}' at page {}",
-                    table_name,
-                    current_page_id.as_u32()
-                )));
-            }
-
-            let mut offset = TABLE_PAGE_HEADER_SIZE;
-            for _ in 0..header.row_count {
-                if offset + 4 > crate::storage::PAGE_SIZE {
-                    return Err(crate::error::HematiteError::CorruptedData(format!(
-                        "Row length exceeds page bounds for table '{}' on page {}",
-                        table_name,
-                        current_page_id.as_u32()
-                    )));
-                }
-
-                let row_length = crate::storage::serialization::RowSerializer::read_row_length(
-                    &page.data[offset..offset + 4],
-                )?;
-                offset += 4;
-
-                if offset + row_length > crate::storage::PAGE_SIZE {
-                    return Err(crate::error::HematiteError::CorruptedData(format!(
-                        "Row payload exceeds page bounds for table '{}' on page {}",
-                        table_name,
-                        current_page_id.as_u32()
-                    )));
-                }
-
-                let row = crate::storage::serialization::RowSerializer::deserialize_stored_row(
-                    &page.data[offset..offset + row_length],
-                )?;
-                max_row_id = max_row_id.max(row.row_id);
-                row_count += 1;
-                offset += row_length;
-            }
-
-            pages.push(current_page_id);
-
-            if header.next_page_id == PageId::invalid() {
-                break;
-            }
-
-            if header.next_page_id == DB_HEADER_PAGE_ID
-                || header.next_page_id == STORAGE_METADATA_PAGE_ID
-            {
-                return Err(crate::error::HematiteError::CorruptedData(format!(
-                    "Table '{}' points at reserved page {}",
-                    table_name,
-                    header.next_page_id.as_u32()
-                )));
-            }
-
-            previous_page_id = current_page_id;
-            current_page_id = header.next_page_id;
-        }
-
-        Ok((pages, row_count, max_row_id))
-    }
-
     fn validate_table_btree_pages(
         &mut self,
         table_name: &str,
@@ -557,48 +452,6 @@ impl StorageEngine {
         }
 
         Ok(())
-    }
-
-    fn row_data_end(page: &Page, row_count: u32) -> Result<usize> {
-        let mut offset = TABLE_PAGE_HEADER_SIZE;
-
-        for _ in 0..row_count {
-            if offset + 4 > crate::storage::PAGE_SIZE {
-                return Err(crate::error::HematiteError::CorruptedData(
-                    "Row length exceeds page bounds".to_string(),
-                ));
-            }
-
-            let row_length = crate::storage::serialization::RowSerializer::read_row_length(
-                &page.data[offset..offset + 4],
-            )?;
-            offset += 4 + row_length;
-
-            if offset > crate::storage::PAGE_SIZE {
-                return Err(crate::error::HematiteError::CorruptedData(
-                    "Row payload exceeds page bounds".to_string(),
-                ));
-            }
-        }
-
-        Ok(offset)
-    }
-
-    fn initialize_table_page(
-        &self,
-        page_id: PageId,
-        prev_page_id: PageId,
-        next_page_id: PageId,
-    ) -> Result<Page> {
-        let mut page = Page::new(page_id);
-        let header = crate::storage::TablePageHeader {
-            page_type: crate::storage::PageType::TableData,
-            row_count: 0,
-            next_page_id,
-            prev_page_id,
-        };
-        self.table_manager.write_page_header(&mut page, &header)?;
-        Ok(page)
     }
 
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
@@ -771,86 +624,7 @@ impl StorageEngine {
             (metadata.root_page_id, metadata.next_row_id)
         };
 
-        match self.table_storage_kind(root_page_id)? {
-            TableStorageKind::LegacyPageChain => {
-                self.insert_into_table_legacy(table_name, root_page_id, row, row_id)
-            }
-            TableStorageKind::RowidBtree => {
-                self.insert_into_table_btree(table_name, root_page_id, row_id, row)
-            }
-        }
-    }
-
-    fn insert_into_table_legacy(
-        &mut self,
-        table_name: &str,
-        root_page_id: PageId,
-        row: Vec<crate::catalog::Value>,
-        row_id: u64,
-    ) -> Result<u64> {
-        let serialized_row =
-            crate::storage::serialization::RowSerializer::serialize_stored_row(&StoredRow {
-                row_id,
-                values: row,
-            })?;
-        if TABLE_PAGE_HEADER_SIZE + serialized_row.len() > crate::storage::PAGE_SIZE {
-            return Err(crate::error::HematiteError::StorageError(
-                "Row too large to fit in a table page".to_string(),
-            ));
-        }
-
-        let mut current_page_id = root_page_id;
-
-        loop {
-            let mut page = self.read_page(current_page_id)?;
-            let mut header = self.table_manager.read_page_header(&page)?;
-            let offset = Self::row_data_end(&page, header.row_count)?;
-
-            if header.row_count < crate::storage::MAX_ROWS_PER_PAGE as u32
-                && offset + serialized_row.len() <= crate::storage::PAGE_SIZE
-            {
-                page.data[offset..offset + serialized_row.len()].copy_from_slice(&serialized_row);
-                header.row_count += 1;
-                self.table_manager.write_page_header(&mut page, &header)?;
-                self.write_page(page)?;
-
-                // Update metadata
-                if let Some(metadata) = self.table_manager.get_table_metadata_mut(table_name) {
-                    metadata.row_count += 1;
-                    metadata.next_row_id += 1;
-                }
-
-                return Ok(row_id);
-            }
-
-            if header.next_page_id != PageId::invalid() {
-                current_page_id = header.next_page_id;
-                continue;
-            }
-
-            let new_page_id = self.allocate_page()?;
-            let mut new_page =
-                self.initialize_table_page(new_page_id, current_page_id, PageId::invalid())?;
-
-            header.next_page_id = new_page_id;
-            self.table_manager.write_page_header(&mut page, &header)?;
-            self.write_page(page)?;
-
-            new_page.data[TABLE_PAGE_HEADER_SIZE..TABLE_PAGE_HEADER_SIZE + serialized_row.len()]
-                .copy_from_slice(&serialized_row);
-            let mut new_header = self.table_manager.read_page_header(&new_page)?;
-            new_header.row_count = 1;
-            self.table_manager
-                .write_page_header(&mut new_page, &new_header)?;
-            self.write_page(new_page)?;
-
-            if let Some(metadata) = self.table_manager.get_table_metadata_mut(table_name) {
-                metadata.row_count += 1;
-                metadata.next_row_id += 1;
-            }
-
-            return Ok(row_id);
-        }
+        self.insert_into_table_btree(table_name, root_page_id, row_id, row)
     }
 
     fn insert_into_table_btree(
@@ -976,42 +750,17 @@ impl StorageEngine {
             metadata.root_page_id
         };
 
-        match self.table_storage_kind(root_page_id)? {
-            TableStorageKind::LegacyPageChain => {
-                let mut page_ids = vec![root_page_id];
-                let mut current_page_id = root_page_id;
-                loop {
-                    let page = self.read_page(current_page_id)?;
-                    let header = self.table_manager.read_page_header(&page)?;
-                    if header.next_page_id == PageId::invalid() {
-                        break;
-                    }
-                    current_page_id = header.next_page_id;
-                    page_ids.push(current_page_id);
-                }
-
-                let root_page =
-                    self.initialize_table_page(root_page_id, PageId::invalid(), PageId::invalid())?;
-                self.write_page(root_page)?;
-
-                for page_id in page_ids.into_iter().skip(1) {
-                    self.deallocate_page(page_id)?;
-                }
-            }
-            TableStorageKind::RowidBtree => {
-                let mut page_ids = Vec::new();
-                self.collect_btree_page_ids(root_page_id, &mut page_ids)?;
-                for page_id in page_ids {
-                    if page_id != root_page_id {
-                        self.deallocate_page(page_id)?;
-                    }
-                }
-                let mut root_page = Page::new(root_page_id);
-                let root = BTreeNode::new_leaf(root_page_id);
-                root.to_page(&mut root_page)?;
-                self.write_page(root_page)?;
+        let mut page_ids = Vec::new();
+        self.collect_btree_page_ids(root_page_id, &mut page_ids)?;
+        for page_id in page_ids {
+            if page_id != root_page_id {
+                self.deallocate_page(page_id)?;
             }
         }
+        let mut root_page = Page::new(root_page_id);
+        let root = BTreeNode::new_leaf(root_page_id);
+        root.to_page(&mut root_page)?;
+        self.write_page(root_page)?;
 
         let next_row_id = self
             .table_manager
@@ -1046,73 +795,7 @@ impl StorageEngine {
             metadata.root_page_id
         };
 
-        match self.table_storage_kind(root_page_id)? {
-            TableStorageKind::LegacyPageChain => {
-                self.delete_from_table_by_rowid_legacy(table_name, root_page_id, rowid)
-            }
-            TableStorageKind::RowidBtree => {
-                self.delete_from_table_by_rowid_btree(table_name, root_page_id, rowid)
-            }
-        }
-    }
-
-    fn delete_from_table_by_rowid_legacy(
-        &mut self,
-        table_name: &str,
-        root_page_id: PageId,
-        rowid: u64,
-    ) -> Result<bool> {
-        let mut current_page_id = root_page_id;
-        loop {
-            let mut page = self.read_page(current_page_id)?;
-            let mut header = self.table_manager.read_page_header(&page)?;
-            let mut offset = TABLE_PAGE_HEADER_SIZE;
-            let page_end = Self::row_data_end(&page, header.row_count)?;
-
-            for _ in 0..header.row_count {
-                if offset + 4 > crate::storage::PAGE_SIZE {
-                    return Err(crate::error::HematiteError::CorruptedData(
-                        "Row length exceeds page bounds".to_string(),
-                    ));
-                }
-
-                let row_len = crate::storage::serialization::RowSerializer::read_row_length(
-                    &page.data[offset..offset + 4],
-                )?;
-                let payload_start = offset + 4;
-                let payload_end = payload_start + row_len;
-                if payload_end > crate::storage::PAGE_SIZE {
-                    return Err(crate::error::HematiteError::CorruptedData(
-                        "Row payload exceeds page bounds".to_string(),
-                    ));
-                }
-
-                let row = crate::storage::serialization::RowSerializer::deserialize_stored_row(
-                    &page.data[payload_start..payload_end],
-                )?;
-                if row.row_id == rowid {
-                    page.data.copy_within(payload_end..page_end, offset);
-                    let new_end = page_end - (payload_end - offset);
-                    page.data[new_end..page_end].fill(0);
-
-                    header.row_count -= 1;
-                    self.table_manager.write_page_header(&mut page, &header)?;
-                    self.write_page(page)?;
-
-                    if let Some(metadata) = self.table_manager.get_table_metadata_mut(table_name) {
-                        metadata.row_count = metadata.row_count.saturating_sub(1);
-                    }
-                    return Ok(true);
-                }
-
-                offset = payload_end;
-            }
-
-            if header.next_page_id == PageId::invalid() {
-                return Ok(false);
-            }
-            current_page_id = header.next_page_id;
-        }
+        self.delete_from_table_by_rowid_btree(table_name, root_page_id, rowid)
     }
 
     fn delete_from_table_by_rowid_btree(
@@ -1171,80 +854,7 @@ impl StorageEngine {
             metadata.root_page_id
         };
 
-        match self.table_storage_kind(root_page_id)? {
-            TableStorageKind::LegacyPageChain => {
-                let serialized_row =
-                    crate::storage::serialization::RowSerializer::serialize_stored_row(&row)?;
-                if TABLE_PAGE_HEADER_SIZE + serialized_row.len() > crate::storage::PAGE_SIZE {
-                    return Err(crate::error::HematiteError::StorageError(
-                        "Row too large to fit in a table page".to_string(),
-                    ));
-                }
-
-                let mut current_page_id = root_page_id;
-                loop {
-                    let mut page = self.read_page(current_page_id)?;
-                    let mut header = self.table_manager.read_page_header(&page)?;
-                    let offset = Self::row_data_end(&page, header.row_count)?;
-
-                    if header.row_count < crate::storage::MAX_ROWS_PER_PAGE as u32
-                        && offset + serialized_row.len() <= crate::storage::PAGE_SIZE
-                    {
-                        page.data[offset..offset + serialized_row.len()]
-                            .copy_from_slice(&serialized_row);
-                        header.row_count += 1;
-                        self.table_manager.write_page_header(&mut page, &header)?;
-                        self.write_page(page)?;
-
-                        if let Some(metadata) =
-                            self.table_manager.get_table_metadata_mut(table_name)
-                        {
-                            metadata.row_count += 1;
-                        }
-
-                        return Ok(());
-                    }
-
-                    if header.next_page_id != PageId::invalid() {
-                        current_page_id = header.next_page_id;
-                        continue;
-                    }
-
-                    let new_page_id = self.allocate_page()?;
-                    let mut new_page = self.initialize_table_page(
-                        new_page_id,
-                        current_page_id,
-                        PageId::invalid(),
-                    )?;
-
-                    header.next_page_id = new_page_id;
-                    self.table_manager.write_page_header(&mut page, &header)?;
-                    self.write_page(page)?;
-
-                    new_page.data
-                        [TABLE_PAGE_HEADER_SIZE..TABLE_PAGE_HEADER_SIZE + serialized_row.len()]
-                        .copy_from_slice(&serialized_row);
-                    let mut new_header = self.table_manager.read_page_header(&new_page)?;
-                    new_header.row_count = 1;
-                    self.table_manager
-                        .write_page_header(&mut new_page, &new_header)?;
-                    self.write_page(new_page)?;
-
-                    if let Some(metadata) = self.table_manager.get_table_metadata_mut(table_name) {
-                        metadata.row_count += 1;
-                    }
-
-                    return Ok(());
-                }
-            }
-            TableStorageKind::RowidBtree => self.insert_btree_row_with_id(
-                table_name,
-                root_page_id,
-                row.row_id,
-                row.values,
-                false,
-            ),
-        }
+        self.insert_btree_row_with_id(table_name, root_page_id, row.row_id, row.values, false)
     }
 
     pub fn drop_table(&mut self, table_name: &str) -> Result<()> {
@@ -1255,29 +865,10 @@ impl StorageEngine {
             ))
         })?;
 
-        match self.table_storage_kind(metadata.root_page_id)? {
-            TableStorageKind::LegacyPageChain => {
-                let mut current_page_id = metadata.root_page_id;
-                loop {
-                    let page = self.read_page(current_page_id)?;
-                    let header = self.table_manager.read_page_header(&page)?;
-                    let next_page_id = header.next_page_id;
-                    self.deallocate_page(current_page_id)?;
-
-                    if next_page_id == PageId::invalid() {
-                        break;
-                    }
-
-                    current_page_id = next_page_id;
-                }
-            }
-            TableStorageKind::RowidBtree => {
-                let mut page_ids = Vec::new();
-                self.collect_btree_page_ids(metadata.root_page_id, &mut page_ids)?;
-                for page_id in page_ids {
-                    self.deallocate_page(page_id)?;
-                }
-            }
+        let mut page_ids = Vec::new();
+        self.collect_btree_page_ids(metadata.root_page_id, &mut page_ids)?;
+        for page_id in page_ids {
+            self.deallocate_page(page_id)?;
         }
 
         self.primary_key_indexes.remove(table_name);
@@ -1299,23 +890,6 @@ impl StorageEngine {
     }
 
     pub fn open_table_cursor(&mut self, table_name: &str) -> Result<TableCursor> {
-        let rows = self.read_rows_with_ids_from_table_storage(table_name)?;
-        Ok(TableCursor::new(rows))
-    }
-
-    fn table_storage_kind(&mut self, root_page_id: PageId) -> Result<TableStorageKind> {
-        let root_page = self.read_page(root_page_id)?;
-        if root_page.data[0..4] == *b"BTRE" {
-            Ok(TableStorageKind::RowidBtree)
-        } else {
-            Ok(TableStorageKind::LegacyPageChain)
-        }
-    }
-
-    fn read_rows_with_ids_from_table_storage(
-        &mut self,
-        table_name: &str,
-    ) -> Result<Vec<StoredRow>> {
         let root_page_id = self
             .table_manager
             .get_table_metadata(table_name)
@@ -1326,67 +900,8 @@ impl StorageEngine {
                 ))
             })?
             .root_page_id;
-
-        match self.table_storage_kind(root_page_id)? {
-            TableStorageKind::LegacyPageChain => {
-                self.read_rows_with_ids_from_legacy_pages(table_name)
-            }
-            TableStorageKind::RowidBtree => self.read_rows_with_ids_from_btree(root_page_id),
-        }
-    }
-
-    fn read_rows_with_ids_from_legacy_pages(&mut self, table_name: &str) -> Result<Vec<StoredRow>> {
-        let metadata = self
-            .table_manager
-            .get_table_metadata(table_name)
-            .ok_or_else(|| {
-                crate::error::HematiteError::StorageError(format!(
-                    "Table '{}' does not exist",
-                    table_name
-                ))
-            })?;
-
-        let mut rows = Vec::new();
-        let mut current_page_id = metadata.root_page_id;
-
-        loop {
-            let page = self.read_page(current_page_id)?;
-            let header = self.table_manager.read_page_header(&page)?;
-            let mut offset = TABLE_PAGE_HEADER_SIZE;
-
-            for _ in 0..header.row_count {
-                if offset + 4 > crate::storage::PAGE_SIZE {
-                    return Err(crate::error::HematiteError::CorruptedData(
-                        "Row length exceeds page bounds".to_string(),
-                    ));
-                }
-
-                let row_length = crate::storage::serialization::RowSerializer::read_row_length(
-                    &page.data[offset..offset + 4],
-                )?;
-                offset += 4;
-
-                if offset + row_length > crate::storage::PAGE_SIZE {
-                    return Err(crate::error::HematiteError::CorruptedData(
-                        "Row payload exceeds page bounds".to_string(),
-                    ));
-                }
-
-                let row_data = &page.data[offset..offset + row_length];
-                let row =
-                    crate::storage::serialization::RowSerializer::deserialize_stored_row(row_data)?;
-                rows.push(row);
-                offset += row_length;
-            }
-
-            if header.next_page_id == PageId::invalid() {
-                break;
-            }
-
-            current_page_id = header.next_page_id;
-        }
-
-        Ok(rows)
+        let rows = self.read_rows_with_ids_from_btree(root_page_id)?;
+        Ok(TableCursor::new(rows))
     }
 
     fn read_rows_with_ids_from_btree(&mut self, root_page_id: PageId) -> Result<Vec<StoredRow>> {
@@ -1458,16 +973,7 @@ impl StorageEngine {
                 ))
             })?
             .root_page_id;
-        match self.table_storage_kind(root_page_id)? {
-            TableStorageKind::LegacyPageChain => {
-                let mut cursor = self.open_table_cursor(table_name)?;
-                if !cursor.seek_rowid(rowid) {
-                    return Ok(None);
-                }
-                Ok(cursor.current().cloned())
-            }
-            TableStorageKind::RowidBtree => self.lookup_row_by_rowid_btree(root_page_id, rowid),
-        }
+        self.lookup_row_by_rowid_btree(root_page_id, rowid)
     }
 
     fn lookup_row_by_rowid_btree(
@@ -1625,19 +1131,6 @@ impl StorageEngine {
         crate::storage::serialization::RowSerializer::serialize(values)
     }
 
-    // Helper methods for page operations
-    pub fn write_page_header(
-        &self,
-        page: &mut Page,
-        header: &crate::storage::TablePageHeader,
-    ) -> Result<()> {
-        self.table_manager.write_page_header(page, header)
-    }
-
-    pub fn read_page_header(&self, page: &Page) -> Result<crate::storage::TablePageHeader> {
-        self.table_manager.read_page_header(page)
-    }
-
     pub fn create_empty_btree(&mut self) -> Result<PageId> {
         use crate::btree::BTreeNode;
 
@@ -1650,16 +1143,5 @@ impl StorageEngine {
 
         self.write_page(root_page)?;
         Ok(root_page_id)
-    }
-}
-
-// Implement PageOperations trait for StorageEngine
-impl PageOperations for StorageEngine {
-    fn read_page(&mut self, page_id: PageId) -> Result<Page> {
-        self.read_page(page_id)
-    }
-
-    fn write_page(&mut self, page: Page) -> Result<()> {
-        self.write_page(page)
     }
 }
