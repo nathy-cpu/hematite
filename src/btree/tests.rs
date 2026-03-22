@@ -176,6 +176,36 @@ mod mod_tests {
     }
 
     #[test]
+    fn test_byte_tree_insert_reports_root_changes() -> Result<()> {
+        let path = tmp_db();
+        let storage = new_storage(&path)?;
+        let trees = ByteTreeStore::new(storage);
+        let original_root_page_id = trees.create_tree()?;
+        let mut tree = trees.open_tree(original_root_page_id)?;
+        let mut final_root_page_id = original_root_page_id;
+        let mut saw_root_change = false;
+
+        for i in 0..200u32 {
+            let key = i.to_be_bytes();
+            let value = format!("value-{i}");
+            let mutation = tree.insert_with_mutation(&key, value.as_bytes())?;
+            final_root_page_id = mutation.root_page_id;
+            saw_root_change |= mutation.root_changed;
+        }
+
+        assert!(saw_root_change);
+        assert_ne!(final_root_page_id, original_root_page_id);
+
+        let mut reopened = trees.open_tree(final_root_page_id)?;
+        assert_eq!(
+            reopened.get(&42u32.to_be_bytes())?,
+            Some(b"value-42".to_vec())
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn test_btree_delete() -> Result<()> {
         let path = tmp_db();
         let storage = new_storage(&path)?;

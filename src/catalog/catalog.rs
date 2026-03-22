@@ -126,21 +126,23 @@ impl Catalog {
         let new_schema_root = trees.create_tree()?;
         let mut btree = trees.open_tree(new_schema_root)?;
 
+        let mut current_schema_root = new_schema_root;
         for table in table_entries {
             let key = CatalogSchemaCodec::encode_key(&table.name)?;
             let value = CatalogSchemaCodec::encode_value(&table)?;
-            btree.insert(&key, &value)?;
+            let mutation = btree.insert_with_mutation(&key, &value)?;
+            current_schema_root = mutation.root_page_id;
         }
 
         let transaction_active = self.engine.transaction_active();
         self.engine.update_database_header(|header| {
-            header.schema_root_page = new_schema_root;
+            header.schema_root_page = current_schema_root;
         })?;
         if !transaction_active {
             self.engine.flush()?;
         }
 
-        self.schema_root = new_schema_root;
+        self.schema_root = current_schema_root;
         self.schema_dirty = false;
         Ok(())
     }

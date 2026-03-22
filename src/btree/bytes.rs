@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::btree::codec::RawBytesCodec;
 use crate::btree::cursor::BTreeCursor;
-use crate::btree::index::BTreeIndex;
+use crate::btree::index::{BTreeIndex, TreeMutation};
 use crate::btree::tree::{
     collect_tree_page_ids, collect_tree_space_stats, reset_tree_pages, BTreeManager, TreeSpaceStats,
 };
@@ -88,12 +88,21 @@ impl ByteTree {
     }
 
     pub fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        self.insert_with_mutation(key, value).map(|_| ())
+    }
+
+    pub fn insert_with_mutation(&mut self, key: &[u8], value: &[u8]) -> Result<TreeMutation> {
         self.index
-            .insert_typed::<RawBytesCodec>(&key.to_vec(), &value.to_vec())
+            .insert_typed_with_mutation::<RawBytesCodec>(&key.to_vec(), &value.to_vec())
     }
 
     pub fn delete(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        self.index.delete_typed::<RawBytesCodec>(&key.to_vec())
+        self.delete_with_mutation(key).map(|(value, _)| value)
+    }
+
+    pub fn delete_with_mutation(&mut self, key: &[u8]) -> Result<(Option<Vec<u8>>, TreeMutation)> {
+        self.index
+            .delete_typed_with_mutation::<RawBytesCodec>(&key.to_vec())
     }
 
     pub fn cursor(&self) -> Result<ByteTreeCursor> {

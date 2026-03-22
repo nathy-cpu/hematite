@@ -10,6 +10,12 @@ use std::sync::{Arc, Mutex};
 
 use super::node;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TreeMutation {
+    pub root_page_id: PageId,
+    pub root_changed: bool,
+}
+
 /// Main B-tree index interface
 pub struct BTreeIndex {
     storage: Arc<Mutex<Pager>>,
@@ -88,25 +94,45 @@ impl BTreeIndex {
     }
 
     pub fn insert(&mut self, key: BTreeKey, value: BTreeValue) -> Result<()> {
+        self.insert_with_mutation(key, value).map(|_| ())
+    }
+
+    pub fn insert_with_mutation(
+        &mut self,
+        key: BTreeKey,
+        value: BTreeValue,
+    ) -> Result<TreeMutation> {
         // Validate key and value sizes at the top level
         BTreeNode::validate_key_size(&key)?;
         BTreeNode::validate_value_size(&value)?;
+        let original_root_page_id = self.root_page_id;
 
-        // TODO: Implement B-tree insertion with splitting
         let result = self.insert_recursive(self.root_page_id, key, value)?;
 
         if let Some((new_key, new_page_id)) = result {
-            // Root split needed - create new root
             self.create_new_root(new_key, new_page_id)?;
         }
 
-        Ok(())
+        Ok(TreeMutation {
+            root_page_id: self.root_page_id,
+            root_changed: self.root_page_id != original_root_page_id,
+        })
     }
 
     pub fn insert_typed<C: KeyValueCodec>(&mut self, key: &C::Key, value: &C::Value) -> Result<()> {
         let encoded_key = C::encode_key(key)?;
         let encoded_value = C::encode_value(value)?;
         self.insert(BTreeKey::new(encoded_key), BTreeValue::new(encoded_value))
+    }
+
+    pub fn insert_typed_with_mutation<C: KeyValueCodec>(
+        &mut self,
+        key: &C::Key,
+        value: &C::Value,
+    ) -> Result<TreeMutation> {
+        let encoded_key = C::encode_key(key)?;
+        let encoded_value = C::encode_value(value)?;
+        self.insert_with_mutation(BTreeKey::new(encoded_key), BTreeValue::new(encoded_value))
     }
 
     fn insert_recursive(
@@ -189,11 +215,25 @@ impl BTreeIndex {
     }
 
     pub fn delete(&mut self, key: &BTreeKey) -> Result<Option<BTreeValue>> {
+        self.delete_with_mutation(key).map(|(value, _)| value)
+    }
+
+    pub fn delete_with_mutation(
+        &mut self,
+        key: &BTreeKey,
+    ) -> Result<(Option<BTreeValue>, TreeMutation)> {
+        let original_root_page_id = self.root_page_id;
         let result = self.delete_recursive(self.root_page_id, key)?;
         if let Some(new_root) = self.check_root_underflow()? {
             self.root_page_id = new_root;
         }
-        Ok(result)
+        Ok((
+            result,
+            TreeMutation {
+                root_page_id: self.root_page_id,
+                root_changed: self.root_page_id != original_root_page_id,
+            },
+        ))
     }
 
     pub fn delete_typed<C: KeyValueCodec>(&mut self, key: &C::Key) -> Result<Option<C::Value>> {
@@ -203,6 +243,19 @@ impl BTreeIndex {
             Some(value) => Ok(Some(C::decode_value(value.as_bytes())?)),
             None => Ok(None),
         }
+    }
+
+    pub fn delete_typed_with_mutation<C: KeyValueCodec>(
+        &mut self,
+        key: &C::Key,
+    ) -> Result<(Option<C::Value>, TreeMutation)> {
+        let encoded_key = C::encode_key(key)?;
+        let (raw, mutation) = self.delete_with_mutation(&BTreeKey::new(encoded_key))?;
+        let decoded = match raw {
+            Some(value) => Some(C::decode_value(value.as_bytes())?),
+            None => None,
+        };
+        Ok((decoded, mutation))
     }
 
     pub fn cursor(&self) -> Result<BTreeCursor> {

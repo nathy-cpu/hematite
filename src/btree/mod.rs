@@ -9,7 +9,7 @@ pub mod tree;
 
 pub use bytes::{ByteTree, ByteTreeCursor, ByteTreeStore};
 pub use codec::{KeyValueCodec, RawBytesCodec};
-pub use index::BTreeIndex;
+pub use index::{BTreeIndex, TreeMutation};
 pub use node::BTreeNode;
 
 pub const BTREE_ORDER: usize = 100; // Maximum children per node
