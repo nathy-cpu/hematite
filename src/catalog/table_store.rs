@@ -1,5 +1,6 @@
 //! Table storage operations for catalog-managed rowid tables.
 
+use crate::btree::ByteTreeStore;
 use crate::catalog::Value;
 use crate::error::{HematiteError, Result};
 use crate::storage::PageId;
@@ -10,7 +11,7 @@ use super::engine_metadata;
 use super::table_btree;
 
 pub(crate) fn get_storage_stats(engine: &CatalogEngine) -> CatalogStorageStats {
-    let mut pager = engine.pager.lock().unwrap();
+    let pager = engine.pager.lock().unwrap();
     let file_bytes = pager.file_len().unwrap_or(0);
     let allocated_page_count = pager.allocated_page_count();
     let free_page_count = pager.free_pages().len();
@@ -18,10 +19,11 @@ pub(crate) fn get_storage_stats(engine: &CatalogEngine) -> CatalogStorageStats {
     let trailing_free_page_count = pager.trailing_free_page_count();
     let mut live_table_page_count = 0usize;
     let mut table_used_bytes = 0usize;
+    drop(pager);
+    let trees = ByteTreeStore::from_shared_storage(engine.shared_pager());
 
     for metadata in engine.table_metadata.values() {
-        if let Ok(space_stats) = table_btree::collect_space_stats(&mut pager, metadata.root_page_id)
-        {
+        if let Ok(space_stats) = trees.collect_space_stats(metadata.root_page_id) {
             live_table_page_count += space_stats.page_ids.len();
             table_used_bytes += space_stats.used_bytes;
         }
