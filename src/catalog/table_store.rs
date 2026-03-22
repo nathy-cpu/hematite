@@ -1,0 +1,198 @@
+//! Table storage operations for catalog-managed rowid tables.
+
+use crate::catalog::Value;
+use crate::error::{HematiteError, Result};
+use crate::storage::PageId;
+
+use super::cursor::TableCursor;
+use super::engine::{CatalogEngine, CatalogStorageStats, StoredRow};
+use super::engine_metadata;
+use super::table_btree;
+
+pub(crate) fn get_storage_stats(engine: &CatalogEngine) -> CatalogStorageStats {
+    let free_page_count = engine.pager.lock().unwrap().free_pages().len();
+    CatalogStorageStats {
+        table_count: engine.table_metadata.len(),
+        total_rows: engine.table_metadata.values().map(|m| m.row_count).sum(),
+        free_page_count,
+    }
+}
+
+pub(crate) fn create_table(engine: &mut CatalogEngine, table_name: &str) -> Result<PageId> {
+    let root_page_id = engine.create_empty_btree()?;
+    engine_metadata::create_table_metadata(engine, table_name, root_page_id)?;
+    Ok(root_page_id)
+}
+
+pub(crate) fn insert_into_table(
+    engine: &mut CatalogEngine,
+    table_name: &str,
+    row: Vec<Value>,
+) -> Result<u64> {
+    let (root_page_id, row_id) = {
+        let metadata = engine_metadata::lookup_table_metadata(engine, table_name)?;
+        (metadata.root_page_id, metadata.next_row_id)
+    };
+
+    let new_root_page_id = {
+        let mut pager = engine.pager.lock().unwrap();
+        table_btree::insert_row(&mut pager, root_page_id, row_id, row)?
+    };
+
+    if let Some(new_root_page_id) = new_root_page_id {
+        if let Some(metadata) = engine.table_metadata.get_mut(table_name) {
+            metadata.root_page_id = new_root_page_id;
+        }
+    }
+    if let Some(metadata) = engine.table_metadata.get_mut(table_name) {
+        metadata.row_count += 1;
+        metadata.next_row_id += 1;
+    }
+    Ok(row_id)
+}
+
+pub(crate) fn replace_table_rows(
+    engine: &mut CatalogEngine,
+    table_name: &str,
+    rows: Vec<StoredRow>,
+) -> Result<()> {
+    let root_page_id = engine_metadata::lookup_table_metadata(engine, table_name)?.root_page_id;
+    {
+        let mut pager = engine.pager.lock().unwrap();
+        table_btree::reset_tree(&mut pager, root_page_id)?;
+    }
+
+    let next_row_id = engine
+        .table_metadata
+        .get(table_name)
+        .map(|metadata| metadata.next_row_id)
+        .unwrap_or(1);
+
+    if let Some(metadata) = engine.table_metadata.get_mut(table_name) {
+        metadata.row_count = 0;
+        metadata.next_row_id =
+            next_row_id.max(rows.iter().map(|row| row.row_id).max().unwrap_or(0) + 1);
+    }
+
+    for row in rows {
+        insert_stored_row(engine, table_name, row)?;
+    }
+
+    Ok(())
+}
+
+pub(crate) fn insert_row_with_rowid(
+    engine: &mut CatalogEngine,
+    table_name: &str,
+    row: StoredRow,
+) -> Result<()> {
+    insert_stored_row(engine, table_name, row)
+}
+
+pub(crate) fn delete_from_table_by_rowid(
+    engine: &mut CatalogEngine,
+    table_name: &str,
+    rowid: u64,
+) -> Result<bool> {
+    let root_page_id = engine_metadata::lookup_table_metadata(engine, table_name)?.root_page_id;
+    let deleted = {
+        let mut pager = engine.pager.lock().unwrap();
+        table_btree::delete_row(&mut pager, root_page_id, rowid)?
+    };
+    if deleted {
+        if let Some(metadata) = engine.table_metadata.get_mut(table_name) {
+            metadata.row_count = metadata.row_count.saturating_sub(1);
+        }
+    }
+    Ok(deleted)
+}
+
+pub(crate) fn drop_table(engine: &mut CatalogEngine, table_name: &str) -> Result<()> {
+    let metadata = engine.table_metadata.remove(table_name).ok_or_else(|| {
+        HematiteError::StorageError(format!("Table '{}' does not exist", table_name))
+    })?;
+
+    let mut page_ids = Vec::new();
+    {
+        let mut pager = engine.pager.lock().unwrap();
+        table_btree::collect_page_ids(&mut pager, metadata.root_page_id, &mut page_ids)?;
+        for page_id in page_ids {
+            pager.deallocate_page(page_id)?;
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) fn open_table_cursor(
+    engine: &mut CatalogEngine,
+    table_name: &str,
+) -> Result<TableCursor> {
+    let root_page_id = engine_metadata::lookup_table_metadata(engine, table_name)?.root_page_id;
+    let rows = {
+        let mut pager = engine.pager.lock().unwrap();
+        table_btree::read_rows(&mut pager, root_page_id)?
+    };
+    Ok(TableCursor::new(rows))
+}
+
+pub(crate) fn read_rows_with_ids(
+    engine: &mut CatalogEngine,
+    table_name: &str,
+) -> Result<Vec<StoredRow>> {
+    let mut cursor = open_table_cursor(engine, table_name)?;
+    let mut rows = Vec::new();
+    if cursor.first() {
+        loop {
+            if let Some(row) = cursor.current() {
+                rows.push(row.clone());
+            }
+            if !cursor.next() {
+                break;
+            }
+        }
+    }
+    Ok(rows)
+}
+
+pub(crate) fn read_from_table(
+    engine: &mut CatalogEngine,
+    table_name: &str,
+) -> Result<Vec<Vec<Value>>> {
+    Ok(read_rows_with_ids(engine, table_name)?
+        .into_iter()
+        .map(|row| row.values)
+        .collect())
+}
+
+pub(crate) fn lookup_row_by_rowid(
+    engine: &mut CatalogEngine,
+    table_name: &str,
+    rowid: u64,
+) -> Result<Option<StoredRow>> {
+    let root_page_id = engine_metadata::lookup_table_metadata(engine, table_name)?.root_page_id;
+    let mut pager = engine.pager.lock().unwrap();
+    table_btree::lookup_row(&mut pager, root_page_id, rowid)
+}
+
+pub(crate) fn insert_stored_row(
+    engine: &mut CatalogEngine,
+    table_name: &str,
+    row: StoredRow,
+) -> Result<()> {
+    let root_page_id = engine_metadata::lookup_table_metadata(engine, table_name)?.root_page_id;
+    let new_root_page_id = {
+        let mut pager = engine.pager.lock().unwrap();
+        table_btree::insert_row(&mut pager, root_page_id, row.row_id, row.values)?
+    };
+
+    if let Some(new_root_page_id) = new_root_page_id {
+        if let Some(metadata) = engine.table_metadata.get_mut(table_name) {
+            metadata.root_page_id = new_root_page_id;
+        }
+    }
+    if let Some(metadata) = engine.table_metadata.get_mut(table_name) {
+        metadata.row_count += 1;
+    }
+    Ok(())
+}

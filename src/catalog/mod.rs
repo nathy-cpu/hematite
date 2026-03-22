@@ -4,14 +4,18 @@ pub mod catalog;
 pub mod column;
 pub mod cursor;
 pub mod engine;
+pub(crate) mod engine_metadata;
 pub mod header;
 pub mod ids;
 pub mod index_btree;
+pub(crate) mod index_store;
+pub(crate) mod integrity;
 pub mod row_id;
 pub mod schema;
 pub mod serialization;
 pub mod table;
 pub mod table_btree;
+pub(crate) mod table_store;
 pub mod tests;
 pub mod types;
 
