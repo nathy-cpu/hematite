@@ -2,10 +2,13 @@
 
 mod mod_tests {
     use crate::btree::bytes::ByteTreeStore;
+    use crate::btree::codec::RawBytesCodec;
     use crate::btree::index::BTreeIndex;
     use crate::btree::tree::BTreeManager;
+    use crate::btree::value_store::StoredValueLayout;
     use crate::btree::{BTreeKey, BTreeValue, KeyValueCodec};
     use crate::error::Result;
+    use crate::storage::overflow::collect_overflow_page_ids;
     use crate::storage::Pager;
     use crate::test_utils::TestDbFile;
     use std::collections::BTreeMap;
@@ -252,6 +255,64 @@ mod mod_tests {
         let cursor = tree.cursor()?;
         assert_eq!(cursor.current()?, Some((b"blob".to_vec(), large_value)));
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_byte_tree_delete_reclaims_overflow_pages() -> Result<()> {
+        let path = tmp_db();
+        let storage = new_storage(&path)?;
+        let trees = ByteTreeStore::new(storage);
+        let root_page_id = trees.create_tree()?;
+        let mut tree = trees.open_tree(root_page_id)?;
+        let large_value = vec![0x6B; crate::storage::PAGE_SIZE * 2];
+
+        tree.insert(b"blob", &large_value)?;
+
+        let shared = trees.shared_storage();
+        let mut raw_tree = BTreeIndex::from_shared_storage(shared.clone(), root_page_id);
+        let stored_value = raw_tree
+            .search_typed::<RawBytesCodec>(&b"blob".to_vec())?
+            .expect("stored value should exist");
+        let layout = StoredValueLayout::decode(&stored_value)?;
+        let overflow_ids = {
+            let mut pager = shared.lock().unwrap();
+            collect_overflow_page_ids(&mut pager, Some(layout.overflow_first_page))?
+        };
+
+        assert_eq!(tree.delete(b"blob")?, Some(large_value));
+
+        let reused_page_id = shared.lock().unwrap().allocate_page()?;
+        assert!(overflow_ids.contains(&reused_page_id));
+        Ok(())
+    }
+
+    #[test]
+    fn test_byte_tree_reset_reclaims_overflow_pages() -> Result<()> {
+        let path = tmp_db();
+        let storage = new_storage(&path)?;
+        let trees = ByteTreeStore::new(storage);
+        let root_page_id = trees.create_tree()?;
+        let mut tree = trees.open_tree(root_page_id)?;
+        let large_value = vec![0x33; crate::storage::PAGE_SIZE * 2];
+
+        tree.insert(b"blob", &large_value)?;
+
+        let shared = trees.shared_storage();
+        let mut raw_tree = BTreeIndex::from_shared_storage(shared.clone(), root_page_id);
+        let stored_value = raw_tree
+            .search_typed::<RawBytesCodec>(&b"blob".to_vec())?
+            .expect("stored value should exist");
+        let layout = StoredValueLayout::decode(&stored_value)?;
+        let overflow_ids = {
+            let mut pager = shared.lock().unwrap();
+            collect_overflow_page_ids(&mut pager, Some(layout.overflow_first_page))?
+        };
+
+        trees.reset_tree(root_page_id)?;
+
+        let reused_page_id = shared.lock().unwrap().allocate_page()?;
+        assert!(overflow_ids.contains(&reused_page_id));
         Ok(())
     }
 

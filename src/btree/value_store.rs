@@ -1,7 +1,7 @@
 //! B-tree-owned stored-value format for inline and overflow-backed payloads.
 
 use crate::error::{HematiteError, Result};
-use crate::storage::overflow::{read_overflow_chain, write_overflow_chain};
+use crate::storage::overflow::{free_overflow_chain, read_overflow_chain, write_overflow_chain};
 use crate::storage::{Pager, INVALID_PAGE_ID};
 
 use super::node::MAX_VALUE_SIZE;
@@ -185,4 +185,16 @@ pub fn hydrate_stored_value(storage: &mut Pager, stored_value: &[u8]) -> Result<
     let mut value = layout.local_payload;
     value.extend_from_slice(&overflow_payload);
     Ok(value)
+}
+
+pub fn free_stored_value_overflow(storage: &mut Pager, stored_value: &[u8]) -> Result<()> {
+    let layout = StoredValueLayout::decode(stored_value)?;
+    free_overflow_chain(
+        storage,
+        if layout.overflow_first_page == INVALID_PAGE_ID {
+            None
+        } else {
+            Some(layout.overflow_first_page)
+        },
+    )
 }

@@ -9,10 +9,14 @@ use std::sync::{Arc, Mutex};
 use crate::btree::codec::RawBytesCodec;
 use crate::btree::cursor::BTreeCursor;
 use crate::btree::index::{BTreeIndex, TreeMutation};
+use crate::btree::node::BTreeNode;
 use crate::btree::tree::{
     collect_tree_page_ids, collect_tree_space_stats, reset_tree_pages, BTreeManager, TreeSpaceStats,
 };
-use crate::btree::value_store::{hydrate_stored_value, materialize_stored_value};
+use crate::btree::value_store::{
+    free_stored_value_overflow, hydrate_stored_value, materialize_stored_value,
+};
+use crate::btree::NodeType;
 use crate::error::Result;
 use crate::storage::{PageId, Pager};
 
@@ -51,6 +55,10 @@ impl ByteTreeStore {
     }
 
     pub fn delete_tree(&self, root_page_id: PageId) -> Result<()> {
+        {
+            let mut pager = self.storage.lock().unwrap();
+            free_tree_overflow(&mut pager, root_page_id)?;
+        }
         let mut manager = BTreeManager::from_shared_storage(self.storage.clone());
         manager.delete_tree(root_page_id)
     }
@@ -62,6 +70,7 @@ impl ByteTreeStore {
 
     pub fn reset_tree(&self, root_page_id: PageId) -> Result<()> {
         let mut pager = self.storage.lock().unwrap();
+        free_tree_overflow(&mut pager, root_page_id)?;
         reset_tree_pages(&mut pager, root_page_id)
     }
 
@@ -103,12 +112,21 @@ impl ByteTree {
     }
 
     pub fn insert_with_mutation(&mut self, key: &[u8], value: &[u8]) -> Result<TreeMutation> {
+        let existing_stored_value = self.index.search_typed::<RawBytesCodec>(&key.to_vec())?;
         let stored_value = {
             let mut storage = self.storage.lock().unwrap();
             materialize_stored_value(&mut storage, value)?
         };
-        self.index
-            .insert_typed_with_mutation::<RawBytesCodec>(&key.to_vec(), &stored_value)
+        let mutation = self
+            .index
+            .insert_typed_with_mutation::<RawBytesCodec>(&key.to_vec(), &stored_value)?;
+
+        if let Some(existing_stored_value) = existing_stored_value {
+            let mut storage = self.storage.lock().unwrap();
+            free_stored_value_overflow(&mut storage, &existing_stored_value)?;
+        }
+
+        Ok(mutation)
     }
 
     pub fn delete(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
@@ -122,7 +140,9 @@ impl ByteTree {
         let logical_value = match stored_value {
             Some(stored_value) => {
                 let mut storage = self.storage.lock().unwrap();
-                Some(hydrate_stored_value(&mut storage, &stored_value)?)
+                let logical_value = hydrate_stored_value(&mut storage, &stored_value)?;
+                free_stored_value_overflow(&mut storage, &stored_value)?;
+                Some(logical_value)
             }
             None => None,
         };
@@ -166,6 +186,26 @@ impl ByteTree {
             inner: self.index.cursor()?,
         })
     }
+}
+
+fn free_tree_overflow(storage: &mut Pager, root_page_id: PageId) -> Result<()> {
+    let page = storage.read_page(root_page_id)?;
+    let node = BTreeNode::from_page(page)?;
+
+    match node.node_type {
+        NodeType::Leaf => {
+            for value in node.values {
+                free_stored_value_overflow(storage, value.as_bytes())?;
+            }
+        }
+        NodeType::Internal => {
+            for child_page_id in node.children {
+                free_tree_overflow(storage, child_page_id)?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 pub struct ByteTreeCursor {
