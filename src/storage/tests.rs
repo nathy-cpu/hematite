@@ -1004,7 +1004,7 @@ mod rowid_table_tests {
         collect_overflow_page_ids, free_overflow_chain, read_overflow_chain,
         validate_overflow_chain, write_overflow_chain,
     };
-    use crate::storage::rowid_table::{
+    use crate::storage::row_id::{
         decode_stored_row_record, encode_stored_row_record, free_row_record_overflow,
         hydrate_row_record_cell, materialize_row_record_cell, RowidInternalCell, RowidLeafCell,
         RowidLeafCellLayout, ROWID_LEAF_FIXED_HEADER_SIZE,

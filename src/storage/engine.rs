@@ -6,14 +6,14 @@
 //! - Tables are stored as rowid-keyed B-trees and the catalog persists root-page metadata.
 //! - The storage file is organized as a forest of B-trees (catalog/table/index).
 
-use crate::btree::node::SearchResult;
-use crate::btree::{BTreeKey, BTreeNode, BTreeValue, NodeType};
+use crate::btree::BTreeNode;
 use crate::catalog::{Table, Value};
 use crate::error::Result;
 use crate::storage::free_list::FreeList;
+use crate::storage::index_cache::TransientIndexStore;
 use crate::storage::{
-    cursor::TableCursor, pager::Pager, Page, PageId, StorageIntegrityReport, StoredRow,
-    TableMetadata, DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID,
+    cursor::TableCursor, pager::Pager, table_btree, Page, PageId, StorageIntegrityReport,
+    StoredRow, TableMetadata, DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -23,8 +23,7 @@ use std::path::Path;
 pub struct StorageEngine {
     pager: Pager,
     table_metadata: HashMap<String, TableMetadata>,
-    primary_key_indexes: HashMap<String, HashMap<Vec<u8>, StoredRow>>,
-    secondary_indexes: HashMap<String, HashMap<String, HashMap<Vec<u8>, Vec<StoredRow>>>>,
+    transient_indexes: TransientIndexStore,
 }
 
 impl StorageEngine {
@@ -336,7 +335,7 @@ impl StorageEngine {
             }
 
             let (table_pages, counted_rows, max_row_id) =
-                self.validate_table_btree_pages(&table_name, metadata.root_page_id)?;
+                table_btree::validate_pages(self, &table_name, metadata.root_page_id)?;
 
             for page_id in table_pages {
                 if free_pages.contains(&page_id) {
@@ -415,62 +414,6 @@ impl StorageEngine {
         })
     }
 
-    fn validate_table_btree_pages(
-        &mut self,
-        table_name: &str,
-        root_page_id: PageId,
-    ) -> Result<(Vec<PageId>, u64, u64)> {
-        let mut visited = HashSet::new();
-        let mut row_count = 0u64;
-        let mut max_row_id = 0u64;
-        self.walk_table_btree(
-            root_page_id,
-            table_name,
-            &mut visited,
-            &mut row_count,
-            &mut max_row_id,
-        )?;
-        Ok((visited.into_iter().collect(), row_count, max_row_id))
-    }
-
-    fn walk_table_btree(
-        &mut self,
-        page_id: PageId,
-        table_name: &str,
-        visited: &mut HashSet<PageId>,
-        row_count: &mut u64,
-        max_row_id: &mut u64,
-    ) -> Result<()> {
-        if !visited.insert(page_id) {
-            return Err(crate::error::HematiteError::CorruptedData(format!(
-                "Cycle detected in B-tree for table '{}'",
-                table_name
-            )));
-        }
-
-        let page = self.read_page(page_id)?;
-        let node = BTreeNode::from_page(page)?;
-
-        match node.node_type {
-            NodeType::Leaf => {
-                for value in node.values {
-                    let row = crate::storage::serialization::RowSerializer::deserialize_stored_row(
-                        &value.data,
-                    )?;
-                    *row_count += 1;
-                    *max_row_id = (*max_row_id).max(row.row_id);
-                }
-            }
-            NodeType::Internal => {
-                for child in node.children {
-                    self.walk_table_btree(child, table_name, visited, row_count, max_row_id)?;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
         let pager = Pager::new(path, 100)?;
         Self::from_pager(pager)
@@ -487,8 +430,7 @@ impl StorageEngine {
             let mut engine = Self {
                 pager,
                 table_metadata: HashMap::new(),
-                primary_key_indexes: HashMap::new(),
-                secondary_indexes: HashMap::new(),
+                transient_indexes: TransientIndexStore::default(),
             };
             engine.load_table_metadata()?;
             Ok(engine)
@@ -631,49 +573,9 @@ impl StorageEngine {
             (metadata.root_page_id, metadata.next_row_id)
         };
 
-        self.insert_into_table_btree(table_name, root_page_id, row_id, row)
-    }
+        let new_root_page_id = table_btree::insert_row(self, root_page_id, row_id, row)?;
 
-    fn insert_into_table_btree(
-        &mut self,
-        table_name: &str,
-        root_page_id: PageId,
-        row_id: u64,
-        row: Vec<crate::catalog::Value>,
-    ) -> Result<u64> {
-        self.insert_btree_row_with_id(table_name, root_page_id, row_id, row, true)?;
-        Ok(row_id)
-    }
-
-    fn insert_btree_row_with_id(
-        &mut self,
-        table_name: &str,
-        root_page_id: PageId,
-        row_id: u64,
-        row: Vec<crate::catalog::Value>,
-        advance_next_rowid: bool,
-    ) -> Result<()> {
-        let key = BTreeKey::new(row_id.to_be_bytes().to_vec());
-        let mut encoded =
-            crate::storage::serialization::RowSerializer::serialize_stored_row(&StoredRow {
-                row_id,
-                values: row,
-            })?;
-        encoded.drain(0..4); // B-tree value payload stores row_id+values without length prefix.
-        let value = BTreeValue::new(encoded);
-
-        let split_result = self.insert_btree_recursive(root_page_id, key, value)?;
-        if let Some((split_key, split_page_id)) = split_result {
-            let new_root_page_id = self.allocate_page()?;
-            let mut new_root = BTreeNode::new_internal(new_root_page_id);
-            new_root.keys.push(split_key);
-            new_root.children.push(root_page_id);
-            new_root.children.push(split_page_id);
-
-            let mut new_root_page = Page::new(new_root_page_id);
-            new_root.to_page(&mut new_root_page)?;
-            self.write_page(new_root_page)?;
-
+        if let Some(new_root_page_id) = new_root_page_id {
             if let Some(metadata) = self.table_metadata.get_mut(table_name) {
                 metadata.root_page_id = new_root_page_id;
             }
@@ -681,66 +583,9 @@ impl StorageEngine {
 
         if let Some(metadata) = self.table_metadata.get_mut(table_name) {
             metadata.row_count += 1;
-            if advance_next_rowid {
-                metadata.next_row_id += 1;
-            }
+            metadata.next_row_id += 1;
         }
-
-        Ok(())
-    }
-
-    fn insert_btree_recursive(
-        &mut self,
-        page_id: PageId,
-        key: BTreeKey,
-        value: BTreeValue,
-    ) -> Result<Option<(BTreeKey, PageId)>> {
-        let mut page = self.read_page(page_id)?;
-        let mut node = BTreeNode::from_page(page.clone())?;
-
-        match node.node_type {
-            NodeType::Leaf => {
-                if let Some(existing_index) = node.keys.iter().position(|k| k == &key) {
-                    node.values[existing_index] = value;
-                    node.to_page(&mut page)?;
-                    self.write_page(page)?;
-                    return Ok(None);
-                }
-
-                if node.keys.len() < crate::btree::node::MAX_KEYS
-                    && node.can_insert_key_value(&key, &value)
-                {
-                    node.insert_leaf(key, value)?;
-                    node.to_page(&mut page)?;
-                    self.write_page(page)?;
-                    Ok(None)
-                } else {
-                    let (new_key, new_page_id) = node.split_leaf(self, key, value)?;
-                    Ok(Some((new_key, new_page_id)))
-                }
-            }
-            NodeType::Internal => {
-                let child_page_id = node.find_child(&key);
-                let split_result = self.insert_btree_recursive(child_page_id, key, value)?;
-
-                if let Some((split_key, split_page_id)) = split_result {
-                    if node.keys.len() < crate::btree::node::MAX_KEYS
-                        && node.can_insert_key_child(&split_key)
-                    {
-                        node.insert_internal(split_key, split_page_id)?;
-                        node.to_page(&mut page)?;
-                        self.write_page(page)?;
-                        Ok(None)
-                    } else {
-                        let (new_key, new_page_id) =
-                            node.split_internal(self, split_key, split_page_id)?;
-                        Ok(Some((new_key, new_page_id)))
-                    }
-                } else {
-                    Ok(None)
-                }
-            }
-        }
+        Ok(row_id)
     }
 
     pub fn replace_table_rows(&mut self, table_name: &str, rows: Vec<StoredRow>) -> Result<()> {
@@ -749,17 +594,7 @@ impl StorageEngine {
             metadata.root_page_id
         };
 
-        let mut page_ids = Vec::new();
-        self.collect_btree_page_ids(root_page_id, &mut page_ids)?;
-        for page_id in page_ids {
-            if page_id != root_page_id {
-                self.deallocate_page(page_id)?;
-            }
-        }
-        let mut root_page = Page::new(root_page_id);
-        let root = BTreeNode::new_leaf(root_page_id);
-        root.to_page(&mut root_page)?;
-        self.write_page(root_page)?;
+        table_btree::reset_tree(self, root_page_id)?;
 
         let next_row_id = self
             .table_metadata
@@ -786,17 +621,7 @@ impl StorageEngine {
             metadata.root_page_id
         };
 
-        self.delete_from_table_by_rowid_btree(table_name, root_page_id, rowid)
-    }
-
-    fn delete_from_table_by_rowid_btree(
-        &mut self,
-        table_name: &str,
-        root_page_id: PageId,
-        rowid: u64,
-    ) -> Result<bool> {
-        let key = BTreeKey::new(rowid.to_be_bytes().to_vec());
-        let deleted = self.delete_btree_recursive(root_page_id, &key)?;
+        let deleted = table_btree::delete_row(self, root_page_id, rowid)?;
         if !deleted {
             return Ok(false);
         }
@@ -806,38 +631,25 @@ impl StorageEngine {
         Ok(true)
     }
 
-    fn delete_btree_recursive(&mut self, page_id: PageId, key: &BTreeKey) -> Result<bool> {
-        let mut page = self.read_page(page_id)?;
-        let mut node = BTreeNode::from_page(page.clone())?;
-
-        match node.node_type {
-            NodeType::Leaf => {
-                let deleted = node.delete_from_leaf(key)?.is_some();
-                if deleted {
-                    node.to_page(&mut page)?;
-                    self.write_page(page)?;
-                }
-                Ok(deleted)
-            }
-            NodeType::Internal => {
-                let child_page_id = node.find_child(key);
-                let deleted = self.delete_btree_recursive(child_page_id, key)?;
-                if deleted {
-                    node.to_page(&mut page)?;
-                    self.write_page(page)?;
-                }
-                Ok(deleted)
-            }
-        }
-    }
-
     fn insert_stored_row(&mut self, table_name: &str, row: StoredRow) -> Result<()> {
         let root_page_id = {
             let metadata = self.lookup_table_metadata(table_name)?;
             metadata.root_page_id
         };
 
-        self.insert_btree_row_with_id(table_name, root_page_id, row.row_id, row.values, false)
+        let new_root_page_id = table_btree::insert_row(self, root_page_id, row.row_id, row.values)?;
+
+        if let Some(new_root_page_id) = new_root_page_id {
+            if let Some(metadata) = self.table_metadata.get_mut(table_name) {
+                metadata.root_page_id = new_root_page_id;
+            }
+        }
+
+        if let Some(metadata) = self.table_metadata.get_mut(table_name) {
+            metadata.row_count += 1;
+        }
+
+        Ok(())
     }
 
     pub fn drop_table(&mut self, table_name: &str) -> Result<()> {
@@ -849,63 +661,20 @@ impl StorageEngine {
         })?;
 
         let mut page_ids = Vec::new();
-        self.collect_btree_page_ids(metadata.root_page_id, &mut page_ids)?;
+        table_btree::collect_page_ids(self, metadata.root_page_id, &mut page_ids)?;
         for page_id in page_ids {
             self.deallocate_page(page_id)?;
         }
 
-        self.primary_key_indexes.remove(table_name);
-        self.secondary_indexes.remove(table_name);
+        self.transient_indexes.remove_table(table_name);
 
-        Ok(())
-    }
-
-    fn collect_btree_page_ids(&mut self, page_id: PageId, out: &mut Vec<PageId>) -> Result<()> {
-        out.push(page_id);
-        let page = self.read_page(page_id)?;
-        let node = BTreeNode::from_page(page)?;
-        if node.node_type == NodeType::Internal {
-            for child_page_id in node.children {
-                self.collect_btree_page_ids(child_page_id, out)?;
-            }
-        }
         Ok(())
     }
 
     pub fn open_table_cursor(&mut self, table_name: &str) -> Result<TableCursor> {
         let root_page_id = self.lookup_table_metadata(table_name)?.root_page_id;
-        let rows = self.read_rows_with_ids_from_btree(root_page_id)?;
+        let rows = table_btree::read_rows(self, root_page_id)?;
         Ok(TableCursor::new(rows))
-    }
-
-    fn read_rows_with_ids_from_btree(&mut self, root_page_id: PageId) -> Result<Vec<StoredRow>> {
-        let mut rows = Vec::new();
-        self.collect_rows_from_btree(root_page_id, &mut rows)?;
-        rows.sort_unstable_by_key(|row| row.row_id);
-        Ok(rows)
-    }
-
-    fn collect_rows_from_btree(&mut self, page_id: PageId, out: &mut Vec<StoredRow>) -> Result<()> {
-        let page = self.read_page(page_id)?;
-        let node = BTreeNode::from_page(page)?;
-
-        match node.node_type {
-            NodeType::Leaf => {
-                for value in node.values {
-                    let row = crate::storage::serialization::RowSerializer::deserialize_stored_row(
-                        &value.data,
-                    )?;
-                    out.push(row);
-                }
-            }
-            NodeType::Internal => {
-                for child_page_id in node.children {
-                    self.collect_rows_from_btree(child_page_id, out)?;
-                }
-            }
-        }
-
-        Ok(())
     }
 
     pub fn read_rows_with_ids(&mut self, table_name: &str) -> Result<Vec<StoredRow>> {
@@ -938,34 +707,7 @@ impl StorageEngine {
         rowid: u64,
     ) -> Result<Option<StoredRow>> {
         let root_page_id = self.lookup_table_metadata(table_name)?.root_page_id;
-        self.lookup_row_by_rowid_btree(root_page_id, rowid)
-    }
-
-    fn lookup_row_by_rowid_btree(
-        &mut self,
-        root_page_id: PageId,
-        rowid: u64,
-    ) -> Result<Option<StoredRow>> {
-        let key = BTreeKey::new(rowid.to_be_bytes().to_vec());
-        let mut current_page_id = root_page_id;
-        loop {
-            let page = self.read_page(current_page_id)?;
-            let node = BTreeNode::from_page(page)?;
-            match node.search(&key) {
-                SearchResult::Found(value) => {
-                    let row = crate::storage::serialization::RowSerializer::deserialize_stored_row(
-                        &value.data,
-                    )?;
-                    return Ok(Some(row));
-                }
-                SearchResult::NotFound(next_child) => {
-                    if node.node_type == NodeType::Leaf {
-                        return Ok(None);
-                    }
-                    current_page_id = next_child;
-                }
-            }
-        }
+        table_btree::lookup_row(self, root_page_id, rowid)
     }
 
     pub fn table_exists(&self, table_name: &str) -> bool {
@@ -979,19 +721,12 @@ impl StorageEngine {
     ) -> Result<Option<StoredRow>> {
         self.ensure_primary_key_index(table)?;
         let key = Self::encode_primary_key(key_values)?;
-        Ok(self
-            .primary_key_indexes
-            .get(&table.name)
-            .and_then(|index| index.get(&key).cloned()))
+        Ok(self.transient_indexes.lookup_primary_key(&table.name, &key))
     }
 
     pub fn register_primary_key_row(&mut self, table: &Table, row: StoredRow) -> Result<()> {
-        let key = Self::encode_primary_key(&table.get_primary_key_values(&row.values)?)?;
-        self.primary_key_indexes
-            .entry(table.name.clone())
-            .or_default()
-            .insert(key, row);
-        Ok(())
+        self.transient_indexes
+            .register_primary_key_row(table, row, Self::encode_primary_key)
     }
 
     pub fn lookup_rows_by_secondary_index(
@@ -1003,75 +738,27 @@ impl StorageEngine {
         self.ensure_secondary_indexes(table)?;
         let key = Self::encode_index_key(key_values)?;
         Ok(self
-            .secondary_indexes
-            .get(&table.name)
-            .and_then(|table_indexes| table_indexes.get(index_name))
-            .and_then(|index| index.get(&key))
-            .cloned()
-            .unwrap_or_default())
+            .transient_indexes
+            .lookup_secondary_index(&table.name, index_name, &key))
     }
 
     pub fn register_secondary_index_row(&mut self, table: &Table, row: StoredRow) -> Result<()> {
-        if table.secondary_indexes.is_empty() {
-            return Ok(());
-        }
-
-        let table_indexes = self
-            .secondary_indexes
-            .entry(table.name.clone())
-            .or_default();
-        for index in &table.secondary_indexes {
-            let key_values = index
-                .column_indices
-                .iter()
-                .map(|&column_index| row.values[column_index].clone())
-                .collect::<Vec<_>>();
-            let key = Self::encode_index_key(&key_values)?;
-            table_indexes
-                .entry(index.name.clone())
-                .or_default()
-                .entry(key)
-                .or_default()
-                .push(row.clone());
-        }
-
-        Ok(())
+        self.transient_indexes
+            .register_secondary_index_row(table, row, Self::encode_index_key)
     }
 
     pub fn rebuild_primary_key_index(&mut self, table: &Table, rows: &[StoredRow]) -> Result<()> {
-        let mut index = HashMap::new();
-        for row in rows {
-            let key = Self::encode_primary_key(&table.get_primary_key_values(&row.values)?)?;
-            index.insert(key, row.clone());
-        }
-        self.primary_key_indexes.insert(table.name.clone(), index);
-        Ok(())
+        self.transient_indexes
+            .rebuild_primary_key_index(table, rows, Self::encode_primary_key)
     }
 
     pub fn rebuild_secondary_indexes(&mut self, table: &Table, rows: &[StoredRow]) -> Result<()> {
-        let mut table_indexes: HashMap<String, HashMap<Vec<u8>, Vec<StoredRow>>> = HashMap::new();
-
-        for index in &table.secondary_indexes {
-            let mut entries: HashMap<Vec<u8>, Vec<StoredRow>> = HashMap::new();
-            for row in rows {
-                let key_values = index
-                    .column_indices
-                    .iter()
-                    .map(|&column_index| row.values[column_index].clone())
-                    .collect::<Vec<_>>();
-                let key = Self::encode_index_key(&key_values)?;
-                entries.entry(key).or_default().push(row.clone());
-            }
-            table_indexes.insert(index.name.clone(), entries);
-        }
-
-        self.secondary_indexes
-            .insert(table.name.clone(), table_indexes);
-        Ok(())
+        self.transient_indexes
+            .rebuild_secondary_indexes(table, rows, Self::encode_index_key)
     }
 
     fn ensure_primary_key_index(&mut self, table: &Table) -> Result<()> {
-        if self.primary_key_indexes.contains_key(&table.name) {
+        if self.transient_indexes.has_primary_key_index(&table.name) {
             return Ok(());
         }
 
@@ -1080,7 +767,7 @@ impl StorageEngine {
     }
 
     fn ensure_secondary_indexes(&mut self, table: &Table) -> Result<()> {
-        if self.secondary_indexes.contains_key(&table.name) {
+        if self.transient_indexes.has_secondary_indexes(&table.name) {
             return Ok(());
         }
 
