@@ -845,6 +845,56 @@ mod mod_tests {
     }
 }
 
+mod value_store_tests {
+    use crate::btree::value_store::{
+        StoredValueLayout, STORED_VALUE_HEADER_SIZE, STORED_VALUE_LOCAL_CAPACITY,
+    };
+    use crate::storage::INVALID_PAGE_ID;
+
+    #[test]
+    fn test_stored_value_layout_inline_roundtrip() -> crate::error::Result<()> {
+        let layout = StoredValueLayout::new_inline(b"hello world")?;
+        let encoded = layout.encode()?;
+        let decoded = StoredValueLayout::decode(&encoded)?;
+
+        assert_eq!(decoded, layout);
+        assert_eq!(decoded.overflow_first_page, INVALID_PAGE_ID);
+        Ok(())
+    }
+
+    #[test]
+    fn test_stored_value_layout_overflow_roundtrip() -> crate::error::Result<()> {
+        let local_payload = vec![0xAB; STORED_VALUE_LOCAL_CAPACITY];
+        let layout = StoredValueLayout::new_overflow(
+            STORED_VALUE_LOCAL_CAPACITY + 123,
+            local_payload.clone(),
+            77,
+        )?;
+        let encoded = layout.encode()?;
+        assert_eq!(
+            encoded.len(),
+            STORED_VALUE_HEADER_SIZE + local_payload.len()
+        );
+
+        let decoded = StoredValueLayout::decode(&encoded)?;
+        assert_eq!(decoded, layout);
+        assert_eq!(decoded.overflow_len(), 123);
+        Ok(())
+    }
+
+    #[test]
+    fn test_stored_value_layout_rejects_invalid_headers() {
+        assert!(StoredValueLayout::decode(&[0u8; STORED_VALUE_HEADER_SIZE - 1]).is_err());
+
+        let mut bad_inline = vec![0u8; STORED_VALUE_HEADER_SIZE];
+        bad_inline[0] = 0;
+        bad_inline[1..5].copy_from_slice(&1u32.to_le_bytes());
+        bad_inline[5..7].copy_from_slice(&0u16.to_le_bytes());
+        bad_inline[7..11].copy_from_slice(&7u32.to_le_bytes());
+        assert!(StoredValueLayout::decode(&bad_inline).is_err());
+    }
+}
+
 mod tree_tests {
     use crate::btree::node::{BTREE_PAGE_FORMAT_VERSION, BTREE_PAGE_HEADER_SIZE};
     use crate::btree::tree::BTreeManager;

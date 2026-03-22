@@ -6,6 +6,7 @@ pub mod cursor;
 pub mod index;
 pub mod node;
 pub mod tree;
+pub mod value_store;
 
 pub use bytes::{ByteTree, ByteTreeCursor, ByteTreeStore};
 pub use codec::{KeyValueCodec, RawBytesCodec};
