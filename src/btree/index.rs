@@ -203,19 +203,20 @@ impl BTreeIndex {
     }
 
     fn create_new_root(&mut self, key: BTreeKey, right_page_id: PageId) -> Result<()> {
-        let new_root_page_id = self.storage.lock().unwrap().allocate_page()?;
-        let mut new_root_page = Page::new(new_root_page_id);
+        let left_child_page_id = self.storage.lock().unwrap().allocate_page()?;
+        let root_snapshot = self.storage.lock().unwrap().read_page(self.root_page_id)?;
+        let mut left_child_page = Page::new(left_child_page_id);
+        left_child_page.data.copy_from_slice(&root_snapshot.data);
+        self.storage.lock().unwrap().write_page(left_child_page)?;
 
-        let mut new_root = BTreeNode::new_internal(new_root_page_id);
+        let mut new_root = BTreeNode::new_internal(self.root_page_id);
         new_root.keys.push(key);
-        new_root.children.push(self.root_page_id);
+        new_root.children.push(left_child_page_id);
         new_root.children.push(right_page_id);
 
-        BTreeNode::to_page(&new_root, &mut new_root_page)?;
-        self.storage.lock().unwrap().write_page(new_root_page)?;
-
-        self.root_page_id = new_root_page_id;
-        Ok(())
+        let mut root_page = Page::new(self.root_page_id);
+        BTreeNode::to_page(&new_root, &mut root_page)?;
+        self.storage.lock().unwrap().write_page(root_page)
     }
 
     pub fn delete(&mut self, key: &BTreeKey) -> Result<Option<BTreeValue>> {
@@ -306,16 +307,16 @@ impl BTreeIndex {
         let node = BTreeNode::from_page(page)?;
 
         if node.keys.is_empty() && !node.children.is_empty() {
-            // Root is empty but has children, make first child the new root
-            let new_root_page_id = node.children[0];
-
-            // Deallocate the old root page
+            let child_page_id = node.children[0];
+            let child_page = self.storage.lock().unwrap().read_page(child_page_id)?;
+            let mut root_page = Page::new(self.root_page_id);
+            root_page.data.copy_from_slice(&child_page.data);
+            self.storage.lock().unwrap().write_page(root_page)?;
             self.storage
                 .lock()
                 .unwrap()
-                .deallocate_page(self.root_page_id)?;
-
-            Ok(Some(new_root_page_id))
+                .deallocate_page(child_page_id)?;
+            Ok(Some(self.root_page_id))
         } else {
             Ok(None)
         }
