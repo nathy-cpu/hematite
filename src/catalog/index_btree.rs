@@ -1,13 +1,13 @@
 //! Relational durable index access methods built on generic B-trees.
 
 use crate::btree::node::SearchResult;
+use crate::btree::tree::{collect_tree_page_ids, reset_tree_pages};
 use crate::btree::{BTreeKey, BTreeNode, BTreeValue, NodeType};
 use crate::catalog::Value;
 use crate::error::{HematiteError, Result};
 use crate::storage::{Page, PageId, Pager};
 
 use super::cursor::IndexEntry;
-use super::table_btree;
 
 pub fn encode_index_key(values: &[Value]) -> Result<Vec<u8>> {
     super::serialization::RowSerializer::serialize(values)
@@ -112,7 +112,7 @@ pub fn read_secondary_entries(pager: &mut Pager, root_page_id: PageId) -> Result
 }
 
 pub fn reset_tree(pager: &mut Pager, root_page_id: PageId) -> Result<()> {
-    table_btree::reset_tree(pager, root_page_id)
+    reset_tree_pages(pager, root_page_id)
 }
 
 pub fn collect_page_ids(
@@ -120,7 +120,7 @@ pub fn collect_page_ids(
     root_page_id: PageId,
     out: &mut Vec<PageId>,
 ) -> Result<()> {
-    table_btree::collect_page_ids(pager, root_page_id, out)
+    collect_tree_page_ids(pager, root_page_id, out)
 }
 
 fn insert_entry(

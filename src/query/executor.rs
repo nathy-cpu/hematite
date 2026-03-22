@@ -1,44 +1,12 @@
 //! Query execution engine for processing SQL statements
 
-use crate::catalog::{CatalogEngine, StoredRow};
-use crate::catalog::{Column, DataType, Schema, Table, Value};
+use crate::catalog::StoredRow;
+use crate::catalog::{Column, DataType, Table, Value};
 use crate::error::{HematiteError, Result};
 use crate::parser::ast::*;
-use crate::query::planner::SelectAccessPath;
+use crate::query::plan::SelectAccessPath;
+pub use crate::query::runtime::{ExecutionContext, QueryExecutor, QueryResult};
 use std::cmp::Ordering;
-
-#[derive(Debug, Clone)]
-pub struct QueryResult {
-    pub affected_rows: usize,
-    pub columns: Vec<String>,
-    pub rows: Vec<Vec<Value>>,
-}
-
-#[derive(Debug)]
-pub struct ExecutionContext<'a> {
-    pub catalog: Schema,
-    pub engine: &'a mut CatalogEngine,
-}
-
-impl<'a> ExecutionContext<'a> {
-    pub fn for_read(catalog: &Schema, engine: &'a mut CatalogEngine) -> Self {
-        Self {
-            catalog: catalog.clone(),
-            engine,
-        }
-    }
-
-    pub fn for_mutation(catalog: &Schema, engine: &'a mut CatalogEngine) -> Self {
-        Self {
-            catalog: catalog.clone(),
-            engine,
-        }
-    }
-}
-
-pub trait QueryExecutor {
-    fn execute(&mut self, ctx: &mut ExecutionContext<'_>) -> Result<QueryResult>;
-}
 
 #[derive(Debug, Clone)]
 pub struct SelectExecutor {

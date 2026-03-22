@@ -1,6 +1,6 @@
 //! Relational storage engine built on top of the pager and generic B-trees.
 
-use crate::btree::BTreeNode;
+use crate::btree::tree::create_tree_root;
 use crate::catalog::{Table, Value};
 use crate::error::{HematiteError, Result};
 use crate::storage::{
@@ -138,12 +138,8 @@ impl CatalogEngine {
     }
 
     pub fn create_empty_btree(&self) -> Result<PageId> {
-        let root_page_id = self.allocate_page()?;
-        let root_node = BTreeNode::new_leaf(root_page_id);
-        let mut root_page = Page::new(root_page_id);
-        BTreeNode::to_page(&root_node, &mut root_page)?;
-        self.write_page(root_page)?;
-        Ok(root_page_id)
+        let mut pager = self.pager.lock().unwrap();
+        create_tree_root(&mut pager)
     }
 
     pub fn get_table_metadata(&self) -> &HashMap<String, TableRuntimeMetadata> {
@@ -160,13 +156,8 @@ impl CatalogEngine {
     }
 
     pub fn create_table(&mut self, table_name: &str) -> Result<PageId> {
-        let root_page_id = self.allocate_page()?;
+        let root_page_id = self.create_empty_btree()?;
         self.create_table_metadata(table_name, root_page_id)?;
-
-        let mut root_page = Page::new(root_page_id);
-        let root = BTreeNode::new_leaf(root_page_id);
-        root.to_page(&mut root_page)?;
-        self.write_page(root_page)?;
         Ok(root_page_id)
     }
 

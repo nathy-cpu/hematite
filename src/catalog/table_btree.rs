@@ -1,4 +1,5 @@
 use crate::btree::node::SearchResult;
+use crate::btree::tree::{collect_tree_page_ids, reset_tree_pages};
 use crate::btree::{BTreeKey, BTreeNode, BTreeValue, NodeType};
 use crate::error::Result;
 use crate::storage::{Page, PageId, Pager};
@@ -197,31 +198,11 @@ fn delete_recursive(pager: &mut Pager, page_id: PageId, key: &BTreeKey) -> Resul
 }
 
 pub fn reset_tree(pager: &mut Pager, root_page_id: PageId) -> Result<()> {
-    let mut page_ids = Vec::new();
-    collect_page_ids(pager, root_page_id, &mut page_ids)?;
-    for page_id in page_ids {
-        if page_id != root_page_id {
-            pager.deallocate_page(page_id)?;
-        }
-    }
-
-    let mut root_page = Page::new(root_page_id);
-    let root = BTreeNode::new_leaf(root_page_id);
-    root.to_page(&mut root_page)?;
-    pager.write_page(root_page)?;
-    Ok(())
+    reset_tree_pages(pager, root_page_id)
 }
 
 pub fn collect_page_ids(pager: &mut Pager, page_id: PageId, out: &mut Vec<PageId>) -> Result<()> {
-    out.push(page_id);
-    let page = pager.read_page(page_id)?;
-    let node = BTreeNode::from_page(page)?;
-    if node.node_type == NodeType::Internal {
-        for child_page_id in node.children {
-            collect_page_ids(pager, child_page_id, out)?;
-        }
-    }
-    Ok(())
+    collect_tree_page_ids(pager, page_id, out)
 }
 
 pub fn read_rows(pager: &mut Pager, root_page_id: PageId) -> Result<Vec<StoredRow>> {

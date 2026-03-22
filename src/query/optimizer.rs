@@ -2,7 +2,7 @@
 
 use crate::catalog::Schema;
 use crate::error::Result;
-use crate::query::planner::{IndexType, QueryPlan, SelectAnalysis};
+use crate::query::plan::{IndexType, QueryPlan, SelectAnalysis};
 
 #[derive(Debug, Clone)]
 pub struct QueryOptimizer {

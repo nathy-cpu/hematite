@@ -28,14 +28,8 @@ impl BTreeManager {
     }
 
     pub fn create_tree(&mut self) -> Result<PageId> {
-        let root_page_id = self.storage.lock().unwrap().allocate_page()?;
-        let mut root_page = Page::new(root_page_id);
-
-        let root_node = BTreeNode::new_leaf(root_page_id);
-        BTreeNode::to_page(&root_node, &mut root_page)?;
-
-        self.storage.lock().unwrap().write_page(root_page)?;
-        Ok(root_page_id)
+        let mut pager = self.storage.lock().unwrap();
+        create_tree_root(&mut pager)
     }
 
     pub fn open_tree(&mut self, root_page_id: PageId) -> Result<BTreeIndex> {
@@ -225,6 +219,46 @@ impl BTreeManager {
 
         Ok(())
     }
+}
+
+pub fn create_tree_root(pager: &mut Pager) -> Result<PageId> {
+    let root_page_id = pager.allocate_page()?;
+    initialize_empty_tree_root(pager, root_page_id)?;
+    Ok(root_page_id)
+}
+
+pub fn initialize_empty_tree_root(pager: &mut Pager, root_page_id: PageId) -> Result<()> {
+    let mut root_page = Page::new(root_page_id);
+    let root_node = BTreeNode::new_leaf(root_page_id);
+    BTreeNode::to_page(&root_node, &mut root_page)?;
+    pager.write_page(root_page)
+}
+
+pub fn reset_tree_pages(pager: &mut Pager, root_page_id: PageId) -> Result<()> {
+    let mut page_ids = Vec::new();
+    collect_tree_page_ids(pager, root_page_id, &mut page_ids)?;
+    for page_id in page_ids {
+        if page_id != root_page_id {
+            pager.deallocate_page(page_id)?;
+        }
+    }
+    initialize_empty_tree_root(pager, root_page_id)
+}
+
+pub fn collect_tree_page_ids(
+    pager: &mut Pager,
+    page_id: PageId,
+    out: &mut Vec<PageId>,
+) -> Result<()> {
+    out.push(page_id);
+    let page = pager.read_page(page_id)?;
+    let node = BTreeNode::from_page(page)?;
+    if node.node_type == NodeType::Internal {
+        for child_page_id in node.children {
+            collect_tree_page_ids(pager, child_page_id, out)?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Default)]
