@@ -10,11 +10,36 @@ use super::engine_metadata;
 use super::table_btree;
 
 pub(crate) fn get_storage_stats(engine: &CatalogEngine) -> CatalogStorageStats {
-    let free_page_count = engine.pager.lock().unwrap().free_pages().len();
+    let mut pager = engine.pager.lock().unwrap();
+    let file_bytes = pager.file_len().unwrap_or(0);
+    let allocated_page_count = pager.allocated_page_count();
+    let free_page_count = pager.free_pages().len();
+    let fragmented_free_page_count = pager.fragmented_free_page_count();
+    let trailing_free_page_count = pager.trailing_free_page_count();
+    let mut live_table_page_count = 0usize;
+    let mut table_used_bytes = 0usize;
+
+    for metadata in engine.table_metadata.values() {
+        if let Ok(space_stats) = table_btree::collect_space_stats(&mut pager, metadata.root_page_id)
+        {
+            live_table_page_count += space_stats.page_ids.len();
+            table_used_bytes += space_stats.used_bytes;
+        }
+    }
+
     CatalogStorageStats {
         table_count: engine.table_metadata.len(),
         total_rows: engine.table_metadata.values().map(|m| m.row_count).sum(),
+        file_bytes,
+        allocated_page_count,
         free_page_count,
+        fragmented_free_page_count,
+        trailing_free_page_count,
+        live_table_page_count,
+        table_used_bytes,
+        table_unused_bytes: live_table_page_count
+            .saturating_mul(crate::storage::PAGE_SIZE)
+            .saturating_sub(table_used_bytes),
     }
 }
 

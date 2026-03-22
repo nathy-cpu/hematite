@@ -1,7 +1,9 @@
 //! Relational durable index access methods built on generic B-trees.
 
 use crate::btree::node::SearchResult;
-use crate::btree::tree::{collect_tree_page_ids, reset_tree_pages};
+use crate::btree::tree::{
+    collect_tree_page_ids, collect_tree_space_stats, reset_tree_pages, TreeSpaceStats,
+};
 use crate::btree::{BTreeKey, BTreeNode, BTreeValue, NodeType};
 use crate::catalog::Value;
 use crate::error::{HematiteError, Result};
@@ -121,6 +123,10 @@ pub fn collect_page_ids(
     out: &mut Vec<PageId>,
 ) -> Result<()> {
     collect_tree_page_ids(pager, root_page_id, out)
+}
+
+pub fn collect_space_stats(pager: &mut Pager, root_page_id: PageId) -> Result<TreeSpaceStats> {
+    collect_tree_space_stats(pager, root_page_id)
 }
 
 fn insert_entry(

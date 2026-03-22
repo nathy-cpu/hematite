@@ -79,6 +79,8 @@ pub(crate) fn validate_integrity(engine: &mut CatalogEngine) -> Result<CatalogIn
     Ok(CatalogIntegrityReport {
         table_count: engine.table_metadata.len(),
         live_page_count: live_pages.len(),
+        index_page_count: 0,
+        overflow_page_count: 0,
         free_page_count: pager_report.free_page_count,
         total_rows,
         pager: pager_report,

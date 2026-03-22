@@ -25,13 +25,22 @@ pub struct TableRuntimeMetadata {
 pub struct CatalogStorageStats {
     pub table_count: usize,
     pub total_rows: u64,
+    pub file_bytes: u64,
+    pub allocated_page_count: usize,
     pub free_page_count: usize,
+    pub fragmented_free_page_count: usize,
+    pub trailing_free_page_count: usize,
+    pub live_table_page_count: usize,
+    pub table_used_bytes: usize,
+    pub table_unused_bytes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogIntegrityReport {
     pub table_count: usize,
     pub live_page_count: usize,
+    pub index_page_count: usize,
+    pub overflow_page_count: usize,
     pub free_page_count: usize,
     pub total_rows: u64,
     pub pager: PagerIntegrityReport,

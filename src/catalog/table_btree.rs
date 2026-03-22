@@ -1,5 +1,7 @@
 use crate::btree::node::SearchResult;
-use crate::btree::tree::{collect_tree_page_ids, reset_tree_pages};
+use crate::btree::tree::{
+    collect_tree_page_ids, collect_tree_space_stats, reset_tree_pages, TreeSpaceStats,
+};
 use crate::btree::{BTreeKey, BTreeNode, BTreeValue, NodeType};
 use crate::error::Result;
 use crate::storage::{Page, PageId, Pager};
@@ -203,6 +205,10 @@ pub fn reset_tree(pager: &mut Pager, root_page_id: PageId) -> Result<()> {
 
 pub fn collect_page_ids(pager: &mut Pager, page_id: PageId, out: &mut Vec<PageId>) -> Result<()> {
     collect_tree_page_ids(pager, page_id, out)
+}
+
+pub fn collect_space_stats(pager: &mut Pager, root_page_id: PageId) -> Result<TreeSpaceStats> {
+    collect_tree_space_stats(pager, root_page_id)
 }
 
 pub fn read_rows(pager: &mut Pager, root_page_id: PageId) -> Result<Vec<StoredRow>> {

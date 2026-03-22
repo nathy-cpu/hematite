@@ -228,6 +228,22 @@ impl Pager {
         self.page_checksums = checksums;
     }
 
+    pub fn file_len(&self) -> Result<u64> {
+        self.file_manager.file_len()
+    }
+
+    pub fn allocated_page_count(&self) -> usize {
+        self.file_manager.allocated_page_count()
+    }
+
+    pub fn fragmented_free_page_count(&self) -> usize {
+        self.file_manager.fragmented_free_page_count()
+    }
+
+    pub fn trailing_free_page_count(&self) -> usize {
+        self.file_manager.trailing_free_page_count()
+    }
+
     pub fn validate_integrity(&mut self) -> Result<PagerIntegrityReport> {
         let max_page_id_exclusive = self.file_manager.next_page_id();
         let mut free_pages = HashSet::new();
@@ -307,7 +323,10 @@ impl Pager {
         }
 
         Ok(PagerIntegrityReport {
+            allocated_page_count: self.file_manager.allocated_page_count(),
             free_page_count: free_pages.len(),
+            fragmented_free_page_count: self.file_manager.fragmented_free_page_count(),
+            trailing_free_page_count: self.file_manager.trailing_free_page_count(),
             checksummed_page_count: self.page_checksums.len(),
             verified_checksum_pages,
         })

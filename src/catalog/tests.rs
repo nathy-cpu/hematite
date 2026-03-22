@@ -1556,4 +1556,37 @@ mod catalog_new_tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_catalog_validate_integrity_detects_index_table_overlap() -> Result<()> {
+        let test_db = TestDbFile::new("_test_catalog_validate_integrity_index_overlap");
+
+        let mut catalog = Catalog::open_or_create(test_db.path())?;
+        let table_id = catalog.create_table(
+            "users",
+            vec![
+                Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer)
+                    .primary_key(true)
+                    .nullable(false),
+                Column::new(ColumnId::new(2), "email".to_string(), DataType::Text),
+            ],
+        )?;
+        let table_root_id = catalog.with_engine(|storage| storage.create_table("users"))?;
+        let primary_key_root_id = catalog.with_engine(|storage| storage.create_empty_btree())?;
+        catalog.set_table_root_page(table_id, table_root_id)?;
+        catalog.set_table_primary_key_root_page(table_id, primary_key_root_id)?;
+        catalog.add_secondary_index(
+            table_id,
+            crate::catalog::SecondaryIndex {
+                name: "idx_users_email".to_string(),
+                column_indices: vec![1],
+                root_page_id: table_root_id,
+            },
+        )?;
+
+        let err = catalog.validate_integrity().unwrap_err();
+        assert!(err.to_string().contains("overlaps table storage"));
+
+        Ok(())
+    }
 }

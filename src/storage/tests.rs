@@ -362,6 +362,14 @@ mod mod_tests {
         assert_eq!(stats.table_count, 2);
         assert_eq!(stats.total_rows, 2);
         assert_eq!(stats.free_page_count, 1);
+        assert_eq!(stats.fragmented_free_page_count, 1);
+        assert_eq!(stats.trailing_free_page_count, 0);
+        assert!(stats.allocated_page_count >= stats.live_table_page_count + stats.free_page_count);
+        assert!(
+            stats.file_bytes >= 64 + (stats.allocated_page_count as u64 + 2) * PAGE_SIZE as u64
+        );
+        assert!(stats.table_used_bytes > 0);
+        assert!(stats.table_unused_bytes < stats.live_table_page_count * PAGE_SIZE);
 
         Ok(())
     }
@@ -378,8 +386,12 @@ mod mod_tests {
         let report = storage.validate_integrity()?;
         assert_eq!(report.table_count, 1);
         assert_eq!(report.live_page_count, 1);
+        assert_eq!(report.index_page_count, 0);
+        assert_eq!(report.overflow_page_count, 0);
         assert_eq!(report.total_rows, 2);
+        assert!(report.pager.allocated_page_count >= 1);
         assert_eq!(report.pager.free_page_count, 0);
+        assert_eq!(report.pager.fragmented_free_page_count, 0);
         assert!(report.pager.verified_checksum_pages >= 1);
 
         Ok(())

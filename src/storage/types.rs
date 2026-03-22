@@ -49,7 +49,10 @@ impl Page {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PagerIntegrityReport {
+    pub allocated_page_count: usize,
     pub free_page_count: usize,
+    pub fragmented_free_page_count: usize,
+    pub trailing_free_page_count: usize,
     pub checksummed_page_count: usize,
     pub verified_checksum_pages: usize,
 }

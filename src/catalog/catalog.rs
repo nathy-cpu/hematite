@@ -9,6 +9,7 @@ use crate::catalog::header::DatabaseHeader;
 use crate::catalog::ids::TableId;
 use crate::catalog::schema::Schema;
 use crate::catalog::table::{SecondaryIndex, Table};
+use crate::catalog::{index_btree, table_btree};
 use crate::error::{HematiteError, Result};
 use crate::storage::{Page, PageId, Pager, DB_HEADER_PAGE_ID};
 use std::collections::HashMap;
@@ -512,7 +513,110 @@ impl Catalog {
             }
         }
 
-        self.engine.validate_integrity()
+        let mut report = self.engine.validate_integrity()?;
+        let pager_arc = self.engine.shared_pager();
+        let mut pager = pager_arc.lock().unwrap();
+        let free_pages = pager
+            .free_pages()
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        let mut table_pages = std::collections::HashSet::new();
+        let mut index_pages = std::collections::HashSet::new();
+        let tables = self
+            .schema
+            .list_tables()
+            .into_iter()
+            .filter_map(|(table_id, _)| self.schema.get_table(table_id).cloned())
+            .collect::<Vec<_>>();
+
+        for table in &tables {
+            let mut table_page_ids = Vec::new();
+            table_btree::collect_page_ids(&mut pager, table.root_page_id, &mut table_page_ids)?;
+            for page_id in table_page_ids {
+                if free_pages.contains(&page_id) {
+                    return Err(crate::error::HematiteError::CorruptedData(format!(
+                        "Table page {} for '{}' is also present in the freelist",
+                        page_id, table.name
+                    )));
+                }
+                if !table_pages.insert(page_id) {
+                    return Err(crate::error::HematiteError::CorruptedData(format!(
+                        "Table page {} is shared across multiple table trees",
+                        page_id
+                    )));
+                }
+            }
+
+            if table.primary_key_index_root_page_id != 0 {
+                let mut index_page_ids = Vec::new();
+                index_btree::collect_page_ids(
+                    &mut pager,
+                    table.primary_key_index_root_page_id,
+                    &mut index_page_ids,
+                )?;
+                for page_id in index_page_ids {
+                    if free_pages.contains(&page_id) {
+                        return Err(crate::error::HematiteError::CorruptedData(format!(
+                            "Primary-key index page {} for '{}' is also present in the freelist",
+                            page_id, table.name
+                        )));
+                    }
+                    if table_pages.contains(&page_id) {
+                        return Err(crate::error::HematiteError::CorruptedData(format!(
+                            "Primary-key index page {} for '{}' overlaps table storage",
+                            page_id, table.name
+                        )));
+                    }
+                    if !index_pages.insert(page_id) {
+                        return Err(crate::error::HematiteError::CorruptedData(format!(
+                            "Index page {} is shared across multiple index trees",
+                            page_id
+                        )));
+                    }
+                }
+            }
+
+            for index in &table.secondary_indexes {
+                if index.root_page_id == 0 {
+                    return Err(crate::error::HematiteError::CorruptedData(format!(
+                        "Secondary index '{}' on '{}' is missing a root page",
+                        index.name, table.name
+                    )));
+                }
+                let mut index_page_ids = Vec::new();
+                index_btree::collect_page_ids(&mut pager, index.root_page_id, &mut index_page_ids)?;
+                for page_id in index_page_ids {
+                    if free_pages.contains(&page_id) {
+                        return Err(crate::error::HematiteError::CorruptedData(format!(
+                            "Secondary index page {} for '{}.{}' is also present in the freelist",
+                            page_id, table.name, index.name
+                        )));
+                    }
+                    if table_pages.contains(&page_id) {
+                        return Err(crate::error::HematiteError::CorruptedData(format!(
+                            "Secondary index page {} for '{}.{}' overlaps table storage",
+                            page_id, table.name, index.name
+                        )));
+                    }
+                    if !index_pages.insert(page_id) {
+                        return Err(crate::error::HematiteError::CorruptedData(format!(
+                            "Index page {} is shared across multiple index trees",
+                            page_id
+                        )));
+                    }
+                }
+            }
+        }
+
+        drop(pager);
+        for table in &tables {
+            self.engine.validate_table_indexes(table)?;
+        }
+
+        report.live_page_count = table_pages.len();
+        report.index_page_count = index_pages.len();
+        Ok(report)
     }
 
     // ... (rest of the code remains the same)

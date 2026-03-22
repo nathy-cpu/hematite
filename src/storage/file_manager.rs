@@ -164,6 +164,38 @@ impl FileManager {
         self.next_page_id
     }
 
+    pub(crate) fn allocated_page_count(&self) -> usize {
+        self.next_page_id
+            .saturating_sub(STORAGE_METADATA_PAGE_ID + 1) as usize
+    }
+
+    pub(crate) fn trailing_free_page_count(&self) -> usize {
+        if self.next_page_id <= STORAGE_METADATA_PAGE_ID + 1 {
+            return 0;
+        }
+
+        let mut count = 0usize;
+        let mut candidate = self.next_page_id;
+        while candidate > STORAGE_METADATA_PAGE_ID + 1 {
+            let page_id = candidate - 1;
+            if self.free_list.as_slice().contains(&page_id) {
+                count += 1;
+                candidate -= 1;
+            } else {
+                break;
+            }
+        }
+
+        count
+    }
+
+    pub(crate) fn fragmented_free_page_count(&self) -> usize {
+        self.free_list
+            .as_slice()
+            .len()
+            .saturating_sub(self.trailing_free_page_count())
+    }
+
     fn compact_trailing_free_pages(&mut self) -> Result<()> {
         let minimum_next_page_id = STORAGE_METADATA_PAGE_ID + 1;
         self.free_list

@@ -263,6 +263,52 @@ pub fn collect_tree_page_ids(
     Ok(())
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TreeSpaceStats {
+    pub page_ids: Vec<PageId>,
+    pub used_bytes: usize,
+    pub leaf_pages: usize,
+    pub internal_pages: usize,
+}
+
+pub fn collect_tree_space_stats(pager: &mut Pager, root_page_id: PageId) -> Result<TreeSpaceStats> {
+    let mut visited = HashSet::new();
+    let mut stats = TreeSpaceStats::default();
+    collect_tree_space_stats_recursive(pager, root_page_id, &mut visited, &mut stats)?;
+    Ok(stats)
+}
+
+fn collect_tree_space_stats_recursive(
+    pager: &mut Pager,
+    page_id: PageId,
+    visited: &mut HashSet<PageId>,
+    stats: &mut TreeSpaceStats,
+) -> Result<()> {
+    if !visited.insert(page_id) {
+        return Err(crate::error::HematiteError::CorruptedData(format!(
+            "Cycle detected while collecting tree space stats at page {}",
+            page_id
+        )));
+    }
+
+    let page = pager.read_page(page_id)?;
+    let node = BTreeNode::from_page(page)?;
+    stats.page_ids.push(page_id);
+    stats.used_bytes += node.estimate_serialized_size();
+
+    match node.node_type {
+        NodeType::Leaf => stats.leaf_pages += 1,
+        NodeType::Internal => {
+            stats.internal_pages += 1;
+            for child_page_id in node.children {
+                collect_tree_space_stats_recursive(pager, child_page_id, visited, stats)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, Default)]
 struct TreeValidationState {
     visited: HashSet<PageId>,
