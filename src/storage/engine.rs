@@ -3,9 +3,8 @@
 //! M0 storage contract notes:
 //! - This layer is the relational storage facade above page IO.
 //! - On-disk metadata versioning is strict; older metadata formats are rejected.
-//! - Table metadata currently tracks root page, row count, and next rowid.
-//! - During migration to table B-tree storage, rowid remains the physical table key.
-//! - The storage file is expected to evolve into a forest of B-trees (catalog/table/index).
+//! - Tables are stored as rowid-keyed B-trees and the catalog persists root-page metadata.
+//! - The storage file is organized as a forest of B-trees (catalog/table/index).
 
 use crate::btree::node::SearchResult;
 use crate::btree::{BTreeKey, BTreeNode, BTreeValue, NodeType};

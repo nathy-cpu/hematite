@@ -1,4 +1,4 @@
-//! Rowid table cell formats for table B-tree migration.
+//! Rowid table cell formats for rowid-keyed table B-trees.
 //!
 //! This module defines stable byte-level encodings for rowid-keyed table cells.
 

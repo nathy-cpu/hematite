@@ -246,15 +246,11 @@ impl<'a> Transaction<'a> {
 }
 
 #[derive(Debug, Clone)]
-pub struct Database {
-    connections: Arc<Mutex<Vec<Connection>>>,
-}
+pub struct Database;
 
 impl Database {
     pub fn new() -> Self {
-        Self {
-            connections: Arc::new(Mutex::new(Vec::new())),
-        }
+        Self
     }
 
     pub fn open(database_path: &str) -> Result<Connection> {
@@ -266,8 +262,7 @@ impl Database {
     }
 
     pub fn connect(&mut self, database_path: &str) -> Result<Connection> {
-        let connection = Connection::new(database_path)?;
-        Ok(connection)
+        Connection::new(database_path)
     }
 }
 
