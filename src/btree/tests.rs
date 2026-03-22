@@ -167,10 +167,13 @@ mod mod_tests {
 
         let mut cursor = tree.cursor()?;
         assert!(cursor.is_valid());
-        assert_eq!(cursor.current(), Some((&b"alpha"[..], &b"one"[..])));
+        assert_eq!(
+            cursor.current()?,
+            Some((b"alpha".to_vec(), b"one".to_vec()))
+        );
 
         cursor.seek(b"beta")?;
-        assert_eq!(cursor.current(), Some((&b"beta"[..], &b"two"[..])));
+        assert_eq!(cursor.current()?, Some((b"beta".to_vec(), b"two".to_vec())));
 
         Ok(())
     }
@@ -230,6 +233,24 @@ mod mod_tests {
                 (b"alpha:2".to_vec(), b"a2".to_vec())
             ]
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_byte_tree_large_values_roundtrip_and_cursor() -> Result<()> {
+        let path = tmp_db();
+        let storage = new_storage(&path)?;
+        let trees = ByteTreeStore::new(storage);
+        let root_page_id = trees.create_tree()?;
+        let mut tree = trees.open_tree(root_page_id)?;
+
+        let large_value = vec![0x5A; crate::storage::PAGE_SIZE * 2];
+        tree.insert(b"blob", &large_value)?;
+        assert_eq!(tree.get(b"blob")?, Some(large_value.clone()));
+
+        let cursor = tree.cursor()?;
+        assert_eq!(cursor.current()?, Some((b"blob".to_vec(), large_value)));
 
         Ok(())
     }

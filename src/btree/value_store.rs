@@ -1,7 +1,8 @@
 //! B-tree-owned stored-value format for inline and overflow-backed payloads.
 
 use crate::error::{HematiteError, Result};
-use crate::storage::INVALID_PAGE_ID;
+use crate::storage::overflow::{read_overflow_chain, write_overflow_chain};
+use crate::storage::{Pager, INVALID_PAGE_ID};
 
 use super::node::MAX_VALUE_SIZE;
 
@@ -149,4 +150,39 @@ impl StoredValueLayout {
             overflow_first_page,
         })
     }
+}
+
+pub fn materialize_stored_value(storage: &mut Pager, logical_value: &[u8]) -> Result<Vec<u8>> {
+    if logical_value.len() <= STORED_VALUE_LOCAL_CAPACITY {
+        return StoredValueLayout::new_inline(logical_value)?.encode();
+    }
+
+    let local_payload = logical_value[..STORED_VALUE_LOCAL_CAPACITY].to_vec();
+    let overflow_payload = &logical_value[STORED_VALUE_LOCAL_CAPACITY..];
+    let overflow_first_page =
+        write_overflow_chain(storage, overflow_payload)?.ok_or_else(|| {
+            HematiteError::StorageError(
+                "Expected overflow pages for a large B-tree value".to_string(),
+            )
+        })?;
+
+    StoredValueLayout::new_overflow(logical_value.len(), local_payload, overflow_first_page)?
+        .encode()
+}
+
+pub fn hydrate_stored_value(storage: &mut Pager, stored_value: &[u8]) -> Result<Vec<u8>> {
+    let layout = StoredValueLayout::decode(stored_value)?;
+    let overflow_payload = read_overflow_chain(
+        storage,
+        if layout.overflow_first_page == INVALID_PAGE_ID {
+            None
+        } else {
+            Some(layout.overflow_first_page)
+        },
+        layout.overflow_len(),
+    )?;
+
+    let mut value = layout.local_payload;
+    value.extend_from_slice(&overflow_payload);
+    Ok(value)
 }

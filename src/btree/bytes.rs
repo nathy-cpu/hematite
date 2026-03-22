@@ -12,6 +12,7 @@ use crate::btree::index::{BTreeIndex, TreeMutation};
 use crate::btree::tree::{
     collect_tree_page_ids, collect_tree_space_stats, reset_tree_pages, BTreeManager, TreeSpaceStats,
 };
+use crate::btree::value_store::{hydrate_stored_value, materialize_stored_value};
 use crate::error::Result;
 use crate::storage::{PageId, Pager};
 
@@ -43,7 +44,10 @@ impl ByteTreeStore {
     pub fn open_tree(&self, root_page_id: PageId) -> Result<ByteTree> {
         let mut manager = BTreeManager::from_shared_storage(self.storage.clone());
         let index = manager.open_tree(root_page_id)?;
-        Ok(ByteTree { index })
+        Ok(ByteTree {
+            storage: self.storage.clone(),
+            index,
+        })
     }
 
     pub fn delete_tree(&self, root_page_id: PageId) -> Result<()> {
@@ -75,6 +79,7 @@ impl ByteTreeStore {
 }
 
 pub struct ByteTree {
+    storage: Arc<Mutex<Pager>>,
     index: BTreeIndex,
 }
 
@@ -84,7 +89,13 @@ impl ByteTree {
     }
 
     pub fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        self.index.search_typed::<RawBytesCodec>(&key.to_vec())
+        match self.index.search_typed::<RawBytesCodec>(&key.to_vec())? {
+            Some(stored_value) => {
+                let mut storage = self.storage.lock().unwrap();
+                Ok(Some(hydrate_stored_value(&mut storage, &stored_value)?))
+            }
+            None => Ok(None),
+        }
     }
 
     pub fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
@@ -92,8 +103,12 @@ impl ByteTree {
     }
 
     pub fn insert_with_mutation(&mut self, key: &[u8], value: &[u8]) -> Result<TreeMutation> {
+        let stored_value = {
+            let mut storage = self.storage.lock().unwrap();
+            materialize_stored_value(&mut storage, value)?
+        };
         self.index
-            .insert_typed_with_mutation::<RawBytesCodec>(&key.to_vec(), &value.to_vec())
+            .insert_typed_with_mutation::<RawBytesCodec>(&key.to_vec(), &stored_value)
     }
 
     pub fn delete(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
@@ -101,8 +116,17 @@ impl ByteTree {
     }
 
     pub fn delete_with_mutation(&mut self, key: &[u8]) -> Result<(Option<Vec<u8>>, TreeMutation)> {
-        self.index
-            .delete_typed_with_mutation::<RawBytesCodec>(&key.to_vec())
+        let (stored_value, mutation) = self
+            .index
+            .delete_typed_with_mutation::<RawBytesCodec>(&key.to_vec())?;
+        let logical_value = match stored_value {
+            Some(stored_value) => {
+                let mut storage = self.storage.lock().unwrap();
+                Some(hydrate_stored_value(&mut storage, &stored_value)?)
+            }
+            None => None,
+        };
+        Ok((logical_value, mutation))
     }
 
     pub fn entry(&mut self, key: &[u8]) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
@@ -124,7 +148,7 @@ impl ByteTree {
         let mut cursor = self.cursor()?;
         cursor.seek(prefix)?;
         let mut entries = Vec::new();
-        while let Some((key, value)) = cursor.current_owned() {
+        while let Some((key, value)) = cursor.current()? {
             if !key.starts_with(prefix) {
                 break;
             }
@@ -138,12 +162,14 @@ impl ByteTree {
 
     pub fn cursor(&self) -> Result<ByteTreeCursor> {
         Ok(ByteTreeCursor {
+            storage: self.storage.clone(),
             inner: self.index.cursor()?,
         })
     }
 }
 
 pub struct ByteTreeCursor {
+    storage: Arc<Mutex<Pager>>,
     inner: BTreeCursor,
 }
 
@@ -172,15 +198,17 @@ impl ByteTreeCursor {
         self.inner.value().map(|value| value.as_bytes())
     }
 
-    pub fn current(&self) -> Option<(&[u8], &[u8])> {
-        self.inner
-            .current()
-            .map(|(key, value)| (key.as_bytes(), value.as_bytes()))
-    }
-
-    pub fn current_owned(&self) -> Option<(Vec<u8>, Vec<u8>)> {
-        self.current()
-            .map(|(key, value)| (key.to_vec(), value.to_vec()))
+    pub fn current(&self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        match self.inner.current() {
+            Some((key, value)) => {
+                let mut storage = self.storage.lock().unwrap();
+                Ok(Some((
+                    key.as_bytes().to_vec(),
+                    hydrate_stored_value(&mut storage, value.as_bytes())?,
+                )))
+            }
+            None => Ok(None),
+        }
     }
 
     pub fn collect_all(&mut self) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
@@ -190,7 +218,7 @@ impl ByteTreeCursor {
 
     pub fn collect_remaining(&mut self) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let mut entries = Vec::new();
-        while let Some(entry) = self.current_owned() {
+        while let Some(entry) = self.current()? {
             entries.push(entry);
             if self.next().is_err() {
                 break;
