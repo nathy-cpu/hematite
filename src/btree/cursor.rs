@@ -2,12 +2,12 @@
 
 use crate::btree::{BTreeKey, BTreeNode, BTreeValue, NodeType};
 use crate::error::{HematiteError, Result};
-use crate::storage::{PageId, StorageEngine};
+use crate::storage::{PageId, Pager};
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
 pub struct BTreeCursor {
-    storage: Arc<Mutex<StorageEngine>>,
+    storage: Arc<Mutex<Pager>>,
     stack: Vec<CursorFrame>,
     at_end: bool,
     root_page_id: PageId,
@@ -21,7 +21,7 @@ struct CursorFrame {
 }
 
 impl BTreeCursor {
-    pub fn new(storage: Arc<Mutex<StorageEngine>>, root_page_id: PageId) -> Result<Self> {
+    pub fn new(storage: Arc<Mutex<Pager>>, root_page_id: PageId) -> Result<Self> {
         let mut cursor = Self {
             storage: storage,
             stack: Vec::new(),

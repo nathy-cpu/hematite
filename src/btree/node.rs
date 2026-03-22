@@ -8,7 +8,7 @@
 
 use crate::btree::{BTreeKey, BTreeValue, NodeType, BTREE_ORDER};
 use crate::error::{HematiteError, Result};
-use crate::storage::{Page, PageId, StorageEngine, PAGE_SIZE};
+use crate::storage::{Page, PageId, Pager, PAGE_SIZE};
 
 // Size validation constants
 pub const MAX_KEY_SIZE: usize = 256; // Maximum key size in bytes
@@ -549,7 +549,7 @@ impl BTreeNode {
 
     pub fn split_leaf(
         &mut self,
-        storage: &mut StorageEngine,
+        storage: &mut Pager,
         new_key: BTreeKey,
         new_value: BTreeValue,
     ) -> Result<(BTreeKey, PageId)> {
@@ -591,7 +591,7 @@ impl BTreeNode {
 
     pub fn split_internal(
         &mut self,
-        storage: &mut StorageEngine,
+        storage: &mut Pager,
         new_key: BTreeKey,
         new_child: PageId,
     ) -> Result<(BTreeKey, PageId)> {
@@ -788,7 +788,7 @@ impl BTreeNode {
         merged.keys.len() <= MAX_KEYS && merged.will_fit_in_page()
     }
 
-    pub fn merge_leaf(&mut self, other: &mut BTreeNode, storage: &mut StorageEngine) -> Result<()> {
+    pub fn merge_leaf(&mut self, other: &mut BTreeNode, storage: &mut Pager) -> Result<()> {
         if self.node_type != NodeType::Leaf || other.node_type != NodeType::Leaf {
             return Err(HematiteError::StorageError(
                 "Can only merge leaf nodes".to_string(),
@@ -814,7 +814,7 @@ impl BTreeNode {
         &mut self,
         other: &mut BTreeNode,
         separator_key: BTreeKey,
-        storage: &mut StorageEngine,
+        storage: &mut Pager,
     ) -> Result<()> {
         if self.node_type != NodeType::Internal || other.node_type != NodeType::Internal {
             return Err(HematiteError::StorageError(

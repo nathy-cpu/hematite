@@ -1,7 +1,7 @@
 //! Overflow page chain support for large table-cell payloads.
 
 use crate::error::{HematiteError, Result};
-use crate::storage::{Page, PageId, StorageEngine, PAGE_SIZE};
+use crate::storage::{Page, PageId, Pager, PAGE_SIZE};
 
 pub const OVERFLOW_MAGIC: &[u8; 4] = b"OVR1";
 pub const OVERFLOW_HEADER_SIZE: usize = 12; // magic(4) + next_page_id(4) + chunk_len(4)
@@ -13,7 +13,7 @@ pub struct OverflowChainReport {
     pub payload_len: usize,
 }
 
-pub fn write_overflow_chain(storage: &mut StorageEngine, payload: &[u8]) -> Result<Option<PageId>> {
+pub fn write_overflow_chain(storage: &mut Pager, payload: &[u8]) -> Result<Option<PageId>> {
     if payload.is_empty() {
         return Ok(None);
     }
@@ -55,7 +55,7 @@ pub fn write_overflow_chain(storage: &mut StorageEngine, payload: &[u8]) -> Resu
 }
 
 pub fn read_overflow_chain(
-    storage: &mut StorageEngine,
+    storage: &mut Pager,
     first_page: Option<PageId>,
     expected_len: usize,
 ) -> Result<Vec<u8>> {
@@ -107,7 +107,7 @@ pub fn read_overflow_chain(
     Ok(out)
 }
 
-pub fn free_overflow_chain(storage: &mut StorageEngine, first_page: Option<PageId>) -> Result<()> {
+pub fn free_overflow_chain(storage: &mut Pager, first_page: Option<PageId>) -> Result<()> {
     let mut current = match first_page {
         Some(page_id) => page_id,
         None => return Ok(()),
@@ -140,7 +140,7 @@ pub fn free_overflow_chain(storage: &mut StorageEngine, first_page: Option<PageI
 }
 
 pub fn validate_overflow_chain(
-    storage: &mut StorageEngine,
+    storage: &mut Pager,
     first_page: Option<PageId>,
     expected_len: usize,
 ) -> Result<OverflowChainReport> {
@@ -204,7 +204,7 @@ pub fn validate_overflow_chain(
 }
 
 pub fn collect_overflow_page_ids(
-    storage: &mut StorageEngine,
+    storage: &mut Pager,
     first_page: Option<PageId>,
 ) -> Result<Vec<PageId>> {
     let mut ids = Vec::new();

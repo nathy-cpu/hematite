@@ -1,12 +1,11 @@
-//! Rowid table cell formats for rowid-keyed table B-trees.
-//!
-//! This module defines stable byte-level encodings for rowid-keyed table cells.
+//! Rowid table cell formats for relational tables.
 
 use crate::error::{HematiteError, Result};
 use crate::storage::overflow::{free_overflow_chain, read_overflow_chain, write_overflow_chain};
-use crate::storage::serialization::RowSerializer;
-use crate::storage::StoredRow;
-use crate::storage::{PageId, StorageEngine};
+use crate::storage::{PageId, Pager};
+
+use super::engine::StoredRow;
+use super::serialization::RowSerializer;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RowidLeafCell {
@@ -117,26 +116,26 @@ pub fn encode_stored_row_record(
 }
 
 pub fn decode_stored_row_record(rowid: u64, payload: &[u8]) -> Result<StoredRow> {
-    let mut row = RowSerializer::deserialize_stored_row(payload)?;
+    let mut serialized = Vec::with_capacity(payload.len() + 4);
+    serialized.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    serialized.extend_from_slice(payload);
+    let mut row = RowSerializer::deserialize_stored_row(&serialized)?;
     row.row_id = rowid;
     Ok(row)
 }
 
 pub fn materialize_row_record_cell(
-    storage: &mut StorageEngine,
+    pager: &mut Pager,
     row: &StoredRow,
     max_local_payload: usize,
 ) -> Result<Vec<u8>> {
     let mut encoded = encode_stored_row_record(row, max_local_payload)?;
-    let overflow_first = write_overflow_chain(storage, &encoded.overflow_payload)?;
+    let overflow_first = write_overflow_chain(pager, &encoded.overflow_payload)?;
     encoded.cell.overflow_first_page = overflow_first.unwrap_or(PageId::invalid());
     encoded.cell.encode()
 }
 
-pub fn hydrate_row_record_cell(
-    storage: &mut StorageEngine,
-    cell_bytes: &[u8],
-) -> Result<StoredRow> {
+pub fn hydrate_row_record_cell(pager: &mut Pager, cell_bytes: &[u8]) -> Result<StoredRow> {
     let cell = RowidLeafCellLayout::decode(cell_bytes)?;
     let local_len = cell.local_payload.len();
     let total_len = cell.total_payload_len as usize;
@@ -152,25 +151,25 @@ pub fn hydrate_row_record_cell(
     } else {
         Some(cell.overflow_first_page)
     };
-    let overflow_payload = read_overflow_chain(storage, overflow_first, overflow_len)?;
+    let overflow_payload = read_overflow_chain(pager, overflow_first, overflow_len)?;
 
     let mut payload = cell.local_payload;
     payload.extend_from_slice(&overflow_payload);
     decode_stored_row_record(cell.rowid, &payload)
 }
 
-pub fn free_row_record_overflow(storage: &mut StorageEngine, cell_bytes: &[u8]) -> Result<()> {
+pub fn free_row_record_overflow(pager: &mut Pager, cell_bytes: &[u8]) -> Result<()> {
     let cell = RowidLeafCellLayout::decode(cell_bytes)?;
     let overflow_first = if cell.overflow_first_page == PageId::invalid() {
         None
     } else {
         Some(cell.overflow_first_page)
     };
-    free_overflow_chain(storage, overflow_first)
+    free_overflow_chain(pager, overflow_first)
 }
 
 impl RowidLeafCell {
-    pub const HEADER_SIZE: usize = 12; // rowid(u64) + payload_len(u32)
+    pub const HEADER_SIZE: usize = 12;
 
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(Self::HEADER_SIZE + self.payload.len());
@@ -211,7 +210,7 @@ pub struct RowidInternalCell {
 }
 
 impl RowidInternalCell {
-    pub const SIZE: usize = 12; // separator_rowid(u64) + child_page_id(u32)
+    pub const SIZE: usize = 12;
 
     pub fn encode(&self) -> [u8; Self::SIZE] {
         let mut out = [0u8; Self::SIZE];

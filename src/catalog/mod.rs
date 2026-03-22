@@ -2,18 +2,29 @@
 
 pub mod catalog;
 pub mod column;
+pub mod cursor;
+pub mod engine;
 pub mod header;
 pub mod ids;
+pub mod index_btree;
+pub mod row_id;
 pub mod schema;
+pub mod serialization;
 pub mod table;
+pub mod table_btree;
 pub mod tests;
 pub mod types;
 
 // Re-export main types for easier access
 pub use catalog::Catalog;
 pub use column::Column;
+pub use cursor::{IndexCursor, TableCursor};
+pub use engine::{
+    CatalogEngine, CatalogIntegrityReport, CatalogStorageStats, StoredRow, TableRuntimeMetadata,
+};
 pub use header::DatabaseHeader;
 pub use ids::{ColumnId, TableId};
 pub use schema::Schema;
+pub use serialization::RowSerializer;
 pub use table::{SecondaryIndex, Table};
 pub use types::{DataType, Value};

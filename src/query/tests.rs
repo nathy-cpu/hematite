@@ -6,7 +6,7 @@ mod executor_tests {
     use crate::error::Result;
     use crate::parser::ast::*;
     use crate::query::executor::*;
-    use crate::storage::StorageEngine;
+    use crate::catalog::CatalogEngine;
     use crate::test_utils::TestDbFile;
 
     #[test]
@@ -32,7 +32,7 @@ mod executor_tests {
         catalog.create_table("users".to_string(), columns)?;
 
         let db = TestDbFile::new("_test_select_executor_debug");
-        let mut storage = StorageEngine::new(db.path())?;
+        let mut storage = CatalogEngine::new(db.path())?;
         // Create table in storage as well
         let _ = storage.create_table("users")?;
 
@@ -111,7 +111,7 @@ mod executor_tests {
         catalog.create_table("users".to_string(), columns)?;
 
         let db = TestDbFile::new("_test_select_executor");
-        let mut storage = StorageEngine::new(db.path())?;
+        let mut storage = CatalogEngine::new(db.path())?;
         // Create table in storage as well
         let _ = storage.create_table("users")?;
 
@@ -174,7 +174,7 @@ mod executor_tests {
         )?;
 
         let db = TestDbFile::new("_test_select_executor_secondary_index_lookup");
-        let mut storage = StorageEngine::new(db.path())?;
+        let mut storage = CatalogEngine::new(db.path())?;
         let root_page_id = storage.create_table("users")?;
         let primary_key_root_page_id = storage.create_empty_btree()?;
         let secondary_index_root_page_id = storage.create_empty_btree()?;
@@ -199,28 +199,28 @@ mod executor_tests {
         let table = catalog.get_table_by_name("users").unwrap();
         storage.register_secondary_index_row(
             table,
-            crate::storage::StoredRow {
+            crate::catalog::StoredRow {
                 row_id: row_id_1,
                 values: vec![Value::Integer(1), Value::Text("a@example.com".to_string())],
             },
         )?;
         storage.register_primary_key_row(
             table,
-            crate::storage::StoredRow {
+            crate::catalog::StoredRow {
                 row_id: row_id_1,
                 values: vec![Value::Integer(1), Value::Text("a@example.com".to_string())],
             },
         )?;
         storage.register_secondary_index_row(
             table,
-            crate::storage::StoredRow {
+            crate::catalog::StoredRow {
                 row_id: row_id_2,
                 values: vec![Value::Integer(2), Value::Text("b@example.com".to_string())],
             },
         )?;
         storage.register_primary_key_row(
             table,
-            crate::storage::StoredRow {
+            crate::catalog::StoredRow {
                 row_id: row_id_2,
                 values: vec![Value::Integer(2), Value::Text("b@example.com".to_string())],
             },
@@ -273,7 +273,7 @@ mod executor_tests {
         catalog.create_table("users".to_string(), columns)?;
 
         let db = TestDbFile::new("_test_select_executor_rowid_lookup");
-        let mut storage = StorageEngine::new(db.path())?;
+        let mut storage = CatalogEngine::new(db.path())?;
         let _ = storage.create_table("users")?;
 
         let rowid_1 = storage.insert_into_table(
@@ -330,7 +330,7 @@ mod executor_tests {
         let table_id = catalog.create_table("users".to_string(), columns)?;
 
         let db = TestDbFile::new("_test_insert_executor");
-        let mut storage = StorageEngine::new(db.path())?;
+        let mut storage = CatalogEngine::new(db.path())?;
         // Create table in storage as well
         let root_page_id = storage.create_table("users")?;
         let primary_key_root_page_id = storage.create_empty_btree()?;
@@ -360,7 +360,7 @@ mod executor_tests {
     fn test_create_executor() -> Result<()> {
         let catalog = Schema::new();
         let db = TestDbFile::new("_test_create_executor");
-        let mut storage = StorageEngine::new(db.path())?;
+        let mut storage = CatalogEngine::new(db.path())?;
         let mut ctx = ExecutionContext::for_mutation(&catalog, &mut storage);
 
         let statement = CreateStatement {

@@ -5,7 +5,7 @@ mod mod_tests {
     use crate::btree::tree::BTreeManager;
     use crate::btree::{BTreeKey, BTreeValue, KeyValueCodec};
     use crate::error::Result;
-    use crate::storage::StorageEngine;
+    use crate::storage::Pager;
     use crate::test_utils::TestDbFile;
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
@@ -14,8 +14,8 @@ mod mod_tests {
         TestDbFile::new("_test_btree")
     }
 
-    fn new_storage(db: &TestDbFile) -> Result<StorageEngine> {
-        StorageEngine::new(db.path().to_string())
+    fn new_storage(db: &TestDbFile) -> Result<Pager> {
+        Pager::new(db.path().to_string(), 100)
     }
 
     #[derive(Debug, Clone)]
@@ -747,7 +747,7 @@ mod tree_tests {
     use crate::btree::tree::BTreeManager;
     use crate::btree::{BTreeKey, BTreeNode, BTreeValue, NodeType};
     use crate::error::Result;
-    use crate::storage::{Page, PageId, StorageEngine, PAGE_SIZE};
+    use crate::storage::{Page, PageId, Pager, PAGE_SIZE};
 
     #[test]
     fn test_btree_key_comparison() {
@@ -843,7 +843,7 @@ mod tree_tests {
 
     #[test]
     fn test_leaf_merge_rejects_oversized_result() -> Result<()> {
-        let mut storage = StorageEngine::new_in_memory()?;
+        let mut storage = Pager::new_in_memory(100)?;
         let left_page = storage.allocate_page()?;
         let right_page = storage.allocate_page()?;
 
@@ -867,7 +867,7 @@ mod tree_tests {
 
     #[test]
     fn test_leaf_merge_deallocates_other_page() -> Result<()> {
-        let mut storage = StorageEngine::new_in_memory()?;
+        let mut storage = Pager::new_in_memory(100)?;
         let left_page = storage.allocate_page()?;
         let right_page = storage.allocate_page()?;
 
@@ -893,7 +893,7 @@ mod tree_tests {
     #[test]
     fn test_validate_tree_rejects_unsorted_leaf_keys() -> Result<()> {
         let test_db = crate::test_utils::TestDbFile::new("_test_btree_validate_unsorted_leaf");
-        let mut storage = StorageEngine::new(test_db.path())?;
+        let mut storage = Pager::new(test_db.path(), 100)?;
         let root = storage.allocate_page()?;
 
         let mut leaf = BTreeNode::new_leaf(root);
@@ -917,7 +917,7 @@ mod tree_tests {
     fn test_validate_tree_rejects_mixed_leaf_depths() -> Result<()> {
         let test_db =
             crate::test_utils::TestDbFile::new("_test_btree_validate_leaf_depth_mismatch");
-        let mut storage = StorageEngine::new(test_db.path())?;
+        let mut storage = Pager::new(test_db.path(), 100)?;
 
         let root = storage.allocate_page()?;
         let left_leaf_page = storage.allocate_page()?;

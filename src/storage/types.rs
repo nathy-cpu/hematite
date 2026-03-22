@@ -61,40 +61,9 @@ impl Page {
     }
 }
 
-// Table storage structures
-#[derive(Debug, Clone)]
-pub struct TableMetadata {
-    pub name: String,
-    pub root_page_id: PageId,
-    pub row_count: u64,
-    pub next_row_id: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StorageStats {
-    pub table_count: usize,
-    pub total_rows: u64,
-    pub free_page_count: usize,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PagerIntegrityReport {
     pub free_page_count: usize,
     pub checksummed_page_count: usize,
     pub verified_checksum_pages: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StorageIntegrityReport {
-    pub table_count: usize,
-    pub live_page_count: usize,
-    pub free_page_count: usize,
-    pub total_rows: u64,
-    pub pager: PagerIntegrityReport,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct StoredRow {
-    pub row_id: u64,
-    pub values: Vec<crate::catalog::Value>,
 }

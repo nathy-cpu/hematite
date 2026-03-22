@@ -1,6 +1,6 @@
-//! Storage-layer cursor abstractions.
+//! Relational cursors.
 
-use crate::storage::StoredRow;
+use super::engine::StoredRow;
 
 #[derive(Debug, Clone)]
 pub struct TableCursor {

@@ -1,10 +1,10 @@
 //! Query execution engine for processing SQL statements
 
+use crate::catalog::{CatalogEngine, StoredRow};
 use crate::catalog::{Column, DataType, Schema, Table, Value};
 use crate::error::{HematiteError, Result};
 use crate::parser::ast::*;
 use crate::query::planner::SelectAccessPath;
-use crate::storage::StorageEngine;
 use std::cmp::Ordering;
 
 #[derive(Debug, Clone)]
@@ -17,21 +17,21 @@ pub struct QueryResult {
 #[derive(Debug)]
 pub struct ExecutionContext<'a> {
     pub catalog: Schema,
-    pub storage: &'a mut StorageEngine,
+    pub engine: &'a mut CatalogEngine,
 }
 
 impl<'a> ExecutionContext<'a> {
-    pub fn for_read(catalog: &Schema, storage: &'a mut StorageEngine) -> Self {
+    pub fn for_read(catalog: &Schema, engine: &'a mut CatalogEngine) -> Self {
         Self {
             catalog: catalog.clone(),
-            storage,
+            engine,
         }
     }
 
-    pub fn for_mutation(catalog: &Schema, storage: &'a mut StorageEngine) -> Self {
+    pub fn for_mutation(catalog: &Schema, engine: &'a mut CatalogEngine) -> Self {
         Self {
             catalog: catalog.clone(),
-            storage,
+            engine,
         }
     }
 }
@@ -475,7 +475,7 @@ impl QueryExecutor for SelectExecutor {
                         "Planner selected rowid lookup without a matching predicate".to_string(),
                     )
                 })?;
-                ctx.storage
+                ctx.engine
                     .lookup_row_by_rowid(&table_name, rowid)?
                     .map(|row| vec![row.values])
                     .unwrap_or_default()
@@ -488,7 +488,7 @@ impl QueryExecutor for SelectExecutor {
                                 .to_string(),
                         )
                     })?;
-                ctx.storage
+                ctx.engine
                     .lookup_row_by_primary_key(table, &primary_key_values)?
                     .map(|row| vec![row.values])
                     .unwrap_or_default()
@@ -502,13 +502,13 @@ impl QueryExecutor for SelectExecutor {
                             index_name
                         ))
                     })?;
-                ctx.storage
+                ctx.engine
                     .lookup_rows_by_secondary_index(table, index_name, &key_values)?
                     .into_iter()
                     .map(|row| row.values)
                     .collect()
             }
-            SelectAccessPath::FullTableScan => ctx.storage.read_from_table(&table_name)?,
+            SelectAccessPath::FullTableScan => ctx.engine.read_from_table(&table_name)?,
         };
 
         // Apply WHERE clause filtering.
@@ -615,7 +615,7 @@ impl InsertExecutor {
         })?;
 
         if ctx
-            .storage
+            .engine
             .lookup_row_by_primary_key(table, &candidate_pk)?
             .is_some()
         {
@@ -725,18 +725,18 @@ impl QueryExecutor for InsertExecutor {
             self.ensure_primary_key_is_unique(ctx, &table, &[], &row_values)?;
 
             let row_id = ctx
-                .storage
+                .engine
                 .insert_into_table(&self.statement.table, row_values.clone())?;
-            ctx.storage.register_primary_key_row(
+            ctx.engine.register_primary_key_row(
                 &table,
-                crate::storage::StoredRow {
+                StoredRow {
                     row_id,
                     values: row_values.clone(),
                 },
             )?;
-            ctx.storage.register_secondary_index_row(
+            ctx.engine.register_secondary_index_row(
                 &table,
-                crate::storage::StoredRow {
+                StoredRow {
                     row_id,
                     values: row_values.clone(),
                 },
@@ -820,7 +820,7 @@ impl QueryExecutor for UpdateExecutor {
                 HematiteError::ParseError(format!("Table '{}' not found", self.statement.table))
             })?;
 
-        let all_rows = ctx.storage.read_rows_with_ids(&self.statement.table)?;
+        let all_rows = ctx.engine.read_rows_with_ids(&self.statement.table)?;
         let select_executor = SelectExecutor::new(
             SelectStatement {
                 columns: vec![SelectItem::Wildcard],
@@ -873,7 +873,7 @@ impl QueryExecutor for UpdateExecutor {
                 table
                     .validate_row(&updated_row)
                     .map_err(|err| HematiteError::ParseError(err.to_string()))?;
-                rewritten_rows.push(crate::storage::StoredRow {
+                rewritten_rows.push(StoredRow {
                     row_id: stored_row.row_id,
                     values: updated_row,
                 });
@@ -890,12 +890,12 @@ impl QueryExecutor for UpdateExecutor {
                 .map(|row| row.values.clone())
                 .collect::<Vec<_>>(),
         )?;
-        ctx.storage
+        ctx.engine
             .replace_table_rows(&self.statement.table, rewritten_rows)?;
-        let refreshed_rows = ctx.storage.read_rows_with_ids(&self.statement.table)?;
-        ctx.storage
+        let refreshed_rows = ctx.engine.read_rows_with_ids(&self.statement.table)?;
+        ctx.engine
             .rebuild_primary_key_index(table, &refreshed_rows)?;
-        ctx.storage
+        ctx.engine
             .rebuild_secondary_indexes(table, &refreshed_rows)?;
 
         Ok(QueryResult {
@@ -928,7 +928,7 @@ impl QueryExecutor for DeleteExecutor {
                 HematiteError::ParseError(format!("Table '{}' not found", self.statement.table))
             })?;
 
-        let all_rows = ctx.storage.read_rows_with_ids(&self.statement.table)?;
+        let all_rows = ctx.engine.read_rows_with_ids(&self.statement.table)?;
         let select_executor = SelectExecutor::new(
             SelectStatement {
                 columns: vec![SelectItem::Wildcard],
@@ -963,8 +963,8 @@ impl QueryExecutor for DeleteExecutor {
         }
 
         for row in &rows_to_delete {
-            ctx.storage.delete_secondary_index_row(table, row)?;
-            let deleted_pk = ctx.storage.delete_primary_key_row(table, row)?;
+            ctx.engine.delete_secondary_index_row(table, row)?;
+            let deleted_pk = ctx.engine.delete_primary_key_row(table, row)?;
             if !deleted_pk {
                 return Err(HematiteError::CorruptedData(format!(
                     "Primary-key index entry vanished during delete execution for table '{}'",
@@ -972,7 +972,7 @@ impl QueryExecutor for DeleteExecutor {
                 )));
             }
             let deleted = ctx
-                .storage
+                .engine
                 .delete_from_table_by_rowid(&self.statement.table, row.row_id)?;
             if !deleted {
                 return Err(HematiteError::CorruptedData(format!(
@@ -1033,8 +1033,8 @@ impl QueryExecutor for CreateExecutor {
         let columns = self.convert_column_definitions()?;
 
         // Create storage structures first so the catalog only persists the final roots once.
-        let root_page_id = ctx.storage.create_table(&self.statement.table)?;
-        let primary_key_root_page_id = ctx.storage.create_empty_btree()?;
+        let root_page_id = ctx.engine.create_table(&self.statement.table)?;
+        let primary_key_root_page_id = ctx.engine.create_empty_btree()?;
         ctx.catalog.create_table_with_roots(
             self.statement.table.clone(),
             columns,
@@ -1073,7 +1073,7 @@ impl QueryExecutor for DropExecutor {
             })?
             .clone();
 
-        ctx.storage.drop_table_with_indexes(&table)?;
+        ctx.engine.drop_table_with_indexes(&table)?;
         ctx.catalog
             .drop_table(table.id)
             .map_err(|err| HematiteError::ParseError(err.to_string()))?;

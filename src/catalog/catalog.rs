@@ -4,12 +4,13 @@ use crate::btree::tree::BTreeManager;
 use crate::btree::BTreeIndex;
 use crate::btree::KeyValueCodec;
 use crate::catalog::column::Column;
+use crate::catalog::engine::{CatalogEngine, CatalogIntegrityReport};
 use crate::catalog::header::DatabaseHeader;
 use crate::catalog::ids::TableId;
 use crate::catalog::schema::Schema;
 use crate::catalog::table::{SecondaryIndex, Table};
 use crate::error::{HematiteError, Result};
-use crate::storage::{Page, PageId, StorageEngine, StorageIntegrityReport, DB_HEADER_PAGE_ID};
+use crate::storage::{Page, PageId, Pager, DB_HEADER_PAGE_ID};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -41,7 +42,8 @@ impl KeyValueCodec for CatalogSchemaCodec {
 /// SQLite-style catalog manager with B-tree schema persistence
 #[derive(Debug)]
 pub struct Catalog {
-    storage: Arc<Mutex<StorageEngine>>,
+    pager: Arc<Mutex<Pager>>,
+    engine: CatalogEngine,
     schema: Schema,
     schema_root: PageId,
     schema_dirty: bool,
@@ -50,52 +52,54 @@ pub struct Catalog {
 impl Catalog {
     /// Open or create a database with SQLite-style schema management
     pub fn open_or_create<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
-        let storage = StorageEngine::new(path)?;
-        Self::open_with_storage(storage)
+        let pager = Pager::new(path, 100)?;
+        Self::open_with_pager(pager)
     }
 
     pub fn open_in_memory() -> Result<Self> {
-        let storage = StorageEngine::new_in_memory()?;
-        Self::open_with_storage(storage)
+        let pager = Pager::new_in_memory(100)?;
+        Self::open_with_pager(pager)
     }
 
-    fn open_with_storage(storage: StorageEngine) -> Result<Self> {
-        let storage = Arc::new(Mutex::new(storage));
+    fn open_with_pager(pager: Pager) -> Result<Self> {
+        let pager = Arc::new(Mutex::new(pager));
+        let engine = CatalogEngine::from_shared_pager(pager.clone())?;
 
         // Try to read existing database header
-        let mut storage_guard = storage.lock().unwrap();
-        let header = match storage_guard.read_page(DB_HEADER_PAGE_ID) {
-            Ok(page) => {
-                // Existing database - read header
-                DatabaseHeader::deserialize(&page)?
-            }
-            Err(_) => {
-                // New database - create header and schema B-tree
-                let header = DatabaseHeader::new(PageId::new(2)); // Start schema at page 2
-
-                // Create empty schema B-tree
-                let schema_root = storage_guard.create_empty_btree()?;
-                let mut new_header = header;
-                new_header.schema_root_page = schema_root;
-                new_header.checksum = new_header.calculate_checksum();
-
-                // Write header to page 0
-                let mut header_page = Page::new(DB_HEADER_PAGE_ID);
-                new_header.serialize(&mut header_page)?;
-                storage_guard.write_page(header_page)?;
-                storage_guard.flush()?;
-
-                new_header
+        let existing_header = {
+            let mut pager_guard = pager.lock().unwrap();
+            match pager_guard.read_page(DB_HEADER_PAGE_ID) {
+                Ok(page) => Some(DatabaseHeader::deserialize(&page)?),
+                Err(_) => None,
             }
         };
 
-        drop(storage_guard);
+        let header = match existing_header {
+            Some(header) => header,
+            None => {
+                // New database - create header and schema B-tree
+                let mut manager = BTreeManager::from_shared_storage(pager.clone());
+                let schema_root = manager.create_tree()?;
+
+                let mut header = DatabaseHeader::new(schema_root);
+                header.checksum = header.calculate_checksum();
+
+                let mut pager_guard = pager.lock().unwrap();
+                let mut header_page = Page::new(DB_HEADER_PAGE_ID);
+                header.serialize(&mut header_page)?;
+                pager_guard.write_page(header_page)?;
+                pager_guard.flush()?;
+
+                header
+            }
+        };
 
         // Load schema from B-tree
-        let schema = Self::load_schema_from_btree(&storage, header.schema_root_page)?;
+        let schema = Self::load_schema_from_btree(&pager, header.schema_root_page)?;
 
         Ok(Self {
-            storage,
+            pager,
+            engine,
             schema,
             schema_root: header.schema_root_page,
             schema_dirty: false,
@@ -103,11 +107,8 @@ impl Catalog {
     }
 
     /// Load schema from the schema B-tree
-    fn load_schema_from_btree(
-        storage: &Arc<Mutex<StorageEngine>>,
-        schema_root: PageId,
-    ) -> Result<Schema> {
-        let btree = BTreeIndex::from_shared_storage(storage.clone(), schema_root);
+    fn load_schema_from_btree(pager: &Arc<Mutex<Pager>>, schema_root: PageId) -> Result<Schema> {
+        let btree = BTreeIndex::from_shared_storage(pager.clone(), schema_root);
         let mut cursor = btree.cursor()?;
 
         let mut schema = Schema::new();
@@ -140,26 +141,26 @@ impl Catalog {
             .collect::<Vec<_>>();
 
         let old_schema_root = self.schema_root;
-        let mut manager = BTreeManager::from_shared_storage(self.storage.clone());
+        let mut manager = BTreeManager::from_shared_storage(self.pager.clone());
         manager.delete_tree(old_schema_root)?;
         let new_schema_root = manager.create_tree()?;
 
         let mut btree =
-            crate::btree::BTreeIndex::from_shared_storage(self.storage.clone(), new_schema_root);
+            crate::btree::BTreeIndex::from_shared_storage(self.pager.clone(), new_schema_root);
 
         for table in table_entries {
             btree.insert_typed::<CatalogSchemaCodec>(&table.name, &table)?;
         }
 
-        let mut storage_guard = self.storage.lock().unwrap();
-        let header_page = storage_guard.read_page(DB_HEADER_PAGE_ID)?;
+        let mut pager_guard = self.pager.lock().unwrap();
+        let header_page = pager_guard.read_page(DB_HEADER_PAGE_ID)?;
         let mut header = DatabaseHeader::deserialize(&header_page)?;
         header.schema_root_page = new_schema_root;
         header.checksum = header.calculate_checksum();
         let mut updated = Page::new(DB_HEADER_PAGE_ID);
         header.serialize(&mut updated)?;
-        storage_guard.write_page(updated)?;
-        storage_guard.flush()?;
+        pager_guard.write_page(updated)?;
+        pager_guard.flush()?;
 
         self.schema_root = new_schema_root;
         self.schema_dirty = false;
@@ -168,15 +169,15 @@ impl Catalog {
 
     /// Get the next table ID from database header
     fn get_next_table_id(&self) -> Result<TableId> {
-        let mut storage_guard = self.storage.lock().unwrap();
-        let header_page = storage_guard.read_page(DB_HEADER_PAGE_ID)?;
+        let mut pager_guard = self.pager.lock().unwrap();
+        let header_page = pager_guard.read_page(DB_HEADER_PAGE_ID)?;
         let mut header = DatabaseHeader::deserialize(&header_page)?;
         let table_id = header.increment_table_id();
 
         // Update header with new table ID
         let mut updated_page = Page::new(DB_HEADER_PAGE_ID);
         header.serialize(&mut updated_page)?;
-        storage_guard.write_page(updated_page)?;
+        pager_guard.write_page(updated_page)?;
 
         Ok(table_id)
     }
@@ -271,13 +272,12 @@ impl Catalog {
         self.schema.clone()
     }
 
-    /// Run a storage operation against the catalog's backing storage.
-    pub fn with_storage<F, T>(&self, f: F) -> Result<T>
+    /// Run a relational engine operation against the catalog's backing engine.
+    pub fn with_engine<F, T>(&mut self, f: F) -> Result<T>
     where
-        F: FnOnce(&mut StorageEngine) -> Result<T>,
+        F: FnOnce(&mut CatalogEngine) -> Result<T>,
     {
-        let mut storage_guard = self.storage.lock().unwrap();
-        f(&mut storage_guard)
+        f(&mut self.engine)
     }
 
     /// Force schema persistence to B-tree
@@ -288,8 +288,7 @@ impl Catalog {
     /// Flush both schema metadata and storage pages.
     pub fn flush(&mut self) -> Result<()> {
         self.save_schema_to_btree()?;
-        let mut storage_guard = self.storage.lock().unwrap();
-        storage_guard.flush()
+        self.engine.flush()
     }
 
     /// Replace the entire in-memory schema and persist it as the durable catalog state.
@@ -298,15 +297,15 @@ impl Catalog {
         self.schema_dirty = true;
         self.save_schema_to_btree()?;
 
-        let mut storage_guard = self.storage.lock().unwrap();
-        let header_page = storage_guard.read_page(DB_HEADER_PAGE_ID)?;
+        let mut pager_guard = self.pager.lock().unwrap();
+        let header_page = pager_guard.read_page(DB_HEADER_PAGE_ID)?;
         let mut header = DatabaseHeader::deserialize(&header_page)?;
         header.next_table_id = self.schema.next_table_id();
         header.checksum = header.calculate_checksum();
 
         let mut updated = Page::new(DB_HEADER_PAGE_ID);
         header.serialize(&mut updated)?;
-        storage_guard.write_page(updated)?;
+        pager_guard.write_page(updated)?;
 
         Ok(())
     }
@@ -427,7 +426,7 @@ impl Catalog {
         schema_result
     }
 
-    pub fn validate_integrity(&self) -> Result<StorageIntegrityReport> {
+    pub fn validate_integrity(&mut self) -> Result<CatalogIntegrityReport> {
         self.validate_schema()?;
 
         let schema_tables = self
@@ -441,8 +440,8 @@ impl Catalog {
             })
             .collect::<HashMap<_, _>>();
 
-        let mut storage_guard = self.storage.lock().unwrap();
-        let storage_tables = storage_guard
+        let storage_tables = self
+            .engine
             .get_table_metadata()
             .iter()
             .map(|(name, metadata)| (name.clone(), metadata.root_page_id))
@@ -475,7 +474,7 @@ impl Catalog {
             }
         }
 
-        storage_guard.validate_integrity()
+        self.engine.validate_integrity()
     }
 
     // ... (rest of the code remains the same)
@@ -525,10 +524,10 @@ impl Catalog {
 
     /// Get the next available table ID without incrementing
     pub fn peek_next_table_id(&self) -> Result<TableId> {
-        let mut storage_guard = self.storage.lock().unwrap();
-        let header_page = storage_guard.read_page(PageId::new(0))?;
+        let mut pager_guard = self.pager.lock().unwrap();
+        let header_page = pager_guard.read_page(PageId::new(0))?;
         let header = DatabaseHeader::deserialize(&header_page)?;
-        drop(storage_guard); // Release lock
+        drop(pager_guard);
         Ok(TableId::new(header.next_table_id))
     }
 

@@ -5,14 +5,14 @@ use crate::btree::node::SearchResult;
 use crate::btree::KeyValueCodec;
 use crate::btree::{BTreeKey, BTreeNode, BTreeValue, NodeType};
 use crate::error::{HematiteError, Result};
-use crate::storage::{Page, PageId, StorageEngine};
+use crate::storage::{Page, PageId, Pager};
 use std::sync::{Arc, Mutex};
 
 use super::node;
 
 /// Main B-tree index interface
 pub struct BTreeIndex {
-    storage: Arc<Mutex<StorageEngine>>,
+    storage: Arc<Mutex<Pager>>,
     root_page_id: PageId,
 }
 
@@ -24,14 +24,14 @@ impl BTreeIndex {
         }
     }
 
-    pub fn new(storage: StorageEngine, root_page_id: PageId) -> Self {
+    pub fn new(storage: Pager, root_page_id: PageId) -> Self {
         Self {
             storage: Arc::new(Mutex::new(storage)),
             root_page_id,
         }
     }
 
-    pub fn from_shared_storage(storage: Arc<Mutex<StorageEngine>>, root_page_id: PageId) -> Self {
+    pub fn from_shared_storage(storage: Arc<Mutex<Pager>>, root_page_id: PageId) -> Self {
         Self {
             storage,
             root_page_id,
@@ -42,7 +42,7 @@ impl BTreeIndex {
         self.root_page_id
     }
 
-    pub fn new_with_init(storage: StorageEngine) -> Result<Self> {
+    pub fn new_with_init(storage: Pager) -> Result<Self> {
         // Allocate a page for root
         let storage_arc = Arc::new(Mutex::new(storage));
         let root_page_id = storage_arc.lock().unwrap().allocate_page()?;

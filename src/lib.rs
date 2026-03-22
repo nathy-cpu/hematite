@@ -15,7 +15,10 @@ pub mod storage;
 pub mod test_utils;
 
 pub use btree::tree::BTreeManager;
-pub use catalog::{Catalog, Column, DataType, Schema, Table, Value};
+pub use catalog::{
+    Catalog, CatalogEngine, CatalogIntegrityReport, CatalogStorageStats, Column, DataType, Schema,
+    StoredRow, Table, TableCursor, Value,
+};
 pub use error::{HematiteError, Result};
 pub use parser::parser::Parser;
 pub use parser::{ast::*, Lexer};
@@ -23,4 +26,4 @@ pub use query::{ExecutionContext, QueryExecutor, QueryPlanner, QueryResult};
 pub use sql::{
     Connection, Database, Hematite, PreparedStatement, ResultSet, Row, StatementResult, Transaction,
 };
-pub use storage::{Database as StorageDatabase, StorageEngine};
+pub use storage::Pager;

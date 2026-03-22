@@ -8,22 +8,22 @@
 
 use crate::btree::{BTreeIndex, BTreeNode, NodeType};
 use crate::error::Result;
-use crate::storage::{Page, PageId, StorageEngine, DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID};
+use crate::storage::{Page, PageId, Pager, DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 pub struct BTreeManager {
-    storage: Arc<Mutex<StorageEngine>>,
+    storage: Arc<Mutex<Pager>>,
 }
 
 impl BTreeManager {
-    pub fn new(storage: StorageEngine) -> Self {
+    pub fn new(storage: Pager) -> Self {
         Self {
             storage: Arc::new(Mutex::new(storage)),
         }
     }
 
-    pub fn from_shared_storage(storage: Arc<Mutex<StorageEngine>>) -> Self {
+    pub fn from_shared_storage(storage: Arc<Mutex<Pager>>) -> Self {
         Self { storage }
     }
 

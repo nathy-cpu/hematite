@@ -1615,11 +1615,11 @@ mod catalog_new_tests {
                     .nullable(false),
             ],
         )?;
-        let root_page_id = catalog.with_storage(|storage| storage.create_table("users"))?;
+        let root_page_id = catalog.with_engine(|storage| storage.create_table("users"))?;
         catalog.set_table_root_page(table_id, root_page_id)?;
         assert!(catalog.validate_integrity().is_ok());
 
-        catalog.with_storage(|storage| storage.drop_table("users"))?;
+        catalog.with_engine(|storage| storage.drop_table("users"))?;
 
         let err = catalog.validate_integrity().unwrap_err();
         assert!(err.to_string().contains("missing from storage metadata"));

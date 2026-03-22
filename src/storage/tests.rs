@@ -212,41 +212,10 @@ mod pager_tests {
     }
 }
 
-mod database_tests {
-    use crate::error::Result;
-    use crate::storage::database::*;
-    use crate::test_utils::TestDbFile;
-
-    #[test]
-    fn test_database_creation_and_close() -> Result<()> {
-        let test_db = TestDbFile::new("_test_database");
-
-        {
-            let mut db = Database::open(test_db.path())?;
-            // Database is created successfully
-            db.close()?;
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_database_storage_access() -> Result<()> {
-        let test_db = TestDbFile::new("_test_database_storage");
-
-        let mut db = Database::open(test_db.path())?;
-
-        // Test storage access
-        let storage = db.storage();
-        assert_eq!(storage.get_table_metadata().len(), 0);
-        Ok(())
-    }
-}
-
 mod mod_tests {
     use crate::btree::{BTreeNode, BTreeValue, NodeType};
-    use crate::catalog::Value;
-    use crate::storage::*;
+    use crate::catalog::{CatalogEngine, Value};
+    use crate::storage::{Page, Pager, PAGE_SIZE, STORAGE_METADATA_PAGE_ID};
     use crate::test_utils::TestDbFile;
     use std::io::{Seek, SeekFrom, Write};
 
@@ -256,7 +225,7 @@ mod mod_tests {
     fn test_concurrent_page_access() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_storage_concurrent");
 
-        let mut storage = StorageEngine::new(test_db.path())?;
+        let mut storage = Pager::new(test_db.path(), 100)?;
         let page_id = storage.allocate_page()?;
 
         // Write initial data
@@ -285,7 +254,7 @@ mod mod_tests {
         let test_db = TestDbFile::new("_test_storage_free_pages_persist");
 
         let deallocated_page = {
-            let mut storage = StorageEngine::new(test_db.path())?;
+            let mut storage = crate::catalog::CatalogEngine::new(test_db.path())?;
             let page_1 = storage.allocate_page()?;
             let page_2 = storage.allocate_page()?;
             assert_ne!(page_1, page_2);
@@ -294,7 +263,7 @@ mod mod_tests {
             page_1
         };
 
-        let mut reopened = StorageEngine::new(test_db.path())?;
+        let reopened = crate::catalog::CatalogEngine::new(test_db.path())?;
         let reused = reopened.allocate_page()?;
         assert_eq!(reused, deallocated_page);
 
@@ -306,7 +275,7 @@ mod mod_tests {
         let test_db = TestDbFile::new("_test_storage_trailing_free_pages_compact");
 
         let (highest_page, size_before, size_after_compaction) = {
-            let mut storage = StorageEngine::new(test_db.path())?;
+            let mut storage = crate::catalog::CatalogEngine::new(test_db.path())?;
             let _page_1 = storage.allocate_page()?;
             let _page_2 = storage.allocate_page()?;
             let page_3 = storage.allocate_page()?;
@@ -321,7 +290,7 @@ mod mod_tests {
 
         assert!(size_after_compaction < size_before);
 
-        let mut reopened = StorageEngine::new(test_db.path())?;
+        let reopened = crate::catalog::CatalogEngine::new(test_db.path())?;
         let reused = reopened.allocate_page()?;
         assert_eq!(reused, highest_page);
 
@@ -331,7 +300,7 @@ mod mod_tests {
     #[test]
     fn test_storage_stats_reflect_tables_rows_and_free_pages() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_storage_stats");
-        let mut storage = StorageEngine::new(test_db.path())?;
+        let mut storage = CatalogEngine::new(test_db.path())?;
 
         let _ = storage.create_table("users")?;
         let _ = storage.create_table("notes")?;
@@ -352,7 +321,7 @@ mod mod_tests {
     #[test]
     fn test_storage_integrity_validates_healthy_state() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_storage_integrity_healthy");
-        let mut storage = StorageEngine::new(test_db.path())?;
+        let mut storage = CatalogEngine::new(test_db.path())?;
 
         let _ = storage.create_table("users")?;
         let _ = storage.insert_into_table("users", vec![Value::Integer(1)])?;
@@ -371,7 +340,7 @@ mod mod_tests {
     #[test]
     fn test_storage_integrity_rejects_live_free_page_overlap() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_storage_integrity_overlap");
-        let mut storage = StorageEngine::new(test_db.path())?;
+        let mut storage = crate::catalog::CatalogEngine::new(test_db.path())?;
 
         let root_page_id = storage.create_table("users")?;
         let _extra_page_id = storage.allocate_page()?;
@@ -387,7 +356,7 @@ mod mod_tests {
     #[test]
     fn test_storage_integrity_rejects_corrupt_table_row_count() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_storage_integrity_row_count_corrupt");
-        let mut storage = StorageEngine::new(test_db.path())?;
+        let mut storage = crate::catalog::CatalogEngine::new(test_db.path())?;
 
         let root_page_id = storage.create_table("users")?;
         let _ = storage.insert_into_table("users", vec![Value::Integer(1)])?;
@@ -412,7 +381,7 @@ mod mod_tests {
     #[test]
     fn test_storage_integrity_rejects_cursor_rowid_order_violation() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_storage_integrity_cursor_rowid_order");
-        let mut storage = StorageEngine::new(test_db.path())?;
+        let mut storage = crate::catalog::CatalogEngine::new(test_db.path())?;
 
         let root_page_id = storage.create_table("users")?;
         let _ = storage.insert_into_table("users", vec![Value::Integer(1)])?;
@@ -423,18 +392,13 @@ mod mod_tests {
         assert_eq!(node.node_type, NodeType::Leaf);
         assert!(node.values.len() >= 2);
 
-        let first = crate::storage::serialization::RowSerializer::deserialize_stored_row(
-            &node.values[0].data,
-        )?;
-        let mut second = crate::storage::serialization::RowSerializer::deserialize_stored_row(
-            &node.values[1].data,
-        )?;
+        let first = crate::catalog::RowSerializer::deserialize_stored_row(&node.values[0].data)?;
+        let mut second =
+            crate::catalog::RowSerializer::deserialize_stored_row(&node.values[1].data)?;
 
         // Corrupt second row's row_id to be <= first row_id.
         second.row_id = first.row_id;
-        let mut corrupted =
-            crate::storage::serialization::RowSerializer::serialize_stored_row(&second)?;
-        corrupted.drain(0..4);
+        let corrupted = crate::catalog::RowSerializer::serialize_stored_row(&second)?;
         node.values[1] = BTreeValue::new(corrupted);
         node.to_page(&mut page)?;
         storage.write_page(page)?;
@@ -451,7 +415,7 @@ mod mod_tests {
         let test_db = TestDbFile::new("_test_versioned_storage_metadata");
 
         {
-            let mut storage = StorageEngine::new(test_db.path())?;
+            let mut storage = CatalogEngine::new(test_db.path())?;
             let _ = storage.create_table("users")?;
             let _ = storage.insert_into_table("users", vec![Value::Integer(1)])?;
             let page_1 = storage.allocate_page()?;
@@ -460,7 +424,7 @@ mod mod_tests {
             storage.flush()?;
         }
 
-        let reopened = StorageEngine::new(test_db.path())?;
+        let reopened = crate::catalog::CatalogEngine::new(test_db.path())?;
         let stats = reopened.get_storage_stats();
         assert_eq!(stats.table_count, 1);
         assert_eq!(stats.total_rows, 1);
@@ -482,7 +446,7 @@ mod mod_tests {
         pager.flush()?;
         drop(pager);
 
-        let reopened = StorageEngine::new(test_db.path());
+        let reopened = crate::catalog::CatalogEngine::new(test_db.path());
         assert!(reopened.is_err());
         assert!(reopened
             .unwrap_err()
@@ -497,7 +461,7 @@ mod mod_tests {
         let test_db = TestDbFile::new("_test_page_checksum_detects_corruption");
 
         let corrupted_page_id = {
-            let mut storage = StorageEngine::new(test_db.path())?;
+            let mut storage = crate::catalog::CatalogEngine::new(test_db.path())?;
             let page_id = storage.allocate_page()?;
             let mut page = Page::new(page_id);
             page.data[0..4].copy_from_slice(&[7, 7, 7, 7]);
@@ -517,7 +481,7 @@ mod mod_tests {
             file.flush()?;
         }
 
-        let mut reopened = StorageEngine::new(test_db.path())?;
+        let reopened = crate::catalog::CatalogEngine::new(test_db.path())?;
         let err = reopened.read_page(corrupted_page_id).unwrap_err();
         assert!(err.to_string().contains("Page checksum mismatch"));
 
@@ -529,7 +493,7 @@ mod mod_tests {
         let test_db = TestDbFile::new("_test_storage_integrity_checksum_corrupt");
 
         let corrupted_page_id = {
-            let mut storage = StorageEngine::new(test_db.path())?;
+            let mut storage = crate::catalog::CatalogEngine::new(test_db.path())?;
             let page_id = storage.allocate_page()?;
             let mut page = Page::new(page_id);
             page.data[0..4].copy_from_slice(&[7, 7, 7, 7]);
@@ -549,7 +513,7 @@ mod mod_tests {
             file.flush()?;
         }
 
-        let mut reopened = StorageEngine::new(test_db.path())?;
+        let mut reopened = crate::catalog::CatalogEngine::new(test_db.path())?;
         let err = reopened.validate_integrity().unwrap_err();
         assert!(err.to_string().contains("Page checksum mismatch"));
 
@@ -559,7 +523,7 @@ mod mod_tests {
     #[test]
     fn test_table_storage_spans_multiple_pages() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_storage_multi_page");
-        let mut storage = StorageEngine::new(test_db.path())?;
+        let mut storage = crate::catalog::CatalogEngine::new(test_db.path())?;
 
         let _ = storage.create_table("users")?;
 
@@ -605,7 +569,7 @@ mod mod_tests {
     #[test]
     fn test_new_table_root_uses_btree_page_format() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_storage_table_root_is_btree");
-        let mut storage = StorageEngine::new(test_db.path())?;
+        let mut storage = crate::catalog::CatalogEngine::new(test_db.path())?;
 
         let root_page_id = storage.create_table("users")?;
         let root_page = storage.read_page(root_page_id)?;
@@ -622,7 +586,7 @@ mod mod_tests {
     #[test]
     fn test_row_ids_survive_table_rewrite() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_storage_row_ids_survive_rewrite");
-        let mut storage = StorageEngine::new(test_db.path())?;
+        let mut storage = crate::catalog::CatalogEngine::new(test_db.path())?;
 
         let _ = storage.create_table("users")?;
         let first_id = storage.insert_into_table(
@@ -662,7 +626,7 @@ mod mod_tests {
     #[test]
     fn test_lookup_row_by_primary_key() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_storage_lookup_by_primary_key");
-        let mut storage = StorageEngine::new(test_db.path())?;
+        let mut storage = crate::catalog::CatalogEngine::new(test_db.path())?;
 
         let _ = storage.create_table("users")?;
         let primary_key_root_page_id = storage.create_empty_btree()?;
@@ -700,14 +664,14 @@ mod mod_tests {
         table.primary_key_index_root_page_id = primary_key_root_page_id;
         storage.register_primary_key_row(
             &table,
-            crate::storage::StoredRow {
+            crate::catalog::StoredRow {
                 row_id: first_id,
                 values: vec![Value::Integer(1), Value::Text("Alice".to_string())],
             },
         )?;
         storage.register_primary_key_row(
             &table,
-            crate::storage::StoredRow {
+            crate::catalog::StoredRow {
                 row_id: second_id,
                 values: vec![Value::Integer(2), Value::Text("Bob".to_string())],
             },
@@ -731,7 +695,7 @@ mod mod_tests {
     #[test]
     fn test_secondary_index_lookup_and_rebuild() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_storage_secondary_index_lookup");
-        let mut storage = StorageEngine::new(test_db.path())?;
+        let mut storage = crate::catalog::CatalogEngine::new(test_db.path())?;
 
         let root_page_id = storage.create_table("users")?;
         let primary_key_root_page_id = storage.create_empty_btree()?;
@@ -765,7 +729,7 @@ mod mod_tests {
             "users",
             vec![Value::Integer(1), Value::Text("a@example.com".to_string())],
         )?;
-        let row_1 = crate::storage::StoredRow {
+        let row_1 = crate::catalog::StoredRow {
             row_id: row_id_1,
             values: vec![Value::Integer(1), Value::Text("a@example.com".to_string())],
         };
@@ -776,7 +740,7 @@ mod mod_tests {
             "users",
             vec![Value::Integer(2), Value::Text("a@example.com".to_string())],
         )?;
-        let row_2 = crate::storage::StoredRow {
+        let row_2 = crate::catalog::StoredRow {
             row_id: row_id_2,
             values: vec![Value::Integer(2), Value::Text("a@example.com".to_string())],
         };
@@ -790,7 +754,7 @@ mod mod_tests {
         )?;
         assert_eq!(matched.len(), 2);
 
-        let rewritten_rows = vec![crate::storage::StoredRow {
+        let rewritten_rows = vec![crate::catalog::StoredRow {
             row_id: row_id_1,
             values: vec![Value::Integer(1), Value::Text("b@example.com".to_string())],
         }];
@@ -820,7 +784,7 @@ mod mod_tests {
         let test_db = TestDbFile::new("_test_durable_indexes_survive_reopen");
 
         let (table, row_id) = {
-            let mut storage = StorageEngine::new(test_db.path())?;
+            let mut storage = crate::catalog::CatalogEngine::new(test_db.path())?;
             let root_page_id = storage.create_table("users")?;
             let primary_key_root_page_id = storage.create_empty_btree()?;
             let secondary_index_root_page_id = storage.create_empty_btree()?;
@@ -857,7 +821,7 @@ mod mod_tests {
                     Value::Text("persist@example.com".to_string()),
                 ],
             )?;
-            let row = crate::storage::StoredRow {
+            let row = crate::catalog::StoredRow {
                 row_id,
                 values: vec![
                     Value::Integer(7),
@@ -870,7 +834,7 @@ mod mod_tests {
             (table, row_id)
         };
 
-        let mut reopened = StorageEngine::new(test_db.path())?;
+        let mut reopened = crate::catalog::CatalogEngine::new(test_db.path())?;
         let found = reopened.lookup_row_by_primary_key(&table, &[Value::Integer(7)])?;
         assert_eq!(found.map(|row| row.row_id), Some(row_id));
 
@@ -888,7 +852,7 @@ mod mod_tests {
     #[test]
     fn test_delete_updates_durable_indexes() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_delete_updates_durable_indexes");
-        let mut storage = StorageEngine::new(test_db.path())?;
+        let mut storage = crate::catalog::CatalogEngine::new(test_db.path())?;
         let root_page_id = storage.create_table("users")?;
         let primary_key_root_page_id = storage.create_empty_btree()?;
         let secondary_index_root_page_id = storage.create_empty_btree()?;
@@ -925,7 +889,7 @@ mod mod_tests {
                 Value::Text("gone@example.com".to_string()),
             ],
         )?;
-        let row = crate::storage::StoredRow {
+        let row = crate::catalog::StoredRow {
             row_id,
             values: vec![
                 Value::Integer(11),
@@ -956,7 +920,7 @@ mod mod_tests {
     #[test]
     fn test_table_scan_via_cursor_matches_row_reads() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_storage_table_scan_via_cursor");
-        let mut storage = StorageEngine::new(test_db.path())?;
+        let mut storage = crate::catalog::CatalogEngine::new(test_db.path())?;
         let _ = storage.create_table("users")?;
         let _ = storage.insert_into_table("users", vec![Value::Integer(2)])?;
         let _ = storage.insert_into_table("users", vec![Value::Integer(1)])?;
@@ -982,7 +946,7 @@ mod mod_tests {
     #[test]
     fn test_rowid_lookup_via_cursor_seek() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_storage_rowid_lookup_via_cursor");
-        let mut storage = StorageEngine::new(test_db.path())?;
+        let mut storage = crate::catalog::CatalogEngine::new(test_db.path())?;
         let _ = storage.create_table("users")?;
 
         let first = storage.insert_into_table("users", vec![Value::Integer(10)])?;
@@ -1002,7 +966,7 @@ mod mod_tests {
         let test_db = TestDbFile::new("_test_storage_cursor_reopen_order");
 
         {
-            let mut storage = StorageEngine::new(test_db.path())?;
+            let mut storage = crate::catalog::CatalogEngine::new(test_db.path())?;
             let _ = storage.create_table("users")?;
             let _ = storage.insert_into_table("users", vec![Value::Integer(1)])?;
             let _ = storage.insert_into_table("users", vec![Value::Integer(2)])?;
@@ -1010,7 +974,7 @@ mod mod_tests {
             storage.flush()?;
         }
 
-        let mut reopened = StorageEngine::new(test_db.path())?;
+        let mut reopened = crate::catalog::CatalogEngine::new(test_db.path())?;
         let mut cursor = reopened.open_table_cursor("users")?;
         let mut seen = Vec::new();
         if cursor.first() {
@@ -1032,7 +996,7 @@ mod mod_tests {
     #[test]
     fn test_delete_from_table_by_rowid_removes_only_target_row() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_storage_delete_by_rowid");
-        let mut storage = StorageEngine::new(test_db.path())?;
+        let mut storage = crate::catalog::CatalogEngine::new(test_db.path())?;
         let _ = storage.create_table("users")?;
 
         let row1 = storage.insert_into_table("users", vec![Value::Integer(1)])?;
@@ -1059,7 +1023,6 @@ mod mod_tests {
 }
 
 mod randomized_pager_lifecycle_tests {
-    use crate::storage::StorageEngine;
     use crate::test_utils::TestDbFile;
     use std::collections::HashSet;
 
@@ -1108,7 +1071,7 @@ mod randomized_pager_lifecycle_tests {
     #[test]
     fn test_randomized_allocation_reuse_reopen_cycles() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_storage_randomized_alloc_reuse_reopen");
-        let mut storage = StorageEngine::new(test_db.path())?;
+        let mut storage = crate::catalog::CatalogEngine::new(test_db.path())?;
         let mut rng = LcgRng::new(0xD1CE_BA5E_2026_0317);
 
         let mut live_pages: HashSet<u32> = HashSet::new();
@@ -1139,7 +1102,7 @@ mod randomized_pager_lifecycle_tests {
 
             if rng.chance(1, 10) {
                 storage.flush()?;
-                storage = StorageEngine::new(test_db.path())?;
+                storage = crate::catalog::CatalogEngine::new(test_db.path())?;
                 let _ = storage.validate_integrity()?;
             }
 
@@ -1149,7 +1112,7 @@ mod randomized_pager_lifecycle_tests {
         }
 
         storage.flush()?;
-        storage = StorageEngine::new(test_db.path())?;
+        storage = crate::catalog::CatalogEngine::new(test_db.path())?;
         let report = storage.validate_integrity()?;
         assert!(report.pager.free_page_count <= retired_pages.len());
         assert!(reuse_hits > 0, "expected at least one reused page id");
@@ -1159,16 +1122,16 @@ mod randomized_pager_lifecycle_tests {
 }
 
 mod rowid_table_tests {
-    use crate::storage::overflow::{
-        collect_overflow_page_ids, free_overflow_chain, read_overflow_chain,
-        validate_overflow_chain, write_overflow_chain,
-    };
-    use crate::storage::row_id::{
+    use crate::catalog::row_id::{
         decode_stored_row_record, encode_stored_row_record, free_row_record_overflow,
         hydrate_row_record_cell, materialize_row_record_cell, RowidInternalCell, RowidLeafCell,
         RowidLeafCellLayout, ROWID_LEAF_FIXED_HEADER_SIZE,
     };
-    use crate::storage::PageId;
+    use crate::storage::overflow::{
+        collect_overflow_page_ids, free_overflow_chain, read_overflow_chain,
+        validate_overflow_chain, write_overflow_chain,
+    };
+    use crate::storage::{PageId, Pager};
 
     #[test]
     fn test_rowid_leaf_cell_roundtrip() -> crate::error::Result<()> {
@@ -1234,7 +1197,7 @@ mod rowid_table_tests {
     #[test]
     fn test_overflow_chain_roundtrip_and_free() -> crate::error::Result<()> {
         let test_db = crate::test_utils::TestDbFile::new("_test_rowid_overflow_chain");
-        let mut storage = crate::storage::StorageEngine::new(test_db.path())?;
+        let mut storage = Pager::new(test_db.path(), 100)?;
 
         let payload = vec![0xAB; crate::storage::PAGE_SIZE * 2 + 57];
         let first = write_overflow_chain(&mut storage, &payload)?;
@@ -1255,7 +1218,7 @@ mod rowid_table_tests {
     #[test]
     fn test_overflow_chain_validation_detects_cycle() -> crate::error::Result<()> {
         let test_db = crate::test_utils::TestDbFile::new("_test_rowid_overflow_cycle");
-        let mut storage = crate::storage::StorageEngine::new(test_db.path())?;
+        let mut storage = Pager::new(test_db.path(), 100)?;
         let payload = vec![0x44; crate::storage::PAGE_SIZE + 5];
         let first = write_overflow_chain(&mut storage, &payload)?
             .expect("non-empty payload should allocate overflow chain");
@@ -1272,7 +1235,7 @@ mod rowid_table_tests {
     #[test]
     fn test_overflow_chain_validation_detects_truncation() -> crate::error::Result<()> {
         let test_db = crate::test_utils::TestDbFile::new("_test_rowid_overflow_truncation");
-        let mut storage = crate::storage::StorageEngine::new(test_db.path())?;
+        let mut storage = Pager::new(test_db.path(), 100)?;
         let payload = vec![0x55; crate::storage::PAGE_SIZE + 50];
         let first = write_overflow_chain(&mut storage, &payload)?
             .expect("non-empty payload should allocate overflow chain");
@@ -1288,7 +1251,7 @@ mod rowid_table_tests {
 
     #[test]
     fn test_rowid_record_encode_decode_with_local_split() -> crate::error::Result<()> {
-        let row = crate::storage::StoredRow {
+        let row = crate::catalog::StoredRow {
             row_id: 501,
             values: vec![
                 crate::catalog::Value::Integer(9),
@@ -1314,8 +1277,8 @@ mod rowid_table_tests {
         let test_db = crate::test_utils::TestDbFile::new("_test_rowid_large_row_reopen_reuse");
 
         let cell_page_id = {
-            let mut storage = crate::storage::StorageEngine::new(test_db.path())?;
-            let row = crate::storage::StoredRow {
+            let mut storage = Pager::new(test_db.path(), 100)?;
+            let row = crate::catalog::StoredRow {
                 row_id: 9001,
                 values: vec![
                     crate::catalog::Value::Integer(123),
@@ -1345,7 +1308,7 @@ mod rowid_table_tests {
             cell_page_id
         };
 
-        let mut reopened = crate::storage::StorageEngine::new(test_db.path())?;
+        let mut reopened = Pager::new(test_db.path(), 100)?;
         let page = reopened.read_page(cell_page_id)?;
         let size =
             u32::from_le_bytes([page.data[0], page.data[1], page.data[2], page.data[3]]) as usize;
@@ -1372,8 +1335,8 @@ mod rowid_table_tests {
 }
 
 mod cursor_tests {
-    use crate::storage::cursor::{IndexCursor, IndexEntry, TableCursor};
-    use crate::storage::StoredRow;
+    use crate::catalog::cursor::{IndexCursor, IndexEntry, TableCursor};
+    use crate::catalog::StoredRow;
 
     #[test]
     fn test_table_cursor_first_next_seek_current() {
@@ -1451,9 +1414,9 @@ mod cursor_tests {
 }
 
 mod serialization_tests {
+    use crate::catalog::serialization::*;
     use crate::catalog::Value;
     use crate::error::{HematiteError, Result};
-    use crate::storage::serialization::*;
 
     #[test]
     fn test_roundtrip_row() -> Result<()> {

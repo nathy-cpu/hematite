@@ -1,6 +1,7 @@
 //! SQL connection and statement interface
 
 use crate::catalog::Catalog;
+use crate::catalog::CatalogEngine;
 use crate::catalog::Value;
 use crate::error::{HematiteError, Result};
 use crate::parser::{Lexer, Parser};
@@ -44,10 +45,10 @@ impl Connection {
         statement: crate::parser::ast::Statement,
     ) -> Result<QueryResult> {
         let (schema, table_row_counts) = {
-            let catalog_guard = self.catalog.lock().unwrap();
+            let mut catalog_guard = self.catalog.lock().unwrap();
             let schema = catalog_guard.clone_schema();
-            let table_row_counts = catalog_guard
-                .with_storage(|storage| Ok(Self::collect_table_row_counts(storage)))?;
+            let table_row_counts =
+                catalog_guard.with_engine(|engine| Ok(Self::collect_table_row_counts(engine)))?;
             (schema, table_row_counts)
         };
 
@@ -56,9 +57,9 @@ impl Connection {
         let mut executor = plan.executor;
 
         let result = {
-            let catalog_guard = self.catalog.lock().unwrap();
-            catalog_guard.with_storage(|storage| {
-                let mut ctx = ExecutionContext::for_read(&schema, storage);
+            let mut catalog_guard = self.catalog.lock().unwrap();
+            catalog_guard.with_engine(|engine| {
+                let mut ctx = ExecutionContext::for_read(&schema, engine);
                 executor.execute(&mut ctx)
             })?
         };
@@ -72,10 +73,10 @@ impl Connection {
     ) -> Result<QueryResult> {
         let persists_schema = statement.mutates_schema();
         let (schema, table_row_counts) = {
-            let catalog_guard = self.catalog.lock().unwrap();
+            let mut catalog_guard = self.catalog.lock().unwrap();
             let schema = catalog_guard.clone_schema();
-            let table_row_counts = catalog_guard
-                .with_storage(|storage| Ok(Self::collect_table_row_counts(storage)))?;
+            let table_row_counts =
+                catalog_guard.with_engine(|engine| Ok(Self::collect_table_row_counts(engine)))?;
             (schema, table_row_counts)
         };
 
@@ -84,9 +85,9 @@ impl Connection {
         let mut executor = plan.executor;
 
         let (result, updated_schema) = {
-            let catalog_guard = self.catalog.lock().unwrap();
-            catalog_guard.with_storage(|storage| {
-                let mut ctx = ExecutionContext::for_mutation(&schema, storage);
+            let mut catalog_guard = self.catalog.lock().unwrap();
+            catalog_guard.with_engine(|engine| {
+                let mut ctx = ExecutionContext::for_mutation(&schema, engine);
                 let result = executor.execute(&mut ctx)?;
                 Ok((result, ctx.catalog))
             })?
@@ -100,8 +101,8 @@ impl Connection {
         Ok(result)
     }
 
-    fn collect_table_row_counts(storage: &crate::storage::StorageEngine) -> HashMap<String, usize> {
-        storage
+    fn collect_table_row_counts(engine: &CatalogEngine) -> HashMap<String, usize> {
+        engine
             .get_table_metadata()
             .iter()
             .map(|(name, metadata)| (name.clone(), metadata.row_count as usize))
