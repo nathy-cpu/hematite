@@ -8,7 +8,7 @@
 
 use crate::btree::{BTreeKey, BTreeValue, NodeType, BTREE_ORDER};
 use crate::error::{HematiteError, Result};
-use crate::storage::{Page, PageId, Pager, PAGE_SIZE};
+use crate::storage::{Page, PageId, Pager, INVALID_PAGE_ID, PAGE_SIZE};
 
 // Size validation constants
 pub const MAX_KEY_SIZE: usize = 256; // Maximum key size in bytes
@@ -252,7 +252,7 @@ impl BTreeNode {
 
     pub fn from_page(page: Page) -> Result<Self> {
         if page.data.len() != PAGE_SIZE {
-            return Err(HematiteError::InvalidPage(page.id.as_u32()));
+            return Err(HematiteError::InvalidPage(page.id));
         }
 
         let (node_type, key_count, payload_len) = Self::validate_page_header(&page)?;
@@ -314,7 +314,7 @@ impl BTreeNode {
                     page.data[offset + 3],
                 ]);
                 offset += 4;
-                node.children.push(PageId::new(child_id));
+                node.children.push(child_id);
             }
         }
 
@@ -416,7 +416,7 @@ impl BTreeNode {
 
         if matches!(self.node_type, NodeType::Internal) {
             for child_id in &self.children {
-                payload.extend_from_slice(&child_id.as_u32().to_le_bytes());
+                payload.extend_from_slice(&child_id.to_le_bytes());
             }
         }
 
@@ -467,7 +467,7 @@ impl BTreeNode {
                 std::cmp::Ordering::Greater => continue,
             }
         }
-        SearchResult::NotFound(PageId::invalid())
+        SearchResult::NotFound(INVALID_PAGE_ID)
     }
 
     fn search_internal(&self, key: &BTreeKey) -> SearchResult {

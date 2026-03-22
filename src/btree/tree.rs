@@ -8,7 +8,9 @@
 
 use crate::btree::{BTreeIndex, BTreeNode, NodeType};
 use crate::error::Result;
-use crate::storage::{Page, PageId, Pager, DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID};
+use crate::storage::{
+    Page, PageId, Pager, DB_HEADER_PAGE_ID, INVALID_PAGE_ID, STORAGE_METADATA_PAGE_ID,
+};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
@@ -70,7 +72,7 @@ impl BTreeManager {
     }
 
     pub fn validate_tree(&mut self, root_page_id: PageId) -> Result<bool> {
-        if root_page_id == PageId::invalid()
+        if root_page_id == INVALID_PAGE_ID
             || root_page_id == DB_HEADER_PAGE_ID
             || root_page_id == STORAGE_METADATA_PAGE_ID
         {
@@ -93,7 +95,7 @@ impl BTreeManager {
         depth: usize,
         state: &mut TreeValidationState,
     ) -> Result<bool> {
-        if page_id == PageId::invalid()
+        if page_id == INVALID_PAGE_ID
             || page_id == DB_HEADER_PAGE_ID
             || page_id == STORAGE_METADATA_PAGE_ID
         {

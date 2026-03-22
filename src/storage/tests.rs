@@ -2,12 +2,12 @@
 
 mod buffer_pool_tests {
     use crate::storage::buffer_pool::*;
-    use crate::storage::{Page, PageId};
+    use crate::storage::Page;
 
     #[test]
     fn test_buffer_pool_basic_operations() {
         let mut pool = BufferPool::new(3);
-        let page_id = PageId::new(1);
+        let page_id = 1;
         let page = Page::new(page_id);
 
         // Test empty pool
@@ -25,30 +25,30 @@ mod buffer_pool_tests {
         let mut pool = BufferPool::new(2);
 
         // Fill pool to capacity
-        let page1 = Page::new(PageId::new(1));
-        let page2 = Page::new(PageId::new(2));
+        let page1 = Page::new(1);
+        let page2 = Page::new(2);
         pool.put(page1.clone());
         pool.put(page2.clone());
 
         assert_eq!(pool.len(), 2);
 
         // Add third page (should evict first)
-        let page3 = Page::new(PageId::new(3));
+        let page3 = Page::new(3);
         pool.put(page3.clone());
 
         assert_eq!(pool.len(), 2);
-        assert!(pool.get(PageId::new(1)).is_none()); // Evicted
-        assert!(pool.get(PageId::new(2)).is_some()); // Still present
-        assert!(pool.get(PageId::new(3)).is_some()); // New page
+        assert!(pool.get(1).is_none()); // Evicted
+        assert!(pool.get(2).is_some()); // Still present
+        assert!(pool.get(3).is_some()); // New page
     }
 
     #[test]
     fn test_buffer_pool_lru_update() {
         let mut pool = BufferPool::new(3);
 
-        let page1 = Page::new(PageId::new(1));
-        let page2 = Page::new(PageId::new(2));
-        let page3 = Page::new(PageId::new(3));
+        let page1 = Page::new(1);
+        let page2 = Page::new(2);
+        let page3 = Page::new(3);
 
         // Add pages
         pool.put(page1);
@@ -56,23 +56,23 @@ mod buffer_pool_tests {
         pool.put(page3);
 
         // Access page1 (should make it most recently used)
-        pool.get(PageId::new(1));
+        pool.get(1);
 
         // Add page4 (should evict page2, not page1)
-        let page4 = Page::new(PageId::new(4));
+        let page4 = Page::new(4);
         pool.put(page4);
 
-        assert!(pool.get(PageId::new(1)).is_some()); // Still present (accessed)
-        assert!(pool.get(PageId::new(2)).is_none()); // Evicted (least recently used)
-        assert!(pool.get(PageId::new(3)).is_some()); // Still present
-        assert!(pool.get(PageId::new(4)).is_some()); // New page
+        assert!(pool.get(1).is_some()); // Still present (accessed)
+        assert!(pool.get(2).is_none()); // Evicted (least recently used)
+        assert!(pool.get(3).is_some()); // Still present
+        assert!(pool.get(4).is_some()); // New page
     }
 
     #[test]
     fn test_buffer_pool_update_existing() {
         let mut pool = BufferPool::new(2);
 
-        let page_id = PageId::new(1);
+        let page_id = 1;
         let page1 = Page::new(page_id);
         let mut page2 = Page::new(page_id);
         page2.data[0] = 42; // Modified page
@@ -91,8 +91,8 @@ mod buffer_pool_tests {
     fn test_buffer_pool_remove() {
         let mut pool = BufferPool::new(3);
 
-        let page1 = Page::new(PageId::new(1));
-        let page2 = Page::new(PageId::new(2));
+        let page1 = Page::new(1);
+        let page2 = Page::new(2);
 
         pool.put(page1);
         pool.put(page2);
@@ -100,13 +100,13 @@ mod buffer_pool_tests {
         assert_eq!(pool.len(), 2);
 
         // Remove page1
-        pool.remove(PageId::new(1));
+        pool.remove(1);
         assert_eq!(pool.len(), 1);
-        assert!(pool.get(PageId::new(1)).is_none());
-        assert!(pool.get(PageId::new(2)).is_some());
+        assert!(pool.get(1).is_none());
+        assert!(pool.get(2).is_some());
 
         // Remove non-existent page
-        pool.remove(PageId::new(999));
+        pool.remove(999);
         assert_eq!(pool.len(), 1); // No change
     }
 
@@ -114,40 +114,39 @@ mod buffer_pool_tests {
     fn test_buffer_pool_capacity_zero() {
         let mut pool = BufferPool::new(0);
 
-        let page = Page::new(PageId::new(1));
+        let page = Page::new(1);
         pool.put(page);
 
         // Pool should remain empty since capacity is 0
         assert_eq!(pool.len(), 0);
-        assert!(pool.get(PageId::new(1)).is_none());
+        assert!(pool.get(1).is_none());
     }
 }
 
 mod freelist_tests {
     use crate::storage::free_list::FreeList;
-    use crate::storage::PageId;
 
     #[test]
     fn test_freelist_push_is_idempotent() {
         let mut freelist = FreeList::new();
-        freelist.push_free_page(PageId::new(10));
-        freelist.push_free_page(PageId::new(10));
-        assert_eq!(freelist.as_slice(), &[PageId::new(10)]);
+        freelist.push_free_page(10);
+        freelist.push_free_page(10);
+        assert_eq!(freelist.as_slice(), &[10]);
     }
 
     #[test]
     fn test_freelist_compacts_trailing_pages() {
         let mut freelist = FreeList::new();
-        freelist.push_free_page(PageId::new(8));
-        freelist.push_free_page(PageId::new(9));
-        freelist.push_free_page(PageId::new(11));
-        freelist.push_free_page(PageId::new(12));
+        freelist.push_free_page(8);
+        freelist.push_free_page(9);
+        freelist.push_free_page(11);
+        freelist.push_free_page(12);
 
         let mut next_page_id = 13;
         freelist.compact_trailing_pages(&mut next_page_id, 2);
 
         assert_eq!(next_page_id, 11);
-        assert_eq!(freelist.as_slice(), &[PageId::new(8), PageId::new(9)]);
+        assert_eq!(freelist.as_slice(), &[8, 9]);
     }
 
     #[test]
@@ -524,7 +523,7 @@ mod mod_tests {
                 .read(true)
                 .write(true)
                 .open(test_db.path())?;
-            let offset = 64 + (corrupted_page_id.as_u32() as u64 * PAGE_SIZE as u64);
+            let offset = 64 + (corrupted_page_id as u64 * PAGE_SIZE as u64);
             file.seek(SeekFrom::Start(offset))?;
             file.write_all(&[9])?;
             file.flush()?;
@@ -556,7 +555,7 @@ mod mod_tests {
                 .read(true)
                 .write(true)
                 .open(test_db.path())?;
-            let offset = 64 + (corrupted_page_id.as_u32() as u64 * PAGE_SIZE as u64);
+            let offset = 64 + (corrupted_page_id as u64 * PAGE_SIZE as u64);
             file.seek(SeekFrom::Start(offset))?;
             file.write_all(&[9])?;
             file.flush()?;
@@ -710,7 +709,7 @@ mod mod_tests {
                 .expect("table metadata should exist")
                 .root_page_id,
         )?;
-        table.primary_key_index_root_page_id = primary_key_root_page_id;
+        table.primary_key_index_root_page_id = primary_key_root_page_id.into();
         storage.register_primary_key_row(
             &table,
             crate::catalog::StoredRow {
@@ -767,11 +766,11 @@ mod mod_tests {
             ],
             root_page_id,
         )?;
-        table.primary_key_index_root_page_id = primary_key_root_page_id;
+        table.primary_key_index_root_page_id = primary_key_root_page_id.into();
         table.add_secondary_index(crate::catalog::SecondaryIndex {
             name: "idx_users_email".to_string(),
             column_indices: vec![1],
-            root_page_id: secondary_index_root_page_id,
+            root_page_id: secondary_index_root_page_id.into(),
         })?;
 
         let row_id_1 = storage.insert_into_table(
@@ -856,11 +855,11 @@ mod mod_tests {
                 ],
                 root_page_id,
             )?;
-            table.primary_key_index_root_page_id = primary_key_root_page_id;
+            table.primary_key_index_root_page_id = primary_key_root_page_id.into();
             table.add_secondary_index(crate::catalog::SecondaryIndex {
                 name: "idx_users_email".to_string(),
                 column_indices: vec![1],
-                root_page_id: secondary_index_root_page_id,
+                root_page_id: secondary_index_root_page_id.into(),
             })?;
 
             let row_id = storage.insert_into_table(
@@ -924,11 +923,11 @@ mod mod_tests {
             ],
             root_page_id,
         )?;
-        table.primary_key_index_root_page_id = primary_key_root_page_id;
+        table.primary_key_index_root_page_id = primary_key_root_page_id.into();
         table.add_secondary_index(crate::catalog::SecondaryIndex {
             name: "idx_users_email".to_string(),
             column_indices: vec![1],
-            root_page_id: secondary_index_root_page_id,
+            root_page_id: secondary_index_root_page_id.into(),
         })?;
 
         let row_id = storage.insert_into_table(
@@ -1131,7 +1130,7 @@ mod randomized_pager_lifecycle_tests {
             let should_allocate = live_pages.is_empty() || rng.chance(3, 5);
             if should_allocate {
                 let page_id = storage.allocate_page()?;
-                let id = page_id.as_u32();
+                let id = page_id;
 
                 assert!(id >= 2, "allocator returned reserved page {}", id);
                 assert!(
@@ -1145,7 +1144,7 @@ mod randomized_pager_lifecycle_tests {
                 }
                 live_pages.insert(id);
             } else if let Some(id) = remove_random(&mut live_pages, &mut rng) {
-                storage.deallocate_page(crate::storage::PageId::new(id))?;
+                storage.deallocate_page(id)?;
                 retired_pages.insert(id);
             }
 
@@ -1180,7 +1179,8 @@ mod rowid_table_tests {
         collect_overflow_page_ids, free_overflow_chain, read_overflow_chain,
         validate_overflow_chain, write_overflow_chain,
     };
-    use crate::storage::{PageId, Pager};
+    use crate::storage::Pager;
+    use crate::storage::INVALID_PAGE_ID;
 
     #[test]
     fn test_rowid_leaf_cell_roundtrip() -> crate::error::Result<()> {
@@ -1206,7 +1206,7 @@ mod rowid_table_tests {
     fn test_rowid_internal_cell_roundtrip() -> crate::error::Result<()> {
         let cell = RowidInternalCell {
             separator_rowid: 144,
-            child_page_id: PageId::new(99),
+            child_page_id: 99,
         };
         let encoded = cell.encode();
         let decoded = RowidInternalCell::decode(&encoded)?;
@@ -1225,7 +1225,7 @@ mod rowid_table_tests {
             rowid: 77,
             total_payload_len: 1000,
             local_payload: vec![9, 8, 7, 6, 5],
-            overflow_first_page: PageId::new(120),
+            overflow_first_page: 120,
         };
         let encoded = cell.encode()?;
         assert_eq!(
@@ -1273,7 +1273,7 @@ mod rowid_table_tests {
             .expect("non-empty payload should allocate overflow chain");
 
         let mut first_page = storage.read_page(first)?;
-        first_page.data[4..8].copy_from_slice(&first.as_u32().to_le_bytes());
+        first_page.data[4..8].copy_from_slice(&first.to_le_bytes());
         storage.write_page(first_page)?;
 
         let err = validate_overflow_chain(&mut storage, Some(first), payload.len()).unwrap_err();
@@ -1290,7 +1290,7 @@ mod rowid_table_tests {
             .expect("non-empty payload should allocate overflow chain");
 
         let mut first_page = storage.read_page(first)?;
-        first_page.data[4..8].copy_from_slice(&PageId::invalid().as_u32().to_le_bytes());
+        first_page.data[4..8].copy_from_slice(&INVALID_PAGE_ID.to_le_bytes());
         storage.write_page(first_page)?;
 
         let err = validate_overflow_chain(&mut storage, Some(first), payload.len()).unwrap_err();
@@ -1340,7 +1340,7 @@ mod rowid_table_tests {
             let cell = RowidLeafCellLayout::decode(&cell_bytes)?;
             let overflow_ids = collect_overflow_page_ids(
                 &mut storage,
-                if cell.overflow_first_page == PageId::invalid() {
+                if cell.overflow_first_page == INVALID_PAGE_ID {
                     None
                 } else {
                     Some(cell.overflow_first_page)
@@ -1369,7 +1369,7 @@ mod rowid_table_tests {
         let cell = RowidLeafCellLayout::decode(&cell_bytes)?;
         let overflow_ids = collect_overflow_page_ids(
             &mut reopened,
-            if cell.overflow_first_page == PageId::invalid() {
+            if cell.overflow_first_page == INVALID_PAGE_ID {
                 None
             } else {
                 Some(cell.overflow_first_page)

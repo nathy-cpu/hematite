@@ -747,7 +747,7 @@ mod tree_tests {
     use crate::btree::tree::BTreeManager;
     use crate::btree::{BTreeKey, BTreeNode, BTreeValue, NodeType};
     use crate::error::Result;
-    use crate::storage::{Page, PageId, Pager, PAGE_SIZE};
+    use crate::storage::{Page, Pager, PAGE_SIZE};
 
     #[test]
     fn test_btree_key_comparison() {
@@ -762,7 +762,7 @@ mod tree_tests {
 
     #[test]
     fn test_btree_node_creation() {
-        let page_id = PageId::new(1);
+        let page_id = 1;
         let leaf_node = BTreeNode::new_leaf(page_id);
         assert!(matches!(leaf_node.node_type, NodeType::Leaf));
         assert_eq!(leaf_node.keys.len(), 0);
@@ -776,7 +776,7 @@ mod tree_tests {
 
     #[test]
     fn test_btree_node_serialization() -> Result<()> {
-        let page_id = PageId::new(1);
+        let page_id = 1;
         let mut node = BTreeNode::new_leaf(page_id);
 
         node.keys.push(BTreeKey::new(vec![1, 2, 3]));
@@ -805,7 +805,7 @@ mod tree_tests {
 
     #[test]
     fn test_btree_page_rejects_unsupported_version() -> Result<()> {
-        let page_id = PageId::new(1);
+        let page_id = 1;
         let mut node = BTreeNode::new_leaf(page_id);
         node.keys.push(BTreeKey::new(vec![1, 2, 3]));
         node.values.push(BTreeValue::new(vec![7, 8, 9]));
@@ -822,7 +822,7 @@ mod tree_tests {
 
     #[test]
     fn test_btree_page_rejects_invalid_payload_length() -> Result<()> {
-        let page_id = PageId::new(1);
+        let page_id = 1;
         let mut node = BTreeNode::new_leaf(page_id);
         node.keys.push(BTreeKey::new(vec![1, 2, 3]));
         node.values.push(BTreeValue::new(vec![7, 8, 9]));

@@ -2,7 +2,7 @@
 
 use crate::error::{HematiteError, Result};
 use crate::storage::overflow::{free_overflow_chain, read_overflow_chain, write_overflow_chain};
-use crate::storage::{PageId, Pager};
+use crate::storage::{PageId, Pager, INVALID_PAGE_ID};
 
 use super::engine::StoredRow;
 use super::serialization::RowSerializer;
@@ -40,7 +40,7 @@ impl RowidLeafCellLayout {
         out.extend_from_slice(&self.rowid.to_le_bytes());
         out.extend_from_slice(&self.total_payload_len.to_le_bytes());
         out.extend_from_slice(&local_len.to_le_bytes());
-        out.extend_from_slice(&self.overflow_first_page.as_u32().to_le_bytes());
+        out.extend_from_slice(&self.overflow_first_page.to_le_bytes());
         out.extend_from_slice(&self.local_payload);
         Ok(out)
     }
@@ -57,8 +57,7 @@ impl RowidLeafCellLayout {
         ]);
         let total_payload_len = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
         let local_len = u32::from_le_bytes([data[12], data[13], data[14], data[15]]) as usize;
-        let overflow_first_page =
-            PageId::new(u32::from_le_bytes([data[16], data[17], data[18], data[19]]));
+        let overflow_first_page = u32::from_le_bytes([data[16], data[17], data[18], data[19]]);
 
         if ROWID_LEAF_FIXED_HEADER_SIZE + local_len != data.len() {
             return Err(HematiteError::CorruptedData(
@@ -109,7 +108,7 @@ pub fn encode_stored_row_record(
             rowid: row.row_id,
             total_payload_len: payload.len() as u32,
             local_payload,
-            overflow_first_page: PageId::invalid(),
+            overflow_first_page: INVALID_PAGE_ID,
         },
         overflow_payload,
     })
@@ -131,7 +130,7 @@ pub fn materialize_row_record_cell(
 ) -> Result<Vec<u8>> {
     let mut encoded = encode_stored_row_record(row, max_local_payload)?;
     let overflow_first = write_overflow_chain(pager, &encoded.overflow_payload)?;
-    encoded.cell.overflow_first_page = overflow_first.unwrap_or(PageId::invalid());
+    encoded.cell.overflow_first_page = overflow_first.unwrap_or(INVALID_PAGE_ID);
     encoded.cell.encode()
 }
 
@@ -146,7 +145,7 @@ pub fn hydrate_row_record_cell(pager: &mut Pager, cell_bytes: &[u8]) -> Result<S
     }
 
     let overflow_len = total_len - local_len;
-    let overflow_first = if cell.overflow_first_page == PageId::invalid() {
+    let overflow_first = if cell.overflow_first_page == INVALID_PAGE_ID {
         None
     } else {
         Some(cell.overflow_first_page)
@@ -160,7 +159,7 @@ pub fn hydrate_row_record_cell(pager: &mut Pager, cell_bytes: &[u8]) -> Result<S
 
 pub fn free_row_record_overflow(pager: &mut Pager, cell_bytes: &[u8]) -> Result<()> {
     let cell = RowidLeafCellLayout::decode(cell_bytes)?;
-    let overflow_first = if cell.overflow_first_page == PageId::invalid() {
+    let overflow_first = if cell.overflow_first_page == INVALID_PAGE_ID {
         None
     } else {
         Some(cell.overflow_first_page)
@@ -215,7 +214,7 @@ impl RowidInternalCell {
     pub fn encode(&self) -> [u8; Self::SIZE] {
         let mut out = [0u8; Self::SIZE];
         out[0..8].copy_from_slice(&self.separator_rowid.to_le_bytes());
-        out[8..12].copy_from_slice(&self.child_page_id.as_u32().to_le_bytes());
+        out[8..12].copy_from_slice(&self.child_page_id.to_le_bytes());
         out
     }
 
@@ -229,7 +228,7 @@ impl RowidInternalCell {
         let separator_rowid = u64::from_le_bytes([
             data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
         ]);
-        let child_page_id = PageId::new(u32::from_le_bytes([data[8], data[9], data[10], data[11]]));
+        let child_page_id = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
 
         Ok(Self {
             separator_rowid,

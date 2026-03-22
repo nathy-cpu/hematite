@@ -3,28 +3,28 @@ mod tests {
     use crate::catalog::types::{DataType, Value};
     use crate::catalog::{Column, ColumnId, DatabaseHeader, Schema, Table, TableId};
     use crate::error::Result;
-    use crate::storage::{Page, PageId};
+    use crate::storage::Page;
 
     #[test]
     fn test_database_header_creation() {
-        let schema_root = PageId::new(42);
+        let schema_root = 42u32;
         let header = DatabaseHeader::new(schema_root);
 
         assert_eq!(header.magic, DatabaseHeader::MAGIC);
         assert_eq!(header.version, DatabaseHeader::CURRENT_VERSION);
-        assert_eq!(header.schema_root_page, schema_root);
+        assert_eq!(header.schema_root_page, schema_root.into());
         assert_eq!(header.next_table_id, 1);
         assert!(header.verify_checksum());
     }
 
     #[test]
     fn test_database_header_serialization_roundtrip() -> Result<()> {
-        let original = DatabaseHeader::new(PageId::new(123));
+        let original = DatabaseHeader::new(123u32);
 
-        let mut page = Page::new(DatabaseHeader::HEADER_PAGE_ID);
-        original.serialize(&mut page)?;
+        let mut page = Page::new(crate::storage::DB_HEADER_PAGE_ID);
+        original.serialize(&mut page.data)?;
 
-        let deserialized = DatabaseHeader::deserialize(&page)?;
+        let deserialized = DatabaseHeader::deserialize(&page.data)?;
 
         assert_eq!(original.magic, deserialized.magic);
         assert_eq!(original.version, deserialized.version);
@@ -43,12 +43,7 @@ mod tests {
             Column::new(ColumnId::new(3), "active".to_string(), DataType::Boolean),
         ];
 
-        let original = Table::new(
-            TableId::new(42),
-            "test_table".to_string(),
-            columns,
-            PageId::new(123),
-        )?;
+        let original = Table::new(TableId::new(42), "test_table".to_string(), columns, 123)?;
 
         // Convert to bytes and back
         let bytes = original.to_bytes()?;
@@ -432,12 +427,12 @@ mod tests {
 
     #[test]
     fn test_database_header_invalid_magic() -> Result<()> {
-        let mut page = Page::new(DatabaseHeader::HEADER_PAGE_ID);
+        let mut page = Page::new(crate::storage::DB_HEADER_PAGE_ID);
 
         // Write invalid magic bytes
         page.data[0..4].copy_from_slice(b"BAD!");
 
-        let result = DatabaseHeader::deserialize(&page);
+        let result = DatabaseHeader::deserialize(&page.data);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -449,18 +444,18 @@ mod tests {
 
     #[test]
     fn test_database_header_checksum_verification() -> Result<()> {
-        let mut header = DatabaseHeader::new(PageId::new(42));
+        let mut header = DatabaseHeader::new(42u32);
 
         // Corrupt the checksum
         header.checksum = 999;
 
-        let mut page = Page::new(DatabaseHeader::HEADER_PAGE_ID);
-        header.serialize(&mut page)?;
+        let mut page = Page::new(crate::storage::DB_HEADER_PAGE_ID);
+        header.serialize(&mut page.data)?;
 
         // Corrupt checksum in page data
         page.data[16..20].copy_from_slice(&999u32.to_le_bytes());
 
-        let result = DatabaseHeader::deserialize(&page);
+        let result = DatabaseHeader::deserialize(&page.data);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -475,7 +470,7 @@ mod tests {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
-        let mut page = Page::new(DatabaseHeader::HEADER_PAGE_ID);
+        let mut page = Page::new(crate::storage::DB_HEADER_PAGE_ID);
         page.data[0..4].copy_from_slice(&DatabaseHeader::MAGIC);
 
         // Write an older on-disk version on purpose.
@@ -488,12 +483,12 @@ mod tests {
         let mut hasher = DefaultHasher::new();
         DatabaseHeader::MAGIC.hash(&mut hasher);
         unsupported_version.hash(&mut hasher);
-        PageId::new(42).hash(&mut hasher);
+        42.hash(&mut hasher);
         1u32.hash(&mut hasher);
         let checksum = hasher.finish() as u32;
         page.data[16..20].copy_from_slice(&checksum.to_le_bytes());
 
-        let result = DatabaseHeader::deserialize(&page);
+        let result = DatabaseHeader::deserialize(&page.data);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -504,7 +499,7 @@ mod tests {
 
     #[test]
     fn test_database_header_increment_table_id() {
-        let mut header = DatabaseHeader::new(PageId::new(42));
+        let mut header = DatabaseHeader::new(42u32);
 
         let table_id1 = header.increment_table_id();
         assert_eq!(table_id1.as_u32(), 1);
@@ -519,7 +514,7 @@ mod tests {
 
     #[test]
     fn test_database_header_debug() {
-        let header = DatabaseHeader::new(PageId::new(42));
+        let header = DatabaseHeader::new(42u32);
         let debug_str = format!("{:?}", header);
         assert!(debug_str.contains("DatabaseHeader"));
         assert!(debug_str.contains("42")); // Check for page ID instead
@@ -814,11 +809,11 @@ mod tests {
         let columns = create_test_columns();
         let table_id = schema.create_table("users".to_string(), columns)?;
 
-        let new_root_page = crate::storage::PageId::new(42);
+        let new_root_page = 42u32;
         schema.set_table_root_page(table_id, new_root_page)?;
 
         let table = schema.get_table(table_id).unwrap();
-        assert_eq!(table.root_page_id, new_root_page);
+        assert_eq!(table.root_page_id, new_root_page.into());
 
         Ok(())
     }
@@ -827,7 +822,7 @@ mod tests {
     fn test_set_table_root_page_nonexistent() {
         let mut schema = Schema::new();
         let table_id = TableId::new(999);
-        let root_page = crate::storage::PageId::new(42);
+        let root_page = 42u32;
 
         let result = schema.set_table_root_page(table_id, root_page);
         assert!(result.is_err());
@@ -863,30 +858,20 @@ mod tests {
     #[test]
     fn test_table_creation() -> Result<()> {
         let columns = create_test_columns();
-        let table = Table::new(
-            TableId::new(1),
-            "users".to_string(),
-            columns,
-            crate::storage::PageId::new(42),
-        )?;
+        let table = Table::new(TableId::new(1), "users".to_string(), columns, 42u32)?;
 
         assert_eq!(table.id.as_u32(), 1);
         assert_eq!(table.name, "users");
         assert_eq!(table.column_count(), 3);
         assert_eq!(table.primary_key_count(), 1);
-        assert_eq!(table.root_page_id.as_u32(), 42);
+        assert_eq!(table.root_page_id, 42);
 
         Ok(())
     }
 
     #[test]
     fn test_table_validation_no_columns() {
-        let result = Table::new(
-            TableId::new(1),
-            "empty".to_string(),
-            vec![],
-            crate::storage::PageId::new(1),
-        );
+        let result = Table::new(TableId::new(1), "empty".to_string(), vec![], 1u32);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -901,12 +886,7 @@ mod tests {
             Column::new(ColumnId::new(2), "age".to_string(), DataType::Integer),
         ];
 
-        let result = Table::new(
-            TableId::new(1),
-            "no_pk".to_string(),
-            columns,
-            crate::storage::PageId::new(1),
-        );
+        let result = Table::new(TableId::new(1), "no_pk".to_string(), columns, 1u32);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("primary key"));
     }
@@ -914,12 +894,7 @@ mod tests {
     #[test]
     fn test_table_get_column_by_name() -> Result<()> {
         let columns = create_test_columns();
-        let table = Table::new(
-            TableId::new(1),
-            "users".to_string(),
-            columns,
-            crate::storage::PageId::new(42),
-        )?;
+        let table = Table::new(TableId::new(1), "users".to_string(), columns, 42u32)?;
 
         let id_column = table.get_column_by_name("id");
         assert!(id_column.is_some());
@@ -938,12 +913,7 @@ mod tests {
     #[test]
     fn test_table_get_column_index() -> Result<()> {
         let columns = create_test_columns();
-        let table = Table::new(
-            TableId::new(1),
-            "users".to_string(),
-            columns,
-            crate::storage::PageId::new(42),
-        )?;
+        let table = Table::new(TableId::new(1), "users".to_string(), columns, 42u32)?;
 
         assert_eq!(table.get_column_index("id"), Some(0));
         assert_eq!(table.get_column_index("name"), Some(1));
@@ -956,12 +926,7 @@ mod tests {
     #[test]
     fn test_table_validate_row() -> Result<()> {
         let columns = create_test_columns();
-        let table = Table::new(
-            TableId::new(1),
-            "users".to_string(),
-            columns,
-            crate::storage::PageId::new(42),
-        )?;
+        let table = Table::new(TableId::new(1), "users".to_string(), columns, 42u32)?;
 
         // Valid row
         let valid_row = vec![
@@ -1006,12 +971,7 @@ mod tests {
             )
             .primary_key(true),
         ];
-        let table = Table::new(
-            TableId::new(1),
-            "logs".to_string(),
-            columns,
-            crate::storage::PageId::new(42),
-        )?;
+        let table = Table::new(TableId::new(1), "logs".to_string(), columns, 42u32)?;
 
         let row = vec![
             Value::Integer(123),
@@ -1030,12 +990,7 @@ mod tests {
     #[test]
     fn test_table_get_primary_key_values_invalid() -> Result<()> {
         let columns = create_test_columns();
-        let table = Table::new(
-            TableId::new(1),
-            "users".to_string(),
-            columns,
-            crate::storage::PageId::new(42),
-        )?;
+        let table = Table::new(TableId::new(1), "users".to_string(), columns, 42u32)?;
 
         // Row too short for primary key extraction
         let short_row = vec![];
@@ -1053,12 +1008,7 @@ mod tests {
             Column::new(ColumnId::new(3), "active".to_string(), DataType::Boolean),
             Column::new(ColumnId::new(4), "price".to_string(), DataType::Float),
         ];
-        let table = Table::new(
-            TableId::new(1),
-            "products".to_string(),
-            columns,
-            crate::storage::PageId::new(42),
-        )?;
+        let table = Table::new(TableId::new(1), "products".to_string(), columns, 42u32)?;
 
         // Integer (4) + Text (255) + Boolean (1) + Float (8) = 268
         assert_eq!(table.row_size(), 268);
@@ -1069,12 +1019,7 @@ mod tests {
     #[test]
     fn test_table_serialization_roundtrip() -> Result<()> {
         let columns = create_test_columns();
-        let original = Table::new(
-            TableId::new(42),
-            "test_table".to_string(),
-            columns,
-            crate::storage::PageId::new(123),
-        )?;
+        let original = Table::new(TableId::new(42), "test_table".to_string(), columns, 123u32)?;
 
         let mut buffer = Vec::new();
         original.serialize(&mut buffer)?;
@@ -1113,12 +1058,7 @@ mod tests {
                 .primary_key(true),
             Column::new(ColumnId::new(3), "content".to_string(), DataType::Text),
         ];
-        let original = Table::new(
-            TableId::new(1),
-            "user_posts".to_string(),
-            columns,
-            crate::storage::PageId::new(42),
-        )?;
+        let original = Table::new(TableId::new(1), "user_posts".to_string(), columns, 42u32)?;
 
         let mut buffer = Vec::new();
         original.serialize(&mut buffer)?;
@@ -1147,12 +1087,7 @@ mod tests {
     #[test]
     fn test_table_clone() -> Result<()> {
         let columns = create_test_columns();
-        let original = Table::new(
-            TableId::new(1),
-            "users".to_string(),
-            columns,
-            crate::storage::PageId::new(42),
-        )?;
+        let original = Table::new(TableId::new(1), "users".to_string(), columns, 42u32)?;
 
         let cloned = original.clone();
         assert_eq!(original.id, cloned.id);
@@ -1176,12 +1111,7 @@ mod tests {
     #[test]
     fn test_table_debug() -> Result<()> {
         let columns = create_test_columns();
-        let table = Table::new(
-            TableId::new(1),
-            "users".to_string(),
-            columns,
-            crate::storage::PageId::new(42),
-        )?;
+        let table = Table::new(TableId::new(1), "users".to_string(), columns, 42u32)?;
 
         let debug_str = format!("{:?}", table);
         assert!(debug_str.contains("Table"));
@@ -1396,7 +1326,7 @@ mod catalog_new_tests {
         assert!(!catalog.table_exists_by_id(TableId::new(999)));
 
         // Test root page management
-        let root_page = crate::storage::PageId::new(42);
+        let root_page = 42u32;
         catalog.set_table_root_page(table_id, root_page)?;
 
         let retrieved_page = catalog.get_table_root_page(table_id)?.unwrap();
@@ -1408,7 +1338,7 @@ mod catalog_new_tests {
         assert_eq!(stats.name, "users");
         assert_eq!(stats.column_count, 2);
         assert_eq!(stats.primary_key_count, 1);
-        assert_eq!(stats.root_page_id, root_page);
+        assert_eq!(stats.root_page_id, root_page.into());
 
         // Test all table statistics
         let all_stats = catalog.get_all_table_stats()?;
@@ -1446,7 +1376,7 @@ mod catalog_new_tests {
     fn test_catalog_create_table_with_root() -> Result<()> {
         let test_db = TestDbFile::new("_test_create_with_root");
 
-        let root_page = crate::storage::PageId::new(100);
+        let root_page = 100u32;
 
         {
             let mut catalog = Catalog::open_or_create(test_db.path())?;
@@ -1459,12 +1389,12 @@ mod catalog_new_tests {
 
             let table = catalog.get_table(table_id)?.unwrap();
             assert_eq!(table.name, "products");
-            assert_eq!(table.root_page_id, root_page);
+            assert_eq!(table.root_page_id, root_page.into());
         }
 
         let reopened = Catalog::open_or_create(test_db.path())?;
         let table = reopened.get_table_by_name("products")?.unwrap();
-        assert_eq!(table.root_page_id, root_page);
+        assert_eq!(table.root_page_id, root_page.into());
 
         Ok(())
     }
@@ -1472,7 +1402,7 @@ mod catalog_new_tests {
     #[test]
     fn test_catalog_root_page_update_persists_across_reopen() -> Result<()> {
         let test_db = TestDbFile::new("_test_root_page_persistence");
-        let updated_root = crate::storage::PageId::new(77);
+        let updated_root = 77u32;
 
         {
             let mut catalog = Catalog::open_or_create(test_db.path())?;
@@ -1488,7 +1418,7 @@ mod catalog_new_tests {
 
         let reopened = Catalog::open_or_create(test_db.path())?;
         let table = reopened.get_table_by_name("users")?.unwrap();
-        assert_eq!(table.root_page_id, updated_root);
+        assert_eq!(table.root_page_id, updated_root.into());
 
         Ok(())
     }
@@ -1510,7 +1440,7 @@ mod catalog_new_tests {
         assert!(catalog.validate_schema().is_ok());
 
         // Test setting invalid root page (page 0 should be rejected)
-        let result = catalog.set_table_root_page(table_id, crate::storage::PageId::new(0));
+        let result = catalog.set_table_root_page(table_id, 0u32);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -1518,7 +1448,7 @@ mod catalog_new_tests {
             .contains("reserved for database header"));
 
         // Test setting valid root page
-        let valid_page = crate::storage::PageId::new(42);
+        let valid_page = 42u32;
         assert!(catalog.set_table_root_page(table_id, valid_page).is_ok());
 
         // Test getting root page
@@ -1530,7 +1460,7 @@ mod catalog_new_tests {
 
         // Test setting root page for non-existent table
         let fake_id = TableId::new(999);
-        let result = catalog.set_table_root_page(fake_id, crate::storage::PageId::new(100));
+        let result = catalog.set_table_root_page(fake_id, 100u32);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
 
@@ -1547,13 +1477,13 @@ mod catalog_new_tests {
                     .primary_key(true),
                 Column::new(ColumnId::new(2), "email".to_string(), DataType::Text),
             ],
-            crate::storage::PageId::new(10),
+            10u32,
         )?;
 
         table.add_secondary_index(crate::catalog::SecondaryIndex {
             name: "idx_users_email".to_string(),
             column_indices: vec![1],
-            root_page_id: crate::storage::PageId::new(42),
+            root_page_id: 42u32.into(),
         })?;
 
         let bytes = table.to_bytes()?;
@@ -1562,7 +1492,7 @@ mod catalog_new_tests {
         assert_eq!(decoded.secondary_indexes.len(), 1);
         let index = decoded.get_secondary_index("idx_users_email").unwrap();
         assert_eq!(index.column_indices, vec![1]);
-        assert_eq!(index.root_page_id, crate::storage::PageId::new(42));
+        assert_eq!(index.root_page_id, 42u32.into());
 
         Ok(())
     }
@@ -1586,7 +1516,7 @@ mod catalog_new_tests {
                 crate::catalog::SecondaryIndex {
                     name: "idx_users_email".to_string(),
                     column_indices: vec![1],
-                    root_page_id: crate::storage::PageId::new(55),
+                    root_page_id: 55u32.into(),
                 },
             )?;
             catalog.flush()?;
@@ -1597,7 +1527,7 @@ mod catalog_new_tests {
         assert_eq!(table.secondary_indexes.len(), 1);
         let index = table.get_secondary_index("idx_users_email").unwrap();
         assert_eq!(index.column_indices, vec![1]);
-        assert_eq!(index.root_page_id, crate::storage::PageId::new(55));
+        assert_eq!(index.root_page_id, 55u32.into());
 
         Ok(())
     }

@@ -104,10 +104,7 @@ fn serialize_storage_metadata(engine: &CatalogEngine) -> Result<String> {
     for table in table_entries {
         lines.push(format!(
             "table|{}|{}|{}|{}",
-            table.name,
-            table.root_page_id.as_u32(),
-            table.row_count,
-            table.next_row_id
+            table.name, table.root_page_id, table.row_count, table.next_row_id
         ));
     }
 
@@ -147,9 +144,9 @@ fn parse_storage_metadata(engine: &mut CatalogEngine, metadata_str: &str) -> Res
                 ));
             }
             let name = parts[0];
-            let root_page_id = PageId::new(parts[1].parse::<u32>().map_err(|_| {
+            let root_page_id = parts[1].parse::<u32>().map_err(|_| {
                 HematiteError::StorageError("Invalid table root page metadata".to_string())
-            })?);
+            })?;
             let row_count = parts[2].parse::<u64>().map_err(|_| {
                 HematiteError::StorageError("Invalid table row count metadata".to_string())
             })?;

@@ -740,7 +740,7 @@ mod connection_tests {
             let schema = conn.schema_snapshot()?;
             let table = schema.get_table_by_name("users").unwrap();
             let root_page = table.root_page_id;
-            assert_ne!(root_page.as_u32(), 0);
+            assert_ne!(root_page, 0);
             conn.close()?;
             root_page
         };

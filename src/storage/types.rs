@@ -19,25 +19,11 @@ pub const PAGE_SIZE: usize = 4096; // 4KB pages
 /// Reserved page IDs for the single-file database layout.
 ///
 /// Kept in `storage` to avoid higher-layer dependencies.
-pub const DB_HEADER_PAGE_ID: PageId = PageId::new(0);
-pub const STORAGE_METADATA_PAGE_ID: PageId = PageId::new(1);
+pub const DB_HEADER_PAGE_ID: u32 = 0;
+pub const STORAGE_METADATA_PAGE_ID: u32 = 1;
+pub const INVALID_PAGE_ID: u32 = u32::MAX;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PageId(u32);
-
-impl PageId {
-    pub const fn new(id: u32) -> Self {
-        Self(id)
-    }
-
-    pub fn as_u32(&self) -> u32 {
-        self.0
-    }
-
-    pub const fn invalid() -> Self {
-        Self(u32::MAX)
-    }
-}
+pub type PageId = u32;
 
 #[derive(Debug, Clone)]
 pub struct Page {
@@ -55,7 +41,7 @@ impl Page {
 
     pub fn from_bytes(id: PageId, data: Vec<u8>) -> Result<Self> {
         if data.len() != PAGE_SIZE {
-            return Err(crate::error::HematiteError::InvalidPage(id.as_u32()));
+            return Err(crate::error::HematiteError::InvalidPage(id));
         }
         Ok(Self { id, data })
     }

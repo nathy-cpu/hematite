@@ -3,6 +3,7 @@
 use super::column::Column;
 use super::ids::TableId;
 use super::types::Value;
+use crate::storage::PageId;
 use crate::HematiteError;
 use crate::Result;
 use std::collections::HashMap;
@@ -15,15 +16,15 @@ pub struct Table {
     pub column_indices: HashMap<String, usize>,
     pub primary_key_columns: Vec<usize>,
     pub secondary_indexes: Vec<SecondaryIndex>,
-    pub root_page_id: crate::storage::PageId,
-    pub primary_key_index_root_page_id: crate::storage::PageId,
+    pub root_page_id: u32,
+    pub primary_key_index_root_page_id: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecondaryIndex {
     pub name: String,
     pub column_indices: Vec<usize>,
-    pub root_page_id: crate::storage::PageId,
+    pub root_page_id: u32,
 }
 
 impl Table {
@@ -31,7 +32,7 @@ impl Table {
         id: TableId,
         name: String,
         mut columns: Vec<Column>,
-        root_page_id: crate::storage::PageId,
+        root_page_id: PageId,
     ) -> Result<Self> {
         let mut column_indices = HashMap::new();
         let mut primary_key_columns = Vec::new();
@@ -71,7 +72,7 @@ impl Table {
             primary_key_columns,
             secondary_indexes: Vec::new(),
             root_page_id,
-            primary_key_index_root_page_id: crate::storage::PageId::new(0),
+            primary_key_index_root_page_id: 0,
         })
     }
 
@@ -176,8 +177,8 @@ impl Table {
         buffer.extend_from_slice(name_bytes);
 
         // Root page ID (4 bytes)
-        buffer.extend_from_slice(&self.root_page_id.as_u32().to_le_bytes());
-        buffer.extend_from_slice(&self.primary_key_index_root_page_id.as_u32().to_le_bytes());
+        buffer.extend_from_slice(&self.root_page_id.to_le_bytes());
+        buffer.extend_from_slice(&self.primary_key_index_root_page_id.to_le_bytes());
 
         // Column count (4 bytes)
         buffer.extend_from_slice(&(self.columns.len() as u32).to_le_bytes());
@@ -201,7 +202,7 @@ impl Table {
             let name_bytes = index.name.as_bytes();
             buffer.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
             buffer.extend_from_slice(name_bytes);
-            buffer.extend_from_slice(&index.root_page_id.as_u32().to_le_bytes());
+            buffer.extend_from_slice(&index.root_page_id.to_le_bytes());
             buffer.extend_from_slice(&(index.column_indices.len() as u32).to_le_bytes());
             for &column_index in &index.column_indices {
                 buffer.extend_from_slice(&(column_index as u32).to_le_bytes());
@@ -246,20 +247,20 @@ impl Table {
         *offset += name_len;
 
         // Root page ID
-        let root_page_id = crate::storage::PageId::new(u32::from_le_bytes([
+        let root_page_id = u32::from_le_bytes([
             buffer[*offset],
             buffer[*offset + 1],
             buffer[*offset + 2],
             buffer[*offset + 3],
-        ]));
+        ]);
         *offset += 4;
 
-        let primary_key_index_root_page_id = crate::storage::PageId::new(u32::from_le_bytes([
+        let primary_key_index_root_page_id = u32::from_le_bytes([
             buffer[*offset],
             buffer[*offset + 1],
             buffer[*offset + 2],
             buffer[*offset + 3],
-        ]));
+        ]);
         *offset += 4;
 
         // Column count
@@ -361,12 +362,12 @@ impl Table {
                     "Invalid secondary index metadata".to_string(),
                 ));
             }
-            let index_root_page_id = crate::storage::PageId::new(u32::from_le_bytes([
+            let index_root_page_id = u32::from_le_bytes([
                 buffer[*offset],
                 buffer[*offset + 1],
                 buffer[*offset + 2],
                 buffer[*offset + 3],
-            ]));
+            ]);
             *offset += 4;
 
             let column_count = u32::from_le_bytes([

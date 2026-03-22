@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use crate::error::{HematiteError, Result};
-use crate::storage::{PageId, DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID};
+use crate::storage::{DB_HEADER_PAGE_ID, INVALID_PAGE_ID, STORAGE_METADATA_PAGE_ID};
 
 use super::engine::{CatalogEngine, CatalogIntegrityReport};
 use super::{index_store, table_btree};
@@ -29,14 +29,13 @@ pub(crate) fn validate_integrity(engine: &mut CatalogEngine) -> Result<CatalogIn
     let mut total_rows = 0u64;
 
     for (table_name, metadata) in metadata_entries {
-        if metadata.root_page_id == PageId::invalid()
+        if metadata.root_page_id == INVALID_PAGE_ID
             || metadata.root_page_id == DB_HEADER_PAGE_ID
             || metadata.root_page_id == STORAGE_METADATA_PAGE_ID
         {
             return Err(HematiteError::CorruptedData(format!(
                 "Table '{}' has invalid root page {}",
-                table_name,
-                metadata.root_page_id.as_u32()
+                table_name, metadata.root_page_id
             )));
         }
 
@@ -49,14 +48,13 @@ pub(crate) fn validate_integrity(engine: &mut CatalogEngine) -> Result<CatalogIn
             if free_pages.contains(&page_id) {
                 return Err(HematiteError::CorruptedData(format!(
                     "Page {} for table '{}' is both live and free",
-                    page_id.as_u32(),
-                    table_name
+                    page_id, table_name
                 )));
             }
             if !live_pages.insert(page_id) {
                 return Err(HematiteError::CorruptedData(format!(
                     "Page {} is shared by multiple tables",
-                    page_id.as_u32()
+                    page_id
                 )));
             }
         }

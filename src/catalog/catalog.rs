@@ -77,7 +77,7 @@ impl Catalog {
         let existing_header = {
             let mut pager_guard = pager.lock().unwrap();
             match pager_guard.read_page(DB_HEADER_PAGE_ID) {
-                Ok(page) => Some(DatabaseHeader::deserialize(&page)?),
+                Ok(page) => Some(DatabaseHeader::deserialize(&page.data)?),
                 Err(_) => None,
             }
         };
@@ -94,7 +94,7 @@ impl Catalog {
 
                 let mut pager_guard = pager.lock().unwrap();
                 let mut header_page = Page::new(DB_HEADER_PAGE_ID);
-                header.serialize(&mut header_page)?;
+                header.serialize(&mut header_page.data)?;
                 pager_guard.write_page(header_page)?;
                 pager_guard.flush()?;
 
@@ -163,11 +163,11 @@ impl Catalog {
         let transaction_active = self.engine.transaction_active();
         let mut pager_guard = self.pager.lock().unwrap();
         let header_page = pager_guard.read_page(DB_HEADER_PAGE_ID)?;
-        let mut header = DatabaseHeader::deserialize(&header_page)?;
+        let mut header = DatabaseHeader::deserialize(&header_page.data)?;
         header.schema_root_page = new_schema_root;
         header.checksum = header.calculate_checksum();
         let mut updated = Page::new(DB_HEADER_PAGE_ID);
-        header.serialize(&mut updated)?;
+        header.serialize(&mut updated.data)?;
         pager_guard.write_page(updated)?;
         if !transaction_active {
             pager_guard.flush()?;
@@ -182,12 +182,12 @@ impl Catalog {
     fn get_next_table_id(&self) -> Result<TableId> {
         let mut pager_guard = self.pager.lock().unwrap();
         let header_page = pager_guard.read_page(DB_HEADER_PAGE_ID)?;
-        let mut header = DatabaseHeader::deserialize(&header_page)?;
+        let mut header = DatabaseHeader::deserialize(&header_page.data)?;
         let table_id = header.increment_table_id();
 
         // Update header with new table ID
         let mut updated_page = Page::new(DB_HEADER_PAGE_ID);
-        header.serialize(&mut updated_page)?;
+        header.serialize(&mut updated_page.data)?;
         pager_guard.write_page(updated_page)?;
 
         Ok(table_id)
@@ -207,7 +207,7 @@ impl Catalog {
         let table_id = self.get_next_table_id()?;
 
         // Create table with placeholder root page (will be set when storage/B-tree is created).
-        let table = Table::new(table_id, name.to_string(), columns, PageId::new(0))?;
+        let table = Table::new(table_id, name.to_string(), columns, 0u32)?;
 
         self.schema.insert_table(table.clone())?;
         self.schema_dirty = true;
@@ -339,12 +339,12 @@ impl Catalog {
 
         let mut pager_guard = self.pager.lock().unwrap();
         let header_page = pager_guard.read_page(DB_HEADER_PAGE_ID)?;
-        let mut header = DatabaseHeader::deserialize(&header_page)?;
+        let mut header = DatabaseHeader::deserialize(&header_page.data)?;
         header.next_table_id = self.schema.next_table_id();
         header.checksum = header.calculate_checksum();
 
         let mut updated = Page::new(DB_HEADER_PAGE_ID);
-        header.serialize(&mut updated)?;
+        header.serialize(&mut updated.data)?;
         pager_guard.write_page(updated)?;
 
         Ok(())
@@ -361,7 +361,7 @@ impl Catalog {
         }
 
         // Validate root page is not page 0 (reserved for database header)
-        if root_page.as_u32() == 0 {
+        if root_page == 0 {
             return Err(crate::error::HematiteError::StorageError(
                 "Root page 0 is reserved for database header".to_string(),
             ));
@@ -379,7 +379,7 @@ impl Catalog {
     pub fn get_table_root_page(&self, table_id: TableId) -> Result<Option<PageId>> {
         if let Some(table) = self.schema.get_table(table_id) {
             // Validate that root page is properly set
-            if table.root_page_id.as_u32() == 0 {
+            if table.root_page_id == 0 {
                 // Table exists but has no B-tree yet
                 Ok(None)
             } else {
@@ -403,7 +403,7 @@ impl Catalog {
         table_id: TableId,
         root_page_id: PageId,
     ) -> Result<()> {
-        if root_page_id.as_u32() == 0 {
+        if root_page_id == 0 {
             return Err(crate::error::HematiteError::StorageError(
                 "Root page 0 is reserved for database header".to_string(),
             ));
@@ -423,7 +423,7 @@ impl Catalog {
         table_root_page_id: PageId,
         primary_key_root_page_id: PageId,
     ) -> Result<()> {
-        if table_root_page_id.as_u32() == 0 || primary_key_root_page_id.as_u32() == 0 {
+        if table_root_page_id == 0 || primary_key_root_page_id == 0 {
             return Err(crate::error::HematiteError::StorageError(
                 "Root page 0 is reserved for database header".to_string(),
             ));
@@ -454,7 +454,7 @@ impl Catalog {
             })?;
 
             // Validate root page consistency
-            if table.root_page_id.as_u32() == 0 {
+            if table.root_page_id == 0 {
                 // This is OK for newly created tables without B-trees
                 continue;
             }
@@ -498,9 +498,7 @@ impl Catalog {
             if storage_root != root_page_id {
                 return Err(crate::error::HematiteError::CorruptedData(format!(
                     "Catalog/storage root mismatch for table '{}': catalog={}, storage={}",
-                    table_name,
-                    root_page_id.as_u32(),
-                    storage_root.as_u32()
+                    table_name, root_page_id, storage_root
                 )));
             }
         }
@@ -565,8 +563,8 @@ impl Catalog {
     /// Get the next available table ID without incrementing
     pub fn peek_next_table_id(&self) -> Result<TableId> {
         let mut pager_guard = self.pager.lock().unwrap();
-        let header_page = pager_guard.read_page(PageId::new(0))?;
-        let header = DatabaseHeader::deserialize(&header_page)?;
+        let header_page = pager_guard.read_page(0)?;
+        let header = DatabaseHeader::deserialize(&header_page.data)?;
         drop(pager_guard);
         Ok(TableId::new(header.next_table_id))
     }
@@ -638,6 +636,6 @@ pub struct TableStats {
     pub name: String,
     pub column_count: usize,
     pub primary_key_count: usize,
-    pub root_page_id: PageId,
+    pub root_page_id: u32,
     pub row_size: usize,
 }

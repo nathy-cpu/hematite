@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use crate::catalog::{Table, Value};
 use crate::error::{HematiteError, Result};
-use crate::storage::PageId;
+use crate::storage::{PageId, INVALID_PAGE_ID};
 
 use super::cursor::IndexCursor;
 use super::engine::{CatalogEngine, StoredRow};
@@ -15,7 +15,7 @@ pub(crate) fn drop_table_with_indexes(engine: &mut CatalogEngine, table: &Table)
     table_store::drop_table(engine, &table.name)?;
     let mut pager = engine.pager.lock().unwrap();
 
-    if table.primary_key_index_root_page_id.as_u32() != 0 {
+    if table.primary_key_index_root_page_id != 0 {
         let mut page_ids = Vec::new();
         index_btree::collect_page_ids(
             &mut pager,
@@ -28,7 +28,7 @@ pub(crate) fn drop_table_with_indexes(engine: &mut CatalogEngine, table: &Table)
     }
 
     for index in &table.secondary_indexes {
-        if index.root_page_id.as_u32() == 0 {
+        if index.root_page_id == 0 {
             continue;
         }
         let mut page_ids = Vec::new();
@@ -321,7 +321,7 @@ pub(crate) fn validate_table_indexes(engine: &mut CatalogEngine, table: &Table) 
 }
 
 pub(crate) fn require_index_root_page(root_page_id: PageId, label: &str) -> Result<PageId> {
-    if root_page_id == PageId::new(0) || root_page_id == PageId::invalid() {
+    if root_page_id == 0 || root_page_id == INVALID_PAGE_ID {
         return Err(HematiteError::StorageError(format!(
             "Missing durable {} root page",
             label

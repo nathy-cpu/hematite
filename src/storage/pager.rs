@@ -100,9 +100,7 @@ impl Pager {
             if actual_checksum != *expected_checksum {
                 return Err(crate::error::HematiteError::CorruptedData(format!(
                     "Page checksum mismatch for page {}: expected {}, got {}",
-                    page_id.as_u32(),
-                    expected_checksum,
-                    actual_checksum
+                    page_id, expected_checksum, actual_checksum
                 )));
             }
         }
@@ -238,22 +236,21 @@ impl Pager {
             if page_id == DB_HEADER_PAGE_ID || page_id == STORAGE_METADATA_PAGE_ID {
                 return Err(crate::error::HematiteError::CorruptedData(format!(
                     "Reserved page {} cannot be marked free",
-                    page_id.as_u32()
+                    page_id
                 )));
             }
 
-            if page_id.as_u32() >= max_page_id_exclusive {
+            if page_id >= max_page_id_exclusive {
                 return Err(crate::error::HematiteError::CorruptedData(format!(
                     "Free page {} exceeds allocated page range (next_page_id={})",
-                    page_id.as_u32(),
-                    max_page_id_exclusive
+                    page_id, max_page_id_exclusive
                 )));
             }
 
             if !free_pages.insert(page_id) {
                 return Err(crate::error::HematiteError::CorruptedData(format!(
                     "Duplicate free page {} detected",
-                    page_id.as_u32()
+                    page_id
                 )));
             }
         }
@@ -261,7 +258,7 @@ impl Pager {
         if self.page_checksums.contains_key(&STORAGE_METADATA_PAGE_ID) {
             return Err(crate::error::HematiteError::CorruptedData(format!(
                 "Storage metadata page {} must not have pager checksum metadata",
-                STORAGE_METADATA_PAGE_ID.as_u32()
+                STORAGE_METADATA_PAGE_ID
             )));
         }
 
@@ -273,18 +270,17 @@ impl Pager {
 
         let mut verified_checksum_pages = 0usize;
         for (page_id, expected_checksum) in checksummed_pages {
-            if page_id.as_u32() >= max_page_id_exclusive {
+            if page_id >= max_page_id_exclusive {
                 return Err(crate::error::HematiteError::CorruptedData(format!(
                     "Checksum entry for page {} exceeds allocated page range (next_page_id={})",
-                    page_id.as_u32(),
-                    max_page_id_exclusive
+                    page_id, max_page_id_exclusive
                 )));
             }
 
             if free_pages.contains(&page_id) {
                 return Err(crate::error::HematiteError::CorruptedData(format!(
                     "Page {} has checksum metadata but is marked free",
-                    page_id.as_u32()
+                    page_id
                 )));
             }
 
@@ -292,7 +288,7 @@ impl Pager {
                 self.buffer_pool.get(page_id).cloned().ok_or_else(|| {
                     crate::error::HematiteError::StorageError(format!(
                         "Dirty page {} missing from buffer pool",
-                        page_id.as_u32()
+                        page_id
                     ))
                 })?
             } else {
@@ -303,9 +299,7 @@ impl Pager {
             if actual_checksum != expected_checksum {
                 return Err(crate::error::HematiteError::CorruptedData(format!(
                     "Page checksum mismatch for page {}: expected {}, got {}",
-                    page_id.as_u32(),
-                    expected_checksum,
-                    actual_checksum
+                    page_id, expected_checksum, actual_checksum
                 )));
             }
 
@@ -433,7 +427,7 @@ impl Pager {
                     )
                 })?
                 .parse::<u32>()
-                .map(PageId::new)
+                .map(|page_id| page_id)
                 .map_err(|_| {
                     crate::error::HematiteError::StorageError(
                         "Invalid pager freelist page id".to_string(),
@@ -478,11 +472,11 @@ impl Pager {
                     "Invalid pager checksum metadata record".to_string(),
                 ));
             }
-            let page_id = PageId::new(parts[0].parse::<u32>().map_err(|_| {
+            let page_id = parts[0].parse::<u32>().map_err(|_| {
                 crate::error::HematiteError::StorageError(
                     "Invalid pager checksum page id".to_string(),
                 )
-            })?);
+            })?;
             let checksum = parts[1].parse::<u32>().map_err(|_| {
                 crate::error::HematiteError::StorageError(
                     "Invalid pager checksum value".to_string(),
@@ -491,7 +485,7 @@ impl Pager {
             if checksums.insert(page_id, checksum).is_some() {
                 return Err(crate::error::HematiteError::StorageError(format!(
                     "Duplicate pager checksum entry for page {}",
-                    page_id.as_u32()
+                    page_id
                 )));
             }
         }
@@ -519,18 +513,18 @@ impl Pager {
             .iter()
             .map(|(page_id, checksum)| (*page_id, *checksum))
             .collect::<Vec<_>>();
-        entries.sort_by_key(|(page_id, _)| page_id.as_u32());
+        entries.sort_by_key(|(page_id, _)| *page_id);
 
         let mut lines = vec![
             format!("version={}", Self::CHECKSUM_METADATA_VERSION),
             format!("free_count={}", self.file_manager.free_pages().len()),
         ];
         for page_id in self.file_manager.free_pages() {
-            lines.push(format!("free|{}", page_id.as_u32()));
+            lines.push(format!("free|{}", page_id));
         }
         lines.push(format!("checksum_count={}", entries.len()));
         for (page_id, checksum) in entries {
-            lines.push(format!("checksum|{}|{}", page_id.as_u32(), checksum));
+            lines.push(format!("checksum|{}|{}", page_id, checksum));
         }
 
         fs::write(path, lines.join("\n"))?;
@@ -546,7 +540,7 @@ impl Pager {
             return Ok(());
         }
 
-        let page_end = 64 + ((page_id.as_u32() as u64 + 1) * crate::storage::PAGE_SIZE as u64);
+        let page_end = 64 + ((page_id as u64 + 1) * crate::storage::PAGE_SIZE as u64);
         if page_end > transaction.original_file_len {
             return Ok(());
         }

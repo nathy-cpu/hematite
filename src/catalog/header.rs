@@ -7,7 +7,6 @@
 
 use super::ids::TableId;
 use crate::error::Result;
-use crate::storage::Page;
 use crate::storage::PageId;
 
 /// Database header structure stored on page 0.
@@ -18,7 +17,7 @@ pub struct DatabaseHeader {
     /// Database format version
     pub version: u32,
     /// Root page of the schema B-tree
-    pub schema_root_page: PageId,
+    pub schema_root_page: u32,
     /// Next available table ID
     pub next_table_id: u32,
     /// Header checksum for integrity verification
@@ -34,7 +33,7 @@ impl DatabaseHeader {
     /// breaks compatibility with previous files.
     pub const CURRENT_VERSION: u32 = 2;
     /// Fixed page ID for database header (consistent with existing implementation)
-    pub const HEADER_PAGE_ID: PageId = PageId::new(0);
+    pub const HEADER_PAGE_ID: u32 = 0;
 
     /// Create a new database header with default values
     pub fn new(schema_root_page: PageId) -> Self {
@@ -68,27 +67,26 @@ impl DatabaseHeader {
     }
 
     /// Serialize header to page data
-    pub fn serialize(&self, page: &mut Page) -> Result<()> {
+    pub fn serialize(&self, bytes: &mut [u8]) -> Result<()> {
         let offset = 0;
 
         // Write magic bytes
-        page.data[offset..offset + 4].copy_from_slice(&self.magic);
+        bytes[offset..offset + 4].copy_from_slice(&self.magic);
 
         // Write version
-        page.data[offset + 4..offset + 8].copy_from_slice(&self.version.to_le_bytes());
+        bytes[offset + 4..offset + 8].copy_from_slice(&self.version.to_le_bytes());
 
         // Write schema root page ID
-        page.data[offset + 8..offset + 12]
-            .copy_from_slice(&self.schema_root_page.as_u32().to_le_bytes());
+        bytes[offset + 8..offset + 12].copy_from_slice(&self.schema_root_page.to_le_bytes());
 
         // Write next table ID
-        page.data[offset + 12..offset + 16].copy_from_slice(&self.next_table_id.to_le_bytes());
+        bytes[offset + 12..offset + 16].copy_from_slice(&self.next_table_id.to_le_bytes());
 
         // Write checksum
-        page.data[offset + 16..offset + 20].copy_from_slice(&self.checksum.to_le_bytes());
+        bytes[offset + 16..offset + 20].copy_from_slice(&self.checksum.to_le_bytes());
 
         // Zero out the rest of the header page
-        for byte in page.data.iter_mut().skip(20) {
+        for byte in bytes.iter_mut().skip(20) {
             *byte = 0;
         }
 
@@ -96,12 +94,12 @@ impl DatabaseHeader {
     }
 
     /// Deserialize header from page data
-    pub fn deserialize(page: &Page) -> Result<Self> {
+    pub fn deserialize(bytes: &[u8]) -> Result<Self> {
         let offset = 0;
 
         // Read magic bytes
         let mut magic = [0u8; 4];
-        magic.copy_from_slice(&page.data[offset..offset + 4]);
+        magic.copy_from_slice(&bytes[offset..offset + 4]);
 
         // Verify magic bytes
         if magic != Self::MAGIC {
@@ -112,10 +110,10 @@ impl DatabaseHeader {
 
         // Read version
         let version = u32::from_le_bytes([
-            page.data[offset + 4],
-            page.data[offset + 5],
-            page.data[offset + 6],
-            page.data[offset + 7],
+            bytes[offset + 4],
+            bytes[offset + 5],
+            bytes[offset + 6],
+            bytes[offset + 7],
         ]);
         if version != Self::CURRENT_VERSION {
             return Err(crate::error::HematiteError::StorageError(format!(
@@ -126,27 +124,27 @@ impl DatabaseHeader {
         }
 
         // Read schema root page ID
-        let schema_root_page = PageId::new(u32::from_le_bytes([
-            page.data[offset + 8],
-            page.data[offset + 9],
-            page.data[offset + 10],
-            page.data[offset + 11],
-        ]));
+        let schema_root_page = u32::from_le_bytes([
+            bytes[offset + 8],
+            bytes[offset + 9],
+            bytes[offset + 10],
+            bytes[offset + 11],
+        ]);
 
         // Read next table ID
         let next_table_id = u32::from_le_bytes([
-            page.data[offset + 12],
-            page.data[offset + 13],
-            page.data[offset + 14],
-            page.data[offset + 15],
+            bytes[offset + 12],
+            bytes[offset + 13],
+            bytes[offset + 14],
+            bytes[offset + 15],
         ]);
 
         // Read checksum
         let checksum = u32::from_le_bytes([
-            page.data[offset + 16],
-            page.data[offset + 17],
-            page.data[offset + 18],
-            page.data[offset + 19],
+            bytes[offset + 16],
+            bytes[offset + 17],
+            bytes[offset + 18],
+            bytes[offset + 19],
         ]);
 
         let header = Self {

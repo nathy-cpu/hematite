@@ -170,7 +170,7 @@ mod executor_tests {
                     DataType::Text,
                 ),
             ],
-            crate::storage::PageId::new(0),
+            0u32,
         )?;
 
         let db = TestDbFile::new("_test_select_executor_secondary_index_lookup");
@@ -178,12 +178,12 @@ mod executor_tests {
         let root_page_id = storage.create_table("users")?;
         let primary_key_root_page_id = storage.create_empty_btree()?;
         let secondary_index_root_page_id = storage.create_empty_btree()?;
-        table.root_page_id = root_page_id;
-        table.primary_key_index_root_page_id = primary_key_root_page_id;
+        table.root_page_id = root_page_id.into();
+        table.primary_key_index_root_page_id = primary_key_root_page_id.into();
         table.add_secondary_index(crate::catalog::SecondaryIndex {
             name: "idx_users_email".to_string(),
             column_indices: vec![1],
-            root_page_id: secondary_index_root_page_id,
+            root_page_id: secondary_index_root_page_id.into(),
         })?;
         catalog.insert_table(table)?;
 
@@ -274,15 +274,15 @@ mod executor_tests {
                     DataType::Text,
                 ),
             ],
-            crate::storage::PageId::new(0),
+            0u32,
         )?;
 
         let db = TestDbFile::new("_test_select_executor_primary_key_lookup");
         let mut storage = CatalogEngine::new(db.path())?;
         let root_page_id = storage.create_table("users")?;
         let primary_key_root_page_id = storage.create_empty_btree()?;
-        table.root_page_id = root_page_id;
-        table.primary_key_index_root_page_id = primary_key_root_page_id;
+        table.root_page_id = root_page_id.into();
+        table.primary_key_index_root_page_id = primary_key_root_page_id.into();
         catalog.insert_table(table)?;
 
         let row_id_1 = storage.insert_into_table(
@@ -763,12 +763,12 @@ mod planner_tests {
                     DataType::Text,
                 ),
             ],
-            crate::storage::PageId::new(10),
+            10u32,
         )?;
         table.add_secondary_index(crate::catalog::SecondaryIndex {
             name: "idx_users_email".to_string(),
             column_indices: vec![1],
-            root_page_id: crate::storage::PageId::new(11),
+            root_page_id: 11u32.into(),
         })?;
         catalog.insert_table(table)?;
 

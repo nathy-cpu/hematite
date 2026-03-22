@@ -4,6 +4,7 @@ use super::column::Column;
 use super::ids::TableId;
 use super::table::{SecondaryIndex, Table};
 use crate::error::HematiteError;
+use crate::storage::PageId;
 use crate::Result;
 use std::collections::HashMap;
 
@@ -51,7 +52,7 @@ impl Schema {
 
         // For now, we'll use a placeholder root page ID
         // This will be assigned when the table is actually created in storage
-        let root_page_id = crate::storage::PageId::new(0);
+        let root_page_id = 0u32;
 
         let table = Table::new(table_id, name.clone(), columns, root_page_id)?;
 
@@ -65,8 +66,8 @@ impl Schema {
         &mut self,
         name: String,
         columns: Vec<Column>,
-        table_root_page_id: crate::storage::PageId,
-        primary_key_root_page_id: crate::storage::PageId,
+        table_root_page_id: PageId,
+        primary_key_root_page_id: PageId,
     ) -> Result<TableId> {
         if self.table_names.contains_key(&name) {
             return Err(HematiteError::ParseError(format!(
@@ -132,7 +133,7 @@ impl Schema {
     pub fn set_table_primary_key_root_page(
         &mut self,
         table_id: TableId,
-        root_page_id: crate::storage::PageId,
+        root_page_id: PageId,
     ) -> Result<()> {
         let table = self
             .tables
@@ -145,8 +146,8 @@ impl Schema {
     pub fn set_table_storage_roots(
         &mut self,
         table_id: TableId,
-        table_root_page_id: crate::storage::PageId,
-        primary_key_root_page_id: crate::storage::PageId,
+        table_root_page_id: PageId,
+        primary_key_root_page_id: PageId,
     ) -> Result<()> {
         let table = self
             .tables
@@ -279,11 +280,7 @@ impl Schema {
         Ok(schema)
     }
 
-    pub fn set_table_root_page(
-        &mut self,
-        table_id: TableId,
-        root_page_id: crate::storage::PageId,
-    ) -> Result<()> {
+    pub fn set_table_root_page(&mut self, table_id: TableId, root_page_id: PageId) -> Result<()> {
         let table = self
             .tables
             .get_mut(&table_id)

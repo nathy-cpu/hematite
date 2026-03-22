@@ -55,12 +55,12 @@ impl RollbackJournal {
 
         bytes.extend_from_slice(&(self.original_free_pages.len() as u32).to_le_bytes());
         for page_id in &self.original_free_pages {
-            bytes.extend_from_slice(&page_id.as_u32().to_le_bytes());
+            bytes.extend_from_slice(&page_id.to_le_bytes());
         }
 
         bytes.extend_from_slice(&(self.original_checksums.len() as u32).to_le_bytes());
         for (page_id, checksum) in &self.original_checksums {
-            bytes.extend_from_slice(&page_id.as_u32().to_le_bytes());
+            bytes.extend_from_slice(&page_id.to_le_bytes());
             bytes.extend_from_slice(&checksum.to_le_bytes());
         }
 
@@ -69,11 +69,11 @@ impl RollbackJournal {
             if record.data.len() != PAGE_SIZE {
                 return Err(HematiteError::StorageError(format!(
                     "Journal page {} has invalid image size {}",
-                    record.page_id.as_u32(),
+                    record.page_id,
                     record.data.len()
                 )));
             }
-            bytes.extend_from_slice(&record.page_id.as_u32().to_le_bytes());
+            bytes.extend_from_slice(&record.page_id.to_le_bytes());
             bytes.extend_from_slice(&record.data);
         }
 
@@ -128,13 +128,13 @@ impl RollbackJournal {
         let free_page_count = read_u32(bytes, &mut offset)? as usize;
         let mut original_free_pages = Vec::with_capacity(free_page_count);
         for _ in 0..free_page_count {
-            original_free_pages.push(PageId::new(read_u32(bytes, &mut offset)?));
+            original_free_pages.push(read_u32(bytes, &mut offset)?);
         }
 
         let checksum_count = read_u32(bytes, &mut offset)? as usize;
         let mut original_checksums = Vec::with_capacity(checksum_count);
         for _ in 0..checksum_count {
-            let page_id = PageId::new(read_u32(bytes, &mut offset)?);
+            let page_id = read_u32(bytes, &mut offset)?;
             let checksum = read_u32(bytes, &mut offset)?;
             original_checksums.push((page_id, checksum));
         }
@@ -142,7 +142,7 @@ impl RollbackJournal {
         let page_count = read_u32(bytes, &mut offset)? as usize;
         let mut page_records = Vec::with_capacity(page_count);
         for _ in 0..page_count {
-            let page_id = PageId::new(read_u32(bytes, &mut offset)?);
+            let page_id = read_u32(bytes, &mut offset)?;
             if offset + PAGE_SIZE > bytes.len() {
                 return Err(HematiteError::StorageError(
                     "Rollback journal page image is truncated".to_string(),

@@ -52,7 +52,7 @@ impl FreeList {
 
     pub fn compact_trailing_pages(&mut self, next_page_id: &mut u32, minimum_next_page_id: u32) {
         while *next_page_id > minimum_next_page_id {
-            let candidate = PageId::new(*next_page_id - 1);
+            let candidate = *next_page_id - 1;
             if let Some(position) = self.pages.iter().position(|page_id| *page_id == candidate) {
                 self.pages.swap_remove(position);
                 *next_page_id -= 1;
@@ -69,9 +69,9 @@ impl FreeList {
         ];
 
         let mut pages = self.pages.clone();
-        pages.sort_by_key(|page_id| page_id.as_u32());
+        pages.sort_by_key(|page_id| *page_id);
         for page_id in pages {
-            lines.push(format!("freelist|{}", page_id.as_u32()));
+            lines.push(format!("freelist|{}", page_id));
         }
 
         lines
@@ -98,7 +98,7 @@ impl FreeList {
                 )
             })?;
 
-            let page_id = payload.parse::<u32>().map(PageId::new).map_err(|_| {
+            let page_id = payload.parse::<u32>().map_err(|_| {
                 crate::error::HematiteError::StorageError(
                     "Invalid freelist page id metadata".to_string(),
                 )
@@ -107,7 +107,7 @@ impl FreeList {
             if pages.contains(&page_id) {
                 return Err(crate::error::HematiteError::StorageError(format!(
                     "Duplicate freelist page id {} in metadata",
-                    page_id.as_u32()
+                    page_id
                 )));
             }
 

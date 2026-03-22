@@ -89,7 +89,7 @@ impl FileManager {
     }
 
     pub fn read_page(&mut self, page_id: PageId) -> Result<Page> {
-        let offset = 64 + (page_id.as_u32() as u64 * PAGE_SIZE as u64);
+        let offset = 64 + (page_id as u64 * PAGE_SIZE as u64);
 
         let mut data = vec![0u8; PAGE_SIZE];
         self.seek(SeekFrom::Start(offset))?;
@@ -99,7 +99,7 @@ impl FileManager {
     }
 
     pub fn write_page(&mut self, page: &Page) -> Result<()> {
-        let offset = 64 + (page.id.as_u32() as u64 * PAGE_SIZE as u64);
+        let offset = 64 + (page.id as u64 * PAGE_SIZE as u64);
 
         self.seek(SeekFrom::Start(offset))?;
         self.write_all(&page.data)?;
@@ -113,7 +113,7 @@ impl FileManager {
             Ok(free_page_id)
         } else {
             // Allocate new page
-            let page_id = PageId::new(self.next_page_id);
+            let page_id = self.next_page_id;
             self.next_page_id += 1;
 
             // Initialize new page with zeros
@@ -165,7 +165,7 @@ impl FileManager {
     }
 
     fn compact_trailing_free_pages(&mut self) -> Result<()> {
-        let minimum_next_page_id = STORAGE_METADATA_PAGE_ID.as_u32() + 1;
+        let minimum_next_page_id = STORAGE_METADATA_PAGE_ID + 1;
         self.free_list
             .compact_trailing_pages(&mut self.next_page_id, minimum_next_page_id);
         let target_next_page_id = self.next_page_id.max(minimum_next_page_id);
