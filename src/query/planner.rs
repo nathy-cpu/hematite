@@ -199,14 +199,15 @@ impl QueryPlanner {
     fn plan_update(&self, statement: UpdateStatement) -> Result<QueryPlan> {
         let analysis = self.analyze_table_access(&statement.table, &statement.where_clause)?;
         let access_path = self.choose_access_path(&analysis);
+        let assignment_count = statement.assignments.len();
         let node = PlanNode::Update(UpdatePlanNode {
             table_name: statement.table.clone(),
-            assignment_count: statement.assignments.len(),
+            assignment_count,
             has_filter: statement.where_clause.is_some(),
             access_path: access_path.clone(),
         });
-        let executor = Box::new(UpdateExecutor::new(statement, access_path));
-        let estimated_cost = 1000.0;
+        let executor = Box::new(UpdateExecutor::new(statement, access_path.clone()));
+        let estimated_cost = self.estimate_update_cost(&analysis, &access_path, assignment_count);
 
         Ok(QueryPlan {
             node,
@@ -225,8 +226,8 @@ impl QueryPlanner {
             has_filter: statement.where_clause.is_some(),
             access_path: access_path.clone(),
         });
-        let executor = Box::new(DeleteExecutor::new(statement, access_path));
-        let estimated_cost = 1000.0;
+        let executor = Box::new(DeleteExecutor::new(statement, access_path.clone()));
+        let estimated_cost = self.estimate_delete_cost(&analysis, &access_path);
 
         Ok(QueryPlan {
             node,
@@ -491,18 +492,82 @@ impl QueryPlanner {
     }
 
     fn estimate_select_cost(&self, analysis: &SelectAnalysis) -> f64 {
-        // Simplified cost model
-        let mut cost = analysis.estimated_rows as f64;
-
-        // Apply index selectivity benefits
-        for index_usage in &analysis.usable_indexes {
-            cost *= index_usage.selectivity;
-        }
-
-        // Add projection cost based on number of accessed columns
+        let access_path = self.choose_access_path(analysis);
+        let mut cost = self.estimate_locator_cost(analysis, &access_path)
+            + self.estimate_rows_touched(analysis, &access_path) * 0.5;
         cost += analysis.accessed_columns.len() as f64 * 0.1;
+        cost.max(1.0)
+    }
 
-        cost
+    fn estimate_update_cost(
+        &self,
+        analysis: &SelectAnalysis,
+        access_path: &SelectAccessPath,
+        assignment_count: usize,
+    ) -> f64 {
+        let rows_touched = self.estimate_rows_touched(analysis, access_path);
+        (self.estimate_locator_cost(analysis, access_path)
+            + rows_touched * 3.0
+            + assignment_count as f64 * 0.2)
+            .max(1.0)
+    }
+
+    fn estimate_delete_cost(
+        &self,
+        analysis: &SelectAnalysis,
+        access_path: &SelectAccessPath,
+    ) -> f64 {
+        let rows_touched = self.estimate_rows_touched(analysis, access_path);
+        (self.estimate_locator_cost(analysis, access_path) + rows_touched * 2.0).max(1.0)
+    }
+
+    fn estimate_rows_touched(
+        &self,
+        analysis: &SelectAnalysis,
+        access_path: &SelectAccessPath,
+    ) -> f64 {
+        match access_path {
+            SelectAccessPath::RowIdLookup | SelectAccessPath::PrimaryKeyLookup => 1.0,
+            SelectAccessPath::SecondaryIndexLookup(index_name) => self
+                .secondary_index_selectivity(analysis, index_name)
+                .map(|selectivity| (analysis.estimated_rows as f64 * selectivity).max(1.0))
+                .unwrap_or((analysis.estimated_rows as f64 * 0.1).max(1.0)),
+            SelectAccessPath::FullTableScan => analysis.estimated_rows as f64,
+        }
+    }
+
+    fn estimate_locator_cost(
+        &self,
+        analysis: &SelectAnalysis,
+        access_path: &SelectAccessPath,
+    ) -> f64 {
+        match access_path {
+            SelectAccessPath::RowIdLookup => 1.0,
+            SelectAccessPath::PrimaryKeyLookup => 2.0,
+            SelectAccessPath::SecondaryIndexLookup(index_name) => {
+                2.5 + self.estimate_rows_touched(analysis, access_path)
+                    + self
+                        .secondary_index_selectivity(analysis, index_name)
+                        .map(|selectivity| selectivity * 5.0)
+                        .unwrap_or(0.5)
+            }
+            SelectAccessPath::FullTableScan => analysis.estimated_rows as f64,
+        }
+    }
+
+    fn secondary_index_selectivity(
+        &self,
+        analysis: &SelectAnalysis,
+        index_name: &str,
+    ) -> Option<f64> {
+        analysis
+            .usable_indexes
+            .iter()
+            .find(|usage| {
+                matches!(usage.index_type, IndexType::Secondary)
+                    && usage.index_name.as_deref() == Some(index_name)
+            })
+            .map(|usage| usage.selectivity)
     }
 }
 

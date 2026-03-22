@@ -682,6 +682,7 @@ mod planner_tests {
     use crate::error::Result;
     use crate::parser::ast::*;
     use crate::query::planner::*;
+    use std::collections::HashMap;
 
     #[test]
     fn test_query_planner_select() -> Result<()> {
@@ -890,6 +891,70 @@ mod planner_tests {
             }
             other => panic!("expected update plan node, got {:?}", other),
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_query_planner_costs_favor_locator_access_paths() -> Result<()> {
+        let mut catalog = Schema::new();
+
+        let columns = vec![
+            crate::catalog::Column::new(
+                crate::catalog::ColumnId::new(1),
+                "id".to_string(),
+                DataType::Integer,
+            )
+            .primary_key(true),
+            crate::catalog::Column::new(
+                crate::catalog::ColumnId::new(2),
+                "name".to_string(),
+                DataType::Text,
+            ),
+        ];
+        catalog.create_table("users".to_string(), columns)?;
+
+        let mut row_counts = HashMap::new();
+        row_counts.insert("users".to_string(), 10_000usize);
+        let planner = QueryPlanner::new(catalog).with_table_row_counts(row_counts);
+
+        let full_scan = planner.plan(Statement::Select(SelectStatement {
+            columns: vec![SelectItem::Column("name".to_string())],
+            from: TableReference::Table("users".to_string()),
+            where_clause: None,
+            order_by: Vec::new(),
+            limit: None,
+        }))?;
+        let rowid_lookup = planner.plan(Statement::Select(SelectStatement {
+            columns: vec![SelectItem::Column("name".to_string())],
+            from: TableReference::Table("users".to_string()),
+            where_clause: Some(WhereClause {
+                conditions: vec![Condition::Comparison {
+                    left: Expression::Column("rowid".to_string()),
+                    operator: ComparisonOperator::Equal,
+                    right: Expression::Literal(Value::Integer(7)),
+                }],
+            }),
+            order_by: Vec::new(),
+            limit: None,
+        }))?;
+        let delete_full_scan = planner.plan(Statement::Delete(DeleteStatement {
+            table: "users".to_string(),
+            where_clause: None,
+        }))?;
+        let delete_pk_lookup = planner.plan(Statement::Delete(DeleteStatement {
+            table: "users".to_string(),
+            where_clause: Some(WhereClause {
+                conditions: vec![Condition::Comparison {
+                    left: Expression::Column("id".to_string()),
+                    operator: ComparisonOperator::Equal,
+                    right: Expression::Literal(Value::Integer(1)),
+                }],
+            }),
+        }))?;
+
+        assert!(rowid_lookup.estimated_cost < full_scan.estimated_cost);
+        assert!(delete_pk_lookup.estimated_cost < delete_full_scan.estimated_cost);
 
         Ok(())
     }
