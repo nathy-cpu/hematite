@@ -250,7 +250,7 @@ impl QueryPlanner {
         statement: &SelectStatement,
         analysis: &SelectAnalysis,
     ) -> SelectPlanNode {
-        let access_path = if self.extract_rowid_lookup(statement).is_some() {
+        let access_path = if analysis.rowid_lookup.is_some() {
             SelectAccessPath::RowIdLookup
         } else if analysis
             .usable_indexes
@@ -352,6 +352,8 @@ impl QueryPlanner {
             HematiteError::ParseError(format!("Table '{}' not found", table_name))
         })?;
 
+        let rowid_lookup = self.extract_rowid_lookup(statement);
+
         // Analyze WHERE clause for index usage opportunities
         let usable_indexes = self.analyze_where_clause(&statement.where_clause, table)?;
 
@@ -361,6 +363,7 @@ impl QueryPlanner {
         Ok(SelectAnalysis {
             table_name,
             table_id: table.id,
+            rowid_lookup,
             estimated_rows: self.estimate_table_rows(table),
             usable_indexes,
             accessed_columns,
@@ -479,6 +482,7 @@ impl QueryPlanner {
 pub struct SelectAnalysis {
     pub table_name: String,
     pub table_id: crate::catalog::TableId,
+    pub rowid_lookup: Option<u64>,
     pub estimated_rows: usize,
     pub usable_indexes: Vec<IndexUsage>,
     pub accessed_columns: Vec<ColumnAccess>,

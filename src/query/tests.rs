@@ -2,11 +2,11 @@
 
 mod executor_tests {
     use crate::catalog::types::{DataType, Value};
+    use crate::catalog::CatalogEngine;
     use crate::catalog::{Column, Schema};
     use crate::error::Result;
     use crate::parser::ast::*;
     use crate::query::executor::*;
-    use crate::catalog::CatalogEngine;
     use crate::test_utils::TestDbFile;
 
     #[test]
@@ -417,6 +417,7 @@ mod optimizer_tests {
         let analysis = SelectAnalysis {
             table_name: "users".to_string(),
             table_id: crate::catalog::TableId::new(1),
+            rowid_lookup: None,
             estimated_rows: 1000,
             usable_indexes: vec![],
             accessed_columns: vec![],
@@ -597,6 +598,10 @@ mod planner_tests {
             }
             other => panic!("expected select plan node, got {:?}", other),
         }
+        assert_eq!(
+            plan.select_analysis.as_ref().and_then(|a| a.rowid_lookup),
+            Some(7)
+        );
         Ok(())
     }
 
