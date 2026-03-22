@@ -1,6 +1,5 @@
 //! Table storage operations for catalog-managed rowid tables.
 
-use crate::btree::ByteTreeStore;
 use crate::catalog::Value;
 use crate::error::{HematiteError, Result};
 
@@ -19,10 +18,8 @@ pub(crate) fn get_storage_stats(engine: &CatalogEngine) -> CatalogStorageStats {
     let mut live_table_page_count = 0usize;
     let mut table_used_bytes = 0usize;
     drop(pager);
-    let trees = ByteTreeStore::from_shared_storage(engine.shared_pager());
-
     for metadata in engine.table_metadata.values() {
-        if let Ok(space_stats) = trees.collect_space_stats(metadata.root_page_id) {
+        if let Ok(space_stats) = engine.collect_tree_space_stats(metadata.root_page_id) {
             live_table_page_count += space_stats.page_ids.len();
             table_used_bytes += space_stats.used_bytes;
         }
@@ -39,13 +36,13 @@ pub(crate) fn get_storage_stats(engine: &CatalogEngine) -> CatalogStorageStats {
         live_table_page_count,
         table_used_bytes,
         table_unused_bytes: live_table_page_count
-            .saturating_mul(crate::storage::PAGE_SIZE)
+            .saturating_mul(CatalogEngine::PAGE_SIZE)
             .saturating_sub(table_used_bytes),
     }
 }
 
 pub(crate) fn create_table(engine: &mut CatalogEngine, table_name: &str) -> Result<u32> {
-    let root_page_id = engine.create_empty_btree()?;
+    let root_page_id = engine.create_tree()?;
     engine_metadata::create_table_metadata(engine, table_name, root_page_id)?;
     Ok(root_page_id)
 }
@@ -60,8 +57,7 @@ pub(crate) fn insert_into_table(
         (metadata.root_page_id, metadata.next_row_id)
     };
 
-    let trees = ByteTreeStore::from_shared_storage(engine.shared_pager());
-    let mut tree = trees.open_tree(root_page_id)?;
+    let mut tree = engine.open_tree(root_page_id)?;
     let encoded_row = RowSerializer::serialize_stored_row(&StoredRow {
         row_id,
         values: row,
@@ -86,8 +82,7 @@ pub(crate) fn replace_table_rows(
     rows: Vec<StoredRow>,
 ) -> Result<()> {
     let root_page_id = engine_metadata::lookup_table_metadata(engine, table_name)?.root_page_id;
-    let trees = ByteTreeStore::from_shared_storage(engine.shared_pager());
-    trees.reset_tree(root_page_id)?;
+    engine.reset_tree(root_page_id)?;
 
     let next_row_id = engine
         .table_metadata
@@ -122,8 +117,7 @@ pub(crate) fn delete_from_table_by_rowid(
     rowid: u64,
 ) -> Result<bool> {
     let root_page_id = engine_metadata::lookup_table_metadata(engine, table_name)?.root_page_id;
-    let trees = ByteTreeStore::from_shared_storage(engine.shared_pager());
-    let mut tree = trees.open_tree(root_page_id)?;
+    let mut tree = engine.open_tree(root_page_id)?;
     let (deleted, mutation) = tree.delete_with_mutation(&rowid.to_be_bytes())?;
     if let Some(metadata) = engine.table_metadata.get_mut(table_name) {
         metadata.root_page_id = mutation.root_page_id;
@@ -140,8 +134,7 @@ pub(crate) fn drop_table(engine: &mut CatalogEngine, table_name: &str) -> Result
     let metadata = engine.table_metadata.remove(table_name).ok_or_else(|| {
         HematiteError::StorageError(format!("Table '{}' does not exist", table_name))
     })?;
-    let trees = ByteTreeStore::from_shared_storage(engine.shared_pager());
-    trees.delete_tree(metadata.root_page_id)
+    engine.delete_tree(metadata.root_page_id)
 }
 
 pub(crate) fn open_table_cursor(
@@ -149,8 +142,7 @@ pub(crate) fn open_table_cursor(
     table_name: &str,
 ) -> Result<TableCursor> {
     let root_page_id = engine_metadata::lookup_table_metadata(engine, table_name)?.root_page_id;
-    let trees = ByteTreeStore::from_shared_storage(engine.shared_pager());
-    let tree = trees.open_tree(root_page_id)?;
+    let tree = engine.open_tree(root_page_id)?;
     let rows = tree
         .entries()?
         .into_iter()
@@ -194,8 +186,7 @@ pub(crate) fn lookup_row_by_rowid(
     rowid: u64,
 ) -> Result<Option<StoredRow>> {
     let root_page_id = engine_metadata::lookup_table_metadata(engine, table_name)?.root_page_id;
-    let trees = ByteTreeStore::from_shared_storage(engine.shared_pager());
-    let mut tree = trees.open_tree(root_page_id)?;
+    let mut tree = engine.open_tree(root_page_id)?;
     match tree.get(&rowid.to_be_bytes())? {
         Some(value) => Ok(Some(RowSerializer::deserialize_stored_row(&value)?)),
         None => Ok(None),
@@ -208,8 +199,7 @@ pub(crate) fn insert_stored_row(
     row: StoredRow,
 ) -> Result<()> {
     let root_page_id = engine_metadata::lookup_table_metadata(engine, table_name)?.root_page_id;
-    let trees = ByteTreeStore::from_shared_storage(engine.shared_pager());
-    let mut tree = trees.open_tree(root_page_id)?;
+    let mut tree = engine.open_tree(root_page_id)?;
     let encoded_row = RowSerializer::serialize_stored_row(&row)?;
     let new_root_page_id = tree
         .insert_with_mutation(&row.row_id.to_be_bytes(), &encoded_row)?

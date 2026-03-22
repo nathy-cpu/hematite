@@ -2,7 +2,6 @@
 
 use std::collections::HashSet;
 
-use crate::btree::ByteTreeStore;
 use crate::catalog::{Table, Value};
 use crate::error::{HematiteError, Result};
 
@@ -14,17 +13,16 @@ const INVALID_ROOT_PAGE_ID: u32 = u32::MAX;
 
 pub(crate) fn drop_table_with_indexes(engine: &mut CatalogEngine, table: &Table) -> Result<()> {
     table_store::drop_table(engine, &table.name)?;
-    let trees = ByteTreeStore::from_shared_storage(engine.shared_pager());
 
     if table.primary_key_index_root_page_id != 0 {
-        trees.delete_tree(table.primary_key_index_root_page_id)?;
+        engine.delete_tree(table.primary_key_index_root_page_id)?;
     }
 
     for index in &table.secondary_indexes {
         if index.root_page_id == 0 {
             continue;
         }
-        trees.delete_tree(index.root_page_id)?;
+        engine.delete_tree(index.root_page_id)?;
     }
 
     Ok(())
@@ -51,8 +49,7 @@ pub(crate) fn lookup_primary_key_rowid(
         table.primary_key_index_root_page_id,
         &format!("primary-key index for table '{}'", table.name),
     )?;
-    let trees = ByteTreeStore::from_shared_storage(engine.shared_pager());
-    let mut tree = trees.open_tree(root_page_id)?;
+    let mut tree = engine.open_tree(root_page_id)?;
     match tree.get(&encode_index_key(key_values)?)? {
         Some(value) => decode_rowid_value(&value).map(Some),
         None => Ok(None),
@@ -69,8 +66,7 @@ pub(crate) fn register_primary_key_row(
         &format!("primary-key index for table '{}'", table.name),
     )?;
     let key_values = table.get_primary_key_values(&row.values)?;
-    let trees = ByteTreeStore::from_shared_storage(engine.shared_pager());
-    let mut tree = trees.open_tree(root_page_id)?;
+    let mut tree = engine.open_tree(root_page_id)?;
     let encoded_key = encode_index_key(&key_values)?;
     if tree.get(&encoded_key)?.is_some() {
         return Err(HematiteError::StorageError(format!(
@@ -114,8 +110,7 @@ pub(crate) fn lookup_secondary_index_rowids(
         index.root_page_id,
         &format!("secondary index '{}' on table '{}'", index.name, table.name),
     )?;
-    let trees = ByteTreeStore::from_shared_storage(engine.shared_pager());
-    let tree = trees.open_tree(root_page_id)?;
+    let tree = engine.open_tree(root_page_id)?;
     tree.entries_with_prefix(&encode_index_key(key_values)?)?
         .into_iter()
         .map(|(_key, value)| decode_rowid_value(&value))
@@ -127,7 +122,6 @@ pub(crate) fn register_secondary_index_row(
     table: &Table,
     row: StoredRow,
 ) -> Result<()> {
-    let trees = ByteTreeStore::from_shared_storage(engine.shared_pager());
     for index in &table.secondary_indexes {
         let root_page_id = require_index_root_page(
             index.root_page_id,
@@ -138,7 +132,7 @@ pub(crate) fn register_secondary_index_row(
             .iter()
             .map(|&column_index| row.values[column_index].clone())
             .collect::<Vec<_>>();
-        let mut tree = trees.open_tree(root_page_id)?;
+        let mut tree = engine.open_tree(root_page_id)?;
         tree.insert_with_mutation(
             &encode_secondary_key(&key_values, row.row_id)?,
             &row.row_id.to_be_bytes(),
@@ -156,10 +150,9 @@ pub(crate) fn rebuild_primary_key_index(
         table.primary_key_index_root_page_id,
         &format!("primary-key index for table '{}'", table.name),
     )?;
-    let trees = ByteTreeStore::from_shared_storage(engine.shared_pager());
-    trees.reset_tree(root_page_id)?;
+    engine.reset_tree(root_page_id)?;
     let mut seen = HashSet::new();
-    let mut tree = trees.open_tree(root_page_id)?;
+    let mut tree = engine.open_tree(root_page_id)?;
     for row in rows {
         let key_values = table.get_primary_key_values(&row.values)?;
         let encoded = encode_index_key(&key_values)?;
@@ -179,14 +172,13 @@ pub(crate) fn rebuild_secondary_indexes(
     table: &Table,
     rows: &[StoredRow],
 ) -> Result<()> {
-    let trees = ByteTreeStore::from_shared_storage(engine.shared_pager());
     for index in &table.secondary_indexes {
         let root_page_id = require_index_root_page(
             index.root_page_id,
             &format!("secondary index '{}' on table '{}'", index.name, table.name),
         )?;
-        trees.reset_tree(root_page_id)?;
-        let mut tree = trees.open_tree(root_page_id)?;
+        engine.reset_tree(root_page_id)?;
+        let mut tree = engine.open_tree(root_page_id)?;
         for row in rows {
             let key_values = index
                 .column_indices
@@ -212,8 +204,7 @@ pub(crate) fn delete_primary_key_row(
         &format!("primary-key index for table '{}'", table.name),
     )?;
     let key_values = table.get_primary_key_values(&row.values)?;
-    let trees = ByteTreeStore::from_shared_storage(engine.shared_pager());
-    let mut tree = trees.open_tree(root_page_id)?;
+    let mut tree = engine.open_tree(root_page_id)?;
     Ok(tree.delete(&encode_index_key(&key_values)?)?.is_some())
 }
 
@@ -222,14 +213,13 @@ pub(crate) fn delete_secondary_index_row(
     table: &Table,
     row: &StoredRow,
 ) -> Result<()> {
-    let trees = ByteTreeStore::from_shared_storage(engine.shared_pager());
     for index in &table.secondary_indexes {
         let key_values = index
             .column_indices
             .iter()
             .map(|&column_index| row.values[column_index].clone())
             .collect::<Vec<_>>();
-        let mut tree = trees.open_tree(index.root_page_id)?;
+        let mut tree = engine.open_tree(index.root_page_id)?;
         let _ = tree.delete(&encode_secondary_key(&key_values, row.row_id)?)?;
     }
     Ok(())
@@ -251,8 +241,7 @@ pub(crate) fn open_primary_key_cursor(
         table.primary_key_index_root_page_id,
         &format!("primary-key index for table '{}'", table.name),
     )?;
-    let trees = ByteTreeStore::from_shared_storage(engine.shared_pager());
-    let tree = trees.open_tree(root_page_id)?;
+    let tree = engine.open_tree(root_page_id)?;
     let entries = tree
         .entries()?
         .into_iter()
@@ -281,8 +270,7 @@ pub(crate) fn open_secondary_index_cursor(
         index.root_page_id,
         &format!("secondary index '{}' on table '{}'", index.name, table.name),
     )?;
-    let trees = ByteTreeStore::from_shared_storage(engine.shared_pager());
-    let tree = trees.open_tree(root_page_id)?;
+    let tree = engine.open_tree(root_page_id)?;
     let entries = tree
         .entries()?
         .into_iter()
@@ -293,10 +281,9 @@ pub(crate) fn open_secondary_index_cursor(
 
 pub(crate) fn validate_table_indexes(engine: &mut CatalogEngine, table: &Table) -> Result<()> {
     let rows = table_store::read_rows_with_ids(engine, &table.name)?;
-    let trees = ByteTreeStore::from_shared_storage(engine.shared_pager());
     for row in &rows {
         let key_values = table.get_primary_key_values(&row.values)?;
-        let mut tree = trees.open_tree(table.primary_key_index_root_page_id)?;
+        let mut tree = engine.open_tree(table.primary_key_index_root_page_id)?;
         let stored_rowid = tree
             .get(&encode_index_key(&key_values)?)?
             .map(|value| decode_rowid_value(&value))
@@ -323,7 +310,7 @@ pub(crate) fn validate_table_indexes(engine: &mut CatalogEngine, table: &Table) 
                 .iter()
                 .map(|&column_index| row.values[column_index].clone())
                 .collect::<Vec<_>>();
-            let tree = trees.open_tree(index.root_page_id)?;
+            let tree = engine.open_tree(index.root_page_id)?;
             let rowids = tree
                 .entries_with_prefix(&encode_index_key(&key_values)?)?
                 .into_iter()

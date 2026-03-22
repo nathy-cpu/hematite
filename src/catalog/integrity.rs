@@ -2,10 +2,8 @@
 
 use std::collections::HashSet;
 
-use crate::btree::ByteTreeStore;
 use crate::catalog::Table;
 use crate::error::{HematiteError, Result};
-use crate::storage::{DB_HEADER_PAGE_ID, INVALID_PAGE_ID, STORAGE_METADATA_PAGE_ID};
 
 use super::engine::{CatalogEngine, CatalogIntegrityReport};
 use super::index_store;
@@ -18,30 +16,21 @@ pub(crate) struct CatalogTreeUsage {
 }
 
 pub(crate) fn validate_integrity(engine: &mut CatalogEngine) -> Result<CatalogIntegrityReport> {
-    let pager_report = engine.pager.lock().unwrap().validate_integrity()?;
+    let pager_report = engine.pager_integrity_report()?;
     let metadata_entries = engine
         .table_metadata
         .iter()
         .map(|(name, metadata)| (name.clone(), metadata.clone()))
         .collect::<Vec<_>>();
 
-    let free_pages = engine
-        .pager
-        .lock()
-        .unwrap()
-        .free_pages()
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
+    let free_pages = engine.free_page_ids().into_iter().collect::<HashSet<_>>();
 
     let mut live_pages = HashSet::new();
     let mut total_rows = 0u64;
-    let trees = ByteTreeStore::from_shared_storage(engine.shared_pager());
 
     for (table_name, metadata) in metadata_entries {
-        if metadata.root_page_id == INVALID_PAGE_ID
-            || metadata.root_page_id == DB_HEADER_PAGE_ID
-            || metadata.root_page_id == STORAGE_METADATA_PAGE_ID
+        if metadata.root_page_id == CatalogEngine::INVALID_PAGE_ID
+            || CatalogEngine::is_reserved_page(metadata.root_page_id)
         {
             return Err(HematiteError::CorruptedData(format!(
                 "Table '{}' has invalid root page {}",
@@ -49,11 +38,11 @@ pub(crate) fn validate_integrity(engine: &mut CatalogEngine) -> Result<CatalogIn
             )));
         }
 
-        let table_pages = trees.collect_page_ids(metadata.root_page_id)?;
+        let table_pages = engine.collect_tree_page_ids(metadata.root_page_id)?;
         let mut counted_rows = 0u64;
         let mut max_row_id = 0u64;
         let mut previous_row_id = None;
-        for (key, value) in trees.open_tree(metadata.root_page_id)?.entries()? {
+        for (key, value) in engine.read_tree_entries(metadata.root_page_id)? {
             if key.len() != 8 {
                 return Err(HematiteError::CorruptedData(format!(
                     "Table '{}' contains a rowid key with invalid length {}",
@@ -138,20 +127,12 @@ pub(crate) fn validate_catalog_layout(
     engine: &mut CatalogEngine,
     tables: &[Table],
 ) -> Result<CatalogTreeUsage> {
-    let free_pages = engine
-        .pager
-        .lock()
-        .unwrap()
-        .free_pages()
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
+    let free_pages = engine.free_page_ids().into_iter().collect::<HashSet<_>>();
     let mut table_pages = HashSet::new();
     let mut index_pages = HashSet::new();
-    let trees = ByteTreeStore::from_shared_storage(engine.shared_pager());
 
     for table in tables {
-        let table_page_ids = trees.collect_page_ids(table.root_page_id)?;
+        let table_page_ids = engine.collect_tree_page_ids(table.root_page_id)?;
         for page_id in table_page_ids {
             if free_pages.contains(&page_id) {
                 return Err(HematiteError::CorruptedData(format!(
@@ -168,7 +149,8 @@ pub(crate) fn validate_catalog_layout(
         }
 
         if table.primary_key_index_root_page_id != 0 {
-            let index_page_ids = trees.collect_page_ids(table.primary_key_index_root_page_id)?;
+            let index_page_ids =
+                engine.collect_tree_page_ids(table.primary_key_index_root_page_id)?;
             for page_id in index_page_ids {
                 if free_pages.contains(&page_id) {
                     return Err(HematiteError::CorruptedData(format!(
@@ -198,7 +180,7 @@ pub(crate) fn validate_catalog_layout(
                     index.name, table.name
                 )));
             }
-            let index_page_ids = trees.collect_page_ids(index.root_page_id)?;
+            let index_page_ids = engine.collect_tree_page_ids(index.root_page_id)?;
             for page_id in index_page_ids {
                 if free_pages.contains(&page_id) {
                     return Err(HematiteError::CorruptedData(format!(

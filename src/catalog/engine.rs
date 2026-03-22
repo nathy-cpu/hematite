@@ -1,11 +1,10 @@
 //! Relational storage engine built on top of the pager and generic B-trees.
 
-use crate::btree::tree::create_tree_root;
+use crate::btree::tree::TreeSpaceStats;
+use crate::btree::{ByteTree, ByteTreeStore};
 use crate::catalog::{DatabaseHeader, Table, TableId, Value};
 use crate::error::{HematiteError, Result};
-use crate::storage::{
-    Page, PageId, Pager, PagerIntegrityReport, DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID,
-};
+use crate::storage::{Page, PageId, Pager, PagerIntegrityReport, DB_HEADER_PAGE_ID};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -64,6 +63,8 @@ pub struct CatalogEngine {
 }
 
 impl CatalogEngine {
+    pub(crate) const PAGE_SIZE: usize = crate::storage::PAGE_SIZE;
+    pub(crate) const INVALID_PAGE_ID: PageId = crate::storage::INVALID_PAGE_ID;
     pub(crate) const STORAGE_METADATA_VERSION: u32 = 3;
 
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
@@ -76,17 +77,13 @@ impl CatalogEngine {
         Self::from_shared_pager(pager)
     }
 
-    pub fn from_shared_pager(pager: Arc<Mutex<Pager>>) -> Result<Self> {
+    pub(crate) fn from_shared_pager(pager: Arc<Mutex<Pager>>) -> Result<Self> {
         let mut engine = Self {
             pager,
             table_metadata: HashMap::new(),
         };
         engine_metadata::load_table_metadata(&mut engine)?;
         Ok(engine)
-    }
-
-    pub fn shared_pager(&self) -> Arc<Mutex<Pager>> {
-        self.pager.clone()
     }
 
     pub fn read_database_header(&self) -> Result<Option<DatabaseHeader>> {
@@ -148,24 +145,28 @@ impl CatalogEngine {
         pager.write_page(updated_page)
     }
 
-    pub fn read_page(&self, page_id: PageId) -> Result<Page> {
+    #[cfg(test)]
+    pub(crate) fn read_page(&self, page_id: PageId) -> Result<Page> {
         self.pager.lock().unwrap().read_page(page_id)
     }
 
-    pub fn write_page(&self, page: Page) -> Result<()> {
+    #[cfg(test)]
+    pub(crate) fn write_page(&self, page: Page) -> Result<()> {
         self.pager.lock().unwrap().write_page(page)
     }
 
-    pub fn allocate_page(&self) -> Result<PageId> {
+    #[cfg(test)]
+    pub(crate) fn allocate_page(&self) -> Result<PageId> {
         let page_id = self.pager.lock().unwrap().allocate_page()?;
-        if page_id == DB_HEADER_PAGE_ID || page_id == STORAGE_METADATA_PAGE_ID {
+        if page_id == DB_HEADER_PAGE_ID || page_id == crate::storage::STORAGE_METADATA_PAGE_ID {
             return self.allocate_page();
         }
         Ok(page_id)
     }
 
-    pub fn deallocate_page(&self, page_id: PageId) -> Result<()> {
-        if page_id == DB_HEADER_PAGE_ID || page_id == STORAGE_METADATA_PAGE_ID {
+    #[cfg(test)]
+    pub(crate) fn deallocate_page(&self, page_id: PageId) -> Result<()> {
+        if page_id == DB_HEADER_PAGE_ID || page_id == crate::storage::STORAGE_METADATA_PAGE_ID {
             return Err(HematiteError::StorageError(
                 "Cannot deallocate reserved page".to_string(),
             ));
@@ -205,13 +206,69 @@ impl CatalogEngine {
         self.table_metadata = snapshot.table_metadata;
     }
 
-    pub fn create_empty_btree(&self) -> Result<PageId> {
-        let mut pager = self.pager.lock().unwrap();
-        create_tree_root(&mut pager)
+    pub(crate) fn create_empty_btree(&self) -> Result<PageId> {
+        self.tree_store().create_tree()
     }
 
-    pub fn get_table_metadata(&self) -> &HashMap<String, TableRuntimeMetadata> {
+    pub(crate) fn get_table_metadata(&self) -> &HashMap<String, TableRuntimeMetadata> {
         &self.table_metadata
+    }
+
+    pub(crate) fn tree_store(&self) -> ByteTreeStore {
+        ByteTreeStore::from_shared_storage(self.pager.clone())
+    }
+
+    pub(crate) fn open_tree(&self, root_page_id: PageId) -> Result<ByteTree> {
+        self.tree_store().open_tree(root_page_id)
+    }
+
+    pub(crate) fn create_tree(&self) -> Result<PageId> {
+        self.tree_store().create_tree()
+    }
+
+    pub(crate) fn delete_tree(&self, root_page_id: PageId) -> Result<()> {
+        self.tree_store().delete_tree(root_page_id)
+    }
+
+    pub(crate) fn reset_tree(&self, root_page_id: PageId) -> Result<()> {
+        self.tree_store().reset_tree(root_page_id)
+    }
+
+    pub(crate) fn read_tree_entries(
+        &self,
+        root_page_id: PageId,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        self.open_tree(root_page_id)?.entries()
+    }
+
+    pub(crate) fn insert_tree_entry(
+        &self,
+        root_page_id: PageId,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<PageId> {
+        let mut tree = self.open_tree(root_page_id)?;
+        Ok(tree.insert_with_mutation(key, value)?.root_page_id)
+    }
+
+    pub(crate) fn collect_tree_page_ids(&self, root_page_id: PageId) -> Result<Vec<PageId>> {
+        self.tree_store().collect_page_ids(root_page_id)
+    }
+
+    pub(crate) fn collect_tree_space_stats(&self, root_page_id: PageId) -> Result<TreeSpaceStats> {
+        self.tree_store().collect_space_stats(root_page_id)
+    }
+
+    pub(crate) fn pager_integrity_report(&mut self) -> Result<PagerIntegrityReport> {
+        self.pager.lock().unwrap().validate_integrity()
+    }
+
+    pub(crate) fn free_page_ids(&self) -> Vec<PageId> {
+        self.pager.lock().unwrap().free_pages().to_vec()
+    }
+
+    pub(crate) fn is_reserved_page(page_id: PageId) -> bool {
+        page_id == DB_HEADER_PAGE_ID || page_id == crate::storage::STORAGE_METADATA_PAGE_ID
     }
 
     pub fn get_storage_stats(&self) -> CatalogStorageStats {

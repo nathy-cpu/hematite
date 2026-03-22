@@ -1,6 +1,6 @@
 //! Catalog - SQLite-style schema management with B-tree persistence
 
-use crate::btree::{ByteTreeStore, KeyValueCodec};
+use crate::btree::KeyValueCodec;
 use crate::catalog::column::Column;
 use crate::catalog::engine::{CatalogEngine, CatalogEngineSnapshot, CatalogIntegrityReport};
 use crate::catalog::ids::TableId;
@@ -68,8 +68,7 @@ impl Catalog {
             Some(header) => header,
             None => {
                 // New database - create header and schema B-tree
-                let trees = ByteTreeStore::from_shared_storage(engine.shared_pager());
-                let schema_root = trees.create_tree()?;
+                let schema_root = engine.create_tree()?;
                 engine.initialize_database_header(schema_root)?
             }
         };
@@ -87,12 +86,9 @@ impl Catalog {
 
     /// Load schema from the schema B-tree
     fn load_schema_from_btree(engine: &CatalogEngine, schema_root: u32) -> Result<Schema> {
-        let trees = ByteTreeStore::from_shared_storage(engine.shared_pager());
-        let btree = trees.open_tree(schema_root)?;
-
         let mut schema = Schema::new();
 
-        for (key, value) in btree.entries()? {
+        for (key, value) in engine.read_tree_entries(schema_root)? {
             let table_name = CatalogSchemaCodec::decode_key(&key)?;
             let mut table = CatalogSchemaCodec::decode_value(&value)?;
             // Ensure the persisted name matches the key to avoid inconsistencies.
@@ -117,17 +113,16 @@ impl Catalog {
             .collect::<Vec<_>>();
 
         let old_schema_root = self.schema_root;
-        let trees = ByteTreeStore::from_shared_storage(self.engine.shared_pager());
-        trees.delete_tree(old_schema_root)?;
-        let new_schema_root = trees.create_tree()?;
-        let mut btree = trees.open_tree(new_schema_root)?;
+        self.engine.delete_tree(old_schema_root)?;
+        let new_schema_root = self.engine.create_tree()?;
 
         let mut current_schema_root = new_schema_root;
         for table in table_entries {
             let key = CatalogSchemaCodec::encode_key(&table.name)?;
             let value = CatalogSchemaCodec::encode_value(&table)?;
-            let mutation = btree.insert_with_mutation(&key, &value)?;
-            current_schema_root = mutation.root_page_id;
+            current_schema_root =
+                self.engine
+                    .insert_tree_entry(current_schema_root, &key, &value)?;
         }
 
         let transaction_active = self.engine.transaction_active();
