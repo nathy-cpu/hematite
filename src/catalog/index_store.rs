@@ -5,11 +5,12 @@ use std::collections::HashSet;
 use crate::btree::ByteTreeStore;
 use crate::catalog::{Table, Value};
 use crate::error::{HematiteError, Result};
-use crate::storage::{PageId, INVALID_PAGE_ID};
 
 use super::cursor::IndexCursor;
 use super::engine::{CatalogEngine, StoredRow};
 use super::table_store;
+
+const INVALID_ROOT_PAGE_ID: u32 = u32::MAX;
 
 pub(crate) fn drop_table_with_indexes(engine: &mut CatalogEngine, table: &Table) -> Result<()> {
     table_store::drop_table(engine, &table.name)?;
@@ -340,8 +341,8 @@ pub(crate) fn validate_table_indexes(engine: &mut CatalogEngine, table: &Table) 
     Ok(())
 }
 
-pub(crate) fn require_index_root_page(root_page_id: PageId, label: &str) -> Result<PageId> {
-    if root_page_id == 0 || root_page_id == INVALID_PAGE_ID {
+pub(crate) fn require_index_root_page(root_page_id: u32, label: &str) -> Result<u32> {
+    if root_page_id == 0 || root_page_id == INVALID_ROOT_PAGE_ID {
         return Err(HematiteError::StorageError(format!(
             "Missing durable {} root page",
             label

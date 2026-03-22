@@ -3,7 +3,6 @@
 use crate::btree::ByteTreeStore;
 use crate::catalog::Value;
 use crate::error::{HematiteError, Result};
-use crate::storage::PageId;
 
 use super::cursor::TableCursor;
 use super::engine::{CatalogEngine, CatalogStorageStats, StoredRow};
@@ -45,7 +44,7 @@ pub(crate) fn get_storage_stats(engine: &CatalogEngine) -> CatalogStorageStats {
     }
 }
 
-pub(crate) fn create_table(engine: &mut CatalogEngine, table_name: &str) -> Result<PageId> {
+pub(crate) fn create_table(engine: &mut CatalogEngine, table_name: &str) -> Result<u32> {
     let root_page_id = engine.create_empty_btree()?;
     engine_metadata::create_table_metadata(engine, table_name, root_page_id)?;
     Ok(root_page_id)
