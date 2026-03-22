@@ -147,15 +147,19 @@ impl BTreeIndex {
         match node.node_type {
             NodeType::Leaf => {
                 if let Some(existing_index) = node.keys.iter().position(|k| k == &key) {
-                    node.values[existing_index] = value;
-                    if !node.will_fit_in_page() {
-                        return Err(HematiteError::StorageError(
-                            "Updated value exceeds page size limit".to_string(),
-                        ));
+                    node.keys.remove(existing_index);
+                    node.values.remove(existing_index);
+
+                    if node.keys.len() < node::MAX_KEYS && node.can_insert_key_value(&key, &value) {
+                        node.insert_leaf(key, value)?;
+                        node.to_page(&mut page)?;
+                        self.storage.lock().unwrap().write_page(page)?;
+                        return Ok(None);
                     }
-                    node.to_page(&mut page)?;
-                    self.storage.lock().unwrap().write_page(page)?;
-                    return Ok(None);
+
+                    let (new_key, new_page_id) =
+                        node.split_leaf(&mut self.storage.lock().unwrap(), key, value)?;
+                    return Ok(Some((new_key, new_page_id)));
                 }
 
                 if node.keys.len() < node::MAX_KEYS && node.can_insert_key_value(&key, &value) {

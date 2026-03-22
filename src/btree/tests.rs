@@ -437,6 +437,52 @@ mod mod_tests {
     }
 
     #[test]
+    fn test_byte_tree_randomized_large_value_reopen_integrity() -> Result<()> {
+        let path = tmp_db();
+        let storage = new_storage(&path)?;
+        let trees = ByteTreeStore::new(storage);
+        let mut root_page_id = trees.create_tree()?;
+        let mut tree = trees.open_tree(root_page_id)?;
+        let mut expected = BTreeMap::<u32, Vec<u8>>::new();
+        let mut rng = LcgRng::new(0xB71E_2026);
+
+        for step in 0..160u32 {
+            let key = rng.next_u32() % 48;
+            if rng.next_u32() % 3 == 0 {
+                let (deleted, mutation) = tree.delete_with_mutation(&key.to_be_bytes())?;
+                root_page_id = mutation.root_page_id;
+                let expected_deleted = expected.remove(&key);
+                assert_eq!(deleted, expected_deleted);
+            } else {
+                let logical_len = if rng.next_u32() % 2 == 0 {
+                    32 + (rng.next_u32() as usize % 96)
+                } else {
+                    crate::storage::PAGE_SIZE + 64 + (rng.next_u32() as usize % 256)
+                };
+                let value = vec![(step % 251) as u8; logical_len];
+                let mutation = tree.insert_with_mutation(&key.to_be_bytes(), &value)?;
+                root_page_id = mutation.root_page_id;
+                expected.insert(key, value);
+            }
+
+            if step % 20 == 0 {
+                drop(tree);
+                assert!(trees.validate_tree(root_page_id)?);
+                tree = trees.open_tree(root_page_id)?;
+            }
+        }
+
+        drop(tree);
+        assert!(trees.validate_tree(root_page_id)?);
+        let mut reopened = trees.open_tree(root_page_id)?;
+        for (key, value) in expected {
+            assert_eq!(reopened.get(&key.to_be_bytes())?, Some(value));
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn test_btree_delete() -> Result<()> {
         let path = tmp_db();
         let storage = new_storage(&path)?;
