@@ -90,8 +90,8 @@ impl BTreeManager {
     fn validate_node_recursive(
         &mut self,
         page_id: PageId,
-        lower_bound: Option<Vec<u8>>,
-        upper_bound: Option<Vec<u8>>,
+        lower_bound: Option<KeyBound>,
+        upper_bound: Option<KeyBound>,
         depth: usize,
         state: &mut TreeValidationState,
     ) -> Result<bool> {
@@ -117,12 +117,22 @@ impl BTreeManager {
         }
         for key in &node.keys {
             if let Some(lower) = &lower_bound {
-                if key.as_bytes() <= lower.as_slice() {
+                let below_lower = if lower.inclusive {
+                    key.as_bytes() < lower.key.as_slice()
+                } else {
+                    key.as_bytes() <= lower.key.as_slice()
+                };
+                if below_lower {
                     return Ok(false);
                 }
             }
             if let Some(upper) = &upper_bound {
-                if key.as_bytes() >= upper.as_slice() {
+                let above_upper = if upper.inclusive {
+                    key.as_bytes() > upper.key.as_slice()
+                } else {
+                    key.as_bytes() >= upper.key.as_slice()
+                };
+                if above_upper {
                     return Ok(false);
                 }
             }
@@ -160,12 +170,18 @@ impl BTreeManager {
                     let child_lower = if child_index == 0 {
                         lower_bound.clone()
                     } else {
-                        Some(node.keys[child_index - 1].as_bytes().to_vec())
+                        Some(KeyBound {
+                            key: node.keys[child_index - 1].as_bytes().to_vec(),
+                            inclusive: true,
+                        })
                     };
                     let child_upper = if child_index == node.keys.len() {
                         upper_bound.clone()
                     } else {
-                        Some(node.keys[child_index].as_bytes().to_vec())
+                        Some(KeyBound {
+                            key: node.keys[child_index].as_bytes().to_vec(),
+                            inclusive: false,
+                        })
                     };
 
                     if !self.validate_node_recursive(
@@ -313,6 +329,12 @@ fn collect_tree_space_stats_recursive(
 struct TreeValidationState {
     visited: HashSet<PageId>,
     leaf_depth: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct KeyBound {
+    key: Vec<u8>,
+    inclusive: bool,
 }
 
 #[derive(Debug, Default)]
