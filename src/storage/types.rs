@@ -15,8 +15,6 @@
 use crate::error::Result;
 
 pub const PAGE_SIZE: usize = 4096; // 4KB pages
-pub const MAX_ROWS_PER_PAGE: usize = 100; // Approximate, depends on row size
-pub const TABLE_PAGE_HEADER_SIZE: usize = 64;
 
 /// Reserved page IDs for the single-file database layout.
 ///
@@ -99,19 +97,4 @@ pub struct StorageIntegrityReport {
 pub struct StoredRow {
     pub row_id: u64,
     pub values: Vec<crate::catalog::Value>,
-}
-
-#[derive(Debug, Clone)]
-pub struct TablePageHeader {
-    pub page_type: PageType,
-    pub row_count: u32,
-    pub next_page_id: PageId,
-    pub prev_page_id: PageId,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum PageType {
-    TableData,
-    TableIndex,
-    Free,
 }

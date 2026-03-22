@@ -11,18 +11,15 @@ pub mod page_manager;
 pub mod pager;
 pub mod rowid_table;
 pub mod serialization;
-pub mod table;
 pub mod types;
 
 // Re-export commonly used types
 pub use database::Database;
 pub use engine::StorageEngine;
 pub use serialization::RowSerializer;
-pub use table::TableManager;
 pub use types::{
-    Page, PageId, PageType, PagerIntegrityReport, StorageIntegrityReport, StorageStats, StoredRow,
-    TableMetadata, TablePageHeader, DB_HEADER_PAGE_ID, MAX_ROWS_PER_PAGE, PAGE_SIZE,
-    STORAGE_METADATA_PAGE_ID, TABLE_PAGE_HEADER_SIZE,
+    Page, PageId, PagerIntegrityReport, StorageIntegrityReport, StorageStats, StoredRow,
+    TableMetadata, DB_HEADER_PAGE_ID, PAGE_SIZE, STORAGE_METADATA_PAGE_ID,
 };
 
 #[cfg(test)]

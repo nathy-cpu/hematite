@@ -12,7 +12,6 @@ use crate::btree::{BTreeKey, BTreeNode, BTreeValue, NodeType};
 use crate::catalog::{Table, Value};
 use crate::error::Result;
 use crate::storage::free_list::FreeList;
-use crate::storage::table::TableManager;
 use crate::storage::{
     cursor::TableCursor, pager::Pager, Page, PageId, StorageIntegrityReport, StoredRow,
     TableMetadata, DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID,
@@ -24,7 +23,7 @@ use std::path::Path;
 #[derive(Debug)]
 pub struct StorageEngine {
     pager: Pager,
-    table_manager: TableManager,
+    table_metadata: HashMap<String, TableMetadata>,
     primary_key_indexes: HashMap<String, HashMap<Vec<u8>, StoredRow>>,
     secondary_indexes: HashMap<String, HashMap<String, HashMap<Vec<u8>, Vec<StoredRow>>>>,
 }
@@ -35,18 +34,10 @@ impl StorageEngine {
     fn serialize_storage_metadata(&self) -> Result<String> {
         let mut lines = vec![
             format!("version={}", Self::STORAGE_METADATA_VERSION),
-            format!(
-                "table_count={}",
-                self.table_manager.get_all_metadata().len()
-            ),
+            format!("table_count={}", self.table_metadata.len()),
         ];
 
-        let mut table_entries = self
-            .table_manager
-            .get_all_metadata()
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
+        let mut table_entries = self.table_metadata.values().cloned().collect::<Vec<_>>();
         table_entries.sort_by(|left, right| left.name.cmp(&right.name));
 
         for table in table_entries {
@@ -142,8 +133,8 @@ impl StorageEngine {
                     )
                 })?;
 
-                self.table_manager.create_table(name, root_page_id)?;
-                if let Some(metadata) = self.table_manager.get_table_metadata_mut(name) {
+                self.create_table_metadata(name, root_page_id)?;
+                if let Some(metadata) = self.table_metadata.get_mut(name) {
                     metadata.row_count = row_count;
                     metadata.next_row_id = next_row_id;
                 }
@@ -275,10 +266,9 @@ impl StorageEngine {
 
     pub fn get_storage_stats(&self) -> crate::storage::StorageStats {
         crate::storage::StorageStats {
-            table_count: self.table_manager.get_all_metadata().len(),
+            table_count: self.table_metadata.len(),
             total_rows: self
-                .table_manager
-                .get_all_metadata()
+                .table_metadata
                 .values()
                 .map(|metadata| metadata.row_count)
                 .sum(),
@@ -286,12 +276,40 @@ impl StorageEngine {
         }
     }
 
+    fn create_table_metadata(&mut self, table_name: &str, root_page_id: PageId) -> Result<()> {
+        if self.table_metadata.contains_key(table_name) {
+            return Err(crate::error::HematiteError::StorageError(format!(
+                "Table '{}' already exists",
+                table_name
+            )));
+        }
+
+        self.table_metadata.insert(
+            table_name.to_string(),
+            TableMetadata {
+                name: table_name.to_string(),
+                root_page_id,
+                row_count: 0,
+                next_row_id: 1,
+            },
+        );
+        Ok(())
+    }
+
+    fn lookup_table_metadata(&self, table_name: &str) -> Result<&TableMetadata> {
+        self.table_metadata.get(table_name).ok_or_else(|| {
+            crate::error::HematiteError::StorageError(format!(
+                "Table '{}' does not exist",
+                table_name
+            ))
+        })
+    }
+
     pub fn validate_integrity(&mut self) -> Result<StorageIntegrityReport> {
         let pager_report = self.pager.validate_integrity()?;
 
         let metadata_entries = self
-            .table_manager
-            .get_all_metadata()
+            .table_metadata
             .iter()
             .map(|(name, metadata)| (name.clone(), metadata.clone()))
             .collect::<Vec<_>>();
@@ -390,7 +408,7 @@ impl StorageEngine {
         }
 
         Ok(StorageIntegrityReport {
-            table_count: self.table_manager.get_all_metadata().len(),
+            table_count: self.table_metadata.len(),
             live_page_count: live_pages.len(),
             free_page_count: pager_report.free_page_count,
             total_rows,
@@ -465,13 +483,11 @@ impl StorageEngine {
     }
 
     fn from_pager(pager: Pager) -> Result<Self> {
-        let table_manager = TableManager::new();
-
         // Load existing table metadata
         {
             let mut engine = Self {
                 pager,
-                table_manager,
+                table_metadata: HashMap::new(),
                 primary_key_indexes: HashMap::new(),
                 secondary_indexes: HashMap::new(),
             };
@@ -563,7 +579,7 @@ impl StorageEngine {
     }
 
     pub fn get_table_metadata(&self) -> &std::collections::HashMap<String, TableMetadata> {
-        self.table_manager.get_all_metadata()
+        &self.table_metadata
     }
 
     fn save_table_metadata(&mut self) -> Result<()> {
@@ -596,7 +612,7 @@ impl StorageEngine {
     // Proper table operations using page-based storage
     pub fn create_table(&mut self, table_name: &str) -> Result<PageId> {
         let root_page_id = self.allocate_page()?;
-        self.table_manager.create_table(table_name, root_page_id)?;
+        self.create_table_metadata(table_name, root_page_id)?;
 
         let mut root_page = Page::new(root_page_id);
         let root = BTreeNode::new_leaf(root_page_id);
@@ -612,15 +628,7 @@ impl StorageEngine {
         row: Vec<crate::catalog::Value>,
     ) -> Result<u64> {
         let (root_page_id, row_id) = {
-            let metadata = self
-                .table_manager
-                .get_table_metadata(table_name)
-                .ok_or_else(|| {
-                    crate::error::HematiteError::StorageError(format!(
-                        "Table '{}' does not exist",
-                        table_name
-                    ))
-                })?;
+            let metadata = self.lookup_table_metadata(table_name)?;
             (metadata.root_page_id, metadata.next_row_id)
         };
 
@@ -667,12 +675,12 @@ impl StorageEngine {
             new_root.to_page(&mut new_root_page)?;
             self.write_page(new_root_page)?;
 
-            if let Some(metadata) = self.table_manager.get_table_metadata_mut(table_name) {
+            if let Some(metadata) = self.table_metadata.get_mut(table_name) {
                 metadata.root_page_id = new_root_page_id;
             }
         }
 
-        if let Some(metadata) = self.table_manager.get_table_metadata_mut(table_name) {
+        if let Some(metadata) = self.table_metadata.get_mut(table_name) {
             metadata.row_count += 1;
             if advance_next_rowid {
                 metadata.next_row_id += 1;
@@ -738,15 +746,7 @@ impl StorageEngine {
 
     pub fn replace_table_rows(&mut self, table_name: &str, rows: Vec<StoredRow>) -> Result<()> {
         let root_page_id = {
-            let metadata = self
-                .table_manager
-                .get_table_metadata(table_name)
-                .ok_or_else(|| {
-                    crate::error::HematiteError::StorageError(format!(
-                        "Table '{}' does not exist",
-                        table_name
-                    ))
-                })?;
+            let metadata = self.lookup_table_metadata(table_name)?;
             metadata.root_page_id
         };
 
@@ -763,12 +763,12 @@ impl StorageEngine {
         self.write_page(root_page)?;
 
         let next_row_id = self
-            .table_manager
-            .get_table_metadata(table_name)
+            .table_metadata
+            .get(table_name)
             .map(|metadata| metadata.next_row_id)
             .unwrap_or(1);
 
-        if let Some(metadata) = self.table_manager.get_table_metadata_mut(table_name) {
+        if let Some(metadata) = self.table_metadata.get_mut(table_name) {
             metadata.row_count = 0;
             metadata.next_row_id =
                 next_row_id.max(rows.iter().map(|row| row.row_id).max().unwrap_or(0) + 1);
@@ -783,15 +783,7 @@ impl StorageEngine {
 
     pub fn delete_from_table_by_rowid(&mut self, table_name: &str, rowid: u64) -> Result<bool> {
         let root_page_id = {
-            let metadata = self
-                .table_manager
-                .get_table_metadata(table_name)
-                .ok_or_else(|| {
-                    crate::error::HematiteError::StorageError(format!(
-                        "Table '{}' does not exist",
-                        table_name
-                    ))
-                })?;
+            let metadata = self.lookup_table_metadata(table_name)?;
             metadata.root_page_id
         };
 
@@ -809,7 +801,7 @@ impl StorageEngine {
         if !deleted {
             return Ok(false);
         }
-        if let Some(metadata) = self.table_manager.get_table_metadata_mut(table_name) {
+        if let Some(metadata) = self.table_metadata.get_mut(table_name) {
             metadata.row_count = metadata.row_count.saturating_sub(1);
         }
         Ok(true)
@@ -842,15 +834,7 @@ impl StorageEngine {
 
     fn insert_stored_row(&mut self, table_name: &str, row: StoredRow) -> Result<()> {
         let root_page_id = {
-            let metadata = self
-                .table_manager
-                .get_table_metadata(table_name)
-                .ok_or_else(|| {
-                    crate::error::HematiteError::StorageError(format!(
-                        "Table '{}' does not exist",
-                        table_name
-                    ))
-                })?;
+            let metadata = self.lookup_table_metadata(table_name)?;
             metadata.root_page_id
         };
 
@@ -858,7 +842,7 @@ impl StorageEngine {
     }
 
     pub fn drop_table(&mut self, table_name: &str) -> Result<()> {
-        let metadata = self.table_manager.remove_table(table_name).ok_or_else(|| {
+        let metadata = self.table_metadata.remove(table_name).ok_or_else(|| {
             crate::error::HematiteError::StorageError(format!(
                 "Table '{}' does not exist",
                 table_name
@@ -890,16 +874,7 @@ impl StorageEngine {
     }
 
     pub fn open_table_cursor(&mut self, table_name: &str) -> Result<TableCursor> {
-        let root_page_id = self
-            .table_manager
-            .get_table_metadata(table_name)
-            .ok_or_else(|| {
-                crate::error::HematiteError::StorageError(format!(
-                    "Table '{}' does not exist",
-                    table_name
-                ))
-            })?
-            .root_page_id;
+        let root_page_id = self.lookup_table_metadata(table_name)?.root_page_id;
         let rows = self.read_rows_with_ids_from_btree(root_page_id)?;
         Ok(TableCursor::new(rows))
     }
@@ -963,16 +938,7 @@ impl StorageEngine {
         table_name: &str,
         rowid: u64,
     ) -> Result<Option<StoredRow>> {
-        let root_page_id = self
-            .table_manager
-            .get_table_metadata(table_name)
-            .ok_or_else(|| {
-                crate::error::HematiteError::StorageError(format!(
-                    "Table '{}' does not exist",
-                    table_name
-                ))
-            })?
-            .root_page_id;
+        let root_page_id = self.lookup_table_metadata(table_name)?.root_page_id;
         self.lookup_row_by_rowid_btree(root_page_id, rowid)
     }
 
@@ -1004,7 +970,7 @@ impl StorageEngine {
     }
 
     pub fn table_exists(&self, table_name: &str) -> bool {
-        self.table_manager.table_exists(table_name)
+        self.table_metadata.contains_key(table_name)
     }
 
     pub fn lookup_row_by_primary_key(
