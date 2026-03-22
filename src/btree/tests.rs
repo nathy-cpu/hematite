@@ -317,6 +317,62 @@ mod mod_tests {
     }
 
     #[test]
+    fn test_byte_tree_validate_tree_detects_overflow_cycle() -> Result<()> {
+        let path = tmp_db();
+        let storage = new_storage(&path)?;
+        let trees = ByteTreeStore::new(storage);
+        let root_page_id = trees.create_tree()?;
+        let mut tree = trees.open_tree(root_page_id)?;
+        let large_value = vec![0x41; crate::storage::PAGE_SIZE * 2];
+
+        tree.insert(b"blob", &large_value)?;
+
+        let shared = trees.shared_storage();
+        let mut raw_tree = BTreeIndex::from_shared_storage(shared.clone(), root_page_id);
+        let stored_value = raw_tree
+            .search_typed::<RawBytesCodec>(&b"blob".to_vec())?
+            .expect("stored value should exist");
+        let layout = StoredValueLayout::decode(&stored_value)?;
+        let mut pager = shared.lock().unwrap();
+        let mut overflow_page = pager.read_page(layout.overflow_first_page)?;
+        overflow_page.data[4..8].copy_from_slice(&layout.overflow_first_page.to_le_bytes());
+        pager.write_page(overflow_page)?;
+        drop(pager);
+
+        assert!(!trees.validate_tree(root_page_id)?);
+        assert!(trees.validate_tree_overflow(root_page_id).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_byte_tree_validate_tree_detects_truncated_overflow_chain() -> Result<()> {
+        let path = tmp_db();
+        let storage = new_storage(&path)?;
+        let trees = ByteTreeStore::new(storage);
+        let root_page_id = trees.create_tree()?;
+        let mut tree = trees.open_tree(root_page_id)?;
+        let large_value = vec![0x51; crate::storage::PAGE_SIZE * 2];
+
+        tree.insert(b"blob", &large_value)?;
+
+        let shared = trees.shared_storage();
+        let mut raw_tree = BTreeIndex::from_shared_storage(shared.clone(), root_page_id);
+        let stored_value = raw_tree
+            .search_typed::<RawBytesCodec>(&b"blob".to_vec())?
+            .expect("stored value should exist");
+        let layout = StoredValueLayout::decode(&stored_value)?;
+        let mut pager = shared.lock().unwrap();
+        let mut overflow_page = pager.read_page(layout.overflow_first_page)?;
+        overflow_page.data[4..8].copy_from_slice(&crate::storage::INVALID_PAGE_ID.to_le_bytes());
+        pager.write_page(overflow_page)?;
+        drop(pager);
+
+        assert!(!trees.validate_tree(root_page_id)?);
+        assert!(trees.validate_tree_overflow(root_page_id).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn test_btree_delete() -> Result<()> {
         let path = tmp_db();
         let storage = new_storage(&path)?;

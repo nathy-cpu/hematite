@@ -4,6 +4,7 @@
 //! tree lifecycle and key/value operations over opaque bytes while hiding pager,
 //! page, and node details inside the B-tree module.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use crate::btree::codec::RawBytesCodec;
@@ -14,10 +15,11 @@ use crate::btree::tree::{
     collect_tree_page_ids, collect_tree_space_stats, reset_tree_pages, BTreeManager, TreeSpaceStats,
 };
 use crate::btree::value_store::{
-    free_stored_value_overflow, hydrate_stored_value, materialize_stored_value,
+    free_stored_value_overflow, hydrate_stored_value, materialize_stored_value, StoredValueLayout,
 };
 use crate::btree::NodeType;
 use crate::error::Result;
+use crate::storage::overflow::{collect_overflow_page_ids, validate_overflow_chain};
 use crate::storage::{PageId, Pager};
 
 #[derive(Clone)]
@@ -65,7 +67,26 @@ impl ByteTreeStore {
 
     pub fn validate_tree(&self, root_page_id: PageId) -> Result<bool> {
         let mut manager = BTreeManager::from_shared_storage(self.storage.clone());
-        manager.validate_tree(root_page_id)
+        if !manager.validate_tree(root_page_id)? {
+            return Ok(false);
+        }
+        Ok(self.validate_tree_overflow(root_page_id).is_ok())
+    }
+
+    pub fn validate_tree_overflow(&self, root_page_id: PageId) -> Result<()> {
+        let mut pager = self.storage.lock().unwrap();
+        let mut tree_page_ids = Vec::new();
+        collect_tree_page_ids(&mut pager, root_page_id, &mut tree_page_ids)?;
+        let tree_pages = tree_page_ids.into_iter().collect::<HashSet<_>>();
+        let free_pages = pager.free_pages().iter().copied().collect::<HashSet<_>>();
+        let mut owned_overflow_pages = HashSet::new();
+        validate_tree_overflow_pages(
+            &mut pager,
+            root_page_id,
+            &tree_pages,
+            &free_pages,
+            &mut owned_overflow_pages,
+        )
     }
 
     pub fn reset_tree(&self, root_page_id: PageId) -> Result<()> {
@@ -201,6 +222,62 @@ fn free_tree_overflow(storage: &mut Pager, root_page_id: PageId) -> Result<()> {
         NodeType::Internal => {
             for child_page_id in node.children {
                 free_tree_overflow(storage, child_page_id)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_tree_overflow_pages(
+    storage: &mut Pager,
+    root_page_id: PageId,
+    tree_pages: &HashSet<PageId>,
+    free_pages: &HashSet<PageId>,
+    owned_overflow_pages: &mut HashSet<PageId>,
+) -> Result<()> {
+    let page = storage.read_page(root_page_id)?;
+    let node = BTreeNode::from_page(page)?;
+
+    match node.node_type {
+        NodeType::Leaf => {
+            for value in node.values {
+                let layout = StoredValueLayout::decode(value.as_bytes())?;
+                if layout.overflow_first_page != crate::storage::INVALID_PAGE_ID {
+                    let first_page = Some(layout.overflow_first_page);
+                    validate_overflow_chain(storage, first_page, layout.overflow_len())?;
+                    for overflow_page_id in collect_overflow_page_ids(storage, first_page)? {
+                        if tree_pages.contains(&overflow_page_id) {
+                            return Err(crate::error::HematiteError::CorruptedData(format!(
+                                "Overflow page {} overlaps a B-tree page",
+                                overflow_page_id
+                            )));
+                        }
+                        if free_pages.contains(&overflow_page_id) {
+                            return Err(crate::error::HematiteError::CorruptedData(format!(
+                                "Overflow page {} is also on the freelist",
+                                overflow_page_id
+                            )));
+                        }
+                        if !owned_overflow_pages.insert(overflow_page_id) {
+                            return Err(crate::error::HematiteError::CorruptedData(format!(
+                                "Overflow page {} is shared by multiple values",
+                                overflow_page_id
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+        NodeType::Internal => {
+            for child_page_id in node.children {
+                validate_tree_overflow_pages(
+                    storage,
+                    child_page_id,
+                    tree_pages,
+                    free_pages,
+                    owned_overflow_pages,
+                )?;
             }
         }
     }
