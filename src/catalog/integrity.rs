@@ -7,7 +7,7 @@ use crate::error::{HematiteError, Result};
 
 use super::engine::{CatalogEngine, CatalogIntegrityReport};
 use super::index_store;
-use super::serialization::RowSerializer;
+use super::serialization::RowCodec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CatalogTreeUsage {
@@ -62,7 +62,7 @@ pub(crate) fn validate_integrity(engine: &mut CatalogEngine) -> Result<CatalogIn
                     )));
                 }
             }
-            let row = RowSerializer::deserialize_stored_row(&value)?;
+            let row = RowCodec::decode_stored_row(&value)?;
             if row.row_id != row_id {
                 return Err(HematiteError::CorruptedData(format!(
                     "Stored rowid mismatch in table '{}': key={}, row={}",

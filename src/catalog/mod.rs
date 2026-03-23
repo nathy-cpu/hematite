@@ -9,6 +9,7 @@ pub mod header;
 pub mod ids;
 pub(crate) mod index_store;
 pub(crate) mod integrity;
+pub mod record;
 pub mod row_id;
 pub(crate) mod runtime_metadata;
 pub mod schema;
@@ -24,11 +25,12 @@ pub use catalog::Catalog;
 pub use column::Column;
 pub use cursor::{IndexCursor, TableCursor};
 pub use engine::{
-    CatalogEngine, CatalogIntegrityReport, CatalogStorageStats, StoredRow, TableRuntimeMetadata,
+    CatalogEngine, CatalogIntegrityReport, CatalogStorageStats, TableRuntimeMetadata,
 };
 pub use header::DatabaseHeader;
 pub use ids::{ColumnId, TableId};
+pub use record::StoredRow;
 pub use schema::Schema;
-pub use serialization::RowSerializer;
+pub use serialization::{IndexKeyCodec, RowCodec, RowSerializer};
 pub use table::{SecondaryIndex, Table};
 pub use types::{DataType, JournalMode, Value};

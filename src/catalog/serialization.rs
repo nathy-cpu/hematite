@@ -3,19 +3,19 @@
 use crate::catalog::Value;
 use crate::error::{HematiteError, Result};
 
-use super::engine::StoredRow;
+use super::record::StoredRow;
 
-pub struct RowSerializer;
+pub struct RowCodec;
 
-impl RowSerializer {
-    pub fn serialize(values: &[Value]) -> Result<Vec<u8>> {
-        Self::serialize_stored_row(&StoredRow {
+impl RowCodec {
+    pub fn encode_values(values: &[Value]) -> Result<Vec<u8>> {
+        Self::encode_stored_row(&StoredRow {
             row_id: 0,
             values: values.to_vec(),
         })
     }
 
-    pub fn serialize_stored_row(row: &StoredRow) -> Result<Vec<u8>> {
+    pub fn encode_stored_row(row: &StoredRow) -> Result<Vec<u8>> {
         let mut buffer = Vec::new();
         buffer.extend_from_slice(&(0u32).to_le_bytes());
         buffer.extend_from_slice(&row.row_id.to_le_bytes());
@@ -50,9 +50,9 @@ impl RowSerializer {
         Ok(buffer)
     }
 
-    pub fn deserialize(data: &[u8]) -> Result<Vec<Value>> {
+    pub fn decode_values(data: &[u8]) -> Result<Vec<Value>> {
         let encoded = if data.len() >= 4 {
-            let payload_len = Self::read_row_length(&data[0..4])?;
+            let payload_len = Self::read_payload_length(&data[0..4])?;
             if payload_len + 4 == data.len() {
                 data.to_vec()
             } else {
@@ -68,10 +68,10 @@ impl RowSerializer {
             encoded
         };
 
-        Ok(Self::deserialize_stored_row(&encoded)?.values)
+        Ok(Self::decode_stored_row(&encoded)?.values)
     }
 
-    pub fn deserialize_stored_row(data: &[u8]) -> Result<StoredRow> {
+    pub fn decode_stored_row(data: &[u8]) -> Result<StoredRow> {
         if data.len() < 12 {
             return Err(HematiteError::CorruptedData(
                 "Stored row header is truncated".to_string(),
@@ -79,7 +79,7 @@ impl RowSerializer {
         }
 
         let mut offset = 0usize;
-        let payload_len = Self::read_row_length(&data[0..4])?;
+        let payload_len = Self::read_payload_length(&data[0..4])?;
         offset += 4;
 
         if payload_len + 4 > data.len() {
@@ -206,7 +206,7 @@ impl RowSerializer {
         Ok(StoredRow { row_id, values })
     }
 
-    pub fn read_row_length(prefix: &[u8]) -> Result<usize> {
+    pub fn read_payload_length(prefix: &[u8]) -> Result<usize> {
         if prefix.len() != 4 {
             return Err(HematiteError::CorruptedData(
                 "Row length prefix must be 4 bytes".to_string(),
@@ -214,5 +214,62 @@ impl RowSerializer {
         }
 
         Ok(u32::from_le_bytes([prefix[0], prefix[1], prefix[2], prefix[3]]) as usize)
+    }
+}
+
+pub struct IndexKeyCodec;
+
+impl IndexKeyCodec {
+    pub fn encode_key(values: &[Value]) -> Result<Vec<u8>> {
+        RowCodec::encode_values(values)
+    }
+
+    pub fn encode_secondary_key(values: &[Value], row_id: u64) -> Result<Vec<u8>> {
+        let mut key = Self::encode_key(values)?;
+        key.extend_from_slice(&row_id.to_be_bytes());
+        Ok(key)
+    }
+
+    pub fn decode_row_id(value: &[u8]) -> Result<u64> {
+        if value.len() != 8 {
+            return Err(HematiteError::CorruptedData(
+                "Index rowid payload must be exactly 8 bytes".to_string(),
+            ));
+        }
+        Ok(u64::from_be_bytes(value.try_into().unwrap()))
+    }
+
+    pub fn split_secondary_key(key: &[u8]) -> Result<(Vec<u8>, u64)> {
+        if key.len() < 8 {
+            return Err(HematiteError::CorruptedData(
+                "Index entry is missing rowid bytes".to_string(),
+            ));
+        }
+        let row_id = u64::from_be_bytes(key[key.len() - 8..].try_into().unwrap());
+        Ok((key[..key.len() - 8].to_vec(), row_id))
+    }
+}
+
+pub struct RowSerializer;
+
+impl RowSerializer {
+    pub fn serialize(values: &[Value]) -> Result<Vec<u8>> {
+        RowCodec::encode_values(values)
+    }
+
+    pub fn serialize_stored_row(row: &StoredRow) -> Result<Vec<u8>> {
+        RowCodec::encode_stored_row(row)
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<Vec<Value>> {
+        RowCodec::decode_values(data)
+    }
+
+    pub fn deserialize_stored_row(data: &[u8]) -> Result<StoredRow> {
+        RowCodec::decode_stored_row(data)
+    }
+
+    pub fn read_row_length(prefix: &[u8]) -> Result<usize> {
+        RowCodec::read_payload_length(prefix)
     }
 }

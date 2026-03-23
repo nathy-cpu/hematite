@@ -2,8 +2,8 @@
 
 use crate::error::{HematiteError, Result};
 
-use super::engine::StoredRow;
-use super::serialization::RowSerializer;
+use super::record::StoredRow;
+use super::serialization::RowCodec;
 
 pub const INVALID_PAGE_ID: u32 = u32::MAX;
 
@@ -89,7 +89,7 @@ pub fn encode_stored_row_record(
     row: &StoredRow,
     max_local_payload: usize,
 ) -> Result<EncodedRowidRecord> {
-    let mut payload = RowSerializer::serialize_stored_row(&StoredRow {
+    let mut payload = RowCodec::encode_stored_row(&StoredRow {
         row_id: 0,
         values: row.values.clone(),
     })?;
@@ -118,7 +118,7 @@ pub fn decode_stored_row_record(rowid: u64, payload: &[u8]) -> Result<StoredRow>
     let mut serialized = Vec::with_capacity(payload.len() + 4);
     serialized.extend_from_slice(&(payload.len() as u32).to_le_bytes());
     serialized.extend_from_slice(payload);
-    let mut row = RowSerializer::deserialize_stored_row(&serialized)?;
+    let mut row = RowCodec::decode_stored_row(&serialized)?;
     row.row_id = rowid;
     Ok(row)
 }

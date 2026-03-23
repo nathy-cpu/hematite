@@ -1,14 +1,14 @@
 //! In-memory table runtime metadata helpers.
 
 use crate::error::{HematiteError, Result};
-use crate::storage::PageId;
 
-use super::engine::{CatalogEngine, StoredRow, TableRuntimeMetadata};
+use super::engine::{CatalogEngine, TableRuntimeMetadata};
+use super::record::StoredRow;
 
 pub(crate) fn create_table_metadata(
     engine: &mut CatalogEngine,
     table_name: &str,
-    root_page_id: PageId,
+    root_page_id: u32,
 ) -> Result<()> {
     if engine.table_metadata.contains_key(table_name) {
         return Err(HematiteError::StorageError(format!(
@@ -50,7 +50,7 @@ pub(crate) fn remove_table_metadata(
 pub(crate) fn apply_insert(
     engine: &mut CatalogEngine,
     table_name: &str,
-    new_root_page_id: PageId,
+    new_root_page_id: u32,
     next_row_id: Option<u64>,
 ) {
     if let Some(metadata) = engine.table_metadata.get_mut(table_name) {
@@ -65,7 +65,7 @@ pub(crate) fn apply_insert(
 pub(crate) fn apply_delete(
     engine: &mut CatalogEngine,
     table_name: &str,
-    new_root_page_id: PageId,
+    new_root_page_id: u32,
     deleted: bool,
 ) {
     if let Some(metadata) = engine.table_metadata.get_mut(table_name) {

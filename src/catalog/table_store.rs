@@ -4,8 +4,9 @@ use crate::catalog::Value;
 use crate::error::Result;
 
 use super::cursor::TableCursor;
-use super::engine::{CatalogEngine, CatalogStorageStats, StoredRow};
-use super::serialization::RowSerializer;
+use super::engine::{CatalogEngine, CatalogStorageStats};
+use super::record::StoredRow;
+use super::serialization::RowCodec;
 
 pub(crate) fn get_storage_stats(engine: &CatalogEngine) -> CatalogStorageStats {
     let pager = engine.pager.lock().unwrap();
@@ -60,7 +61,7 @@ pub(crate) fn insert_into_table(
     };
 
     let mut tree = engine.open_tree(root_page_id)?;
-    let encoded_row = RowSerializer::serialize_stored_row(&StoredRow {
+    let encoded_row = RowCodec::encode_stored_row(&StoredRow {
         row_id,
         values: row,
     })?;
@@ -120,7 +121,7 @@ pub(crate) fn open_table_cursor(
     let root_page_id = engine.table_runtime_metadata(table_name)?.root_page_id;
     let mut rows = Vec::new();
     engine.visit_tree_entries(root_page_id, |_key, value| {
-        rows.push(RowSerializer::deserialize_stored_row(value)?);
+        rows.push(RowCodec::decode_stored_row(value)?);
         Ok(())
     })?;
     Ok(TableCursor::new(rows))
@@ -163,7 +164,7 @@ pub(crate) fn lookup_row_by_rowid(
     let root_page_id = engine.table_runtime_metadata(table_name)?.root_page_id;
     let mut tree = engine.open_tree(root_page_id)?;
     match tree.get(&rowid.to_be_bytes())? {
-        Some(value) => Ok(Some(RowSerializer::deserialize_stored_row(&value)?)),
+        Some(value) => Ok(Some(RowCodec::decode_stored_row(&value)?)),
         None => Ok(None),
     }
 }
@@ -175,7 +176,7 @@ pub(crate) fn insert_stored_row(
 ) -> Result<()> {
     let root_page_id = engine.table_runtime_metadata(table_name)?.root_page_id;
     let mut tree = engine.open_tree(root_page_id)?;
-    let encoded_row = RowSerializer::serialize_stored_row(&row)?;
+    let encoded_row = RowCodec::encode_stored_row(&row)?;
     let new_root_page_id = tree
         .insert_with_mutation(&row.row_id.to_be_bytes(), &encoded_row)?
         .root_page_id;

@@ -12,7 +12,8 @@ use std::sync::{Arc, Mutex};
 
 use super::cursor::{IndexCursor, TableCursor};
 use super::{
-    engine_metadata, index_store, integrity, runtime_metadata, schema_store, table_store, Schema,
+    engine_metadata, index_store, integrity, record::StoredRow, runtime_metadata, schema_store,
+    table_store, Schema,
 };
 
 #[derive(Debug, Clone)]
@@ -47,12 +48,6 @@ pub struct CatalogIntegrityReport {
     pub free_page_count: usize,
     pub total_rows: u64,
     pub pager: PagerIntegrityReport,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct StoredRow {
-    pub row_id: u64,
-    pub values: Vec<Value>,
 }
 
 #[derive(Debug, Clone)]

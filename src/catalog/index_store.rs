@@ -6,7 +6,9 @@ use crate::catalog::{Table, Value};
 use crate::error::{HematiteError, Result};
 
 use super::cursor::IndexCursor;
-use super::engine::{CatalogEngine, StoredRow};
+use super::engine::CatalogEngine;
+use super::record::StoredRow;
+use super::serialization::IndexKeyCodec;
 use super::table_store;
 
 const INVALID_ROOT_PAGE_ID: u32 = u32::MAX;
@@ -50,8 +52,8 @@ pub(crate) fn lookup_primary_key_rowid(
         table.primary_key_index_root_page_id,
         &format!("primary-key index for table '{}'", table.name),
     )?;
-    match tree.get(&encode_index_key(key_values)?)? {
-        Some(value) => decode_rowid_value(&value).map(Some),
+    match tree.get(&IndexKeyCodec::encode_key(key_values)?)? {
+        Some(value) => IndexKeyCodec::decode_row_id(&value).map(Some),
         None => Ok(None),
     }
 }
@@ -67,7 +69,7 @@ pub(crate) fn register_primary_key_row(
         table.primary_key_index_root_page_id,
         &format!("primary-key index for table '{}'", table.name),
     )?;
-    let encoded_key = encode_index_key(&key_values)?;
+    let encoded_key = IndexKeyCodec::encode_key(&key_values)?;
     if tree.get(&encoded_key)?.is_some() {
         return Err(HematiteError::StorageError(format!(
             "Duplicate primary key for table '{}'",
@@ -106,9 +108,9 @@ pub(crate) fn lookup_secondary_index_rowids(
         index.root_page_id,
         &format!("secondary index '{}' on table '{}'", index.name, table.name),
     )?;
-    tree.entries_with_prefix(&encode_index_key(key_values)?)?
+    tree.entries_with_prefix(&IndexKeyCodec::encode_key(key_values)?)?
         .into_iter()
-        .map(|(_key, value)| decode_rowid_value(&value))
+        .map(|(_key, value)| IndexKeyCodec::decode_row_id(&value))
         .collect()
 }
 
@@ -125,7 +127,7 @@ pub(crate) fn register_secondary_index_row(
             &format!("secondary index '{}' on table '{}'", index.name, table.name),
         )?;
         tree.insert_with_mutation(
-            &encode_secondary_key(&key_values, row.row_id)?,
+            &IndexKeyCodec::encode_secondary_key(&key_values, row.row_id)?,
             &row.row_id.to_be_bytes(),
         )?;
     }
@@ -146,14 +148,17 @@ pub(crate) fn rebuild_primary_key_index(
     let mut tree = engine.open_tree(root_page_id)?;
     for row in rows {
         let key_values = table.get_primary_key_values(&row.values)?;
-        let encoded = encode_index_key(&key_values)?;
+        let encoded = IndexKeyCodec::encode_key(&key_values)?;
         if !seen.insert(encoded) {
             return Err(HematiteError::StorageError(format!(
                 "Duplicate primary key encountered while rebuilding table '{}'",
                 table.name
             )));
         }
-        tree.insert_with_mutation(&encode_index_key(&key_values)?, &row.row_id.to_be_bytes())?;
+        tree.insert_with_mutation(
+            &IndexKeyCodec::encode_key(&key_values)?,
+            &row.row_id.to_be_bytes(),
+        )?;
     }
     Ok(())
 }
@@ -173,7 +178,7 @@ pub(crate) fn rebuild_secondary_indexes(
         for row in rows {
             let key_values = secondary_index_values(index, row);
             tree.insert_with_mutation(
-                &encode_secondary_key(&key_values, row.row_id)?,
+                &IndexKeyCodec::encode_secondary_key(&key_values, row.row_id)?,
                 &row.row_id.to_be_bytes(),
             )?;
         }
@@ -192,7 +197,9 @@ pub(crate) fn delete_primary_key_row(
         table.primary_key_index_root_page_id,
         &format!("primary-key index for table '{}'", table.name),
     )?;
-    Ok(tree.delete(&encode_index_key(&key_values)?)?.is_some())
+    Ok(tree
+        .delete(&IndexKeyCodec::encode_key(&key_values)?)?
+        .is_some())
 }
 
 pub(crate) fn delete_secondary_index_row(
@@ -203,17 +210,20 @@ pub(crate) fn delete_secondary_index_row(
     for index in &table.secondary_indexes {
         let key_values = secondary_index_values(index, row);
         let mut tree = engine.open_tree(index.root_page_id)?;
-        let _ = tree.delete(&encode_secondary_key(&key_values, row.row_id)?)?;
+        let _ = tree.delete(&IndexKeyCodec::encode_secondary_key(
+            &key_values,
+            row.row_id,
+        )?)?;
     }
     Ok(())
 }
 
 pub(crate) fn encode_primary_key(key_values: &[Value]) -> Result<Vec<u8>> {
-    encode_index_key(key_values)
+    IndexKeyCodec::encode_key(key_values)
 }
 
 pub(crate) fn encode_secondary_index_key(key_values: &[Value]) -> Result<Vec<u8>> {
-    encode_index_key(key_values)
+    IndexKeyCodec::encode_key(key_values)
 }
 
 pub(crate) fn open_primary_key_cursor(
@@ -227,7 +237,7 @@ pub(crate) fn open_primary_key_cursor(
     let mut entries = Vec::new();
     engine.visit_tree_entries(root_page_id, |key, value| {
         entries.push(super::cursor::IndexEntry {
-            row_id: decode_rowid_value(value)?,
+            row_id: IndexKeyCodec::decode_row_id(value)?,
             key: key.to_vec(),
         });
         Ok(())
@@ -263,8 +273,8 @@ pub(crate) fn validate_table_indexes(engine: &mut CatalogEngine, table: &Table) 
             &format!("primary-key index for table '{}'", table.name),
         )?;
         let stored_rowid = tree
-            .get(&encode_index_key(&key_values)?)?
-            .map(|value| decode_rowid_value(&value))
+            .get(&IndexKeyCodec::encode_key(&key_values)?)?
+            .map(|value| IndexKeyCodec::decode_row_id(&value))
             .transpose()?
             .ok_or_else(|| {
                 HematiteError::CorruptedData(format!(
@@ -290,9 +300,9 @@ pub(crate) fn validate_table_indexes(engine: &mut CatalogEngine, table: &Table) 
                 &format!("secondary index '{}' on table '{}'", index.name, table.name),
             )?;
             let rowids = tree
-                .entries_with_prefix(&encode_index_key(&key_values)?)?
+                .entries_with_prefix(&IndexKeyCodec::encode_key(&key_values)?)?
                 .into_iter()
-                .map(|(_key, value)| decode_rowid_value(&value))
+                .map(|(_key, value)| IndexKeyCodec::decode_row_id(&value))
                 .collect::<Result<Vec<_>>>()?;
             if !rowids.contains(&row.row_id) {
                 return Err(HematiteError::CorruptedData(format!(
@@ -347,40 +357,17 @@ pub(crate) fn require_index_root_page(root_page_id: u32, label: &str) -> Result<
     Ok(root_page_id)
 }
 
-fn encode_index_key(values: &[Value]) -> Result<Vec<u8>> {
-    super::serialization::RowSerializer::serialize(values)
-}
-
-fn encode_secondary_key(values: &[Value], rowid: u64) -> Result<Vec<u8>> {
-    let mut key = encode_index_key(values)?;
-    key.extend_from_slice(&rowid.to_be_bytes());
-    Ok(key)
-}
-
-fn decode_rowid_value(value: &[u8]) -> Result<u64> {
-    if value.len() != 8 {
-        return Err(HematiteError::CorruptedData(
-            "Index rowid payload must be exactly 8 bytes".to_string(),
-        ));
-    }
-    Ok(u64::from_be_bytes(value.try_into().unwrap()))
-}
-
 fn decode_secondary_entry(key: &[u8], value: &[u8]) -> Result<super::cursor::IndexEntry> {
     let row_id = if value.len() == 8 {
-        decode_rowid_value(value)?
-    } else if key.len() >= 8 {
-        u64::from_be_bytes(key[key.len() - 8..].try_into().unwrap())
+        IndexKeyCodec::decode_row_id(value)?
     } else {
-        return Err(HematiteError::CorruptedData(
-            "Index entry is missing rowid bytes".to_string(),
-        ));
+        IndexKeyCodec::split_secondary_key(key)?.1
     };
 
-    let logical_key = if key.len() >= 8 {
-        key[..key.len() - 8].to_vec()
-    } else {
+    let logical_key = if value.len() == 8 {
         key.to_vec()
+    } else {
+        IndexKeyCodec::split_secondary_key(key)?.0
     };
 
     Ok(super::cursor::IndexEntry {

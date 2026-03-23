@@ -1,6 +1,6 @@
 //! Relational cursors.
 
-use super::engine::StoredRow;
+use super::record::StoredRow;
 
 #[derive(Debug, Clone)]
 pub struct TableCursor {
