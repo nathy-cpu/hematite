@@ -33,13 +33,12 @@ impl KeyValueCodec for CatalogSchemaCodec {
 
 pub(crate) fn load_schema(engine: &CatalogEngine, schema_root: u32) -> Result<Schema> {
     let mut schema = Schema::new();
-    engine.visit_tree_entries(schema_root, |key, value| {
-        let table_name = CatalogSchemaCodec::decode_key(key)?;
-        let mut table = CatalogSchemaCodec::decode_value(value)?;
+    let tree_store = engine.typed_tree_store::<CatalogSchemaCodec>();
+    let tree = tree_store.open_tree(schema_root)?;
+    for (table_name, mut table) in tree.entries()? {
         table.name = table_name;
         schema.insert_table(table)?;
-        Ok(())
-    })?;
+    }
     Ok(schema)
 }
 
@@ -48,19 +47,19 @@ pub(crate) fn save_schema(
     schema: &Schema,
     current_root: u32,
 ) -> Result<u32> {
+    let tree_store = engine.typed_tree_store::<CatalogSchemaCodec>();
     let table_entries = schema
         .list_tables()
         .into_iter()
         .filter_map(|(table_id, _)| schema.get_table(table_id).cloned())
         .collect::<Vec<_>>();
 
-    engine.delete_tree(current_root)?;
-    let mut schema_root = engine.create_tree()?;
+    tree_store.delete_tree(current_root)?;
+    let schema_root = tree_store.create_tree()?;
+    let mut tree = tree_store.open_tree(schema_root)?;
 
     for table in table_entries {
-        let key = CatalogSchemaCodec::encode_key(&table.name)?;
-        let value = CatalogSchemaCodec::encode_value(&table)?;
-        schema_root = engine.insert_tree_entry(schema_root, &key, &value)?;
+        tree.insert(&table.name, &table)?;
     }
 
     Ok(schema_root)

@@ -6,7 +6,7 @@ mod mod_tests {
     use crate::btree::index::BTreeIndex;
     use crate::btree::tree::BTreeManager;
     use crate::btree::value_store::StoredValueLayout;
-    use crate::btree::{BTreeKey, BTreeValue, KeyValueCodec};
+    use crate::btree::{BTreeKey, BTreeValue, KeyValueCodec, TypedTreeStore};
     use crate::error::Result;
     use crate::storage::overflow::collect_overflow_page_ids;
     use crate::storage::Pager;
@@ -131,6 +131,28 @@ mod mod_tests {
         let deleted = btree.delete_typed::<U32StringCodec>(&9)?;
         assert_eq!(deleted, Some("nine".to_string()));
         assert_eq!(btree.search_typed::<U32StringCodec>(&9)?, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_typed_tree_store_codec_boundary() -> Result<()> {
+        let path = tmp_db();
+        let storage = new_storage(&path)?;
+        let trees = TypedTreeStore::<U32StringCodec>::from_storage(storage);
+        let root_page_id = trees.create_tree()?;
+        let mut tree = trees.open_tree(root_page_id)?;
+
+        tree.insert(&7, &"seven".to_string())?;
+        tree.insert(&9, &"nine".to_string())?;
+
+        assert_eq!(tree.get(&7)?, Some("seven".to_string()));
+        assert_eq!(tree.delete(&9)?, Some("nine".to_string()));
+
+        let mut cursor = tree.cursor()?;
+        assert!(cursor.is_valid());
+        assert_eq!(cursor.current()?, Some((7, "seven".to_string())));
+        assert!(trees.validate_tree(root_page_id)?);
 
         Ok(())
     }

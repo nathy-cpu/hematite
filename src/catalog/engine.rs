@@ -1,7 +1,6 @@
 //! Relational storage engine built on top of the pager and generic B-trees.
 
-use crate::btree::tree::TreeSpaceStats;
-use crate::btree::{ByteTree, ByteTreeStore};
+use crate::btree::{ByteTree, ByteTreeStore, KeyValueCodec, TreeSpaceStats, TypedTreeStore};
 use crate::catalog::{DatabaseHeader, JournalMode, Table, TableId, Value};
 use crate::error::{HematiteError, Result};
 use crate::storage::{
@@ -256,6 +255,10 @@ impl CatalogEngine {
 
     pub(crate) fn tree_store(&self) -> ByteTreeStore {
         ByteTreeStore::from_shared_storage(self.pager.clone())
+    }
+
+    pub(crate) fn typed_tree_store<C: KeyValueCodec>(&self) -> TypedTreeStore<C> {
+        TypedTreeStore::from_shared_storage(self.pager.clone())
     }
 
     pub(crate) fn open_tree(&self, root_page_id: PageId) -> Result<ByteTree> {
