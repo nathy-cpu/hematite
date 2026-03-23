@@ -1,4 +1,12 @@
-//! Catalog and schema management for database objects
+//! Relational catalog and access-method layer.
+//!
+//! Boundary:
+//! - This module owns relational meaning: schemas, rows, primary keys, secondary indexes, and
+//!   relational codecs.
+//! - It builds on the generic [`crate::storage`] and [`crate::btree`] layers but should not be
+//!   part of the future generic fork.
+//! - The intended fork point is below this module: keep `storage` + `btree`, replace `catalog`,
+//!   `query`, and `sql` with the next database model.
 
 pub mod catalog;
 pub mod column;

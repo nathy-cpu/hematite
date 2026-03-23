@@ -1,8 +1,8 @@
 //! Generic B-tree module over opaque byte keys and values.
 //!
 //! Extraction boundary:
-//! - Higher layers should build on [`ByteTreeStore`], [`ByteTree`], [`ByteTreeCursor`], and
-//!   [`KeyValueCodec`].
+//! - Higher layers should build on [`ByteTreeStore`], [`ByteTree`], [`ByteTreeCursor`],
+//!   [`TypedTreeStore`], [`TypedTree`], [`TypedTreeCursor`], and [`KeyValueCodec`].
 //! - Node/page/value-store mechanics remain internal so the tree layout can evolve without
 //!   leaking implementation detail into relational code.
 //! - This is the generic data-structure half of the future fork point.

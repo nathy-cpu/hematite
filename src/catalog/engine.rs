@@ -295,16 +295,6 @@ impl CatalogEngine {
         Ok(())
     }
 
-    pub(crate) fn insert_tree_entry(
-        &self,
-        root_page_id: PageId,
-        key: &[u8],
-        value: &[u8],
-    ) -> Result<PageId> {
-        let mut tree = self.open_tree(root_page_id)?;
-        Ok(tree.insert_with_mutation(key, value)?.root_page_id)
-    }
-
     pub(crate) fn collect_tree_page_ids(&self, root_page_id: PageId) -> Result<Vec<PageId>> {
         self.tree_store().collect_page_ids(root_page_id)
     }

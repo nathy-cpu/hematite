@@ -358,16 +358,16 @@ pub(crate) fn require_index_root_page(root_page_id: u32, label: &str) -> Result<
 }
 
 fn decode_secondary_entry(key: &[u8], value: &[u8]) -> Result<super::cursor::IndexEntry> {
+    let logical_key = if key.len() >= 8 {
+        IndexKeyCodec::split_secondary_key(key)?.0
+    } else {
+        key.to_vec()
+    };
+
     let row_id = if value.len() == 8 {
         IndexKeyCodec::decode_row_id(value)?
     } else {
         IndexKeyCodec::split_secondary_key(key)?.1
-    };
-
-    let logical_key = if value.len() == 8 {
-        key.to_vec()
-    } else {
-        IndexKeyCodec::split_secondary_key(key)?.0
     };
 
     Ok(super::cursor::IndexEntry {
