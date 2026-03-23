@@ -32,6 +32,7 @@ pub struct CatalogStorageStats {
     pub fragmented_free_page_count: usize,
     pub trailing_free_page_count: usize,
     pub live_table_page_count: usize,
+    pub overflow_page_count: usize,
     pub table_used_bytes: usize,
     pub table_unused_bytes: usize,
 }

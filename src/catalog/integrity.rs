@@ -26,6 +26,7 @@ pub(crate) fn validate_integrity(engine: &mut CatalogEngine) -> Result<CatalogIn
     let free_pages = engine.free_page_ids().into_iter().collect::<HashSet<_>>();
 
     let mut live_pages = HashSet::new();
+    let mut overflow_pages = HashSet::new();
     let mut total_rows = 0u64;
 
     for (table_name, metadata) in metadata_entries {
@@ -38,7 +39,8 @@ pub(crate) fn validate_integrity(engine: &mut CatalogEngine) -> Result<CatalogIn
             )));
         }
 
-        let table_pages = engine.collect_tree_page_ids(metadata.root_page_id)?;
+        let space_stats = engine.collect_tree_space_stats(metadata.root_page_id)?;
+        let table_pages = space_stats.page_ids;
         let mut counted_rows = 0u64;
         let mut max_row_id = 0u64;
         let mut previous_row_id = None;
@@ -87,6 +89,26 @@ pub(crate) fn validate_integrity(engine: &mut CatalogEngine) -> Result<CatalogIn
                 )));
             }
         }
+        for overflow_page_id in space_stats.overflow_page_ids {
+            if free_pages.contains(&overflow_page_id) {
+                return Err(HematiteError::CorruptedData(format!(
+                    "Overflow page {} for table '{}' is both live and free",
+                    overflow_page_id, table_name
+                )));
+            }
+            if live_pages.contains(&overflow_page_id) {
+                return Err(HematiteError::CorruptedData(format!(
+                    "Overflow page {} for table '{}' overlaps B-tree storage",
+                    overflow_page_id, table_name
+                )));
+            }
+            if !overflow_pages.insert(overflow_page_id) {
+                return Err(HematiteError::CorruptedData(format!(
+                    "Overflow page {} is shared by multiple rows",
+                    overflow_page_id
+                )));
+            }
+        }
 
         if counted_rows != metadata.row_count {
             return Err(HematiteError::CorruptedData(format!(
@@ -109,7 +131,7 @@ pub(crate) fn validate_integrity(engine: &mut CatalogEngine) -> Result<CatalogIn
         table_count: engine.table_metadata.len(),
         live_page_count: live_pages.len(),
         index_page_count: 0,
-        overflow_page_count: 0,
+        overflow_page_count: overflow_pages.len(),
         free_page_count: pager_report.free_page_count,
         total_rows,
         pager: pager_report,
@@ -130,10 +152,11 @@ pub(crate) fn validate_catalog_layout(
     let free_pages = engine.free_page_ids().into_iter().collect::<HashSet<_>>();
     let mut table_pages = HashSet::new();
     let mut index_pages = HashSet::new();
+    let mut overflow_pages = HashSet::new();
 
     for table in tables {
-        let table_page_ids = engine.collect_tree_page_ids(table.root_page_id)?;
-        for page_id in table_page_ids {
+        let table_space_stats = engine.collect_tree_space_stats(table.root_page_id)?;
+        for page_id in table_space_stats.page_ids {
             if free_pages.contains(&page_id) {
                 return Err(HematiteError::CorruptedData(format!(
                     "Table page {} for '{}' is also present in the freelist",
@@ -144,6 +167,26 @@ pub(crate) fn validate_catalog_layout(
                 return Err(HematiteError::CorruptedData(format!(
                     "Table page {} is shared across multiple table trees",
                     page_id
+                )));
+            }
+        }
+        for overflow_page_id in table_space_stats.overflow_page_ids {
+            if free_pages.contains(&overflow_page_id) {
+                return Err(HematiteError::CorruptedData(format!(
+                    "Overflow page {} for '{}' is also present in the freelist",
+                    overflow_page_id, table.name
+                )));
+            }
+            if table_pages.contains(&overflow_page_id) {
+                return Err(HematiteError::CorruptedData(format!(
+                    "Overflow page {} for '{}' overlaps table storage",
+                    overflow_page_id, table.name
+                )));
+            }
+            if !overflow_pages.insert(overflow_page_id) {
+                return Err(HematiteError::CorruptedData(format!(
+                    "Overflow page {} is shared across multiple table values",
+                    overflow_page_id
                 )));
             }
         }
@@ -161,6 +204,12 @@ pub(crate) fn validate_catalog_layout(
                 if table_pages.contains(&page_id) {
                     return Err(HematiteError::CorruptedData(format!(
                         "Primary-key index page {} for '{}' overlaps table storage",
+                        page_id, table.name
+                    )));
+                }
+                if overflow_pages.contains(&page_id) {
+                    return Err(HematiteError::CorruptedData(format!(
+                        "Primary-key index page {} for '{}' overlaps overflow storage",
                         page_id, table.name
                     )));
                 }
@@ -191,6 +240,12 @@ pub(crate) fn validate_catalog_layout(
                 if table_pages.contains(&page_id) {
                     return Err(HematiteError::CorruptedData(format!(
                         "Secondary index page {} for '{}.{}' overlaps table storage",
+                        page_id, table.name, index.name
+                    )));
+                }
+                if overflow_pages.contains(&page_id) {
+                    return Err(HematiteError::CorruptedData(format!(
+                        "Secondary index page {} for '{}.{}' overlaps overflow storage",
                         page_id, table.name, index.name
                     )));
                 }

@@ -6,8 +6,10 @@
 //! - Tree lifecycle operations here (create/open/delete/validate) are the control plane that
 //!   higher storage layers should use instead of direct page manipulation.
 
+use crate::btree::value_store::StoredValueLayout;
 use crate::btree::{BTreeIndex, BTreeNode, NodeType};
 use crate::error::Result;
+use crate::storage::overflow::collect_overflow_page_ids;
 use crate::storage::{
     Page, PageId, Pager, DB_HEADER_PAGE_ID, INVALID_PAGE_ID, STORAGE_METADATA_PAGE_ID,
 };
@@ -282,7 +284,9 @@ pub fn collect_tree_page_ids(
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TreeSpaceStats {
     pub page_ids: Vec<PageId>,
+    pub overflow_page_ids: Vec<PageId>,
     pub used_bytes: usize,
+    pub overflow_used_bytes: usize,
     pub leaf_pages: usize,
     pub internal_pages: usize,
 }
@@ -313,7 +317,28 @@ fn collect_tree_space_stats_recursive(
     stats.used_bytes += node.estimate_serialized_size();
 
     match node.node_type {
-        NodeType::Leaf => stats.leaf_pages += 1,
+        NodeType::Leaf => {
+            stats.leaf_pages += 1;
+            for value in &node.values {
+                let layout = StoredValueLayout::decode(value.as_bytes())?;
+                if layout.overflow_first_page != INVALID_PAGE_ID {
+                    let overflow_page_ids =
+                        collect_overflow_page_ids(pager, Some(layout.overflow_first_page))?;
+                    stats.overflow_used_bytes += layout.overflow_len();
+                    for overflow_page_id in overflow_page_ids {
+                        if visited.contains(&overflow_page_id)
+                            || stats.overflow_page_ids.contains(&overflow_page_id)
+                        {
+                            return Err(crate::error::HematiteError::CorruptedData(format!(
+                                "Duplicate overflow page {} encountered while collecting tree space stats",
+                                overflow_page_id
+                            )));
+                        }
+                        stats.overflow_page_ids.push(overflow_page_id);
+                    }
+                }
+            }
+        }
         NodeType::Internal => {
             stats.internal_pages += 1;
             for child_page_id in node.children {

@@ -15,12 +15,14 @@ pub(crate) fn get_storage_stats(engine: &CatalogEngine) -> CatalogStorageStats {
     let fragmented_free_page_count = pager.fragmented_free_page_count();
     let trailing_free_page_count = pager.trailing_free_page_count();
     let mut live_table_page_count = 0usize;
+    let mut overflow_page_count = 0usize;
     let mut table_used_bytes = 0usize;
     drop(pager);
     for metadata in engine.table_metadata.values() {
         if let Ok(space_stats) = engine.collect_tree_space_stats(metadata.root_page_id) {
             live_table_page_count += space_stats.page_ids.len();
-            table_used_bytes += space_stats.used_bytes;
+            overflow_page_count += space_stats.overflow_page_ids.len();
+            table_used_bytes += space_stats.used_bytes + space_stats.overflow_used_bytes;
         }
     }
 
@@ -33,8 +35,9 @@ pub(crate) fn get_storage_stats(engine: &CatalogEngine) -> CatalogStorageStats {
         fragmented_free_page_count,
         trailing_free_page_count,
         live_table_page_count,
+        overflow_page_count,
         table_used_bytes,
-        table_unused_bytes: live_table_page_count
+        table_unused_bytes: (live_table_page_count + overflow_page_count)
             .saturating_mul(CatalogEngine::PAGE_SIZE)
             .saturating_sub(table_used_bytes),
     }

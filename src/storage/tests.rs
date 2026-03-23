@@ -375,6 +375,33 @@ mod mod_tests {
     }
 
     #[test]
+    fn test_storage_stats_and_integrity_report_live_overflow_pages() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_storage_overflow_stats");
+        let mut storage = CatalogEngine::new(test_db.path())?;
+
+        let _ = storage.create_table("docs")?;
+        let large_text = "x".repeat(PAGE_SIZE * 3);
+        let _ = storage.insert_into_table("docs", vec![Value::Text(large_text)])?;
+
+        let stats = storage.get_storage_stats();
+        assert_eq!(stats.table_count, 1);
+        assert_eq!(stats.total_rows, 1);
+        assert!(stats.overflow_page_count > 0);
+        assert!(stats.table_used_bytes > PAGE_SIZE);
+        assert!(
+            stats.table_unused_bytes
+                < (stats.live_table_page_count + stats.overflow_page_count) * PAGE_SIZE
+        );
+
+        let report = storage.validate_integrity()?;
+        assert_eq!(report.table_count, 1);
+        assert_eq!(report.total_rows, 1);
+        assert!(report.overflow_page_count > 0);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_storage_integrity_validates_healthy_state() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_storage_integrity_healthy");
         let mut storage = CatalogEngine::new(test_db.path())?;
