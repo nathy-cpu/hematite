@@ -144,6 +144,59 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_writer_transaction_blocks_second_writer_connection() -> Result<()> {
+        let db = TestDbFile::new("_test_writer_transaction_blocks_second_writer");
+        let mut conn1 = Connection::new(db.path())?;
+
+        conn1.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
+        let mut conn2 = Connection::new(db.path())?;
+
+        let mut tx = conn1.begin_transaction()?;
+        tx.execute("INSERT INTO test (id, name) VALUES (1, 'Alice');")?;
+
+        let err = conn2
+            .execute("INSERT INTO test (id, name) VALUES (2, 'Bob');")
+            .unwrap_err();
+        assert!(err.to_string().contains("locked"));
+
+        tx.rollback()?;
+        drop(tx);
+
+        conn2.execute("INSERT INTO test (id, name) VALUES (2, 'Bob');")?;
+        let result = conn2.execute("SELECT * FROM test;")?;
+        assert_eq!(result.rows.len(), 1);
+
+        conn1.close()?;
+        conn2.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_writer_transaction_blocks_reader_connection() -> Result<()> {
+        let db = TestDbFile::new("_test_writer_transaction_blocks_reader");
+        let mut conn1 = Connection::new(db.path())?;
+
+        conn1.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
+        let mut conn2 = Connection::new(db.path())?;
+
+        let mut tx = conn1.begin_transaction()?;
+        tx.execute("INSERT INTO test (id, name) VALUES (1, 'Alice');")?;
+
+        let err = conn2.execute("SELECT * FROM test;").unwrap_err();
+        assert!(err.to_string().contains("locked"));
+
+        tx.rollback()?;
+        drop(tx);
+
+        let result = conn2.execute("SELECT * FROM test;")?;
+        assert!(result.rows.is_empty());
+
+        conn1.close()?;
+        conn2.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_insert_reorders_columns_and_applies_defaults() -> Result<()> {
         let db = TestDbFile::new("_test_insert_reorders_columns");
         let mut conn = Connection::new(db.path())?;
