@@ -199,6 +199,14 @@ impl CatalogEngine {
         self.pager.lock().unwrap().transaction_active()
     }
 
+    pub(crate) fn begin_read(&mut self) -> Result<()> {
+        self.pager.lock().unwrap().begin_read()
+    }
+
+    pub(crate) fn end_read(&mut self) -> Result<()> {
+        self.pager.lock().unwrap().end_read()
+    }
+
     pub fn snapshot(&self) -> CatalogEngineSnapshot {
         CatalogEngineSnapshot {
             table_metadata: self.table_metadata.clone(),

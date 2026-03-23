@@ -66,7 +66,7 @@ impl Connection {
 
         let result = {
             let mut catalog_guard = self.catalog.lock().unwrap();
-            catalog_guard.with_engine(|engine| {
+            catalog_guard.with_read_engine(|engine| {
                 let mut ctx = ExecutionContext::for_read(&schema, engine);
                 executor.execute(&mut ctx)
             })?

@@ -258,6 +258,52 @@ mod pager_tests {
         assert_eq!(page.data[0], 10);
         Ok(())
     }
+
+    #[test]
+    fn test_pager_allows_multiple_readers() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_multiple_readers");
+        let mut first = Pager::new(test_db.path(), 8)?;
+        let mut second = Pager::new(test_db.path(), 8)?;
+
+        first.begin_read()?;
+        second.begin_read()?;
+
+        second.end_read()?;
+        first.end_read()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_blocks_writer_while_reader_is_active() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_writer_blocked_by_reader");
+        let mut reader = Pager::new(test_db.path(), 8)?;
+        let mut writer = Pager::new(test_db.path(), 8)?;
+
+        reader.begin_read()?;
+        let err = writer.begin_transaction().unwrap_err();
+        assert!(err.to_string().contains("locked"));
+        reader.end_read()?;
+
+        writer.begin_transaction()?;
+        writer.rollback_transaction()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_blocks_reader_while_writer_is_active() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_reader_blocked_by_writer");
+        let mut writer = Pager::new(test_db.path(), 8)?;
+        let mut reader = Pager::new(test_db.path(), 8)?;
+
+        writer.begin_transaction()?;
+        let err = reader.begin_read().unwrap_err();
+        assert!(err.to_string().contains("locked"));
+        writer.rollback_transaction()?;
+
+        reader.begin_read()?;
+        reader.end_read()?;
+        Ok(())
+    }
 }
 
 mod mod_tests {

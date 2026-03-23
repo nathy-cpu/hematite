@@ -182,6 +182,20 @@ impl Catalog {
         f(&mut self.engine)
     }
 
+    pub(crate) fn with_read_engine<F, T>(&mut self, f: F) -> Result<T>
+    where
+        F: FnOnce(&mut CatalogEngine) -> Result<T>,
+    {
+        self.engine.begin_read()?;
+        let result = f(&mut self.engine);
+        let release = self.engine.end_read();
+        match (result, release) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(err), _) => Err(err),
+            (Ok(_), Err(err)) => Err(err),
+        }
+    }
+
     pub(crate) fn snapshot(&self) -> CatalogSnapshot {
         CatalogSnapshot {
             schema: self.schema.clone(),

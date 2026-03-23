@@ -31,6 +31,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug, Clone)]
 struct PagerTransaction {
@@ -41,6 +42,24 @@ struct PagerTransaction {
     page_records: Vec<JournalRecord>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PagerLockMode {
+    None,
+    Shared { depth: usize },
+    Exclusive,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct LockRegistryEntry {
+    readers: usize,
+    writer: bool,
+}
+
+fn lock_registry() -> &'static Mutex<HashMap<PathBuf, LockRegistryEntry>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, LockRegistryEntry>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 #[derive(Debug)]
 pub struct Pager {
     file_manager: FileManager,
@@ -49,6 +68,8 @@ pub struct Pager {
     page_checksums: HashMap<PageId, u32>,
     checksum_store_path: Option<PathBuf>,
     journal_path: Option<PathBuf>,
+    database_identity: Option<PathBuf>,
+    lock_mode: PagerLockMode,
     transaction: Option<PagerTransaction>,
     buffer_pool_capacity: usize,
 }
@@ -59,7 +80,10 @@ impl Pager {
     pub fn new<P: AsRef<Path>>(path: P, cache_capacity: usize) -> Result<Self> {
         let checksum_store_path = Some(Self::checksum_store_path(path.as_ref()));
         let journal_path = Some(Self::journal_path(path.as_ref()));
-        let file_manager = FileManager::new(path)?;
+        let file_manager = FileManager::new(&path)?;
+        let database_identity = fs::canonicalize(path.as_ref())
+            .ok()
+            .or_else(|| Some(path.as_ref().to_path_buf()));
         let mut pager = Self {
             file_manager,
             buffer_pool: BufferPool::new(cache_capacity),
@@ -67,6 +91,8 @@ impl Pager {
             page_checksums: HashMap::new(),
             checksum_store_path,
             journal_path,
+            database_identity,
+            lock_mode: PagerLockMode::None,
             transaction: None,
             buffer_pool_capacity: cache_capacity,
         };
@@ -84,6 +110,8 @@ impl Pager {
             page_checksums: HashMap::new(),
             checksum_store_path: None,
             journal_path: None,
+            database_identity: None,
+            lock_mode: PagerLockMode::None,
             transaction: None,
             buffer_pool_capacity: cache_capacity,
         })
@@ -167,6 +195,8 @@ impl Pager {
             ));
         }
 
+        self.acquire_exclusive_lock()?;
+
         let transaction = PagerTransaction {
             original_file_len: self.file_manager.file_len()?,
             original_free_pages: self.file_manager.free_pages().to_vec(),
@@ -189,6 +219,7 @@ impl Pager {
         self.persist_journal(JournalState::Committed)?;
         self.remove_journal_file()?;
         self.transaction = None;
+        self.release_exclusive_lock()?;
         Ok(())
     }
 
@@ -202,11 +233,20 @@ impl Pager {
         self.rollback_from_active_transaction()?;
         self.remove_journal_file()?;
         self.transaction = None;
+        self.release_exclusive_lock()?;
         Ok(())
     }
 
     pub fn transaction_active(&self) -> bool {
         self.transaction.is_some()
+    }
+
+    pub fn begin_read(&mut self) -> Result<()> {
+        self.acquire_shared_lock()
+    }
+
+    pub fn end_read(&mut self) -> Result<()> {
+        self.release_shared_lock()
     }
 
     pub fn free_pages(&self) -> &[PageId] {
@@ -357,6 +397,105 @@ impl Pager {
             Some(parent) => parent.join(file_name),
             None => PathBuf::from(file_name),
         }
+    }
+
+    fn acquire_shared_lock(&mut self) -> Result<()> {
+        if self.database_identity.is_none() {
+            return Ok(());
+        }
+
+        match self.lock_mode {
+            PagerLockMode::Exclusive => return Ok(()),
+            PagerLockMode::Shared { depth } => {
+                self.lock_mode = PagerLockMode::Shared { depth: depth + 1 };
+                return Ok(());
+            }
+            PagerLockMode::None => {}
+        }
+
+        let path = self.database_identity.as_ref().unwrap().clone();
+        let mut registry = lock_registry().lock().unwrap();
+        let entry = registry.entry(path).or_default();
+        if entry.writer {
+            return Err(crate::error::HematiteError::StorageError(
+                "database is locked for writing".to_string(),
+            ));
+        }
+        entry.readers += 1;
+        self.lock_mode = PagerLockMode::Shared { depth: 1 };
+        Ok(())
+    }
+
+    fn release_shared_lock(&mut self) -> Result<()> {
+        let Some(path) = self.database_identity.as_ref() else {
+            return Ok(());
+        };
+
+        match self.lock_mode {
+            PagerLockMode::Exclusive | PagerLockMode::None => return Ok(()),
+            PagerLockMode::Shared { depth } if depth > 1 => {
+                self.lock_mode = PagerLockMode::Shared { depth: depth - 1 };
+                return Ok(());
+            }
+            PagerLockMode::Shared { .. } => {}
+        }
+
+        let mut registry = lock_registry().lock().unwrap();
+        if let Some(entry) = registry.get_mut(path) {
+            entry.readers = entry.readers.saturating_sub(1);
+            if entry.readers == 0 && !entry.writer {
+                registry.remove(path);
+            }
+        }
+        self.lock_mode = PagerLockMode::None;
+        Ok(())
+    }
+
+    fn acquire_exclusive_lock(&mut self) -> Result<()> {
+        if self.database_identity.is_none() {
+            self.lock_mode = PagerLockMode::Exclusive;
+            return Ok(());
+        }
+        if self.lock_mode == PagerLockMode::Exclusive {
+            return Ok(());
+        }
+        if matches!(self.lock_mode, PagerLockMode::Shared { .. }) {
+            return Err(crate::error::HematiteError::StorageError(
+                "cannot upgrade a shared database lock to an exclusive lock".to_string(),
+            ));
+        }
+
+        let path = self.database_identity.as_ref().unwrap().clone();
+        let mut registry = lock_registry().lock().unwrap();
+        let entry = registry.entry(path).or_default();
+        if entry.writer || entry.readers > 0 {
+            return Err(crate::error::HematiteError::StorageError(
+                "database is locked".to_string(),
+            ));
+        }
+        entry.writer = true;
+        self.lock_mode = PagerLockMode::Exclusive;
+        Ok(())
+    }
+
+    fn release_exclusive_lock(&mut self) -> Result<()> {
+        let Some(path) = self.database_identity.as_ref() else {
+            self.lock_mode = PagerLockMode::None;
+            return Ok(());
+        };
+        if self.lock_mode != PagerLockMode::Exclusive {
+            return Ok(());
+        }
+
+        let mut registry = lock_registry().lock().unwrap();
+        if let Some(entry) = registry.get_mut(path) {
+            entry.writer = false;
+            if entry.readers == 0 {
+                registry.remove(path);
+            }
+        }
+        self.lock_mode = PagerLockMode::None;
+        Ok(())
     }
 
     fn journal_path(db_path: &Path) -> PathBuf {
@@ -670,5 +809,19 @@ impl Pager {
 
         self.page_checksums = journal.original_checksums.iter().copied().collect();
         self.persist_checksums()
+    }
+}
+
+impl Drop for Pager {
+    fn drop(&mut self) {
+        match self.lock_mode {
+            PagerLockMode::Exclusive => {
+                let _ = self.release_exclusive_lock();
+            }
+            PagerLockMode::Shared { .. } => {
+                let _ = self.release_shared_lock();
+            }
+            PagerLockMode::None => {}
+        }
     }
 }
