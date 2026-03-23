@@ -637,6 +637,51 @@ mod mod_tests {
     }
 
     #[test]
+    fn test_repeated_large_row_churn_keeps_file_growth_bounded() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_storage_large_row_churn_bounded_growth");
+        let mut first_peak = None;
+
+        {
+            let mut storage = CatalogEngine::new(test_db.path())?;
+            let _ = storage.create_table("docs")?;
+
+            for cycle in 0..6 {
+                let rowid = storage.insert_into_table(
+                    "docs",
+                    vec![Value::Text(format!(
+                        "cycle-{cycle}-{}",
+                        "x".repeat(PAGE_SIZE * 3)
+                    ))],
+                )?;
+                storage.flush()?;
+
+                let size_after_insert = std::fs::metadata(test_db.path())?.len();
+                first_peak.get_or_insert(size_after_insert);
+
+                assert!(
+                    size_after_insert <= first_peak.unwrap() + (PAGE_SIZE as u64),
+                    "large-row churn grew file unexpectedly: first_peak={}, current={}",
+                    first_peak.unwrap(),
+                    size_after_insert
+                );
+
+                assert!(storage.delete_from_table_by_rowid("docs", rowid)?);
+                storage.flush()?;
+            }
+        }
+
+        let final_size = std::fs::metadata(test_db.path())?.len();
+        assert!(
+            final_size <= first_peak.unwrap(),
+            "expected final file size {} to be <= first peak {}",
+            final_size,
+            first_peak.unwrap()
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn test_storage_metadata_rejects_unsupported_version() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_storage_metadata_unsupported_version");
         let mut pager = crate::storage::pager::Pager::new(test_db.path(), 8)?;
