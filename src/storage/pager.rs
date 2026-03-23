@@ -18,6 +18,11 @@
 //! - The pager owns rollback journaling and crash recovery for page/checksum state.
 //! - Writes journal original page images before first modification in a transaction.
 //! - Recovery is process-crash only and replays the rollback journal on open.
+//!
+//! M10 contract:
+//! - The pager owns the in-process multiple-reader/one-writer lock state for a database file.
+//! - Shared locks protect read scopes; exclusive locks protect write transactions.
+//! - Commit and rollback both release the writer lock only after journal/file state is finalized.
 
 use crate::error::Result;
 use crate::storage::journal::{JournalRecord, JournalState, RollbackJournal};
@@ -242,7 +247,12 @@ impl Pager {
     }
 
     pub fn begin_read(&mut self) -> Result<()> {
-        self.acquire_shared_lock()
+        self.acquire_shared_lock()?;
+        if let Err(err) = self.refresh_persisted_view() {
+            let _ = self.release_shared_lock();
+            return Err(err);
+        }
+        Ok(())
     }
 
     pub fn end_read(&mut self) -> Result<()> {
@@ -659,6 +669,15 @@ impl Pager {
         self.file_manager.set_free_pages(free_pages);
         self.page_checksums = checksums;
         Ok(())
+    }
+
+    fn refresh_persisted_view(&mut self) -> Result<()> {
+        if self.transaction.is_some() || !self.dirty_pages.is_empty() {
+            return Ok(());
+        }
+
+        self.buffer_pool = BufferPool::new(self.buffer_pool_capacity);
+        self.load_persisted_state()
     }
 
     fn persist_checksums(&self) -> Result<()> {

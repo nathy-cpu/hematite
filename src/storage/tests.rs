@@ -168,6 +168,8 @@ mod pager_tests {
     use crate::storage::pager::Pager;
     use crate::storage::Page;
     use crate::test_utils::TestDbFile;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     #[test]
     fn test_pager_write_is_buffered_until_flush() -> crate::error::Result<()> {
@@ -302,6 +304,110 @@ mod pager_tests {
 
         reader.begin_read()?;
         reader.end_read()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_commit_releases_writer_lock_and_persists_changes() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_commit_releases_writer_lock");
+        let mut writer = Pager::new(test_db.path(), 8)?;
+        let page_id = writer.allocate_page()?;
+
+        let mut page = Page::new(page_id);
+        page.data[0] = 10;
+        writer.write_page(page)?;
+        writer.flush()?;
+
+        writer.begin_transaction()?;
+        let mut updated = writer.read_page(page_id)?;
+        updated.data[0] = 77;
+        writer.write_page(updated)?;
+
+        let mut reader = Pager::new(test_db.path(), 8)?;
+        let err = reader.begin_read().unwrap_err();
+        assert!(err.to_string().contains("locked"));
+
+        writer.commit_transaction()?;
+
+        reader.begin_read()?;
+        let persisted = reader.read_page(page_id)?;
+        assert_eq!(persisted.data[0], 77);
+        reader.end_read()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_rollback_releases_writer_lock_and_restores_original_data(
+    ) -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_rollback_releases_writer_lock");
+        let mut writer = Pager::new(test_db.path(), 8)?;
+        let page_id = writer.allocate_page()?;
+
+        let mut page = Page::new(page_id);
+        page.data[0] = 10;
+        writer.write_page(page)?;
+        writer.flush()?;
+
+        writer.begin_transaction()?;
+        let mut updated = writer.read_page(page_id)?;
+        updated.data[0] = 55;
+        writer.write_page(updated)?;
+
+        let mut second_writer = Pager::new(test_db.path(), 8)?;
+        let err = second_writer.begin_transaction().unwrap_err();
+        assert!(err.to_string().contains("locked"));
+
+        writer.rollback_transaction()?;
+
+        second_writer.begin_transaction()?;
+        let restored = second_writer.read_page(page_id)?;
+        assert_eq!(restored.data[0], 10);
+        second_writer.rollback_transaction()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_allows_concurrent_readers_and_blocks_writer_until_they_exit(
+    ) -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_concurrent_readers_block_writer");
+        let db_path = std::path::PathBuf::from(test_db.path());
+        let barrier = Arc::new(Barrier::new(3));
+
+        let first_barrier = Arc::clone(&barrier);
+        let first_path = db_path.clone();
+        let first_reader = thread::spawn(move || -> crate::error::Result<()> {
+            let mut pager = Pager::new(&first_path, 8)?;
+            pager.begin_read()?;
+            first_barrier.wait();
+            first_barrier.wait();
+            pager.end_read()?;
+            Ok(())
+        });
+
+        let second_barrier = Arc::clone(&barrier);
+        let second_path = db_path.clone();
+        let second_reader = thread::spawn(move || -> crate::error::Result<()> {
+            let mut pager = Pager::new(&second_path, 8)?;
+            pager.begin_read()?;
+            second_barrier.wait();
+            second_barrier.wait();
+            pager.end_read()?;
+            Ok(())
+        });
+
+        barrier.wait();
+
+        let mut writer = Pager::new(&db_path, 8)?;
+        let err = writer.begin_transaction().unwrap_err();
+        assert!(err.to_string().contains("locked"));
+
+        barrier.wait();
+
+        first_reader.join().unwrap()?;
+        second_reader.join().unwrap()?;
+
+        writer.begin_transaction()?;
+        writer.rollback_transaction()?;
         Ok(())
     }
 }
