@@ -264,6 +264,7 @@ mod mod_tests {
     use crate::btree::value_store::StoredValueLayout;
     use crate::btree::{BTreeKey, BTreeNode, NodeType};
     use crate::catalog::{CatalogEngine, Value};
+    use crate::storage::overflow::collect_overflow_page_ids;
     use crate::storage::{Page, Pager, PAGE_SIZE, STORAGE_METADATA_PAGE_ID};
     use crate::test_utils::TestDbFile;
     use std::io::{Seek, SeekFrom, Write};
@@ -542,6 +543,95 @@ mod mod_tests {
         assert_eq!(stats.table_count, 1);
         assert_eq!(stats.total_rows, 1);
         assert_eq!(stats.free_page_count, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_delete_reclaims_large_row_overflow_pages() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_storage_delete_reclaims_large_row_overflow");
+        let mut storage = CatalogEngine::new(test_db.path())?;
+
+        let root_page_id = storage.create_table("docs")?;
+        let rowid =
+            storage.insert_into_table("docs", vec![Value::Text("x".repeat(PAGE_SIZE * 3))])?;
+
+        let root_page = storage.read_page(root_page_id)?;
+        let root_node = BTreeNode::from_page(root_page)?;
+        let layout = StoredValueLayout::decode(root_node.values[0].as_bytes())?;
+        let overflow_ids = collect_overflow_page_ids(
+            &mut storage.pager.lock().unwrap(),
+            Some(layout.overflow_first_page),
+        )?;
+        assert!(!overflow_ids.is_empty());
+
+        assert!(storage.delete_from_table_by_rowid("docs", rowid)?);
+        let stats = storage.get_storage_stats();
+        assert_eq!(stats.total_rows, 0);
+        assert_eq!(stats.overflow_page_count, 0);
+
+        let reused = storage.allocate_page()?;
+        assert!(overflow_ids.contains(&reused));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_replace_table_rows_reclaims_previous_large_row_overflow_pages(
+    ) -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_storage_replace_reclaims_large_row_overflow");
+        let mut storage = CatalogEngine::new(test_db.path())?;
+
+        let root_page_id = storage.create_table("docs")?;
+        let _ = storage.insert_into_table("docs", vec![Value::Text("x".repeat(PAGE_SIZE * 3))])?;
+
+        let root_page = storage.read_page(root_page_id)?;
+        let root_node = BTreeNode::from_page(root_page)?;
+        let layout = StoredValueLayout::decode(root_node.values[0].as_bytes())?;
+        let overflow_ids = collect_overflow_page_ids(
+            &mut storage.pager.lock().unwrap(),
+            Some(layout.overflow_first_page),
+        )?;
+
+        storage.replace_table_rows(
+            "docs",
+            vec![crate::catalog::StoredRow {
+                row_id: 1,
+                values: vec![Value::Text("small".to_string())],
+            }],
+        )?;
+
+        let stats = storage.get_storage_stats();
+        assert_eq!(stats.total_rows, 1);
+        assert_eq!(stats.overflow_page_count, 0);
+
+        let reused = storage.allocate_page()?;
+        assert!(overflow_ids.contains(&reused));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_drop_table_reclaims_large_row_overflow_pages() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_storage_drop_reclaims_large_row_overflow");
+        let mut storage = CatalogEngine::new(test_db.path())?;
+
+        let root_page_id = storage.create_table("docs")?;
+        let _ = storage.insert_into_table("docs", vec![Value::Text("x".repeat(PAGE_SIZE * 3))])?;
+
+        let root_page = storage.read_page(root_page_id)?;
+        let root_node = BTreeNode::from_page(root_page)?;
+        let layout = StoredValueLayout::decode(root_node.values[0].as_bytes())?;
+        let overflow_ids = collect_overflow_page_ids(
+            &mut storage.pager.lock().unwrap(),
+            Some(layout.overflow_first_page),
+        )?;
+
+        storage.drop_table("docs")?;
+        assert_eq!(storage.get_storage_stats().table_count, 0);
+
+        let reused = storage.allocate_page()?;
+        assert!(overflow_ids.contains(&reused) || reused == root_page_id);
 
         Ok(())
     }
