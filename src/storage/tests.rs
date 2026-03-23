@@ -164,6 +164,92 @@ mod freelist_tests {
     }
 }
 
+mod wal_tests {
+    use crate::storage::wal::{WalFrame, WalRecord};
+
+    #[test]
+    fn test_wal_record_file_roundtrip() -> crate::error::Result<()> {
+        let first = WalRecord {
+            sequence: 1,
+            file_len: 64 + 3 * crate::storage::PAGE_SIZE as u64,
+            free_pages: vec![9, 12],
+            checksums: vec![(2, 11), (4, 22)],
+            frames: vec![WalFrame {
+                page_id: 2,
+                data: vec![7u8; crate::storage::PAGE_SIZE],
+            }],
+        };
+        let second = WalRecord {
+            sequence: 2,
+            file_len: 64 + 4 * crate::storage::PAGE_SIZE as u64,
+            free_pages: vec![12],
+            checksums: vec![(2, 33), (4, 44)],
+            frames: vec![WalFrame {
+                page_id: 4,
+                data: vec![9u8; crate::storage::PAGE_SIZE],
+            }],
+        };
+
+        let encoded = WalRecord::encode_file(&[first.clone(), second.clone()])?;
+        let decoded = WalRecord::decode_file(&encoded)?;
+        assert_eq!(decoded, vec![first, second]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_wal_decode_ignores_truncated_tail_record() -> crate::error::Result<()> {
+        let record = WalRecord {
+            sequence: 1,
+            file_len: 64 + 2 * crate::storage::PAGE_SIZE as u64,
+            free_pages: vec![8],
+            checksums: vec![(2, 99)],
+            frames: vec![WalFrame {
+                page_id: 2,
+                data: vec![5u8; crate::storage::PAGE_SIZE],
+            }],
+        };
+
+        let mut encoded = WalRecord::encode_file(&[record.clone()])?;
+        let mut partial_tail = WalRecord::encode_file(&[WalRecord {
+            sequence: 2,
+            file_len: 64 + 3 * crate::storage::PAGE_SIZE as u64,
+            free_pages: vec![],
+            checksums: vec![(2, 100)],
+            frames: vec![WalFrame {
+                page_id: 3,
+                data: vec![6u8; crate::storage::PAGE_SIZE],
+            }],
+        }])?;
+        partial_tail.truncate(partial_tail.len() - 17);
+        encoded.extend_from_slice(&partial_tail[8..]);
+
+        let decoded = WalRecord::decode_file(&encoded)?;
+        assert_eq!(decoded, vec![record]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_wal_decode_rejects_record_checksum_mismatch() {
+        let record = WalRecord {
+            sequence: 1,
+            file_len: 64 + 2 * crate::storage::PAGE_SIZE as u64,
+            free_pages: vec![],
+            checksums: vec![(2, 99)],
+            frames: vec![WalFrame {
+                page_id: 2,
+                data: vec![5u8; crate::storage::PAGE_SIZE],
+            }],
+        };
+
+        let mut encoded = WalRecord::encode_file(&[record]).unwrap();
+        let last = encoded.len() - 1;
+        encoded[last] ^= 0xFF;
+
+        let err = WalRecord::decode_file(&encoded).unwrap_err();
+        assert!(err.to_string().contains("checksum mismatch"));
+    }
+}
+
 mod pager_tests {
     use crate::storage::pager::Pager;
     use crate::storage::Page;

@@ -7,6 +7,7 @@ pub mod journal;
 pub mod overflow;
 pub mod pager;
 pub mod types;
+pub mod wal;
 
 pub use pager::Pager;
 pub use types::{
