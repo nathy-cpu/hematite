@@ -23,6 +23,8 @@
 //! - The pager owns the in-process multiple-reader/one-writer lock state for a database file.
 //! - Shared locks protect read scopes; exclusive locks protect write transactions.
 //! - Commit and rollback both release the writer lock only after journal/file state is finalized.
+//! - The future WAL path replaces rollback-journal exclusivity during writes, but keeps the pager
+//!   as the single owner of lock acquisition, visibility boundaries, and recovery coordination.
 
 use crate::error::Result;
 use crate::storage::journal::{JournalRecord, JournalState, RollbackJournal};
