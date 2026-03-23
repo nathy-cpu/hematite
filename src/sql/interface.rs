@@ -1,6 +1,6 @@
 //! High-level SQL interface
 
-use crate::catalog::Value;
+use crate::catalog::{JournalMode, Value};
 use crate::error::{HematiteError, Result};
 use crate::parser::lexer::Token;
 use crate::parser::{Lexer, Parser};
@@ -107,6 +107,18 @@ impl Hematite {
     /// Begin a new transaction
     pub fn transaction(&'_ mut self) -> Result<Transaction<'_>> {
         self.connection.begin_transaction()
+    }
+
+    pub fn journal_mode(&self) -> Result<JournalMode> {
+        self.connection.journal_mode()
+    }
+
+    pub fn set_journal_mode(&mut self, journal_mode: JournalMode) -> Result<()> {
+        self.connection.set_journal_mode(journal_mode)
+    }
+
+    pub fn checkpoint_wal(&mut self) -> Result<()> {
+        self.connection.checkpoint_wal()
     }
 
     /// Execute multiple SQL statements in sequence

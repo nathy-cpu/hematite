@@ -30,6 +30,12 @@ impl DataType {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JournalMode {
+    Rollback,
+    Wal,
+}
+
 #[derive(Debug, Clone)]
 pub enum Value {
     Integer(i32),

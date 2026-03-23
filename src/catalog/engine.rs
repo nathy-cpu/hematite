@@ -2,9 +2,11 @@
 
 use crate::btree::tree::TreeSpaceStats;
 use crate::btree::{ByteTree, ByteTreeStore};
-use crate::catalog::{DatabaseHeader, Table, TableId, Value};
+use crate::catalog::{DatabaseHeader, JournalMode, Table, TableId, Value};
 use crate::error::{HematiteError, Result};
-use crate::storage::{Page, PageId, Pager, PagerIntegrityReport, DB_HEADER_PAGE_ID};
+use crate::storage::{
+    JournalMode as PagerJournalMode, Page, PageId, Pager, PagerIntegrityReport, DB_HEADER_PAGE_ID,
+};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -180,6 +182,25 @@ impl CatalogEngine {
     pub fn flush(&mut self) -> Result<()> {
         engine_metadata::save_table_metadata(self)?;
         self.pager.lock().unwrap().flush()
+    }
+
+    pub fn journal_mode(&self) -> Result<JournalMode> {
+        Ok(match self.pager.lock().unwrap().journal_mode() {
+            PagerJournalMode::Rollback => JournalMode::Rollback,
+            PagerJournalMode::Wal => JournalMode::Wal,
+        })
+    }
+
+    pub fn set_journal_mode(&mut self, journal_mode: JournalMode) -> Result<()> {
+        let mode = match journal_mode {
+            JournalMode::Rollback => PagerJournalMode::Rollback,
+            JournalMode::Wal => PagerJournalMode::Wal,
+        };
+        self.pager.lock().unwrap().set_journal_mode(mode)
+    }
+
+    pub fn checkpoint_wal(&mut self) -> Result<()> {
+        self.pager.lock().unwrap().checkpoint_wal()
     }
 
     pub fn begin_transaction(&mut self) -> Result<()> {

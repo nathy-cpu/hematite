@@ -31,4 +31,4 @@ pub use ids::{ColumnId, TableId};
 pub use schema::Schema;
 pub use serialization::RowSerializer;
 pub use table::{SecondaryIndex, Table};
-pub use types::{DataType, Value};
+pub use types::{DataType, JournalMode, Value};

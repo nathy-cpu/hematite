@@ -2,6 +2,7 @@
 
 use crate::catalog::Catalog;
 use crate::catalog::CatalogEngine;
+use crate::catalog::JournalMode;
 use crate::catalog::Value;
 use crate::error::{HematiteError, Result};
 use crate::parser::{Lexer, Parser};
@@ -164,6 +165,21 @@ impl Connection {
         }
         let mut catalog_guard = self.catalog.lock().unwrap();
         catalog_guard.flush()
+    }
+
+    pub fn journal_mode(&self) -> Result<JournalMode> {
+        let catalog_guard = self.catalog.lock().unwrap();
+        catalog_guard.journal_mode()
+    }
+
+    pub fn set_journal_mode(&mut self, journal_mode: JournalMode) -> Result<()> {
+        let mut catalog_guard = self.catalog.lock().unwrap();
+        catalog_guard.set_journal_mode(journal_mode)
+    }
+
+    pub fn checkpoint_wal(&mut self) -> Result<()> {
+        let mut catalog_guard = self.catalog.lock().unwrap();
+        catalog_guard.checkpoint_wal()
     }
 
     pub fn execute(&mut self, sql: &str) -> Result<QueryResult> {

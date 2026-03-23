@@ -5,6 +5,7 @@ use crate::catalog::engine::{CatalogEngine, CatalogEngineSnapshot, CatalogIntegr
 use crate::catalog::ids::TableId;
 use crate::catalog::schema::Schema;
 use crate::catalog::table::{SecondaryIndex, Table};
+use crate::catalog::JournalMode;
 use crate::error::Result;
 use std::collections::HashMap;
 
@@ -234,6 +235,20 @@ impl Catalog {
     pub fn flush(&mut self) -> Result<()> {
         self.save_schema_to_btree()?;
         self.engine.flush()
+    }
+
+    pub fn journal_mode(&self) -> Result<JournalMode> {
+        self.engine.journal_mode()
+    }
+
+    pub fn set_journal_mode(&mut self, journal_mode: JournalMode) -> Result<()> {
+        self.save_schema_to_btree()?;
+        self.engine.set_journal_mode(journal_mode)
+    }
+
+    pub fn checkpoint_wal(&mut self) -> Result<()> {
+        self.save_schema_to_btree()?;
+        self.engine.checkpoint_wal()
     }
 
     /// Replace the entire in-memory schema and persist it as the durable catalog state.
