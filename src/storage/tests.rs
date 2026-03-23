@@ -704,6 +704,79 @@ mod pager_tests {
     }
 
     #[test]
+    fn test_pager_switches_from_wal_to_rollback_after_checkpointing() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_switches_wal_to_rollback");
+        let wal_path = std::path::PathBuf::from(format!("{}.wal", test_db.path()));
+
+        let page_id = {
+            let mut pager = Pager::new(test_db.path(), 8)?;
+            let page_id = pager.allocate_page()?;
+            let mut page = Page::new(page_id);
+            page.data[0] = 10;
+            pager.write_page(page)?;
+            pager.flush()?;
+            pager.set_journal_mode(JournalMode::Wal)?;
+            page_id
+        };
+
+        let mut reader = Pager::new(test_db.path(), 8)?;
+        reader.begin_read()?;
+
+        let mut writer = Pager::new(test_db.path(), 8)?;
+        writer.begin_transaction()?;
+        let mut updated = writer.read_page(page_id)?;
+        updated.data[0] = 88;
+        writer.write_page(updated)?;
+        writer.commit_transaction()?;
+        assert!(wal_path.exists());
+
+        reader.end_read()?;
+        writer.set_journal_mode(JournalMode::Rollback)?;
+        assert_eq!(writer.journal_mode(), JournalMode::Rollback);
+        assert!(!wal_path.exists());
+
+        let reopened = Pager::new(test_db.path(), 8)?;
+        assert_eq!(reopened.journal_mode(), JournalMode::Rollback);
+        let mut reopened = reopened;
+        let page = reopened.read_page(page_id)?;
+        assert_eq!(page.data[0], 88);
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_refuses_wal_to_rollback_switch_with_active_reader() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_refuses_wal_to_rollback_with_reader");
+
+        let page_id = {
+            let mut pager = Pager::new(test_db.path(), 8)?;
+            let page_id = pager.allocate_page()?;
+            let mut page = Page::new(page_id);
+            page.data[0] = 10;
+            pager.write_page(page)?;
+            pager.flush()?;
+            pager.set_journal_mode(JournalMode::Wal)?;
+            page_id
+        };
+
+        let mut reader = Pager::new(test_db.path(), 8)?;
+        reader.begin_read()?;
+
+        let mut writer = Pager::new(test_db.path(), 8)?;
+        writer.begin_transaction()?;
+        let mut updated = writer.read_page(page_id)?;
+        updated.data[0] = 44;
+        writer.write_page(updated)?;
+        writer.commit_transaction()?;
+
+        let err = writer.set_journal_mode(JournalMode::Rollback).unwrap_err();
+        assert!(err.to_string().contains("while readers are active"));
+
+        reader.end_read()?;
+        writer.set_journal_mode(JournalMode::Rollback)?;
+        Ok(())
+    }
+
+    #[test]
     fn test_pager_wal_recovery_discards_uncommitted_transaction() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_pager_wal_recovery_discards_uncommitted");
 

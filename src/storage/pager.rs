@@ -374,6 +374,17 @@ impl Pager {
                 "Cannot change pager journal mode during an active transaction".to_string(),
             ));
         }
+        if self.journal_mode == journal_mode {
+            return Ok(());
+        }
+        if self.journal_mode == JournalMode::Wal && journal_mode == JournalMode::Rollback {
+            if !self.can_checkpoint_wal()? {
+                return Err(crate::error::HematiteError::StorageError(
+                    "Cannot switch from WAL while readers are active".to_string(),
+                ));
+            }
+            self.checkpoint_wal_unlocked()?;
+        }
         if journal_mode == JournalMode::Rollback {
             self.remove_wal_file()?;
             self.latest_wal_state = None;
