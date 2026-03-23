@@ -631,6 +631,7 @@ mod pager_tests {
     #[test]
     fn test_pager_wal_commit_persists_committed_state_for_reopen() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_pager_wal_commit_persists");
+        let wal_path = std::path::PathBuf::from(format!("{}.wal", test_db.path()));
 
         let page_id = {
             let mut pager = Pager::new(test_db.path(), 8)?;
@@ -649,10 +650,55 @@ mod pager_tests {
             page_id
         };
 
+        assert!(!wal_path.exists());
+
         let mut reopened = Pager::new(test_db.path(), 8)?;
         reopened.begin_read()?;
         let page = reopened.read_page(page_id)?;
         assert_eq!(page.data[0], 99);
+        reopened.end_read()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_wal_checkpoint_waits_for_active_readers() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_wal_checkpoint_waits_for_readers");
+        let wal_path = std::path::PathBuf::from(format!("{}.wal", test_db.path()));
+
+        let page_id = {
+            let mut pager = Pager::new(test_db.path(), 8)?;
+            let page_id = pager.allocate_page()?;
+            let mut page = Page::new(page_id);
+            page.data[0] = 10;
+            pager.write_page(page)?;
+            pager.flush()?;
+            pager.set_journal_mode(JournalMode::Wal)?;
+            page_id
+        };
+
+        let mut reader = Pager::new(test_db.path(), 8)?;
+        reader.begin_read()?;
+
+        let mut writer = Pager::new(test_db.path(), 8)?;
+        writer.begin_transaction()?;
+        let mut updated = writer.read_page(page_id)?;
+        updated.data[0] = 99;
+        writer.write_page(updated)?;
+        writer.commit_transaction()?;
+
+        assert!(wal_path.exists());
+        let err = writer.checkpoint_wal().unwrap_err();
+        assert!(err.to_string().contains("readers are active"));
+
+        assert_eq!(reader.read_page(page_id)?.data[0], 10);
+        reader.end_read()?;
+
+        writer.checkpoint_wal()?;
+        assert!(!wal_path.exists());
+
+        let mut reopened = Pager::new(test_db.path(), 8)?;
+        reopened.begin_read()?;
+        assert_eq!(reopened.read_page(page_id)?.data[0], 99);
         reopened.end_read()?;
         Ok(())
     }

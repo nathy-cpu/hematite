@@ -301,6 +301,9 @@ impl Pager {
 
         if self.journal_mode == JournalMode::Wal {
             self.commit_wal_transaction()?;
+            if self.can_checkpoint_wal()? {
+                self.checkpoint_wal_unlocked()?;
+            }
         } else {
             self.flush()?;
             self.persist_journal(JournalState::Committed)?;
@@ -383,6 +386,23 @@ impl Pager {
             self.load_latest_wal_state()?;
         }
         self.persist_checksums()
+    }
+
+    pub fn checkpoint_wal(&mut self) -> Result<()> {
+        if self.journal_mode != JournalMode::Wal {
+            return Ok(());
+        }
+        if self.transaction.is_some() {
+            return Err(crate::error::HematiteError::StorageError(
+                "Cannot checkpoint WAL during an active transaction".to_string(),
+            ));
+        }
+        if !self.can_checkpoint_wal()? {
+            return Err(crate::error::HematiteError::StorageError(
+                "Cannot checkpoint WAL while readers are active".to_string(),
+            ));
+        }
+        self.checkpoint_wal_unlocked()
     }
 
     pub fn replace_checksums(&mut self, checksums: HashMap<PageId, u32>) {
@@ -1127,6 +1147,46 @@ impl Pager {
         }
 
         self.load_latest_wal_state()
+    }
+
+    fn can_checkpoint_wal(&self) -> Result<bool> {
+        if self.database_identity.is_none() {
+            return Ok(true);
+        }
+
+        let path = self.database_identity.as_ref().unwrap();
+        let registry = lock_registry().lock().unwrap();
+        let Some(entry) = registry.get(path) else {
+            return Ok(true);
+        };
+
+        if entry.readers > 0 {
+            return Ok(false);
+        }
+        if entry.writer && self.lock_mode != PagerLockMode::Write {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    fn checkpoint_wal_unlocked(&mut self) -> Result<()> {
+        let Some(state) = self.latest_wal_state.clone() else {
+            self.remove_wal_file()?;
+            return Ok(());
+        };
+
+        self.file_manager.restore_file_len(state.file_len)?;
+        self.file_manager.set_free_pages(state.free_pages.clone());
+        for (page_id, data) in &state.page_overrides {
+            let page = Page::from_bytes(*page_id, data.clone())?;
+            self.file_manager.write_page(&page)?;
+        }
+        self.file_manager.flush()?;
+        self.page_checksums = state.page_checksums;
+        self.latest_wal_state = None;
+        self.wal_read_snapshot = None;
+        self.remove_wal_file()?;
+        self.persist_checksums()
     }
 }
 
