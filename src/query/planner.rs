@@ -32,6 +32,12 @@ impl QueryPlanner {
         statement.validate(&self.catalog)?;
 
         let plan = match statement {
+            Statement::Begin | Statement::Commit | Statement::Rollback => {
+                return Err(HematiteError::ParseError(
+                    "Transaction control statements are handled at the SQL connection boundary"
+                        .to_string(),
+                ))
+            }
             Statement::Select(select) => self.plan_select(select),
             Statement::Update(update) => self.plan_update(update),
             Statement::Insert(insert) => self.plan_insert(insert),

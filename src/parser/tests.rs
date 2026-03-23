@@ -112,6 +112,24 @@ mod lexer_tests {
     }
 
     #[test]
+    fn test_transaction_tokens() -> Result<()> {
+        let mut lexer = Lexer::new("BEGIN; COMMIT; ROLLBACK;".to_string());
+        lexer.tokenize()?;
+
+        let expected = vec![
+            Token::Begin,
+            Token::Semicolon,
+            Token::Commit,
+            Token::Semicolon,
+            Token::Rollback,
+            Token::Semicolon,
+        ];
+
+        assert_eq!(lexer.get_tokens(), &expected);
+        Ok(())
+    }
+
+    #[test]
     fn test_select_with_where_and_and() -> Result<()> {
         let mut lexer = Lexer::new("SELECT id FROM users WHERE id = 1 AND id != 2".to_string());
         lexer.tokenize()?;
@@ -752,6 +770,29 @@ mod parser_tests {
                 );
             }
             _ => panic!("Expected CREATE statement"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_begin_commit_rollback() -> Result<()> {
+        for (sql, expected) in [
+            ("BEGIN;", "begin"),
+            ("COMMIT;", "commit"),
+            ("ROLLBACK;", "rollback"),
+        ] {
+            let mut lexer = Lexer::new(sql.to_string());
+            lexer.tokenize()?;
+            let mut parser = Parser::new(lexer.get_tokens().to_vec());
+            let statement = parser.parse()?;
+
+            match (expected, statement) {
+                ("begin", Statement::Begin)
+                | ("commit", Statement::Commit)
+                | ("rollback", Statement::Rollback) => {}
+                _ => panic!("unexpected transaction statement parse result"),
+            }
         }
 
         Ok(())

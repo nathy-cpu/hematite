@@ -144,6 +144,38 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_sql_begin_commit_and_rollback() -> Result<()> {
+        let db = TestDbFile::new("_test_sql_begin_commit_and_rollback");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
+
+        conn.execute("BEGIN;")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (1, 'Alice');")?;
+        conn.execute("ROLLBACK;")?;
+
+        let result = conn.execute("SELECT * FROM test;")?;
+        assert!(result.rows.is_empty());
+
+        conn.execute("BEGIN;")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (2, 'Bob');")?;
+        conn.execute("COMMIT;")?;
+
+        let result = conn.execute("SELECT * FROM test;")?;
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0],
+            vec![
+                crate::catalog::Value::Integer(2),
+                crate::catalog::Value::Text("Bob".to_string()),
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_writer_transaction_blocks_second_writer_connection() -> Result<()> {
         let db = TestDbFile::new("_test_writer_transaction_blocks_second_writer");
         let mut conn1 = Connection::new(db.path())?;

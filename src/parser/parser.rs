@@ -45,6 +45,9 @@ impl Parser {
         let token = self.peek_token()?;
 
         match token {
+            Token::Begin => self.parse_begin(),
+            Token::Commit => self.parse_commit(),
+            Token::Rollback => self.parse_rollback(),
             Token::Select => self.parse_select(),
             Token::Update => self.parse_update(),
             Token::Insert => self.parse_insert(),
@@ -52,10 +55,28 @@ impl Parser {
             Token::Create => self.parse_create(),
             Token::Drop => self.parse_drop(),
             _ => Err(HematiteError::ParseError(format!(
-                "Expected SELECT, UPDATE, INSERT, DELETE, CREATE, or DROP, found: {:?}",
+                "Expected BEGIN, COMMIT, ROLLBACK, SELECT, UPDATE, INSERT, DELETE, CREATE, or DROP, found: {:?}",
                 token
             ))),
         }
+    }
+
+    fn parse_begin(&mut self) -> Result<Statement> {
+        self.consume_token(&Token::Begin)?;
+        self.consume_token(&Token::Semicolon)?;
+        Ok(Statement::Begin)
+    }
+
+    fn parse_commit(&mut self) -> Result<Statement> {
+        self.consume_token(&Token::Commit)?;
+        self.consume_token(&Token::Semicolon)?;
+        Ok(Statement::Commit)
+    }
+
+    fn parse_rollback(&mut self) -> Result<Statement> {
+        self.consume_token(&Token::Rollback)?;
+        self.consume_token(&Token::Semicolon)?;
+        Ok(Statement::Rollback)
     }
 
     fn parse_select(&mut self) -> Result<Statement> {

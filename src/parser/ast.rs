@@ -6,6 +6,9 @@ use crate::error::{HematiteError, Result};
 
 #[derive(Debug, Clone)]
 pub enum Statement {
+    Begin,
+    Commit,
+    Rollback,
     Select(SelectStatement),
     Update(UpdateStatement),
     Insert(InsertStatement),
@@ -154,6 +157,7 @@ pub struct ColumnDefinition {
 impl Statement {
     pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
         match self {
+            Statement::Begin | Statement::Commit | Statement::Rollback => Ok(()),
             Statement::Select(select) => select.validate(catalog),
             Statement::Update(update) => update.validate(catalog),
             Statement::Insert(insert) => insert.validate(catalog),
@@ -188,6 +192,7 @@ impl Statement {
         F: FnMut(usize),
     {
         match self {
+            Statement::Begin | Statement::Commit | Statement::Rollback => {}
             Statement::Select(select) => {
                 if let Some(where_clause) = &select.where_clause {
                     where_clause.visit_parameters(f);
@@ -219,6 +224,9 @@ impl Statement {
 
     fn bind_statement(&self, parameters: &[Value]) -> Result<Statement> {
         match self {
+            Statement::Begin => Ok(Statement::Begin),
+            Statement::Commit => Ok(Statement::Commit),
+            Statement::Rollback => Ok(Statement::Rollback),
             Statement::Select(select) => Ok(Statement::Select(SelectStatement {
                 columns: select.columns.clone(),
                 from: select.from.clone(),

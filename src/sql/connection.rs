@@ -70,6 +70,34 @@ impl Connection {
         &mut self,
         statement: crate::parser::ast::Statement,
     ) -> Result<QueryResult> {
+        match statement {
+            crate::parser::ast::Statement::Begin => {
+                self.begin_active_transaction()?;
+                return Ok(QueryResult {
+                    affected_rows: 0,
+                    columns: Vec::new(),
+                    rows: Vec::new(),
+                });
+            }
+            crate::parser::ast::Statement::Commit => {
+                self.commit_active_transaction()?;
+                return Ok(QueryResult {
+                    affected_rows: 0,
+                    columns: Vec::new(),
+                    rows: Vec::new(),
+                });
+            }
+            crate::parser::ast::Statement::Rollback => {
+                self.rollback_active_transaction()?;
+                return Ok(QueryResult {
+                    affected_rows: 0,
+                    columns: Vec::new(),
+                    rows: Vec::new(),
+                });
+            }
+            _ => {}
+        }
+
         if statement.is_read_only() {
             return self.execute_read_statement(statement);
         }
@@ -238,6 +266,14 @@ impl Connection {
     }
 
     pub fn begin_transaction(&'_ mut self) -> Result<Transaction<'_>> {
+        self.begin_active_transaction()?;
+        Ok(Transaction {
+            connection: self,
+            completed: false,
+        })
+    }
+
+    fn begin_active_transaction(&mut self) -> Result<()> {
         if self.transaction.is_some() {
             return Err(HematiteError::InternalError(
                 "Transaction is already active".to_string(),
@@ -250,10 +286,7 @@ impl Connection {
         drop(catalog_guard);
 
         self.transaction = Some(ConnectionTransaction { snapshot });
-        Ok(Transaction {
-            connection: self,
-            completed: false,
-        })
+        Ok(())
     }
 
     #[cfg(test)]

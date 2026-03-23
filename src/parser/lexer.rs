@@ -5,6 +5,9 @@ use crate::error::{HematiteError, Result};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     // Keywords
+    Begin,
+    Commit,
+    Rollback,
     Select,
     Update,
     From,
@@ -156,6 +159,9 @@ impl Lexer {
 
         let identifier = &self.input[start..self.position];
         let token = match identifier.to_uppercase().as_str() {
+            "BEGIN" => Token::Begin,
+            "COMMIT" => Token::Commit,
+            "ROLLBACK" => Token::Rollback,
             "SELECT" => Token::Select,
             "UPDATE" => Token::Update,
             "FROM" => Token::From,
