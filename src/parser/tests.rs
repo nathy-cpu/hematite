@@ -288,6 +288,36 @@ mod lexer_tests {
     }
 
     #[test]
+    fn test_create_and_drop_index_tokens() -> Result<()> {
+        let mut lexer = Lexer::new(
+            "CREATE INDEX idx_users_name ON users (name); DROP INDEX idx_users_name ON users;"
+                .to_string(),
+        );
+        lexer.tokenize()?;
+
+        let expected = vec![
+            Token::Create,
+            Token::Index,
+            Token::Identifier("idx_users_name".to_string()),
+            Token::On,
+            Token::Identifier("users".to_string()),
+            Token::LeftParen,
+            Token::Identifier("name".to_string()),
+            Token::RightParen,
+            Token::Semicolon,
+            Token::Drop,
+            Token::Index,
+            Token::Identifier("idx_users_name".to_string()),
+            Token::On,
+            Token::Identifier("users".to_string()),
+            Token::Semicolon,
+        ];
+
+        assert_eq!(lexer.get_tokens(), &expected);
+        Ok(())
+    }
+
+    #[test]
     fn test_delete_statement() -> Result<()> {
         let mut lexer = Lexer::new("DELETE FROM users WHERE id = 1;".to_string());
         lexer.tokenize()?;
@@ -770,6 +800,36 @@ mod parser_tests {
                 );
             }
             _ => panic!("Expected CREATE statement"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_create_and_drop_index() -> Result<()> {
+        let mut lexer = Lexer::new("CREATE INDEX idx_users_name ON users (name);".to_string());
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let statement = parser.parse()?;
+        match statement {
+            Statement::CreateIndex(create_index) => {
+                assert_eq!(create_index.index_name, "idx_users_name");
+                assert_eq!(create_index.table, "users");
+                assert_eq!(create_index.columns, vec!["name"]);
+            }
+            _ => panic!("Expected CREATE INDEX statement"),
+        }
+
+        let mut lexer = Lexer::new("DROP INDEX idx_users_name ON users;".to_string());
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let statement = parser.parse()?;
+        match statement {
+            Statement::DropIndex(drop_index) => {
+                assert_eq!(drop_index.index_name, "idx_users_name");
+                assert_eq!(drop_index.table, "users");
+            }
+            _ => panic!("Expected DROP INDEX statement"),
         }
 
         Ok(())

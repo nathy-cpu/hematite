@@ -49,7 +49,11 @@ pub fn build_executor(program: ExecutionProgram) -> Box<dyn QueryExecutor> {
             access_path,
         } => Box::new(DeleteExecutor::new(statement, access_path)),
         ExecutionProgram::Create { statement } => Box::new(CreateExecutor::new(statement)),
+        ExecutionProgram::CreateIndex { statement } => {
+            Box::new(CreateIndexExecutor::new(statement))
+        }
         ExecutionProgram::Drop { statement } => Box::new(DropExecutor::new(statement)),
+        ExecutionProgram::DropIndex { statement } => Box::new(DropIndexExecutor::new(statement)),
     }
 }
 
@@ -1261,6 +1265,119 @@ impl QueryExecutor for DropExecutor {
         ctx.catalog
             .drop_table(table.id)
             .map_err(|err| HematiteError::ParseError(err.to_string()))?;
+
+        Ok(QueryResult {
+            affected_rows: 0,
+            columns: Vec::new(),
+            rows: Vec::new(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateIndexExecutor {
+    pub statement: CreateIndexStatement,
+}
+
+impl CreateIndexExecutor {
+    pub fn new(statement: CreateIndexStatement) -> Self {
+        Self { statement }
+    }
+}
+
+impl QueryExecutor for CreateIndexExecutor {
+    fn execute(&mut self, ctx: &mut ExecutionContext<'_>) -> Result<QueryResult> {
+        self.statement.validate(&ctx.catalog)?;
+
+        let table = ctx
+            .catalog
+            .get_table_by_name(&self.statement.table)
+            .ok_or_else(|| {
+                HematiteError::ParseError(format!("Table '{}' not found", self.statement.table))
+            })?
+            .clone();
+
+        let column_indices = self
+            .statement
+            .columns
+            .iter()
+            .map(|column_name| {
+                table.get_column_index(column_name).ok_or_else(|| {
+                    HematiteError::ParseError(format!(
+                        "Column '{}' does not exist in table '{}'",
+                        column_name, self.statement.table
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let root_page_id = ctx.engine.create_empty_btree()?;
+        ctx.catalog.add_secondary_index(
+            table.id,
+            crate::catalog::SecondaryIndex {
+                name: self.statement.index_name.clone(),
+                column_indices,
+                root_page_id,
+            },
+        )?;
+
+        let updated_table = ctx
+            .catalog
+            .get_table(table.id)
+            .ok_or_else(|| {
+                HematiteError::InternalError(format!(
+                    "Table '{}' disappeared while creating index '{}'",
+                    self.statement.table, self.statement.index_name
+                ))
+            })?
+            .clone();
+        let rows = ctx.engine.read_rows_with_ids(&self.statement.table)?;
+        ctx.engine
+            .rebuild_secondary_indexes(&updated_table, &rows)?;
+
+        Ok(QueryResult {
+            affected_rows: 0,
+            columns: Vec::new(),
+            rows: Vec::new(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DropIndexExecutor {
+    pub statement: DropIndexStatement,
+}
+
+impl DropIndexExecutor {
+    pub fn new(statement: DropIndexStatement) -> Self {
+        Self { statement }
+    }
+}
+
+impl QueryExecutor for DropIndexExecutor {
+    fn execute(&mut self, ctx: &mut ExecutionContext<'_>) -> Result<QueryResult> {
+        self.statement.validate(&ctx.catalog)?;
+
+        let table = ctx
+            .catalog
+            .get_table_by_name(&self.statement.table)
+            .ok_or_else(|| {
+                HematiteError::ParseError(format!("Table '{}' not found", self.statement.table))
+            })?
+            .clone();
+        let index = table
+            .get_secondary_index(&self.statement.index_name)
+            .ok_or_else(|| {
+                HematiteError::ParseError(format!(
+                    "Index '{}' does not exist on table '{}'",
+                    self.statement.index_name, self.statement.table
+                ))
+            })?
+            .clone();
+
+        ctx.engine.delete_tree(index.root_page_id)?;
+        ctx.catalog
+            .drop_secondary_index(table.id, &self.statement.index_name)?;
 
         Ok(QueryResult {
             affected_rows: 0,

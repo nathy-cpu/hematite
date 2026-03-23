@@ -2,8 +2,8 @@
 
 use crate::parser::ast::AggregateFunction;
 use crate::parser::ast::{
-    CreateStatement, DeleteStatement, DropStatement, InsertStatement, SelectStatement,
-    UpdateStatement,
+    CreateIndexStatement, CreateStatement, DeleteStatement, DropIndexStatement, DropStatement,
+    InsertStatement, SelectStatement, UpdateStatement,
 };
 
 use super::optimizer::SelectOptimizations;
@@ -48,8 +48,14 @@ pub enum ExecutionProgram {
     Create {
         statement: CreateStatement,
     },
+    CreateIndex {
+        statement: CreateIndexStatement,
+    },
     Drop {
         statement: DropStatement,
+    },
+    DropIndex {
+        statement: DropIndexStatement,
     },
 }
 
@@ -60,7 +66,9 @@ pub enum PlanNode {
     Update(UpdatePlanNode),
     Delete(DeletePlanNode),
     Create(CreatePlanNode),
+    CreateIndex(CreateIndexPlanNode),
     Drop(DropPlanNode),
+    DropIndex(DropIndexPlanNode),
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +130,19 @@ pub struct CreatePlanNode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DropPlanNode {
     pub table_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateIndexPlanNode {
+    pub table_name: String,
+    pub index_name: String,
+    pub column_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropIndexPlanNode {
+    pub table_name: String,
+    pub index_name: String,
 }
 
 #[derive(Debug, Clone)]

@@ -129,6 +129,15 @@ impl Schema {
         table.add_secondary_index(index)
     }
 
+    pub fn drop_secondary_index(&mut self, table_id: TableId, index_name: &str) -> Result<()> {
+        let table = self
+            .tables
+            .get_mut(&table_id)
+            .ok_or_else(|| HematiteError::StorageError("Table not found".to_string()))?;
+        let _ = table.drop_secondary_index(index_name)?;
+        Ok(())
+    }
+
     pub fn set_table_primary_key_root_page(
         &mut self,
         table_id: TableId,

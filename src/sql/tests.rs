@@ -403,6 +403,34 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_create_and_drop_index_sql() -> Result<()> {
+        let db = TestDbFile::new("_test_create_and_drop_index_sql");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT, name TEXT);")?;
+        conn.execute("INSERT INTO users (id, email, name) VALUES (1, 'a@example.com', 'Alice');")?;
+        conn.execute("INSERT INTO users (id, email, name) VALUES (2, 'b@example.com', 'Bob');")?;
+
+        conn.execute("CREATE INDEX idx_users_email ON users (email);")?;
+
+        let schema = conn.schema_snapshot()?;
+        let table = schema.get_table_by_name("users").unwrap();
+        let index = table.get_secondary_index("idx_users_email").unwrap();
+        assert_eq!(index.column_indices, vec![1]);
+
+        let result = conn.execute("SELECT id FROM users WHERE email = 'b@example.com';")?;
+        assert_eq!(result.rows, vec![vec![crate::catalog::Value::Integer(2)]]);
+
+        conn.execute("DROP INDEX idx_users_email ON users;")?;
+        let schema = conn.schema_snapshot()?;
+        let table = schema.get_table_by_name("users").unwrap();
+        assert!(table.get_secondary_index("idx_users_email").is_none());
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_where_null_comparisons_filter_out_rows() -> Result<()> {
         let db = TestDbFile::new("_test_where_null_comparisons_filter_out_rows");
         let mut conn = Connection::new(db.path())?;

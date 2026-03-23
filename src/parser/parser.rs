@@ -478,26 +478,69 @@ impl Parser {
 
     fn parse_create(&mut self) -> Result<Statement> {
         self.consume_token(&Token::Create)?;
-        self.consume_token(&Token::Table)?;
+        match self.peek_token()? {
+            Token::Table => {
+                self.consume_token(&Token::Table)?;
 
-        let table = self.parse_identifier()?;
+                let table = self.parse_identifier()?;
 
-        self.consume_token(&Token::LeftParen)?;
+                self.consume_token(&Token::LeftParen)?;
 
-        let columns = self.parse_column_definitions()?;
+                let columns = self.parse_column_definitions()?;
 
-        self.consume_token(&Token::RightParen)?;
-        self.consume_token(&Token::Semicolon)?;
+                self.consume_token(&Token::RightParen)?;
+                self.consume_token(&Token::Semicolon)?;
 
-        Ok(Statement::Create(CreateStatement { table, columns }))
+                Ok(Statement::Create(CreateStatement { table, columns }))
+            }
+            Token::Index => {
+                self.consume_token(&Token::Index)?;
+                let index_name = self.parse_identifier()?;
+                self.consume_token(&Token::On)?;
+                let table = self.parse_identifier()?;
+                self.consume_token(&Token::LeftParen)?;
+                let columns = self.parse_column_list()?;
+                self.consume_token(&Token::RightParen)?;
+                self.consume_token(&Token::Semicolon)?;
+
+                Ok(Statement::CreateIndex(CreateIndexStatement {
+                    index_name,
+                    table,
+                    columns,
+                }))
+            }
+            token => Err(HematiteError::ParseError(format!(
+                "Expected TABLE or INDEX after CREATE, found: {:?}",
+                token
+            ))),
+        }
     }
 
     fn parse_drop(&mut self) -> Result<Statement> {
         self.consume_token(&Token::Drop)?;
-        self.consume_token(&Token::Table)?;
-        let table = self.parse_identifier()?;
-        self.consume_token(&Token::Semicolon)?;
-        Ok(Statement::Drop(DropStatement { table }))
+        match self.peek_token()? {
+            Token::Table => {
+                self.consume_token(&Token::Table)?;
+                let table = self.parse_identifier()?;
+                self.consume_token(&Token::Semicolon)?;
+                Ok(Statement::Drop(DropStatement { table }))
+            }
+            Token::Index => {
+                self.consume_token(&Token::Index)?;
+                let index_name = self.parse_identifier()?;
+                self.consume_token(&Token::On)?;
+                let table = self.parse_identifier()?;
+                self.consume_token(&Token::Semicolon)?;
+                Ok(Statement::DropIndex(DropIndexStatement {
+                    index_name,
+                    table,
+                }))
+            }
+            token => Err(HematiteError::ParseError(format!(
+                "Expected TABLE or INDEX after DROP, found: {:?}",
+                token
+            ))),
+        }
     }
 
     fn parse_identifier(&mut self) -> Result<String> {

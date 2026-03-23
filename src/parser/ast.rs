@@ -14,7 +14,9 @@ pub enum Statement {
     Insert(InsertStatement),
     Delete(DeleteStatement),
     Create(CreateStatement),
+    CreateIndex(CreateIndexStatement),
     Drop(DropStatement),
+    DropIndex(DropIndexStatement),
 }
 
 #[derive(Debug, Clone)]
@@ -141,7 +143,20 @@ pub struct CreateStatement {
 }
 
 #[derive(Debug, Clone)]
+pub struct CreateIndexStatement {
+    pub index_name: String,
+    pub table: String,
+    pub columns: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct DropStatement {
+    pub table: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DropIndexStatement {
+    pub index_name: String,
     pub table: String,
 }
 
@@ -163,7 +178,9 @@ impl Statement {
             Statement::Insert(insert) => insert.validate(catalog),
             Statement::Delete(delete) => delete.validate(catalog),
             Statement::Create(create) => create.validate(catalog),
+            Statement::CreateIndex(create_index) => create_index.validate(catalog),
             Statement::Drop(drop) => drop.validate(catalog),
+            Statement::DropIndex(drop_index) => drop_index.validate(catalog),
         }
     }
 
@@ -172,7 +189,13 @@ impl Statement {
     }
 
     pub fn mutates_schema(&self) -> bool {
-        matches!(self, Statement::Create(_) | Statement::Drop(_))
+        matches!(
+            self,
+            Statement::Create(_)
+                | Statement::CreateIndex(_)
+                | Statement::Drop(_)
+                | Statement::DropIndex(_)
+        )
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -218,7 +241,10 @@ impl Statement {
                     where_clause.visit_parameters(f);
                 }
             }
-            Statement::Create(_) | Statement::Drop(_) => {}
+            Statement::Create(_)
+            | Statement::CreateIndex(_)
+            | Statement::Drop(_)
+            | Statement::DropIndex(_) => {}
         }
     }
 
@@ -278,7 +304,11 @@ impl Statement {
                     .transpose()?,
             })),
             Statement::Create(create) => Ok(Statement::Create(create.clone())),
+            Statement::CreateIndex(create_index) => {
+                Ok(Statement::CreateIndex(create_index.clone()))
+            }
             Statement::Drop(drop) => Ok(Statement::Drop(drop.clone())),
+            Statement::DropIndex(drop_index) => Ok(Statement::DropIndex(drop_index.clone())),
         }
     }
 }
@@ -653,6 +683,63 @@ impl DropStatement {
         catalog.get_table_by_name(&self.table).ok_or_else(|| {
             HematiteError::ParseError(format!("Table '{}' does not exist", self.table))
         })?;
+        Ok(())
+    }
+}
+
+impl CreateIndexStatement {
+    pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
+        let table = catalog.get_table_by_name(&self.table).ok_or_else(|| {
+            HematiteError::ParseError(format!("Table '{}' does not exist", self.table))
+        })?;
+
+        if self.columns.is_empty() {
+            return Err(HematiteError::ParseError(
+                "CREATE INDEX must specify at least one column".to_string(),
+            ));
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        for column in &self.columns {
+            if !seen.insert(column) {
+                return Err(HematiteError::ParseError(format!(
+                    "Duplicate column '{}' in CREATE INDEX",
+                    column
+                )));
+            }
+
+            if table.get_column_by_name(column).is_none() {
+                return Err(HematiteError::ParseError(format!(
+                    "Column '{}' does not exist in table '{}'",
+                    column, self.table
+                )));
+            }
+        }
+
+        if table.get_secondary_index(&self.index_name).is_some() {
+            return Err(HematiteError::ParseError(format!(
+                "Index '{}' already exists on table '{}'",
+                self.index_name, self.table
+            )));
+        }
+
+        Ok(())
+    }
+}
+
+impl DropIndexStatement {
+    pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
+        let table = catalog.get_table_by_name(&self.table).ok_or_else(|| {
+            HematiteError::ParseError(format!("Table '{}' does not exist", self.table))
+        })?;
+
+        if table.get_secondary_index(&self.index_name).is_none() {
+            return Err(HematiteError::ParseError(format!(
+                "Index '{}' does not exist on table '{}'",
+                self.index_name, self.table
+            )));
+        }
+
         Ok(())
     }
 }

@@ -166,6 +166,21 @@ impl Table {
         Ok(())
     }
 
+    pub fn drop_secondary_index(&mut self, name: &str) -> Result<SecondaryIndex> {
+        let index = self
+            .secondary_indexes
+            .iter()
+            .position(|index| index.name == name)
+            .ok_or_else(|| {
+                HematiteError::StorageError(format!(
+                    "Secondary index '{}' does not exist on table '{}'",
+                    name, self.name
+                ))
+            })?;
+
+        Ok(self.secondary_indexes.remove(index))
+    }
+
     pub fn serialize(&self, buffer: &mut Vec<u8>) -> Result<()> {
         // Table ID (4 bytes)
         buffer.extend_from_slice(&self.id.as_u32().to_le_bytes());

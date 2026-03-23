@@ -43,7 +43,9 @@ impl QueryPlanner {
             Statement::Insert(insert) => self.plan_insert(insert),
             Statement::Delete(delete) => self.plan_delete(delete),
             Statement::Create(create) => self.plan_create(create),
+            Statement::CreateIndex(create_index) => self.plan_create_index(create_index),
             Statement::Drop(drop) => self.plan_drop(drop),
+            Statement::DropIndex(drop_index) => self.plan_drop_index(drop_index),
         }?;
 
         let optimizer = QueryOptimizer::new(self.catalog.clone());
@@ -163,6 +165,37 @@ impl QueryPlanner {
             node,
             program: ExecutionProgram::Drop { statement },
             estimated_cost,
+            select_analysis: None,
+            optimizations: None,
+        })
+    }
+
+    fn plan_create_index(&self, statement: CreateIndexStatement) -> Result<QueryPlan> {
+        let node = PlanNode::CreateIndex(CreateIndexPlanNode {
+            table_name: statement.table.clone(),
+            index_name: statement.index_name.clone(),
+            column_count: statement.columns.len(),
+        });
+
+        Ok(QueryPlan {
+            node,
+            program: ExecutionProgram::CreateIndex { statement },
+            estimated_cost: 1.0,
+            select_analysis: None,
+            optimizations: None,
+        })
+    }
+
+    fn plan_drop_index(&self, statement: DropIndexStatement) -> Result<QueryPlan> {
+        let node = PlanNode::DropIndex(DropIndexPlanNode {
+            table_name: statement.table.clone(),
+            index_name: statement.index_name.clone(),
+        });
+
+        Ok(QueryPlan {
+            node,
+            program: ExecutionProgram::DropIndex { statement },
+            estimated_cost: 1.0,
             select_analysis: None,
             optimizations: None,
         })
