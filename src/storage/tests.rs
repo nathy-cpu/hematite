@@ -252,10 +252,21 @@ mod wal_tests {
 
 mod pager_tests {
     use crate::storage::pager::Pager;
+    use crate::storage::wal::{WalFrame, WalRecord};
     use crate::storage::{JournalMode, Page};
     use crate::test_utils::TestDbFile;
+    use std::fs;
     use std::sync::{Arc, Barrier};
     use std::thread;
+
+    fn checksum_for_test(data: &[u8]) -> u32 {
+        let mut hash: u32 = 0x811C9DC5;
+        for byte in data {
+            hash ^= u32::from(*byte);
+            hash = hash.wrapping_mul(0x01000193);
+        }
+        hash
+    }
 
     #[test]
     fn test_pager_write_is_buffered_until_flush() -> crate::error::Result<()> {
@@ -514,6 +525,106 @@ mod pager_tests {
         let err = second_writer.begin_transaction().unwrap_err();
         assert!(err.to_string().contains("locked"));
         first_writer.rollback_transaction()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_reads_committed_wal_page_images() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_reads_committed_wal_page_images");
+        let wal_path = std::path::PathBuf::from(format!("{}.wal", test_db.path()));
+
+        let page_id = {
+            let mut pager = Pager::new(test_db.path(), 8)?;
+            let page_id = pager.allocate_page()?;
+            let mut page = Page::new(page_id);
+            page.data[0] = 10;
+            pager.write_page(page)?;
+            pager.flush()?;
+            pager.set_journal_mode(JournalMode::Wal)?;
+            page_id
+        };
+
+        let mut wal_page = vec![0u8; crate::storage::PAGE_SIZE];
+        wal_page[0] = 20;
+        let wal_record = WalRecord {
+            sequence: 1,
+            file_len: 64 + 3 * crate::storage::PAGE_SIZE as u64,
+            free_pages: vec![],
+            checksums: vec![(page_id, checksum_for_test(&wal_page))],
+            frames: vec![WalFrame {
+                page_id,
+                data: wal_page,
+            }],
+        };
+        fs::write(&wal_path, WalRecord::encode_file(&[wal_record])?)?;
+
+        let mut reader = Pager::new(test_db.path(), 8)?;
+        reader.begin_read()?;
+        let page = reader.read_page(page_id)?;
+        assert_eq!(page.data[0], 20);
+        reader.end_read()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_wal_reader_snapshot_stays_stable_across_newer_commits() -> crate::error::Result<()>
+    {
+        let test_db = TestDbFile::new("_test_pager_wal_reader_snapshot_stability");
+        let wal_path = std::path::PathBuf::from(format!("{}.wal", test_db.path()));
+
+        let page_id = {
+            let mut pager = Pager::new(test_db.path(), 8)?;
+            let page_id = pager.allocate_page()?;
+            let mut page = Page::new(page_id);
+            page.data[0] = 10;
+            pager.write_page(page)?;
+            pager.flush()?;
+            pager.set_journal_mode(JournalMode::Wal)?;
+            page_id
+        };
+
+        let mut first_wal_page = vec![0u8; crate::storage::PAGE_SIZE];
+        first_wal_page[0] = 20;
+        let first_record = WalRecord {
+            sequence: 1,
+            file_len: 64 + 3 * crate::storage::PAGE_SIZE as u64,
+            free_pages: vec![],
+            checksums: vec![(page_id, checksum_for_test(&first_wal_page))],
+            frames: vec![WalFrame {
+                page_id,
+                data: first_wal_page,
+            }],
+        };
+        fs::write(&wal_path, WalRecord::encode_file(&[first_record.clone()])?)?;
+
+        let mut first_reader = Pager::new(test_db.path(), 8)?;
+        first_reader.begin_read()?;
+        assert_eq!(first_reader.read_page(page_id)?.data[0], 20);
+
+        let mut second_wal_page = vec![0u8; crate::storage::PAGE_SIZE];
+        second_wal_page[0] = 30;
+        let second_record = WalRecord {
+            sequence: 2,
+            file_len: 64 + 3 * crate::storage::PAGE_SIZE as u64,
+            free_pages: vec![],
+            checksums: vec![(page_id, checksum_for_test(&second_wal_page))],
+            frames: vec![WalFrame {
+                page_id,
+                data: second_wal_page,
+            }],
+        };
+        fs::write(
+            &wal_path,
+            WalRecord::encode_file(&[first_record, second_record])?,
+        )?;
+
+        let mut second_reader = Pager::new(test_db.path(), 8)?;
+        second_reader.begin_read()?;
+        assert_eq!(second_reader.read_page(page_id)?.data[0], 30);
+        second_reader.end_read()?;
+
+        assert_eq!(first_reader.read_page(page_id)?.data[0], 20);
+        first_reader.end_read()?;
         Ok(())
     }
 

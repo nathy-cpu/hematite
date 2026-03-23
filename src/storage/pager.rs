@@ -28,6 +28,7 @@
 
 use crate::error::Result;
 use crate::storage::journal::{JournalRecord, JournalState, RollbackJournal};
+use crate::storage::wal::WalRecord;
 use crate::storage::{
     buffer_pool::BufferPool, file_manager::FileManager, Page, PageId, PagerIntegrityReport,
     DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID,
@@ -75,9 +76,13 @@ struct PagerTransaction {
     page_records: Vec<JournalRecord>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct WalReadSnapshot {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WalVisibleState {
     visible_sequence: u64,
+    file_len: u64,
+    free_pages: Vec<PageId>,
+    page_checksums: HashMap<PageId, u32>,
+    page_overrides: HashMap<PageId, Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,8 +115,8 @@ pub struct Pager {
     wal_path: Option<PathBuf>,
     database_identity: Option<PathBuf>,
     lock_mode: PagerLockMode,
-    wal_read_snapshot: Option<WalReadSnapshot>,
-    latest_wal_sequence: u64,
+    wal_read_snapshot: Option<WalVisibleState>,
+    latest_wal_state: Option<WalVisibleState>,
     transaction: Option<PagerTransaction>,
     buffer_pool_capacity: usize,
 }
@@ -139,12 +144,13 @@ impl Pager {
             database_identity,
             lock_mode: PagerLockMode::None,
             wal_read_snapshot: None,
-            latest_wal_sequence: 0,
+            latest_wal_state: None,
             transaction: None,
             buffer_pool_capacity: cache_capacity,
         };
         pager.recover_if_needed()?;
         pager.load_persisted_state()?;
+        pager.load_latest_wal_state()?;
         Ok(pager)
     }
 
@@ -162,7 +168,7 @@ impl Pager {
             database_identity: None,
             lock_mode: PagerLockMode::None,
             wal_read_snapshot: None,
-            latest_wal_sequence: 0,
+            latest_wal_state: None,
             transaction: None,
             buffer_pool_capacity: cache_capacity,
         })
@@ -173,8 +179,35 @@ impl Pager {
             return Ok(page.clone());
         }
 
+        if let Some(state) = self
+            .wal_read_snapshot
+            .as_ref()
+            .or(self.latest_wal_state.as_ref())
+        {
+            if let Some(data) = state.page_overrides.get(&page_id) {
+                let page = Page::from_bytes(page_id, data.clone())?;
+                if let Some(expected_checksum) = state.page_checksums.get(&page_id) {
+                    let actual_checksum = Self::calculate_page_checksum(&page);
+                    if actual_checksum != *expected_checksum {
+                        return Err(crate::error::HematiteError::CorruptedData(format!(
+                            "WAL page checksum mismatch for page {}: expected {}, got {}",
+                            page_id, expected_checksum, actual_checksum
+                        )));
+                    }
+                }
+                self.buffer_pool.put(page.clone());
+                return Ok(page);
+            }
+        }
+
         let page = self.file_manager.read_page(page_id)?;
-        if let Some(expected_checksum) = self.page_checksums.get(&page_id) {
+        let expected_checksum = self
+            .wal_read_snapshot
+            .as_ref()
+            .or(self.latest_wal_state.as_ref())
+            .and_then(|state| state.page_checksums.get(&page_id))
+            .or_else(|| self.page_checksums.get(&page_id));
+        if let Some(expected_checksum) = expected_checksum {
             let actual_checksum = Self::calculate_page_checksum(&page);
             if actual_checksum != *expected_checksum {
                 return Err(crate::error::HematiteError::CorruptedData(format!(
@@ -299,9 +332,7 @@ impl Pager {
             return Err(err);
         }
         if self.journal_mode == JournalMode::Wal {
-            self.wal_read_snapshot = Some(WalReadSnapshot {
-                visible_sequence: self.latest_wal_sequence,
-            });
+            self.wal_read_snapshot = Some(self.snapshot_wal_visible_state()?);
         }
         Ok(())
     }
@@ -338,10 +369,15 @@ impl Pager {
         }
         if journal_mode == JournalMode::Rollback {
             self.remove_wal_file()?;
+            self.latest_wal_state = None;
+            self.wal_read_snapshot = None;
         } else {
             self.remove_journal_file()?;
         }
         self.journal_mode = journal_mode;
+        if journal_mode == JournalMode::Wal {
+            self.load_latest_wal_state()?;
+        }
         self.persist_checksums()
     }
 
@@ -471,6 +507,7 @@ impl Pager {
     #[cfg(test)]
     pub(crate) fn wal_snapshot_sequence(&self) -> Option<u64> {
         self.wal_read_snapshot
+            .as_ref()
             .map(|snapshot| snapshot.visible_sequence)
     }
 
@@ -778,7 +815,73 @@ impl Pager {
         }
 
         self.buffer_pool = BufferPool::new(self.buffer_pool_capacity);
-        self.load_persisted_state()
+        self.load_persisted_state()?;
+        self.load_latest_wal_state()
+    }
+
+    fn snapshot_wal_visible_state(&mut self) -> Result<WalVisibleState> {
+        if let Some(state) = &self.latest_wal_state {
+            return Ok(state.clone());
+        }
+
+        Ok(WalVisibleState {
+            visible_sequence: 0,
+            file_len: self.file_manager.file_len()?,
+            free_pages: self.file_manager.free_pages().to_vec(),
+            page_checksums: self.page_checksums.clone(),
+            page_overrides: HashMap::new(),
+        })
+    }
+
+    fn load_latest_wal_state(&mut self) -> Result<()> {
+        if self.journal_mode != JournalMode::Wal {
+            self.latest_wal_state = None;
+            return Ok(());
+        }
+
+        let Some(path) = &self.wal_path else {
+            self.latest_wal_state = None;
+            return Ok(());
+        };
+
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                self.latest_wal_state = None;
+                return Ok(());
+            }
+            Err(err) => return Err(err.into()),
+        };
+
+        let records = WalRecord::decode_file(&bytes)?;
+        let Some(last_record) = records.last() else {
+            self.latest_wal_state = None;
+            return Ok(());
+        };
+
+        let mut page_overrides = HashMap::new();
+        for record in &records {
+            for frame in &record.frames {
+                page_overrides.insert(frame.page_id, frame.data.clone());
+            }
+        }
+
+        let page_checksums = last_record
+            .checksums
+            .iter()
+            .copied()
+            .collect::<HashMap<_, _>>();
+        self.file_manager
+            .set_free_pages(last_record.free_pages.clone());
+        self.page_checksums = page_checksums.clone();
+        self.latest_wal_state = Some(WalVisibleState {
+            visible_sequence: last_record.sequence,
+            file_len: last_record.file_len,
+            free_pages: last_record.free_pages.clone(),
+            page_checksums,
+            page_overrides,
+        });
+        Ok(())
     }
 
     fn persist_checksums(&self) -> Result<()> {
