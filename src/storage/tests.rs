@@ -1271,6 +1271,7 @@ mod mod_tests {
 }
 
 mod randomized_pager_lifecycle_tests {
+    use crate::catalog::{CatalogEngine, Value};
     use crate::test_utils::TestDbFile;
     use std::collections::HashSet;
 
@@ -1364,6 +1365,72 @@ mod randomized_pager_lifecycle_tests {
         let report = storage.validate_integrity()?;
         assert!(report.pager.free_page_count <= retired_pages.len());
         assert!(reuse_hits > 0, "expected at least one reused page id");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_randomized_large_row_reopen_churn_integrity() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_storage_randomized_large_row_reopen_churn");
+        let mut rng = LcgRng::new(0xC0FFEE55AA);
+        let mut live_row_ids = Vec::new();
+
+        {
+            let mut storage = CatalogEngine::new(test_db.path())?;
+            let _ = storage.create_table("docs")?;
+
+            for step in 0..120usize {
+                let do_insert = live_row_ids.is_empty() || rng.chance(2, 3);
+                if do_insert {
+                    let is_large = rng.chance(1, 2);
+                    let payload = if is_large {
+                        format!("L{}-{}", step, "x".repeat(crate::storage::PAGE_SIZE * 3))
+                    } else {
+                        format!("S{}-{}", step, "y".repeat(32))
+                    };
+                    let rowid = storage.insert_into_table("docs", vec![Value::Text(payload)])?;
+                    live_row_ids.push(rowid);
+                } else {
+                    let index = rng.choose_index(live_row_ids.len());
+                    let rowid = live_row_ids.swap_remove(index);
+                    let deleted = storage.delete_from_table_by_rowid("docs", rowid)?;
+                    assert!(deleted, "expected rowid {} to delete", rowid);
+                }
+
+                if step % 8 == 0 {
+                    storage.flush()?;
+                    assert!(storage.validate_integrity().is_ok());
+                }
+
+                if step % 15 == 14 {
+                    storage.flush()?;
+                    drop(storage);
+                    storage = CatalogEngine::new(test_db.path())?;
+
+                    let rows = storage.read_rows_with_ids("docs")?;
+                    let mut actual_row_ids =
+                        rows.into_iter().map(|row| row.row_id).collect::<Vec<_>>();
+                    actual_row_ids.sort_unstable();
+                    live_row_ids.sort_unstable();
+                    assert_eq!(actual_row_ids, live_row_ids);
+                    assert!(storage.validate_integrity().is_ok());
+                }
+            }
+
+            storage.flush()?;
+            assert!(storage.validate_integrity().is_ok());
+        }
+
+        let mut reopened = CatalogEngine::new(test_db.path())?;
+        let mut actual_row_ids = reopened
+            .read_rows_with_ids("docs")?
+            .into_iter()
+            .map(|row| row.row_id)
+            .collect::<Vec<_>>();
+        actual_row_ids.sort_unstable();
+        live_row_ids.sort_unstable();
+        assert_eq!(actual_row_ids, live_row_ids);
+        assert!(reopened.validate_integrity().is_ok());
 
         Ok(())
     }
