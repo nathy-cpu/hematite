@@ -1,7 +1,7 @@
 //! Centralized tests for the sql module
 
 mod connection_tests {
-    use crate::catalog::DataType;
+    use crate::catalog::{DataType, JournalMode};
     use crate::error::Result;
     use crate::sql::connection::*;
     use crate::test_utils::TestDbFile;
@@ -193,6 +193,71 @@ mod connection_tests {
 
         conn1.close()?;
         conn2.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_wal_mode_reader_sees_precommit_snapshot() -> Result<()> {
+        let db = TestDbFile::new("_test_wal_mode_reader_sees_precommit_snapshot");
+        let mut conn1 = Connection::new(db.path())?;
+        conn1.set_journal_mode(JournalMode::Wal)?;
+
+        conn1.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn1.execute("INSERT INTO test (id, name) VALUES (1, 'Alice');")?;
+
+        let mut conn2 = Connection::new(db.path())?;
+        assert_eq!(conn2.journal_mode()?, JournalMode::Wal);
+
+        let mut tx = conn1.begin_transaction()?;
+        tx.execute("INSERT INTO test (id, name) VALUES (2, 'Bob');")?;
+
+        let result = conn2.execute("SELECT * FROM test ORDER BY id;")?;
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0],
+            vec![
+                crate::catalog::Value::Integer(1),
+                crate::catalog::Value::Text("Alice".to_string()),
+            ]
+        );
+
+        tx.commit()?;
+        drop(tx);
+
+        let result = conn2.execute("SELECT * FROM test ORDER BY id;")?;
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(
+            result.rows[1],
+            vec![
+                crate::catalog::Value::Integer(2),
+                crate::catalog::Value::Text("Bob".to_string()),
+            ]
+        );
+
+        conn1.close()?;
+        conn2.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_connection_can_switch_from_wal_back_to_rollback() -> Result<()> {
+        let db = TestDbFile::new("_test_connection_can_switch_from_wal_back_to_rollback");
+        let mut conn = Connection::new(db.path())?;
+        conn.set_journal_mode(JournalMode::Wal)?;
+
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (1, 'Alice');")?;
+        assert_eq!(conn.journal_mode()?, JournalMode::Wal);
+
+        conn.set_journal_mode(JournalMode::Rollback)?;
+        assert_eq!(conn.journal_mode()?, JournalMode::Rollback);
+        conn.close()?;
+
+        let mut reopened = Connection::new(db.path())?;
+        assert_eq!(reopened.journal_mode()?, JournalMode::Rollback);
+        let result = reopened.execute("SELECT * FROM test;")?;
+        assert_eq!(result.rows.len(), 1);
+        reopened.close()?;
         Ok(())
     }
 
