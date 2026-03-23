@@ -141,6 +141,10 @@ impl FileManager {
         Ok(())
     }
 
+    pub fn deallocate_page_deferred(&mut self, page_id: PageId) {
+        self.free_list.push_free_page(page_id);
+    }
+
     pub fn free_pages(&self) -> &[PageId] {
         self.free_list.as_slice()
     }
@@ -194,6 +198,10 @@ impl FileManager {
             .as_slice()
             .len()
             .saturating_sub(self.trailing_free_page_count())
+    }
+
+    pub(crate) fn compact_free_pages(&mut self) -> Result<()> {
+        self.compact_trailing_free_pages()
     }
 
     fn compact_trailing_free_pages(&mut self) -> Result<()> {

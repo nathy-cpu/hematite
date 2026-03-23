@@ -21,7 +21,7 @@
 //!
 //! M10 contract:
 //! - The pager owns the in-process multiple-reader/one-writer lock state for a database file.
-//! - Shared locks protect read scopes; exclusive locks protect write transactions.
+//! - Shared locks protect read scopes; write locks protect write transactions.
 //! - Commit and rollback both release the writer lock only after journal/file state is finalized.
 //! - The future WAL path replaces rollback-journal exclusivity during writes, but keeps the pager
 //!   as the single owner of lock acquisition, visibility boundaries, and recovery coordination.
@@ -241,7 +241,12 @@ impl Pager {
         self.buffer_pool.remove(page_id);
         self.dirty_pages.remove(&page_id);
         self.page_checksums.remove(&page_id);
-        self.file_manager.deallocate_page(page_id)
+        if self.journal_mode == JournalMode::Wal {
+            self.file_manager.deallocate_page_deferred(page_id);
+            Ok(())
+        } else {
+            self.file_manager.deallocate_page(page_id)
+        }
     }
 
     pub fn flush(&mut self) -> Result<()> {
@@ -437,10 +442,28 @@ impl Pager {
     }
 
     pub fn validate_integrity(&mut self) -> Result<PagerIntegrityReport> {
-        let max_page_id_exclusive = self.file_manager.next_page_id();
+        let (max_page_id_exclusive, logical_free_pages, logical_checksums, wal_overrides) =
+            if let Some(state) = &self.latest_wal_state {
+                let page_regions =
+                    state.file_len.saturating_sub(64) / crate::storage::PAGE_SIZE as u64;
+                (
+                    (page_regions as u32).max(2),
+                    state.free_pages.clone(),
+                    state.page_checksums.clone(),
+                    state.page_overrides.clone(),
+                )
+            } else {
+                (
+                    self.file_manager.next_page_id(),
+                    self.file_manager.free_pages().to_vec(),
+                    self.page_checksums.clone(),
+                    HashMap::new(),
+                )
+            };
+
         let mut free_pages = HashSet::new();
 
-        for &page_id in self.file_manager.free_pages() {
+        for &page_id in &logical_free_pages {
             if page_id == DB_HEADER_PAGE_ID || page_id == STORAGE_METADATA_PAGE_ID {
                 return Err(crate::error::HematiteError::CorruptedData(format!(
                     "Reserved page {} cannot be marked free",
@@ -463,18 +486,15 @@ impl Pager {
             }
         }
 
-        if self.page_checksums.contains_key(&STORAGE_METADATA_PAGE_ID) {
+        if logical_checksums.contains_key(&STORAGE_METADATA_PAGE_ID) {
             return Err(crate::error::HematiteError::CorruptedData(format!(
                 "Storage metadata page {} must not have pager checksum metadata",
                 STORAGE_METADATA_PAGE_ID
             )));
         }
 
-        let checksummed_pages = self
-            .page_checksums
-            .iter()
-            .map(|(page_id, checksum)| (*page_id, *checksum))
-            .collect::<Vec<_>>();
+        let checksummed_pages = logical_checksums.into_iter().collect::<Vec<_>>();
+        let checksummed_page_count = checksummed_pages.len();
 
         let mut verified_checksum_pages = 0usize;
         for (page_id, expected_checksum) in checksummed_pages {
@@ -499,6 +519,8 @@ impl Pager {
                         page_id
                     ))
                 })?
+            } else if let Some(data) = wal_overrides.get(&page_id) {
+                Page::from_bytes(page_id, data.clone())?
             } else {
                 self.file_manager.read_page(page_id)?
             };
@@ -519,7 +541,7 @@ impl Pager {
             free_page_count: free_pages.len(),
             fragmented_free_page_count: self.file_manager.fragmented_free_page_count(),
             trailing_free_page_count: self.file_manager.trailing_free_page_count(),
-            checksummed_page_count: self.page_checksums.len(),
+            checksummed_page_count,
             verified_checksum_pages,
         })
     }
@@ -1188,6 +1210,7 @@ impl Pager {
 
         self.file_manager.restore_file_len(state.file_len)?;
         self.file_manager.set_free_pages(state.free_pages.clone());
+        self.file_manager.compact_free_pages()?;
         for (page_id, data) in &state.page_overrides {
             let page = Page::from_bytes(*page_id, data.clone())?;
             self.file_manager.write_page(&page)?;

@@ -805,6 +805,82 @@ mod pager_tests {
     }
 
     #[test]
+    fn test_pager_wal_reader_keeps_trailing_page_visible_until_checkpoint(
+    ) -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_wal_reader_keeps_trailing_page_visible");
+
+        let trailing_page_id = {
+            let mut pager = Pager::new(test_db.path(), 8)?;
+            let first_page_id = pager.allocate_page()?;
+            let trailing_page_id = pager.allocate_page()?;
+
+            let mut first_page = Page::new(first_page_id);
+            first_page.data[0] = 11;
+            pager.write_page(first_page)?;
+
+            let mut trailing_page = Page::new(trailing_page_id);
+            trailing_page.data[0] = 33;
+            pager.write_page(trailing_page)?;
+            pager.flush()?;
+            pager.set_journal_mode(JournalMode::Wal)?;
+            trailing_page_id
+        };
+
+        let mut reader = Pager::new(test_db.path(), 8)?;
+        reader.begin_read()?;
+        assert_eq!(reader.read_page(trailing_page_id)?.data[0], 33);
+
+        let mut writer = Pager::new(test_db.path(), 8)?;
+        writer.begin_transaction()?;
+        writer.deallocate_page(trailing_page_id)?;
+        writer.commit_transaction()?;
+
+        assert_eq!(reader.read_page(trailing_page_id)?.data[0], 33);
+        reader.end_read()?;
+
+        writer.checkpoint_wal()?;
+        let mut reopened = Pager::new(test_db.path(), 8)?;
+        assert!(reopened.read_page(trailing_page_id).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_validate_integrity_uses_wal_visible_state() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_validate_integrity_uses_wal_visible_state");
+        let wal_path = std::path::PathBuf::from(format!("{}.wal", test_db.path()));
+
+        let page_id = {
+            let mut pager = Pager::new(test_db.path(), 8)?;
+            let page_id = pager.allocate_page()?;
+            let mut page = Page::new(page_id);
+            page.data[0] = 10;
+            pager.write_page(page)?;
+            pager.flush()?;
+            pager.set_journal_mode(JournalMode::Wal)?;
+            page_id
+        };
+
+        let mut wal_page = vec![0u8; crate::storage::PAGE_SIZE];
+        wal_page[0] = 99;
+        let wal_record = WalRecord {
+            sequence: 1,
+            file_len: 64 + 3 * crate::storage::PAGE_SIZE as u64,
+            free_pages: vec![],
+            checksums: vec![(page_id, checksum_for_test(&wal_page))],
+            frames: vec![WalFrame {
+                page_id,
+                data: wal_page,
+            }],
+        };
+        fs::write(&wal_path, WalRecord::encode_file(&[wal_record])?)?;
+
+        let mut pager = Pager::new(test_db.path(), 8)?;
+        let report = pager.validate_integrity()?;
+        assert_eq!(report.verified_checksum_pages, 1);
+        Ok(())
+    }
+
+    #[test]
     fn test_pager_allows_concurrent_readers_and_blocks_writer_until_they_exit(
     ) -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_pager_concurrent_readers_block_writer");
