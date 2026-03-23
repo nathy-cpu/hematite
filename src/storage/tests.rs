@@ -999,8 +999,9 @@ mod pager_tests {
 }
 
 mod mod_tests {
+    use crate::btree::node::BTreeNode;
     use crate::btree::value_store::StoredValueLayout;
-    use crate::btree::{BTreeKey, BTreeNode, NodeType};
+    use crate::btree::{BTreeKey, NodeType};
     use crate::catalog::{CatalogEngine, Value};
     use crate::storage::overflow::collect_overflow_page_ids;
     use crate::storage::{Page, Pager, PAGE_SIZE, STORAGE_METADATA_PAGE_ID};

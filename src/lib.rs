@@ -14,7 +14,6 @@ pub mod storage;
 #[cfg(test)]
 pub mod test_utils;
 
-pub use btree::tree::BTreeManager;
 pub use catalog::{
     Catalog, CatalogEngine, CatalogIntegrityReport, CatalogStorageStats, Column, DataType, Schema,
     StoredRow, Table, TableCursor, Value,

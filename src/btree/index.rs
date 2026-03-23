@@ -1,9 +1,10 @@
 //! B-tree index implementation
 
 use crate::btree::cursor::BTreeCursor;
+use crate::btree::node::BTreeNode;
 use crate::btree::node::SearchResult;
 use crate::btree::KeyValueCodec;
-use crate::btree::{BTreeKey, BTreeNode, BTreeValue, NodeType};
+use crate::btree::{BTreeKey, BTreeValue, NodeType};
 use crate::error::{HematiteError, Result};
 use crate::storage::{Page, PageId, Pager};
 use std::sync::{Arc, Mutex};

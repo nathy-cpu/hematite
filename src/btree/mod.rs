@@ -1,17 +1,23 @@
-//! B-tree module with comprehensive testing
+//! Generic B-tree module over opaque byte keys and values.
+//!
+//! Extraction boundary:
+//! - Higher layers should build on [`ByteTreeStore`], [`ByteTree`], [`ByteTreeCursor`], and
+//!   [`KeyValueCodec`].
+//! - Node/page/value-store mechanics remain internal so the tree layout can evolve without
+//!   leaking implementation detail into relational code.
+//! - This is the generic data-structure half of the future fork point.
 
 pub mod bytes;
 pub mod codec;
-pub mod cursor;
-pub mod index;
-pub mod node;
-pub mod tree;
-pub mod value_store;
+pub(crate) mod cursor;
+pub(crate) mod index;
+pub(crate) mod node;
+pub(crate) mod tree;
+pub(crate) mod value_store;
 
 pub use bytes::{ByteTree, ByteTreeCursor, ByteTreeStore};
 pub use codec::{KeyValueCodec, RawBytesCodec};
-pub use index::{BTreeIndex, TreeMutation};
-pub use node::BTreeNode;
+pub use tree::TreeSpaceStats;
 
 pub const BTREE_ORDER: usize = 100; // Maximum children per node
 

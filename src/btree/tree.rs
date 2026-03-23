@@ -6,8 +6,10 @@
 //! - Tree lifecycle operations here (create/open/delete/validate) are the control plane that
 //!   higher storage layers should use instead of direct page manipulation.
 
+use crate::btree::index::BTreeIndex;
+use crate::btree::node::BTreeNode;
 use crate::btree::value_store::StoredValueLayout;
-use crate::btree::{BTreeIndex, BTreeNode, NodeType};
+use crate::btree::NodeType;
 use crate::error::Result;
 use crate::storage::overflow::collect_overflow_page_ids;
 use crate::storage::{

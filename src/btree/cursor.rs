@@ -1,6 +1,7 @@
 //! B-tree cursor for sequential navigation
 
-use crate::btree::{BTreeKey, BTreeNode, BTreeValue, NodeType};
+use crate::btree::node::BTreeNode;
+use crate::btree::{BTreeKey, BTreeValue, NodeType};
 use crate::error::{HematiteError, Result};
 use crate::storage::{PageId, Pager};
 use std::sync::{Arc, Mutex};

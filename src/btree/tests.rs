@@ -1142,9 +1142,10 @@ mod value_store_tests {
 }
 
 mod tree_tests {
+    use crate::btree::node::BTreeNode;
     use crate::btree::node::{BTREE_PAGE_FORMAT_VERSION, BTREE_PAGE_HEADER_SIZE};
     use crate::btree::tree::BTreeManager;
-    use crate::btree::{BTreeKey, BTreeNode, BTreeValue, NodeType};
+    use crate::btree::{BTreeKey, BTreeValue, NodeType};
     use crate::error::Result;
     use crate::storage::{Page, Pager, PAGE_SIZE};
 
