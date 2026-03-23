@@ -629,6 +629,63 @@ mod pager_tests {
     }
 
     #[test]
+    fn test_pager_wal_commit_persists_committed_state_for_reopen() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_wal_commit_persists");
+
+        let page_id = {
+            let mut pager = Pager::new(test_db.path(), 8)?;
+            let page_id = pager.allocate_page()?;
+            let mut page = Page::new(page_id);
+            page.data[0] = 10;
+            pager.write_page(page)?;
+            pager.flush()?;
+            pager.set_journal_mode(JournalMode::Wal)?;
+
+            pager.begin_transaction()?;
+            let mut updated = pager.read_page(page_id)?;
+            updated.data[0] = 99;
+            pager.write_page(updated)?;
+            pager.commit_transaction()?;
+            page_id
+        };
+
+        let mut reopened = Pager::new(test_db.path(), 8)?;
+        reopened.begin_read()?;
+        let page = reopened.read_page(page_id)?;
+        assert_eq!(page.data[0], 99);
+        reopened.end_read()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_wal_recovery_discards_uncommitted_transaction() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_wal_recovery_discards_uncommitted");
+
+        let page_id = {
+            let mut pager = Pager::new(test_db.path(), 8)?;
+            let page_id = pager.allocate_page()?;
+            let mut page = Page::new(page_id);
+            page.data[0] = 10;
+            pager.write_page(page)?;
+            pager.flush()?;
+            pager.set_journal_mode(JournalMode::Wal)?;
+
+            pager.begin_transaction()?;
+            let mut updated = pager.read_page(page_id)?;
+            updated.data[0] = 77;
+            pager.write_page(updated)?;
+            page_id
+        };
+
+        let mut reopened = Pager::new(test_db.path(), 8)?;
+        reopened.begin_read()?;
+        let page = reopened.read_page(page_id)?;
+        assert_eq!(page.data[0], 10);
+        reopened.end_read()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_pager_allows_concurrent_readers_and_blocks_writer_until_they_exit(
     ) -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_pager_concurrent_readers_block_writer");

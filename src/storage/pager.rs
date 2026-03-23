@@ -299,8 +299,12 @@ impl Pager {
             ));
         }
 
-        self.flush()?;
-        self.persist_journal(JournalState::Committed)?;
+        if self.journal_mode == JournalMode::Wal {
+            self.commit_wal_transaction()?;
+        } else {
+            self.flush()?;
+            self.persist_journal(JournalState::Committed)?;
+        }
         self.remove_journal_file()?;
         self.transaction = None;
         self.release_write_lock()?;
@@ -1044,6 +1048,85 @@ impl Pager {
 
         self.page_checksums = journal.original_checksums.iter().copied().collect();
         self.persist_checksums()
+    }
+
+    fn commit_wal_transaction(&mut self) -> Result<()> {
+        let next_sequence = self
+            .latest_wal_state
+            .as_ref()
+            .map(|state| state.visible_sequence + 1)
+            .unwrap_or(1);
+
+        let mut page_ids = self.dirty_pages.iter().copied().collect::<Vec<_>>();
+        page_ids.sort_unstable();
+
+        let mut frames = Vec::with_capacity(page_ids.len());
+        for page_id in page_ids {
+            let page = self.buffer_pool.get(page_id).cloned().ok_or_else(|| {
+                crate::error::HematiteError::StorageError(format!(
+                    "Dirty page {} missing from buffer pool",
+                    page_id
+                ))
+            })?;
+            frames.push(crate::storage::wal::WalFrame {
+                page_id,
+                data: page.data,
+            });
+        }
+
+        let mut checksums = self
+            .page_checksums
+            .iter()
+            .map(|(page_id, checksum)| (*page_id, *checksum))
+            .collect::<Vec<_>>();
+        checksums.sort_by_key(|(page_id, _)| *page_id);
+
+        let record = WalRecord {
+            sequence: next_sequence,
+            file_len: self.file_manager.file_len()?,
+            free_pages: self.file_manager.free_pages().to_vec(),
+            checksums,
+            frames,
+        };
+
+        self.append_wal_record(record)?;
+        self.dirty_pages.clear();
+        self.persist_checksums()
+    }
+
+    fn append_wal_record(&mut self, record: WalRecord) -> Result<()> {
+        if let Some(path) = &self.wal_path {
+            let existing = match fs::read(path) {
+                Ok(bytes) => WalRecord::decode_file(&bytes)?,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                Err(err) => return Err(err.into()),
+            };
+            let mut records = existing;
+            records.push(record);
+            let bytes = WalRecord::encode_file(&records)?;
+            let mut file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(path)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+        } else {
+            self.latest_wal_state = Some(WalVisibleState {
+                visible_sequence: record.sequence,
+                file_len: record.file_len,
+                free_pages: record.free_pages.clone(),
+                page_checksums: record.checksums.iter().copied().collect(),
+                page_overrides: record
+                    .frames
+                    .iter()
+                    .map(|frame| (frame.page_id, frame.data.clone()))
+                    .collect(),
+            });
+            return Ok(());
+        }
+
+        self.load_latest_wal_state()
     }
 }
 
