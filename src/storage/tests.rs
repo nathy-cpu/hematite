@@ -261,6 +261,7 @@ mod pager_tests {
 }
 
 mod mod_tests {
+    use crate::btree::value_store::StoredValueLayout;
     use crate::btree::{BTreeKey, BTreeNode, NodeType};
     use crate::catalog::{CatalogEngine, Value};
     use crate::storage::{Page, Pager, PAGE_SIZE, STORAGE_METADATA_PAGE_ID};
@@ -436,6 +437,35 @@ mod mod_tests {
 
         let err = storage.validate_integrity().unwrap_err();
         assert!(err.to_string().contains("is both live and free"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_storage_integrity_rejects_live_overflow_free_page_overlap() -> crate::error::Result<()>
+    {
+        let test_db = TestDbFile::new("_test_storage_integrity_overflow_overlap");
+        let mut storage = crate::catalog::CatalogEngine::new(test_db.path())?;
+
+        let root_page_id = storage.create_table("docs")?;
+        let _ = storage.insert_into_table("docs", vec![Value::Text("x".repeat(PAGE_SIZE * 3))])?;
+
+        let root_page = storage.read_page(root_page_id)?;
+        let root_node = BTreeNode::from_page(root_page)?;
+        let layout = StoredValueLayout::decode(root_node.values[0].as_bytes())?;
+        assert_ne!(layout.overflow_first_page, crate::storage::INVALID_PAGE_ID);
+
+        storage.deallocate_page(layout.overflow_first_page)?;
+
+        let err = storage.validate_integrity().unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("Overflow page"));
+        assert!(
+            message.contains("both live and free")
+                || message.contains("also on the freelist")
+                || message.contains("magic mismatch"),
+            "unexpected overlap message: {message}"
+        );
 
         Ok(())
     }
