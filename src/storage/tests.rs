@@ -485,6 +485,39 @@ mod pager_tests {
     }
 
     #[test]
+    fn test_pager_wal_mode_allows_reader_while_writer_is_active() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_wal_reader_while_writer");
+        let mut writer = Pager::new(test_db.path(), 8)?;
+        let mut reader = Pager::new(test_db.path(), 8)?;
+
+        writer.set_journal_mode(JournalMode::Wal)?;
+        reader.set_journal_mode(JournalMode::Wal)?;
+
+        writer.begin_transaction()?;
+        reader.begin_read()?;
+        assert_eq!(reader.wal_snapshot_sequence(), Some(0));
+        reader.end_read()?;
+        writer.rollback_transaction()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_wal_mode_blocks_second_writer() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_wal_second_writer");
+        let mut first_writer = Pager::new(test_db.path(), 8)?;
+        let mut second_writer = Pager::new(test_db.path(), 8)?;
+
+        first_writer.set_journal_mode(JournalMode::Wal)?;
+        second_writer.set_journal_mode(JournalMode::Wal)?;
+
+        first_writer.begin_transaction()?;
+        let err = second_writer.begin_transaction().unwrap_err();
+        assert!(err.to_string().contains("locked"));
+        first_writer.rollback_transaction()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_pager_allows_concurrent_readers_and_blocks_writer_until_they_exit(
     ) -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_pager_concurrent_readers_block_writer");

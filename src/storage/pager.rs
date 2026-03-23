@@ -76,10 +76,15 @@ struct PagerTransaction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WalReadSnapshot {
+    visible_sequence: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PagerLockMode {
     None,
     Shared { depth: usize },
-    Exclusive,
+    Write,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -105,6 +110,8 @@ pub struct Pager {
     wal_path: Option<PathBuf>,
     database_identity: Option<PathBuf>,
     lock_mode: PagerLockMode,
+    wal_read_snapshot: Option<WalReadSnapshot>,
+    latest_wal_sequence: u64,
     transaction: Option<PagerTransaction>,
     buffer_pool_capacity: usize,
 }
@@ -131,6 +138,8 @@ impl Pager {
             wal_path,
             database_identity,
             lock_mode: PagerLockMode::None,
+            wal_read_snapshot: None,
+            latest_wal_sequence: 0,
             transaction: None,
             buffer_pool_capacity: cache_capacity,
         };
@@ -152,6 +161,8 @@ impl Pager {
             wal_path: None,
             database_identity: None,
             lock_mode: PagerLockMode::None,
+            wal_read_snapshot: None,
+            latest_wal_sequence: 0,
             transaction: None,
             buffer_pool_capacity: cache_capacity,
         })
@@ -235,7 +246,7 @@ impl Pager {
             ));
         }
 
-        self.acquire_exclusive_lock()?;
+        self.acquire_write_lock()?;
 
         let transaction = PagerTransaction {
             original_file_len: self.file_manager.file_len()?,
@@ -259,7 +270,7 @@ impl Pager {
         self.persist_journal(JournalState::Committed)?;
         self.remove_journal_file()?;
         self.transaction = None;
-        self.release_exclusive_lock()?;
+        self.release_write_lock()?;
         Ok(())
     }
 
@@ -273,7 +284,7 @@ impl Pager {
         self.rollback_from_active_transaction()?;
         self.remove_journal_file()?;
         self.transaction = None;
-        self.release_exclusive_lock()?;
+        self.release_write_lock()?;
         Ok(())
     }
 
@@ -287,10 +298,16 @@ impl Pager {
             let _ = self.release_shared_lock();
             return Err(err);
         }
+        if self.journal_mode == JournalMode::Wal {
+            self.wal_read_snapshot = Some(WalReadSnapshot {
+                visible_sequence: self.latest_wal_sequence,
+            });
+        }
         Ok(())
     }
 
     pub fn end_read(&mut self) -> Result<()> {
+        self.wal_read_snapshot = None;
         self.release_shared_lock()
     }
 
@@ -451,6 +468,12 @@ impl Pager {
         self.dirty_pages.len()
     }
 
+    #[cfg(test)]
+    pub(crate) fn wal_snapshot_sequence(&self) -> Option<u64> {
+        self.wal_read_snapshot
+            .map(|snapshot| snapshot.visible_sequence)
+    }
+
     fn checksum_store_path(db_path: &Path) -> PathBuf {
         let mut file_name = db_path
             .file_name()
@@ -469,7 +492,8 @@ impl Pager {
         }
 
         match self.lock_mode {
-            PagerLockMode::Exclusive => return Ok(()),
+            PagerLockMode::Write if self.journal_mode == JournalMode::Wal => {}
+            PagerLockMode::Write => return Ok(()),
             PagerLockMode::Shared { depth } => {
                 self.lock_mode = PagerLockMode::Shared { depth: depth + 1 };
                 return Ok(());
@@ -480,7 +504,7 @@ impl Pager {
         let path = self.database_identity.as_ref().unwrap().clone();
         let mut registry = lock_registry().lock().unwrap();
         let entry = registry.entry(path).or_default();
-        if entry.writer {
+        if entry.writer && self.journal_mode == JournalMode::Rollback {
             return Err(crate::error::HematiteError::StorageError(
                 "database is locked for writing".to_string(),
             ));
@@ -496,7 +520,7 @@ impl Pager {
         };
 
         match self.lock_mode {
-            PagerLockMode::Exclusive | PagerLockMode::None => return Ok(()),
+            PagerLockMode::Write | PagerLockMode::None => return Ok(()),
             PagerLockMode::Shared { depth } if depth > 1 => {
                 self.lock_mode = PagerLockMode::Shared { depth: depth - 1 };
                 return Ok(());
@@ -515,39 +539,39 @@ impl Pager {
         Ok(())
     }
 
-    fn acquire_exclusive_lock(&mut self) -> Result<()> {
+    fn acquire_write_lock(&mut self) -> Result<()> {
         if self.database_identity.is_none() {
-            self.lock_mode = PagerLockMode::Exclusive;
+            self.lock_mode = PagerLockMode::Write;
             return Ok(());
         }
-        if self.lock_mode == PagerLockMode::Exclusive {
+        if self.lock_mode == PagerLockMode::Write {
             return Ok(());
         }
         if matches!(self.lock_mode, PagerLockMode::Shared { .. }) {
             return Err(crate::error::HematiteError::StorageError(
-                "cannot upgrade a shared database lock to an exclusive lock".to_string(),
+                "cannot upgrade a shared database lock to a write lock".to_string(),
             ));
         }
 
         let path = self.database_identity.as_ref().unwrap().clone();
         let mut registry = lock_registry().lock().unwrap();
         let entry = registry.entry(path).or_default();
-        if entry.writer || entry.readers > 0 {
+        if entry.writer || (self.journal_mode == JournalMode::Rollback && entry.readers > 0) {
             return Err(crate::error::HematiteError::StorageError(
                 "database is locked".to_string(),
             ));
         }
         entry.writer = true;
-        self.lock_mode = PagerLockMode::Exclusive;
+        self.lock_mode = PagerLockMode::Write;
         Ok(())
     }
 
-    fn release_exclusive_lock(&mut self) -> Result<()> {
+    fn release_write_lock(&mut self) -> Result<()> {
         let Some(path) = self.database_identity.as_ref() else {
             self.lock_mode = PagerLockMode::None;
             return Ok(());
         };
-        if self.lock_mode != PagerLockMode::Exclusive {
+        if self.lock_mode != PagerLockMode::Write {
             return Ok(());
         }
 
@@ -923,8 +947,8 @@ impl Pager {
 impl Drop for Pager {
     fn drop(&mut self) {
         match self.lock_mode {
-            PagerLockMode::Exclusive => {
-                let _ = self.release_exclusive_lock();
+            PagerLockMode::Write => {
+                let _ = self.release_write_lock();
             }
             PagerLockMode::Shared { .. } => {
                 let _ = self.release_shared_lock();
