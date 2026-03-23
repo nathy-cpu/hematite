@@ -40,6 +40,32 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JournalMode {
+    Rollback,
+    Wal,
+}
+
+impl JournalMode {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "rollback" => Ok(Self::Rollback),
+            "wal" => Ok(Self::Wal),
+            _ => Err(crate::error::HematiteError::StorageError(format!(
+                "Unsupported pager journal mode '{}'",
+                value
+            ))),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Rollback => "rollback",
+            Self::Wal => "wal",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PagerTransaction {
     original_file_len: u64,
@@ -73,8 +99,10 @@ pub struct Pager {
     buffer_pool: BufferPool,
     dirty_pages: HashSet<PageId>,
     page_checksums: HashMap<PageId, u32>,
+    journal_mode: JournalMode,
     checksum_store_path: Option<PathBuf>,
     journal_path: Option<PathBuf>,
+    wal_path: Option<PathBuf>,
     database_identity: Option<PathBuf>,
     lock_mode: PagerLockMode,
     transaction: Option<PagerTransaction>,
@@ -87,6 +115,7 @@ impl Pager {
     pub fn new<P: AsRef<Path>>(path: P, cache_capacity: usize) -> Result<Self> {
         let checksum_store_path = Some(Self::checksum_store_path(path.as_ref()));
         let journal_path = Some(Self::journal_path(path.as_ref()));
+        let wal_path = Some(Self::wal_path(path.as_ref()));
         let file_manager = FileManager::new(&path)?;
         let database_identity = fs::canonicalize(path.as_ref())
             .ok()
@@ -96,8 +125,10 @@ impl Pager {
             buffer_pool: BufferPool::new(cache_capacity),
             dirty_pages: HashSet::new(),
             page_checksums: HashMap::new(),
+            journal_mode: JournalMode::Rollback,
             checksum_store_path,
             journal_path,
+            wal_path,
             database_identity,
             lock_mode: PagerLockMode::None,
             transaction: None,
@@ -115,8 +146,10 @@ impl Pager {
             buffer_pool: BufferPool::new(cache_capacity),
             dirty_pages: HashSet::new(),
             page_checksums: HashMap::new(),
+            journal_mode: JournalMode::Rollback,
             checksum_store_path: None,
             journal_path: None,
+            wal_path: None,
             database_identity: None,
             lock_mode: PagerLockMode::None,
             transaction: None,
@@ -274,6 +307,25 @@ impl Pager {
             .iter()
             .map(|(page_id, checksum)| (*page_id, *checksum))
             .collect()
+    }
+
+    pub fn journal_mode(&self) -> JournalMode {
+        self.journal_mode
+    }
+
+    pub fn set_journal_mode(&mut self, journal_mode: JournalMode) -> Result<()> {
+        if self.transaction.is_some() {
+            return Err(crate::error::HematiteError::StorageError(
+                "Cannot change pager journal mode during an active transaction".to_string(),
+            ));
+        }
+        if journal_mode == JournalMode::Rollback {
+            self.remove_wal_file()?;
+        } else {
+            self.remove_journal_file()?;
+        }
+        self.journal_mode = journal_mode;
+        self.persist_checksums()
     }
 
     pub fn replace_checksums(&mut self, checksums: HashMap<PageId, u32>) {
@@ -522,6 +574,18 @@ impl Pager {
         }
     }
 
+    fn wal_path(db_path: &Path) -> PathBuf {
+        let mut file_name = db_path
+            .file_name()
+            .map(OsString::from)
+            .unwrap_or_else(|| OsString::from("hematite.db"));
+        file_name.push(".wal");
+        match db_path.parent() {
+            Some(parent) => parent.join(file_name),
+            None => PathBuf::from(file_name),
+        }
+    }
+
     fn load_persisted_state(&mut self) -> Result<()> {
         let Some(path) = &self.checksum_store_path else {
             return Ok(());
@@ -562,13 +626,24 @@ impl Pager {
             )));
         }
 
-        let expected_free_count = lines
-            .next()
-            .ok_or_else(|| {
+        let mut next_line = lines.next().ok_or_else(|| {
+            crate::error::HematiteError::StorageError(
+                "Missing pager freelist metadata count".to_string(),
+            )
+        })?;
+
+        if let Some(mode) = next_line.strip_prefix("journal_mode=") {
+            self.journal_mode = JournalMode::parse(mode)?;
+            next_line = lines.next().ok_or_else(|| {
                 crate::error::HematiteError::StorageError(
                     "Missing pager freelist metadata count".to_string(),
                 )
-            })?
+            })?;
+        } else {
+            self.journal_mode = JournalMode::Rollback;
+        }
+
+        let expected_free_count = next_line
             .strip_prefix("free_count=")
             .ok_or_else(|| {
                 crate::error::HematiteError::StorageError(
@@ -696,6 +771,7 @@ impl Pager {
 
         let mut lines = vec![
             format!("version={}", Self::CHECKSUM_METADATA_VERSION),
+            format!("journal_mode={}", self.journal_mode.as_str()),
             format!("free_count={}", self.file_manager.free_pages().len()),
         ];
         for page_id in self.file_manager.free_pages() {
@@ -765,6 +841,17 @@ impl Pager {
 
     fn remove_journal_file(&self) -> Result<()> {
         let Some(path) = &self.journal_path else {
+            return Ok(());
+        };
+        match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    fn remove_wal_file(&self) -> Result<()> {
+        let Some(path) = &self.wal_path else {
             return Ok(());
         };
         match fs::remove_file(path) {

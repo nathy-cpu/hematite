@@ -17,6 +17,7 @@ impl TestDbFile {
         let path = PathBuf::from(format!("{}_{}.db", prefix, nanos));
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(Self::pager_checksum_path_for(&path));
+        let _ = fs::remove_file(Self::wal_path_for(&path));
         Self { path }
     }
 
@@ -43,12 +44,29 @@ impl TestDbFile {
             None => PathBuf::from(file_name),
         }
     }
+
+    fn wal_path(&self) -> PathBuf {
+        Self::wal_path_for(&self.path)
+    }
+
+    fn wal_path_for(path: &Path) -> PathBuf {
+        let mut file_name = path
+            .file_name()
+            .map(OsString::from)
+            .unwrap_or_else(|| OsString::from("hematite.db"));
+        file_name.push(".wal");
+        match path.parent() {
+            Some(parent) => parent.join(file_name),
+            None => PathBuf::from(file_name),
+        }
+    }
 }
 
 impl Drop for TestDbFile {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
         let _ = fs::remove_file(self.pager_checksum_path());
+        let _ = fs::remove_file(self.wal_path());
     }
 }
 

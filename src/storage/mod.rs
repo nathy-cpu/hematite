@@ -9,7 +9,7 @@ pub mod pager;
 pub mod types;
 pub mod wal;
 
-pub use pager::Pager;
+pub use pager::{JournalMode, Pager};
 pub use types::{
     Page, PageId, PagerIntegrityReport, DB_HEADER_PAGE_ID, INVALID_PAGE_ID, PAGE_SIZE,
     STORAGE_METADATA_PAGE_ID,

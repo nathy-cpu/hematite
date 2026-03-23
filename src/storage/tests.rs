@@ -252,7 +252,7 @@ mod wal_tests {
 
 mod pager_tests {
     use crate::storage::pager::Pager;
-    use crate::storage::Page;
+    use crate::storage::{JournalMode, Page};
     use crate::test_utils::TestDbFile;
     use std::sync::{Arc, Barrier};
     use std::thread;
@@ -449,6 +449,38 @@ mod pager_tests {
         let restored = second_writer.read_page(page_id)?;
         assert_eq!(restored.data[0], 10);
         second_writer.rollback_transaction()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_journal_mode_persists_across_reopen() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_journal_mode_persists");
+
+        let mut pager = Pager::new(test_db.path(), 8)?;
+        assert_eq!(pager.journal_mode(), JournalMode::Rollback);
+        pager.set_journal_mode(JournalMode::Wal)?;
+        drop(pager);
+
+        let reopened = Pager::new(test_db.path(), 8)?;
+        assert_eq!(reopened.journal_mode(), JournalMode::Wal);
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_invalid_journal_mode_metadata_is_rejected() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_invalid_journal_mode_metadata");
+        let mut pager = Pager::new(test_db.path(), 8)?;
+        pager.flush()?;
+        drop(pager);
+
+        let checksum_path = std::path::PathBuf::from(format!("{}.pager_checksums", test_db.path()));
+        std::fs::write(
+            &checksum_path,
+            "version=1\njournal_mode=bogus\nfree_count=0\nchecksum_count=0",
+        )?;
+
+        let err = Pager::new(test_db.path(), 8).unwrap_err();
+        assert!(err.to_string().contains("Unsupported pager journal mode"));
         Ok(())
     }
 
