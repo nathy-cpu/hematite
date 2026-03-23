@@ -8,11 +8,24 @@
 
 use crate::error::{HematiteError, Result};
 use crate::storage::{PageId, PAGE_SIZE};
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WalFrame {
     pub page_id: PageId,
     pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VisibleWalState {
+    pub visible_sequence: u64,
+    pub file_len: u64,
+    pub free_pages: Vec<PageId>,
+    pub page_checksums: HashMap<PageId, u32>,
+    pub page_overrides: HashMap<PageId, Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,16 +40,13 @@ pub struct WalRecord {
 impl WalRecord {
     const MAGIC: [u8; 4] = *b"HTWL";
     const VERSION: u32 = 1;
+    const FILE_HEADER_LEN: usize = 8;
 
     pub fn encode_file(records: &[Self]) -> Result<Vec<u8>> {
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(&Self::MAGIC);
-        bytes.extend_from_slice(&Self::VERSION.to_le_bytes());
+        bytes.extend_from_slice(&Self::file_header());
         for record in records {
-            let payload = record.encode_payload()?;
-            bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
-            bytes.extend_from_slice(&checksum_bytes(&payload).to_le_bytes());
-            bytes.extend_from_slice(&payload);
+            bytes.extend_from_slice(&record.encode_entry()?);
         }
         Ok(bytes)
     }
@@ -46,7 +56,7 @@ impl WalRecord {
             return Ok(Vec::new());
         }
 
-        if bytes.len() < 8 {
+        if bytes.len() < Self::FILE_HEADER_LEN {
             return Err(HematiteError::StorageError(
                 "WAL file is truncated".to_string(),
             ));
@@ -66,7 +76,7 @@ impl WalRecord {
             )));
         }
 
-        let mut offset = 8usize;
+        let mut offset = Self::FILE_HEADER_LEN;
         let mut records = Vec::new();
         while offset < bytes.len() {
             if offset + 12 > bytes.len() {
@@ -108,7 +118,98 @@ impl WalRecord {
             offset += payload_len;
         }
 
+        Self::validate_records(&records)?;
         Ok(records)
+    }
+
+    pub fn append_to_path<P: AsRef<Path>>(path: P, record: &Self) -> Result<()> {
+        let path = path.as_ref();
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .read(true)
+            .open(path)?;
+        let metadata = file.metadata()?;
+        if metadata.len() == 0 {
+            file.write_all(&Self::file_header())?;
+        } else if metadata.len() < Self::FILE_HEADER_LEN as u64 {
+            return Err(HematiteError::StorageError(
+                "Existing WAL file has a truncated header".to_string(),
+            ));
+        }
+        file.write_all(&record.encode_entry()?)?;
+        file.sync_all()?;
+        Ok(())
+    }
+
+    pub fn load_visible_state_from_path<P: AsRef<Path>>(
+        path: P,
+    ) -> Result<Option<VisibleWalState>> {
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err.into()),
+        };
+
+        let records = Self::decode_file(&bytes)?;
+        Ok(Self::visible_state_from_records(&records))
+    }
+
+    pub fn visible_state_from_records(records: &[Self]) -> Option<VisibleWalState> {
+        let last_record = records.last()?;
+        let mut page_overrides = HashMap::new();
+        for record in records {
+            for frame in &record.frames {
+                page_overrides.insert(frame.page_id, frame.data.clone());
+            }
+        }
+
+        Some(VisibleWalState {
+            visible_sequence: last_record.sequence,
+            file_len: last_record.file_len,
+            free_pages: last_record.free_pages.clone(),
+            page_checksums: last_record.checksums.iter().copied().collect(),
+            page_overrides,
+        })
+    }
+
+    fn validate_records(records: &[Self]) -> Result<()> {
+        let mut previous_sequence = 0u64;
+        for record in records {
+            if record.sequence <= previous_sequence {
+                return Err(HematiteError::StorageError(
+                    "WAL sequences must increase strictly".to_string(),
+                ));
+            }
+            previous_sequence = record.sequence;
+
+            let mut seen_frames = HashSet::new();
+            for frame in &record.frames {
+                if !seen_frames.insert(frame.page_id) {
+                    return Err(HematiteError::StorageError(format!(
+                        "WAL record {} contains duplicate frame for page {}",
+                        record.sequence, frame.page_id
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn file_header() -> [u8; Self::FILE_HEADER_LEN] {
+        let mut header = [0u8; Self::FILE_HEADER_LEN];
+        header[..4].copy_from_slice(&Self::MAGIC);
+        header[4..].copy_from_slice(&Self::VERSION.to_le_bytes());
+        header
+    }
+
+    fn encode_entry(&self) -> Result<Vec<u8>> {
+        let payload = self.encode_payload()?;
+        let mut bytes = Vec::with_capacity(12 + payload.len());
+        bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&checksum_bytes(&payload).to_le_bytes());
+        bytes.extend_from_slice(&payload);
+        Ok(bytes)
     }
 
     fn encode_payload(&self) -> Result<Vec<u8>> {

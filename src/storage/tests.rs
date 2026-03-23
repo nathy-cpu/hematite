@@ -704,6 +704,48 @@ mod pager_tests {
     }
 
     #[test]
+    fn test_pager_wal_checkpoint_allows_reader_on_latest_sequence() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_wal_checkpoint_allows_latest_reader");
+        let wal_path = std::path::PathBuf::from(format!("{}.wal", test_db.path()));
+
+        let page_id = {
+            let mut pager = Pager::new(test_db.path(), 8)?;
+            let page_id = pager.allocate_page()?;
+            let mut page = Page::new(page_id);
+            page.data[0] = 10;
+            pager.write_page(page)?;
+            pager.flush()?;
+            pager.set_journal_mode(JournalMode::Wal)?;
+            page_id
+        };
+
+        let mut stale_reader = Pager::new(test_db.path(), 8)?;
+        stale_reader.begin_read()?;
+
+        let mut writer = Pager::new(test_db.path(), 8)?;
+        writer.begin_transaction()?;
+        let mut updated = writer.read_page(page_id)?;
+        updated.data[0] = 44;
+        writer.write_page(updated)?;
+        writer.commit_transaction()?;
+        assert!(wal_path.exists());
+
+        stale_reader.end_read()?;
+
+        let mut reader = Pager::new(test_db.path(), 8)?;
+        reader.begin_read()?;
+        assert_eq!(reader.wal_snapshot_sequence(), Some(1));
+        assert_eq!(reader.read_page(page_id)?.data[0], 44);
+
+        writer.checkpoint_wal()?;
+        assert!(!wal_path.exists());
+
+        assert_eq!(reader.read_page(page_id)?.data[0], 44);
+        reader.end_read()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_pager_switches_from_wal_to_rollback_after_checkpointing() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_pager_switches_wal_to_rollback");
         let wal_path = std::path::PathBuf::from(format!("{}.wal", test_db.path()));
@@ -800,6 +842,36 @@ mod pager_tests {
         reopened.begin_read()?;
         let page = reopened.read_page(page_id)?;
         assert_eq!(page.data[0], 10);
+        reopened.end_read()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_wal_transaction_does_not_create_rollback_journal() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_wal_transaction_does_not_create_journal");
+        let journal_path = std::path::PathBuf::from(format!("{}.journal", test_db.path()));
+
+        let mut pager = Pager::new(test_db.path(), 8)?;
+        let page_id = pager.allocate_page()?;
+        let mut page = Page::new(page_id);
+        page.data[0] = 7;
+        pager.write_page(page)?;
+        pager.flush()?;
+        pager.set_journal_mode(JournalMode::Wal)?;
+
+        pager.begin_transaction()?;
+        let mut updated = pager.read_page(page_id)?;
+        updated.data[0] = 99;
+        pager.write_page(updated)?;
+        assert!(!journal_path.exists());
+
+        pager.rollback_transaction()?;
+        assert!(!journal_path.exists());
+
+        let mut reopened = Pager::new(test_db.path(), 8)?;
+        reopened.begin_read()?;
+        let restored = reopened.read_page(page_id)?;
+        assert_eq!(restored.data[0], 7);
         reopened.end_read()?;
         Ok(())
     }

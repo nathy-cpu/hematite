@@ -28,7 +28,7 @@
 
 use crate::error::Result;
 use crate::storage::journal::{JournalRecord, JournalState, RollbackJournal};
-use crate::storage::wal::WalRecord;
+use crate::storage::wal::{VisibleWalState, WalFrame, WalRecord};
 use crate::storage::{
     buffer_pool::BufferPool, file_manager::FileManager, Page, PageId, PagerIntegrityReport,
     DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID,
@@ -72,17 +72,10 @@ struct PagerTransaction {
     original_file_len: u64,
     original_free_pages: Vec<PageId>,
     original_checksums: HashMap<PageId, u32>,
+    wal_next_page_id: PageId,
+    wal_free_pages: Vec<PageId>,
     journaled_pages: HashSet<PageId>,
     page_records: Vec<JournalRecord>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct WalVisibleState {
-    visible_sequence: u64,
-    file_len: u64,
-    free_pages: Vec<PageId>,
-    page_checksums: HashMap<PageId, u32>,
-    page_overrides: HashMap<PageId, Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,10 +85,23 @@ enum PagerLockMode {
     Write,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct LockRegistryEntry {
     readers: usize,
     writer: bool,
+    wal_reader_sequences: HashMap<u64, usize>,
+}
+
+fn compact_transaction_free_pages(transaction: &mut PagerTransaction) {
+    transaction.wal_free_pages.sort_unstable();
+    transaction.wal_free_pages.dedup();
+    while let Some(&last_page_id) = transaction.wal_free_pages.last() {
+        if last_page_id + 1 != transaction.wal_next_page_id {
+            break;
+        }
+        transaction.wal_free_pages.pop();
+        transaction.wal_next_page_id = transaction.wal_next_page_id.saturating_sub(1);
+    }
 }
 
 fn lock_registry() -> &'static Mutex<HashMap<PathBuf, LockRegistryEntry>> {
@@ -115,8 +121,8 @@ pub struct Pager {
     wal_path: Option<PathBuf>,
     database_identity: Option<PathBuf>,
     lock_mode: PagerLockMode,
-    wal_read_snapshot: Option<WalVisibleState>,
-    latest_wal_state: Option<WalVisibleState>,
+    wal_read_snapshot: Option<VisibleWalState>,
+    latest_wal_state: Option<VisibleWalState>,
     transaction: Option<PagerTransaction>,
     buffer_pool_capacity: usize,
 }
@@ -179,6 +185,18 @@ impl Pager {
             return Ok(page.clone());
         }
 
+        if self.journal_mode == JournalMode::Wal {
+            if let Some(transaction) = &self.transaction {
+                if page_id >= self.file_manager.next_page_id()
+                    && page_id < transaction.wal_next_page_id
+                {
+                    let page = Page::new(page_id);
+                    self.buffer_pool.put(page.clone());
+                    return Ok(page);
+                }
+            }
+        }
+
         if let Some(state) = self
             .wal_read_snapshot
             .as_ref()
@@ -233,6 +251,16 @@ impl Pager {
     }
 
     pub fn allocate_page(&mut self) -> Result<PageId> {
+        if self.journal_mode == JournalMode::Wal {
+            if let Some(transaction) = &mut self.transaction {
+                if let Some(page_id) = transaction.wal_free_pages.pop() {
+                    return Ok(page_id);
+                }
+                let page_id = transaction.wal_next_page_id;
+                transaction.wal_next_page_id += 1;
+                return Ok(page_id);
+            }
+        }
         self.file_manager.allocate_page()
     }
 
@@ -242,6 +270,13 @@ impl Pager {
         self.dirty_pages.remove(&page_id);
         self.page_checksums.remove(&page_id);
         if self.journal_mode == JournalMode::Wal {
+            if let Some(transaction) = &mut self.transaction {
+                if !transaction.wal_free_pages.contains(&page_id) {
+                    transaction.wal_free_pages.push(page_id);
+                }
+                compact_transaction_free_pages(transaction);
+                return Ok(());
+            }
             self.file_manager.deallocate_page_deferred(page_id);
             Ok(())
         } else {
@@ -250,6 +285,12 @@ impl Pager {
     }
 
     pub fn flush(&mut self) -> Result<()> {
+        if self.journal_mode == JournalMode::Wal && self.transaction.is_some() {
+            return Err(crate::error::HematiteError::StorageError(
+                "Cannot flush pager pages directly during an active WAL transaction".to_string(),
+            ));
+        }
+
         let dirty_ids = self.dirty_pages.iter().copied().collect::<Vec<_>>();
         let mut metadata_page_dirty = false;
 
@@ -290,11 +331,16 @@ impl Pager {
             original_file_len: self.file_manager.file_len()?,
             original_free_pages: self.file_manager.free_pages().to_vec(),
             original_checksums: self.page_checksums.clone(),
+            wal_next_page_id: self.file_manager.next_page_id(),
+            wal_free_pages: self.file_manager.free_pages().to_vec(),
             journaled_pages: HashSet::new(),
             page_records: Vec::new(),
         };
         self.transaction = Some(transaction);
-        self.persist_journal(JournalState::Active)
+        if self.journal_mode == JournalMode::Rollback {
+            self.persist_journal(JournalState::Active)?;
+        }
+        Ok(())
     }
 
     pub fn commit_transaction(&mut self) -> Result<()> {
@@ -326,8 +372,12 @@ impl Pager {
             ));
         }
 
-        self.rollback_from_active_transaction()?;
-        self.remove_journal_file()?;
+        if self.journal_mode == JournalMode::Wal {
+            self.rollback_wal_transaction()?;
+        } else {
+            self.rollback_from_active_transaction()?;
+            self.remove_journal_file()?;
+        }
         self.transaction = None;
         self.release_write_lock()?;
         Ok(())
@@ -338,18 +388,32 @@ impl Pager {
     }
 
     pub fn begin_read(&mut self) -> Result<()> {
+        let previous_lock_mode = self.lock_mode;
         self.acquire_shared_lock()?;
         if let Err(err) = self.refresh_persisted_view() {
             let _ = self.release_shared_lock();
             return Err(err);
         }
         if self.journal_mode == JournalMode::Wal {
-            self.wal_read_snapshot = Some(self.snapshot_wal_visible_state()?);
+            if matches!(previous_lock_mode, PagerLockMode::Write) {
+                return Ok(());
+            }
+            if matches!(previous_lock_mode, PagerLockMode::Shared { .. }) {
+                return Ok(());
+            }
+            let snapshot = self.snapshot_wal_visible_state()?;
+            self.register_wal_reader_sequence(snapshot.visible_sequence)?;
+            self.wal_read_snapshot = Some(snapshot);
         }
         Ok(())
     }
 
     pub fn end_read(&mut self) -> Result<()> {
+        if matches!(self.lock_mode, PagerLockMode::Shared { depth: 1 }) {
+            if let Some(snapshot) = &self.wal_read_snapshot {
+                self.unregister_wal_reader_sequence(snapshot.visible_sequence)?;
+            }
+        }
         self.wal_read_snapshot = None;
         self.release_shared_lock()
     }
@@ -586,7 +650,7 @@ impl Pager {
         }
 
         match self.lock_mode {
-            PagerLockMode::Write if self.journal_mode == JournalMode::Wal => {}
+            PagerLockMode::Write if self.journal_mode == JournalMode::Wal => return Ok(()),
             PagerLockMode::Write => return Ok(()),
             PagerLockMode::Shared { depth } => {
                 self.lock_mode = PagerLockMode::Shared { depth: depth + 1 };
@@ -630,6 +694,35 @@ impl Pager {
             }
         }
         self.lock_mode = PagerLockMode::None;
+        Ok(())
+    }
+
+    fn register_wal_reader_sequence(&self, sequence: u64) -> Result<()> {
+        let Some(path) = self.database_identity.as_ref() else {
+            return Ok(());
+        };
+        let mut registry = lock_registry().lock().unwrap();
+        let entry = registry.entry(path.clone()).or_default();
+        *entry.wal_reader_sequences.entry(sequence).or_insert(0) += 1;
+        Ok(())
+    }
+
+    fn unregister_wal_reader_sequence(&self, sequence: u64) -> Result<()> {
+        let Some(path) = self.database_identity.as_ref() else {
+            return Ok(());
+        };
+        let mut registry = lock_registry().lock().unwrap();
+        if let Some(entry) = registry.get_mut(path) {
+            if let Some(count) = entry.wal_reader_sequences.get_mut(&sequence) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    entry.wal_reader_sequences.remove(&sequence);
+                }
+            }
+            if entry.readers == 0 && !entry.writer && entry.wal_reader_sequences.is_empty() {
+                registry.remove(path);
+            }
+        }
         Ok(())
     }
 
@@ -876,12 +969,12 @@ impl Pager {
         self.load_latest_wal_state()
     }
 
-    fn snapshot_wal_visible_state(&mut self) -> Result<WalVisibleState> {
+    fn snapshot_wal_visible_state(&mut self) -> Result<VisibleWalState> {
         if let Some(state) = &self.latest_wal_state {
             return Ok(state.clone());
         }
 
-        Ok(WalVisibleState {
+        Ok(VisibleWalState {
             visible_sequence: 0,
             file_len: self.file_manager.file_len()?,
             free_pages: self.file_manager.free_pages().to_vec(),
@@ -901,43 +994,7 @@ impl Pager {
             return Ok(());
         };
 
-        let bytes = match fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                self.latest_wal_state = None;
-                return Ok(());
-            }
-            Err(err) => return Err(err.into()),
-        };
-
-        let records = WalRecord::decode_file(&bytes)?;
-        let Some(last_record) = records.last() else {
-            self.latest_wal_state = None;
-            return Ok(());
-        };
-
-        let mut page_overrides = HashMap::new();
-        for record in &records {
-            for frame in &record.frames {
-                page_overrides.insert(frame.page_id, frame.data.clone());
-            }
-        }
-
-        let page_checksums = last_record
-            .checksums
-            .iter()
-            .copied()
-            .collect::<HashMap<_, _>>();
-        self.file_manager
-            .set_free_pages(last_record.free_pages.clone());
-        self.page_checksums = page_checksums.clone();
-        self.latest_wal_state = Some(WalVisibleState {
-            visible_sequence: last_record.sequence,
-            file_len: last_record.file_len,
-            free_pages: last_record.free_pages.clone(),
-            page_checksums,
-            page_overrides,
-        });
+        self.latest_wal_state = WalRecord::load_visible_state_from_path(path)?;
         Ok(())
     }
 
@@ -971,6 +1028,10 @@ impl Pager {
     }
 
     fn snapshot_original_page(&mut self, page_id: PageId) -> Result<()> {
+        if self.journal_mode == JournalMode::Wal {
+            return Ok(());
+        }
+
         let Some(transaction) = &mut self.transaction else {
             return Ok(());
         };
@@ -1103,7 +1164,20 @@ impl Pager {
         self.persist_checksums()
     }
 
+    fn rollback_wal_transaction(&mut self) -> Result<()> {
+        let transaction = self.transaction.clone().ok_or_else(|| {
+            crate::error::HematiteError::StorageError("Pager transaction is not active".to_string())
+        })?;
+        self.buffer_pool = BufferPool::new(self.buffer_pool_capacity);
+        self.dirty_pages.clear();
+        self.page_checksums = transaction.original_checksums;
+        self.load_latest_wal_state()
+    }
+
     fn commit_wal_transaction(&mut self) -> Result<()> {
+        let transaction = self.transaction.as_ref().ok_or_else(|| {
+            crate::error::HematiteError::StorageError("Pager transaction is not active".to_string())
+        })?;
         let next_sequence = self
             .latest_wal_state
             .as_ref()
@@ -1121,7 +1195,7 @@ impl Pager {
                     page_id
                 ))
             })?;
-            frames.push(crate::storage::wal::WalFrame {
+            frames.push(WalFrame {
                 page_id,
                 data: page.data,
             });
@@ -1136,8 +1210,8 @@ impl Pager {
 
         let record = WalRecord {
             sequence: next_sequence,
-            file_len: self.file_manager.file_len()?,
-            free_pages: self.file_manager.free_pages().to_vec(),
+            file_len: 64 + transaction.wal_next_page_id as u64 * crate::storage::PAGE_SIZE as u64,
+            free_pages: transaction.wal_free_pages.clone(),
             checksums,
             frames,
         };
@@ -1149,23 +1223,9 @@ impl Pager {
 
     fn append_wal_record(&mut self, record: WalRecord) -> Result<()> {
         if let Some(path) = &self.wal_path {
-            let existing = match fs::read(path) {
-                Ok(bytes) => WalRecord::decode_file(&bytes)?,
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-                Err(err) => return Err(err.into()),
-            };
-            let mut records = existing;
-            records.push(record);
-            let bytes = WalRecord::encode_file(&records)?;
-            let mut file = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(path)?;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
+            WalRecord::append_to_path(path, &record)?;
         } else {
-            self.latest_wal_state = Some(WalVisibleState {
+            self.latest_wal_state = Some(VisibleWalState {
                 visible_sequence: record.sequence,
                 file_len: record.file_len,
                 free_pages: record.free_pages.clone(),
@@ -1193,13 +1253,21 @@ impl Pager {
             return Ok(true);
         };
 
-        if entry.readers > 0 {
-            return Ok(false);
-        }
         if entry.writer && self.lock_mode != PagerLockMode::Write {
             return Ok(false);
         }
-        Ok(true)
+        if entry.readers == 0 {
+            return Ok(true);
+        }
+        let latest_sequence = self
+            .latest_wal_state
+            .as_ref()
+            .map(|state| state.visible_sequence)
+            .unwrap_or(0);
+        Ok(entry
+            .wal_reader_sequences
+            .keys()
+            .all(|sequence| *sequence == latest_sequence))
     }
 
     fn checkpoint_wal_unlocked(&mut self) -> Result<()> {
