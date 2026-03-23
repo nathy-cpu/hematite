@@ -1,4 +1,22 @@
-//! SQL query parser for converting tokens to AST
+//! SQL parser.
+//!
+//! The parser consumes lexer tokens and builds the AST used by planning.
+//!
+//! ```text
+//! tokens -> statement kind
+//!              |
+//!              +--> CREATE / DROP
+//!              +--> INSERT / UPDATE / DELETE
+//!              +--> SELECT
+//!                        |
+//!                        +--> projection
+//!                        +--> source table
+//!                        +--> WHERE expression tree
+//!                        +--> ORDER BY / LIMIT
+//! ```
+//!
+//! Hematite keeps the grammar strict and explicit so later stages stay small and do not need to
+//! repair ambiguous SQL.
 
 use crate::error::{HematiteError, Result};
 use crate::parser::ast::*;
@@ -67,7 +85,6 @@ impl Parser {
             None
         };
 
-        // Expect semicolon
         self.consume_token(&Token::Semicolon)?;
 
         Ok(Statement::Select(SelectStatement {
@@ -88,7 +105,6 @@ impl Parser {
             self.consume_token(&Token::Asterisk)?;
             columns.push(SelectItem::Wildcard);
         } else {
-            // Parse column list
             loop {
                 let token = self.peek_token()?;
                 match token {
@@ -332,8 +348,7 @@ impl Parser {
                 )))
             }
             Token::NullLiteral | Token::Null => {
-                // `NULL` is used both as a constraint keyword and as a literal in expressions.
-                // We accept either token as a NULL literal here.
+                // `NULL` appears both as a constraint keyword and as an expression literal.
                 if token == Token::NullLiteral {
                     self.consume_token(&Token::NullLiteral)?;
                 } else {
@@ -585,7 +600,6 @@ impl Parser {
         let mut primary_key = false;
         let mut default_value = None;
 
-        // Parse constraints
         while let Ok(token) = self.peek_token() {
             match token {
                 Token::Not => {

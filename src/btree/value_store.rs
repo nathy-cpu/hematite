@@ -1,4 +1,21 @@
-//! B-tree-owned stored-value format for inline and overflow-backed payloads.
+//! B-tree-owned representation of inline and overflow-backed values.
+//!
+//! B-tree leaf values are not stored directly as arbitrary bytes. They are wrapped in a small
+//! format that records:
+//! - the total logical payload length;
+//! - the portion stored locally in the leaf cell;
+//! - the first overflow page, if any.
+//!
+//! Layout:
+//!
+//! ```text
+//! +------+----------------+----------------------+-------------------+
+//! | tag  | total_len (4)  | local payload bytes  | overflow page id  |
+//! +------+----------------+----------------------+-------------------+
+//! ```
+//!
+//! This allows the generic tree layer to support large values internally without forcing higher
+//! layers to manage overflow pages themselves.
 
 use crate::error::{HematiteError, Result};
 use crate::storage::overflow::{free_overflow_chain, read_overflow_chain, write_overflow_chain};

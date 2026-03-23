@@ -1,10 +1,25 @@
-//! B-tree cursor for sequential navigation
-
+//! Stack-based B-tree cursor for ordered scans and point seeks.
+//!
+//! The cursor keeps the search path from the root to the current leaf as a stack of frames:
+//!
+//! ```text
+//! root frame
+//!   -> internal frame
+//!      -> internal frame
+//!         -> leaf frame (current key/value index)
+//! ```
+//!
+//! That stack makes `next` and `prev` work without parent pointers in the on-disk format:
+//! - move within the current leaf if possible;
+//! - otherwise walk upward until a sibling subtree is available;
+//! - descend again to the leftmost or rightmost leaf of that subtree.
+//!
+//! The cursor reads nodes through the shared pager but exposes only logical key/value positions.
 use crate::btree::node::BTreeNode;
 use crate::btree::{BTreeKey, BTreeValue, NodeType};
 use crate::error::{HematiteError, Result};
 use crate::storage::{PageId, Pager};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 #[derive(Debug)]
 pub struct BTreeCursor {
@@ -34,47 +49,11 @@ impl BTreeCursor {
         Ok(cursor)
     }
 
-    // pub fn seek_to_first_original(&mut self, root_page_id: PageId) -> Result<()> {
-    //     self.stack.clear();
-    //     self.at_end = false;
-    //
-    //     let mut current_page_id = root_page_id;
-    //
-    //     loop {
-    //         let page = self.storage.lock().unwrap().read_page(current_page_id)?;
-    //         let node = BTreeNode::from_page(page)?;
-    //
-    //         let node_type = node.node_type;
-    //         let frame = CursorFrame {
-    //             page_id: current_page_id,
-    //             node: node.clone(),
-    //             index: 0,
-    //         };
-    //
-    //         self.stack.push(frame);
-    //
-    //         match node_type {
-    //             NodeType::Leaf => {
-    //                 // Check if the leaf has any keys
-    //                 if node.keys.is_empty() {
-    //                     // Empty tree - mark as at end
-    //                     self.at_end = true;
-    //                 }
-    //                 break;
-    //             }
-    //             NodeType::Internal => {
-    //                 if node.children.is_empty() {
-    //                     return Err(HematiteError::CorruptedData(
-    //                         "Internal node has no children".to_string(),
-    //                     ));
-    //                 }
-    //                 current_page_id = node.children[0];
-    //             }
-    //         }
-    //     }
-    //
-    //     Ok(())
-    // }
+    fn lock_storage(&self) -> Result<MutexGuard<'_, Pager>> {
+        self.storage.lock().map_err(|_| {
+            HematiteError::InternalError("B-tree cursor storage mutex is poisoned".to_string())
+        })
+    }
 
     pub fn is_valid(&self) -> bool {
         !self.at_end && !self.stack.is_empty()
@@ -85,7 +64,7 @@ impl BTreeCursor {
             return None;
         }
 
-        let frame = self.stack.last().unwrap();
+        let frame = self.stack.last()?;
         if frame.index >= frame.node.keys.len() {
             return None;
         }
@@ -98,7 +77,7 @@ impl BTreeCursor {
             return None;
         }
 
-        let frame = self.stack.last().unwrap();
+        let frame = self.stack.last()?;
         if frame.index >= frame.node.values.len() {
             return None;
         }
@@ -111,7 +90,7 @@ impl BTreeCursor {
             return None;
         }
 
-        let frame = self.stack.last().unwrap();
+        let frame = self.stack.last()?;
         if frame.index >= frame.node.keys.len() || frame.index >= frame.node.values.len() {
             return None;
         }
@@ -180,7 +159,7 @@ impl BTreeCursor {
         let mut current_page_id = page_id;
 
         loop {
-            let page = self.storage.lock().unwrap().read_page(current_page_id)?;
+            let page = self.lock_storage()?.read_page(current_page_id)?;
             let node = BTreeNode::from_page(page)?;
 
             match node.node_type {
@@ -206,7 +185,12 @@ impl BTreeCursor {
                         }
                     }
 
-                    self.stack.last_mut().unwrap().index = left;
+                    let frame = self.stack.last_mut().ok_or_else(|| {
+                        HematiteError::InternalError(
+                            "B-tree cursor lost its leaf frame during seek".to_string(),
+                        )
+                    })?;
+                    frame.index = left;
                     if left >= node.keys.len() {
                         self.at_end = true;
                     }
@@ -243,7 +227,9 @@ impl BTreeCursor {
             ));
         }
 
-        let current_frame = self.stack.last_mut().unwrap();
+        let current_frame = self.stack.last_mut().ok_or_else(|| {
+            HematiteError::InternalError("B-tree cursor has no current frame".to_string())
+        })?;
         current_frame.index += 1;
 
         // Check if we're still within the current leaf
@@ -268,7 +254,9 @@ impl BTreeCursor {
             ));
         }
 
-        let current_frame = self.stack.last_mut().unwrap();
+        let current_frame = self.stack.last_mut().ok_or_else(|| {
+            HematiteError::InternalError("B-tree cursor has no current frame".to_string())
+        })?;
 
         // Check if we can move within current leaf
         if current_frame.index > 0 {
@@ -289,7 +277,9 @@ impl BTreeCursor {
                 return Ok(());
             }
 
-            let parent_frame = self.stack.last_mut().unwrap();
+            let parent_frame = self.stack.last_mut().ok_or_else(|| {
+                HematiteError::InternalError("B-tree cursor lost its parent frame".to_string())
+            })?;
             if parent_frame.index < parent_frame.node.children.len() - 1 {
                 // Move to next child in parent
                 parent_frame.index += 1;
@@ -315,7 +305,9 @@ impl BTreeCursor {
                 return Ok(());
             }
 
-            let parent_frame = self.stack.last_mut().unwrap();
+            let parent_frame = self.stack.last_mut().ok_or_else(|| {
+                HematiteError::InternalError("B-tree cursor lost its parent frame".to_string())
+            })?;
             if parent_frame.index > 0 {
                 // Move to previous child in parent
                 parent_frame.index -= 1;
@@ -353,7 +345,7 @@ impl BTreeCursor {
         let mut current_page_id = page_id;
 
         loop {
-            let page = self.storage.lock().unwrap().read_page(current_page_id)?;
+            let page = self.lock_storage()?.read_page(current_page_id)?;
             let node = BTreeNode::from_page(page)?;
 
             let frame = CursorFrame {
@@ -386,7 +378,7 @@ impl BTreeCursor {
         let mut current_page_id = page_id;
 
         loop {
-            let page = self.storage.lock().unwrap().read_page(current_page_id)?;
+            let page = self.lock_storage()?.read_page(current_page_id)?;
             let node = BTreeNode::from_page(page)?;
 
             let index = if node.node_type == NodeType::Leaf {

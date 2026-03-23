@@ -1,28 +1,38 @@
-//! B-tree operations and management.
+//! Generic tree lifecycle, validation, and space-accounting helpers.
 //!
-//! M0 storage contract notes:
-//! - Each logical tree is identified by a root page id.
-//! - The long-term storage model is a forest of trees (catalog + per-table + per-index).
-//! - Tree lifecycle operations here (create/open/delete/validate) are the control plane that
-//!   higher storage layers should use instead of direct page manipulation.
+//! This file contains the control-plane operations around a tree root:
+//! - create a fresh root page;
+//! - open an existing root and validate it is a B-tree page;
+//! - delete or reset an entire tree;
+//! - walk all pages in a tree for validation or space accounting.
+//!
+//! It complements `index.rs`:
+//! - `index.rs` mutates a single tree;
+//! - `tree.rs` manages a tree as a durable object rooted at one page id.
 
 use crate::btree::index::BTreeIndex;
 use crate::btree::node::BTreeNode;
 use crate::btree::value_store::StoredValueLayout;
 use crate::btree::NodeType;
-use crate::error::Result;
+use crate::error::{HematiteError, Result};
 use crate::storage::overflow::collect_overflow_page_ids;
 use crate::storage::{
     Page, PageId, Pager, DB_HEADER_PAGE_ID, INVALID_PAGE_ID, STORAGE_METADATA_PAGE_ID,
 };
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 pub struct BTreeManager {
     storage: Arc<Mutex<Pager>>,
 }
 
 impl BTreeManager {
+    fn lock_storage(&self) -> Result<MutexGuard<'_, Pager>> {
+        self.storage.lock().map_err(|_| {
+            HematiteError::InternalError("B-tree manager storage mutex is poisoned".to_string())
+        })
+    }
+
     pub fn new(storage: Pager) -> Self {
         Self {
             storage: Arc::new(Mutex::new(storage)),
@@ -34,42 +44,37 @@ impl BTreeManager {
     }
 
     pub fn create_tree(&mut self) -> Result<PageId> {
-        let mut pager = self.storage.lock().unwrap();
+        let mut pager = self.lock_storage()?;
         create_tree_root(&mut pager)
     }
 
     pub fn open_tree(&mut self, root_page_id: PageId) -> Result<BTreeIndex> {
-        // Verify that the root page exists and is a valid B-tree node
-        let _page = self.storage.lock().unwrap().read_page(root_page_id)?;
-        let _node = BTreeNode::from_page(_page)?; // Will error if invalid
-
-        // Create a BTreeIndex with the shared storage engine
-        let index = BTreeIndex::from_shared_storage(self.storage.clone(), root_page_id);
-        Ok(index)
+        let page = self.lock_storage()?.read_page(root_page_id)?;
+        let _node = BTreeNode::from_page(page)?;
+        Ok(BTreeIndex::from_shared_storage(
+            self.storage.clone(),
+            root_page_id,
+        ))
     }
 
     pub fn delete_tree(&mut self, root_page_id: PageId) -> Result<()> {
-        // Recursively delete all pages in the tree
         self.delete_tree_recursive(root_page_id)?;
         Ok(())
     }
 
     fn delete_tree_recursive(&mut self, page_id: PageId) -> Result<()> {
-        let page = self.storage.lock().unwrap().read_page(page_id)?;
+        let page = self.lock_storage()?.read_page(page_id)?;
         let node = BTreeNode::from_page(page)?;
 
         match node.node_type {
             NodeType::Leaf => {
-                // Leaf nodes have no children, just deallocate the page
-                self.storage.lock().unwrap().deallocate_page(page_id)?;
+                self.lock_storage()?.deallocate_page(page_id)?;
             }
             NodeType::Internal => {
-                // Recursively delete all children
                 for child_page_id in node.children {
                     self.delete_tree_recursive(child_page_id)?;
                 }
-                // Deallocate the internal node page
-                self.storage.lock().unwrap().deallocate_page(page_id)?;
+                self.lock_storage()?.deallocate_page(page_id)?;
             }
         }
         Ok(())
@@ -110,10 +115,9 @@ impl BTreeManager {
             return Ok(false);
         }
 
-        let page = self.storage.lock().unwrap().read_page(page_id)?;
+        let page = self.lock_storage()?.read_page(page_id)?;
         let node = BTreeNode::from_page(page)?;
 
-        // Check key ordering and per-node key bounds.
         for i in 1..node.keys.len() {
             if node.keys[i - 1] >= node.keys[i] {
                 return Ok(false);
@@ -144,12 +148,10 @@ impl BTreeManager {
 
         match node.node_type {
             NodeType::Leaf => {
-                // Leaf nodes should have matching keys and values
                 if node.keys.len() != node.values.len() {
                     return Ok(false);
                 }
 
-                // All leaves should be at the same depth.
                 if let Some(expected_depth) = state.leaf_depth {
                     if expected_depth != depth {
                         return Ok(false);
@@ -161,7 +163,6 @@ impl BTreeManager {
                 Ok(true)
             }
             NodeType::Internal => {
-                // Internal nodes should have children = keys + 1
                 if node.children.len() != node.keys.len() + 1 {
                     return Ok(false);
                 }
@@ -169,7 +170,6 @@ impl BTreeManager {
                     return Ok(false);
                 }
 
-                // Recursively validate children with tightened key ranges.
                 for (child_index, child_page_id) in node.children.iter().copied().enumerate() {
                     let child_lower = if child_index == 0 {
                         lower_bound.clone()
@@ -205,7 +205,7 @@ impl BTreeManager {
     }
 
     pub fn get_tree_stats(&mut self, root_page_id: PageId) -> Result<TreeStats> {
-        let page = self.storage.lock().unwrap().read_page(root_page_id)?;
+        let page = self.lock_storage()?.read_page(root_page_id)?;
         let root_node = BTreeNode::from_page(page)?;
 
         let mut stats = TreeStats::default();
@@ -232,7 +232,7 @@ impl BTreeManager {
                 stats.internal_nodes += 1;
 
                 for child_page_id in &node.children {
-                    let page = self.storage.lock().unwrap().read_page(*child_page_id)?;
+                    let page = self.lock_storage()?.read_page(*child_page_id)?;
                     let child_node = BTreeNode::from_page(page)?;
                     self.collect_stats_recursive(&child_node, stats, depth + 1)?;
                 }

@@ -1,11 +1,40 @@
-//! Byte-oriented B-tree facade for higher layers.
+//! Generic byte-tree facade.
 //!
-//! This is the main generic B-tree API that upper layers should use. It exposes
-//! tree lifecycle and key/value operations over opaque bytes while hiding pager,
-//! page, and node details inside the B-tree module.
+//! This file is the main reusable interface of the B-tree layer. It lets callers treat a tree as
+//! an ordered map from `&[u8]` to `&[u8]` while the implementation handles page layout, splitting,
+//! merging, cursor navigation, and large-value overflow.
+//!
+//! Layer split:
+//!
+//! ```text
+//! caller
+//!   provides: ordered key bytes, opaque value bytes
+//!   sees:     insert / delete / get / cursor / range helpers / stats
+//!
+//! byte tree
+//!   owns:     root tracking, node mutation, structural validation, overflow-backed values
+//!
+//! pager
+//!   owns:     page IO, free-page reuse, checksums, journaling, WAL, locking
+//! ```
+//!
+//! Large values are represented with a B-tree-owned wrapper:
+//!
+//! ```text
+//! logical value
+//!      |
+//!      v
+//! StoredValueLayout
+//!   local payload bytes
+//!   total length
+//!   first overflow page
+//! ```
+//!
+//! That extra indirection is what keeps overflow handling generic instead of pushing it into the
+//! catalog or table code.
 
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::btree::codec::RawBytesCodec;
 use crate::btree::cursor::BTreeCursor;
@@ -18,7 +47,7 @@ use crate::btree::value_store::{
     free_stored_value_overflow, hydrate_stored_value, materialize_stored_value, StoredValueLayout,
 };
 use crate::btree::NodeType;
-use crate::error::Result;
+use crate::error::{HematiteError, Result};
 use crate::storage::overflow::{collect_overflow_page_ids, validate_overflow_chain};
 use crate::storage::{PageId, Pager};
 
@@ -28,6 +57,12 @@ pub struct ByteTreeStore {
 }
 
 impl ByteTreeStore {
+    fn lock_storage(&self) -> Result<MutexGuard<'_, Pager>> {
+        self.storage.lock().map_err(|_| {
+            HematiteError::InternalError("ByteTreeStore storage mutex is poisoned".to_string())
+        })
+    }
+
     pub fn new(storage: Pager) -> Self {
         Self {
             storage: Arc::new(Mutex::new(storage)),
@@ -58,7 +93,7 @@ impl ByteTreeStore {
 
     pub fn delete_tree(&self, root_page_id: PageId) -> Result<()> {
         {
-            let mut pager = self.storage.lock().unwrap();
+            let mut pager = self.lock_storage()?;
             free_tree_overflow(&mut pager, root_page_id)?;
         }
         let mut manager = BTreeManager::from_shared_storage(self.storage.clone());
@@ -74,7 +109,7 @@ impl ByteTreeStore {
     }
 
     pub fn validate_tree_overflow(&self, root_page_id: PageId) -> Result<()> {
-        let mut pager = self.storage.lock().unwrap();
+        let mut pager = self.lock_storage()?;
         let mut tree_page_ids = Vec::new();
         collect_tree_page_ids(&mut pager, root_page_id, &mut tree_page_ids)?;
         let tree_pages = tree_page_ids.into_iter().collect::<HashSet<_>>();
@@ -90,20 +125,20 @@ impl ByteTreeStore {
     }
 
     pub fn reset_tree(&self, root_page_id: PageId) -> Result<()> {
-        let mut pager = self.storage.lock().unwrap();
+        let mut pager = self.lock_storage()?;
         free_tree_overflow(&mut pager, root_page_id)?;
         reset_tree_pages(&mut pager, root_page_id)
     }
 
     pub fn collect_page_ids(&self, root_page_id: PageId) -> Result<Vec<PageId>> {
-        let mut pager = self.storage.lock().unwrap();
+        let mut pager = self.lock_storage()?;
         let mut page_ids = Vec::new();
         collect_tree_page_ids(&mut pager, root_page_id, &mut page_ids)?;
         Ok(page_ids)
     }
 
     pub fn collect_space_stats(&self, root_page_id: PageId) -> Result<TreeSpaceStats> {
-        let mut pager = self.storage.lock().unwrap();
+        let mut pager = self.lock_storage()?;
         collect_tree_space_stats(&mut pager, root_page_id)
     }
 }
@@ -114,6 +149,12 @@ pub struct ByteTree {
 }
 
 impl ByteTree {
+    fn lock_storage(&self) -> Result<MutexGuard<'_, Pager>> {
+        self.storage.lock().map_err(|_| {
+            HematiteError::InternalError("ByteTree storage mutex is poisoned".to_string())
+        })
+    }
+
     pub fn root_page_id(&self) -> PageId {
         self.index.root_page_id()
     }
@@ -121,7 +162,7 @@ impl ByteTree {
     pub fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         match self.index.search_typed::<RawBytesCodec>(&key.to_vec())? {
             Some(stored_value) => {
-                let mut storage = self.storage.lock().unwrap();
+                let mut storage = self.lock_storage()?;
                 Ok(Some(hydrate_stored_value(&mut storage, &stored_value)?))
             }
             None => Ok(None),
@@ -135,7 +176,7 @@ impl ByteTree {
     pub fn insert_with_mutation(&mut self, key: &[u8], value: &[u8]) -> Result<TreeMutation> {
         let existing_stored_value = self.index.search_typed::<RawBytesCodec>(&key.to_vec())?;
         let stored_value = {
-            let mut storage = self.storage.lock().unwrap();
+            let mut storage = self.lock_storage()?;
             materialize_stored_value(&mut storage, value)?
         };
         let mutation = self
@@ -143,7 +184,7 @@ impl ByteTree {
             .insert_typed_with_mutation::<RawBytesCodec>(&key.to_vec(), &stored_value)?;
 
         if let Some(existing_stored_value) = existing_stored_value {
-            let mut storage = self.storage.lock().unwrap();
+            let mut storage = self.lock_storage()?;
             free_stored_value_overflow(&mut storage, &existing_stored_value)?;
         }
 
@@ -160,7 +201,7 @@ impl ByteTree {
             .delete_typed_with_mutation::<RawBytesCodec>(&key.to_vec())?;
         let logical_value = match stored_value {
             Some(stored_value) => {
-                let mut storage = self.storage.lock().unwrap();
+                let mut storage = self.lock_storage()?;
                 let logical_value = hydrate_stored_value(&mut storage, &stored_value)?;
                 free_stored_value_overflow(&mut storage, &stored_value)?;
                 Some(logical_value)
@@ -291,6 +332,12 @@ pub struct ByteTreeCursor {
 }
 
 impl ByteTreeCursor {
+    fn lock_storage(&self) -> Result<MutexGuard<'_, Pager>> {
+        self.storage.lock().map_err(|_| {
+            HematiteError::InternalError("ByteTreeCursor storage mutex is poisoned".to_string())
+        })
+    }
+
     pub fn is_valid(&self) -> bool {
         self.inner.is_valid()
     }
@@ -318,7 +365,7 @@ impl ByteTreeCursor {
     pub fn current(&self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
         match self.inner.current() {
             Some((key, value)) => {
-                let mut storage = self.storage.lock().unwrap();
+                let mut storage = self.lock_storage()?;
                 Ok(Some((
                     key.as_bytes().to_vec(),
                     hydrate_stored_value(&mut storage, value.as_bytes())?,

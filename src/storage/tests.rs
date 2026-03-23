@@ -1008,8 +1008,6 @@ mod mod_tests {
     use crate::test_utils::TestDbFile;
     use std::io::{Seek, SeekFrom, Write};
 
-    // ... (rest of the code remains the same)
-
     #[test]
     fn test_concurrent_page_access() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_storage_concurrent");
@@ -1017,21 +1015,17 @@ mod mod_tests {
         let mut storage = Pager::new(test_db.path(), 100)?;
         let page_id = storage.allocate_page()?;
 
-        // Write initial data
         let mut page = Page::new(page_id);
         page.data[0..8].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
         storage.write_page(page)?;
 
-        // Read initial data
         let read_page = storage.read_page(page_id)?;
         assert_eq!(read_page.data[0..8], [1, 2, 3, 4, 5, 6, 7, 8]);
 
-        // Modify and write back (this should update the cache)
         let mut mod_page = Page::new(page_id);
         mod_page.data[0..8].copy_from_slice(&[5, 2, 3, 4, 5, 6, 7, 8]);
         storage.write_page(mod_page)?;
 
-        // Read again (should get the updated data from cache)
         let updated_page = storage.read_page(page_id)?;
         assert_eq!(updated_page.data[0..8], [5, 2, 3, 4, 5, 6, 7, 8]);
 
@@ -1099,7 +1093,7 @@ mod mod_tests {
         let _tail_page = storage.allocate_page()?;
         storage.deallocate_page(free_page)?;
 
-        let stats = storage.get_storage_stats();
+        let stats = storage.get_storage_stats()?;
         assert_eq!(stats.table_count, 2);
         assert_eq!(stats.total_rows, 2);
         assert_eq!(stats.free_page_count, 1);
@@ -1124,7 +1118,7 @@ mod mod_tests {
         let large_text = "x".repeat(PAGE_SIZE * 3);
         let _ = storage.insert_into_table("docs", vec![Value::Text(large_text)])?;
 
-        let stats = storage.get_storage_stats();
+        let stats = storage.get_storage_stats()?;
         assert_eq!(stats.table_count, 1);
         assert_eq!(stats.total_rows, 1);
         assert!(stats.overflow_page_count > 0);
@@ -1278,7 +1272,7 @@ mod mod_tests {
         }
 
         let reopened = crate::catalog::CatalogEngine::new(test_db.path())?;
-        let stats = reopened.get_storage_stats();
+        let stats = reopened.get_storage_stats()?;
         assert_eq!(stats.table_count, 1);
         assert_eq!(stats.total_rows, 1);
         assert_eq!(stats.free_page_count, 1);
@@ -1305,7 +1299,7 @@ mod mod_tests {
         assert!(!overflow_ids.is_empty());
 
         assert!(storage.delete_from_table_by_rowid("docs", rowid)?);
-        let stats = storage.get_storage_stats();
+        let stats = storage.get_storage_stats()?;
         assert_eq!(stats.total_rows, 0);
         assert_eq!(stats.overflow_page_count, 0);
 
@@ -1340,7 +1334,7 @@ mod mod_tests {
             }],
         )?;
 
-        let stats = storage.get_storage_stats();
+        let stats = storage.get_storage_stats()?;
         assert_eq!(stats.total_rows, 1);
         assert_eq!(stats.overflow_page_count, 0);
 
@@ -1367,7 +1361,7 @@ mod mod_tests {
         )?;
 
         storage.drop_table("docs")?;
-        assert_eq!(storage.get_storage_stats().table_count, 0);
+        assert_eq!(storage.get_storage_stats()?.table_count, 0);
 
         let reused = storage.allocate_page()?;
         assert!(overflow_ids.contains(&reused) || reused == root_page_id);
@@ -2514,7 +2508,6 @@ mod serialization_tests {
         ];
 
         let bytes = RowSerializer::serialize(&row)?;
-        // Stored length includes everything after the 4-byte length prefix.
         let len = RowSerializer::read_row_length(&bytes[0..4])?;
         let decoded = RowSerializer::deserialize(&bytes[4..4 + len])?;
         assert_eq!(decoded.len(), row.len());
@@ -2523,7 +2516,6 @@ mod serialization_tests {
 
     #[test]
     fn test_deserialize_truncated_returns_error() {
-        // Integer marker without enough payload bytes.
         let truncated = vec![1u8, 0, 1];
         let err = RowSerializer::deserialize(&truncated).unwrap_err();
         assert!(matches!(err, HematiteError::CorruptedData(_)));

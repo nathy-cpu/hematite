@@ -1,7 +1,8 @@
-//! Key/value codec boundary for B-tree payloads.
+//! Typed encoding boundary for the generic B-tree layer.
 //!
-//! The core B-tree stores opaque byte keys and byte values. Higher layers (catalog/table/index)
-//! are responsible for typed encoding/decoding through this trait.
+//! The raw tree only understands ordered key bytes and opaque value bytes. `KeyValueCodec` is the
+//! hook that lets higher layers project typed data onto that raw representation without teaching
+//! the B-tree anything about tables, rows, or indexes.
 
 use crate::error::Result;
 

@@ -1,4 +1,23 @@
-//! Query execution engine for processing SQL statements
+//! Query execution.
+//!
+//! The executor turns a planned access path into concrete catalog operations.
+//!
+//! ```text
+//! parsed statement
+//!      +
+//! chosen access path
+//!      |
+//!      v
+//!   executor node
+//!      |
+//!      +--> table cursor scan
+//!      +--> rowid lookup
+//!      +--> PK index -> rowid -> table lookup
+//!      +--> secondary index -> rowid set -> table lookup
+//! ```
+//!
+//! This layer should stay storage-agnostic at the page level. If a change here requires knowledge
+//! of B-tree node layout or pager internals, the boundary below catalog has started to leak.
 
 use crate::catalog::StoredRow;
 use crate::catalog::{Column, DataType, Table, Value};
@@ -61,7 +80,6 @@ impl SelectExecutor {
                 index + 1
             ))),
             Expression::Column(name) => {
-                // Find column index in the current row (simplified for single table)
                 if let Some(table_name) = self.get_table_name() {
                     if let Some(table) = ctx.catalog.get_table_by_name(table_name) {
                         for (i, col) in table.columns.iter().enumerate() {
@@ -451,7 +469,6 @@ impl SelectExecutor {
 
 impl QueryExecutor for SelectExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext) -> Result<QueryResult> {
-        // Validate statement
         self.statement.validate(&ctx.catalog)?;
 
         let table_name = match &self.statement.from {
@@ -538,7 +555,6 @@ impl QueryExecutor for SelectExecutor {
             SelectAccessPath::FullTableScan => ctx.engine.read_from_table(&table_name)?,
         };
 
-        // Apply WHERE clause filtering.
         let mut filtered_rows = Vec::new();
         let skip_filter = matches!(self.access_path, SelectAccessPath::RowIdLookup);
         for row in &all_rows {
@@ -589,7 +605,6 @@ impl QueryExecutor for SelectExecutor {
             filtered_rows.truncate(limit);
         }
 
-        // Aggregate scalar functions after filtering and ordering.
         if self
             .statement
             .columns
@@ -606,7 +621,6 @@ impl QueryExecutor for SelectExecutor {
             });
         }
 
-        // Apply column projection
         let mut projected_rows = Vec::new();
         for row in filtered_rows {
             projected_rows.push(self.project_row(ctx, &row)?);
@@ -735,7 +749,6 @@ impl InsertExecutor {
 
 impl QueryExecutor for InsertExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext) -> Result<QueryResult> {
-        // Validate statement
         self.statement.validate(&ctx.catalog)?;
 
         let table = ctx
@@ -746,7 +759,6 @@ impl QueryExecutor for InsertExecutor {
             })?
             .clone();
 
-        // Insert data into storage
         for value_row in &self.statement.values {
             let row_values = self.build_row(&table, value_row)?;
             self.ensure_primary_key_is_unique(ctx, &table, &[], &row_values)?;
@@ -1200,7 +1212,6 @@ impl CreateExecutor {
 
 impl QueryExecutor for CreateExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext) -> Result<QueryResult> {
-        // Validate statement
         self.statement.validate(&ctx.catalog)?;
 
         let columns = self.convert_column_definitions()?;

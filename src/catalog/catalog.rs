@@ -1,4 +1,22 @@
-//! Catalog - SQLite-style schema management with B-tree persistence
+//! Relational catalog manager.
+//!
+//! The catalog owns schema-level state and coordinates it with the catalog engine.
+//!
+//! ```text
+//! in-memory schema --------------------+
+//!                                      |
+//! create/drop/alter style operations   |
+//!                                      v
+//!                               schema B-tree
+//!                                      |
+//!                                database header
+//! ```
+//!
+//! Core invariants:
+//! - the in-memory schema is authoritative while a catalog operation is running;
+//! - `schema_root` always names the durable schema tree recorded in page 0;
+//! - schema contents are written before the header is repointed at a new schema root;
+//! - transaction rollback restores both the schema snapshot and the engine snapshot.
 
 use crate::catalog::column::Column;
 use crate::catalog::engine::{CatalogEngine, CatalogEngineSnapshot, CatalogIntegrityReport};
@@ -8,8 +26,6 @@ use crate::catalog::table::{SecondaryIndex, Table};
 use crate::catalog::JournalMode;
 use crate::error::Result;
 use std::collections::HashMap;
-
-/// SQLite-style catalog manager with B-tree schema persistence
 #[derive(Debug)]
 pub struct Catalog {
     engine: CatalogEngine,
@@ -67,7 +83,7 @@ impl Catalog {
 
         let current_schema_root = self.engine.save_schema(&self.schema, self.schema_root)?;
 
-        let transaction_active = self.engine.transaction_active();
+        let transaction_active = self.engine.transaction_active()?;
         self.engine.update_database_header(|header| {
             header.schema_root_page = current_schema_root;
         })?;
@@ -80,14 +96,11 @@ impl Catalog {
         Ok(())
     }
 
-    /// Get the next table ID from database header
     fn get_next_table_id(&mut self) -> Result<TableId> {
         self.engine.allocate_table_id()
     }
 
-    /// Create a new table in the catalog
     pub fn create_table(&mut self, name: &str, columns: Vec<Column>) -> Result<TableId> {
-        // Validate table name doesn't exist
         if self.schema.get_table_by_name(name).is_some() {
             return Err(crate::error::HematiteError::StorageError(format!(
                 "Table '{}' already exists",
@@ -95,10 +108,7 @@ impl Catalog {
             )));
         }
 
-        // Get next table ID
         let table_id = self.get_next_table_id()?;
-
-        // Create table with placeholder root page (will be set when storage/B-tree is created).
         let table = Table::new(table_id, name.to_string(), columns, 0u32)?;
 
         self.schema.insert_table(table.clone())?;
@@ -133,26 +143,21 @@ impl Catalog {
         Ok(table_id)
     }
 
-    /// Get a table by ID
     pub fn get_table(&self, table_id: TableId) -> Result<Option<Table>> {
         Ok(self.schema.get_table(table_id).cloned())
     }
 
-    /// Get a table by name
     pub fn get_table_by_name(&self, name: &str) -> Result<Option<Table>> {
         Ok(self.schema.get_table_by_name(name).cloned())
     }
 
-    /// Drop a table from the catalog
     pub fn drop_table(&mut self, table_id: TableId) -> Result<()> {
-        // Check if table exists
         let table = self.schema.get_table(table_id).cloned();
         if table.is_none() {
             return Err(crate::error::HematiteError::StorageError(
                 "Table not found".to_string(),
             ));
         }
-        // Remove from in-memory schema
         self.schema.drop_table(table_id)?;
         self.schema_dirty = true;
         self.save_schema_to_btree()?;
@@ -160,22 +165,18 @@ impl Catalog {
         Ok(())
     }
 
-    /// List all tables
     pub fn list_tables(&self) -> Result<Vec<(TableId, String)>> {
         Ok(self.schema.list_tables())
     }
 
-    /// Get the in-memory schema (for testing purposes)
     pub fn get_schema(&self) -> &Schema {
         &self.schema
     }
 
-    /// Clone the current in-memory schema snapshot.
     pub fn clone_schema(&self) -> Schema {
         self.schema.clone()
     }
 
-    /// Run a relational engine operation against the catalog's backing engine.
     pub fn with_engine<F, T>(&mut self, f: F) -> Result<T>
     where
         F: FnOnce(&mut CatalogEngine) -> Result<T>,
@@ -226,12 +227,10 @@ impl Catalog {
         self.engine.rollback_transaction()
     }
 
-    /// Force schema persistence to B-tree
     pub fn flush_schema(&mut self) -> Result<()> {
         self.save_schema_to_btree()
     }
 
-    /// Flush both schema metadata and storage pages.
     pub fn flush(&mut self) -> Result<()> {
         self.save_schema_to_btree()?;
         self.engine.flush()
@@ -251,7 +250,6 @@ impl Catalog {
         self.engine.checkpoint_wal()
     }
 
-    /// Replace the entire in-memory schema and persist it as the durable catalog state.
     pub fn replace_schema(&mut self, schema: Schema) -> Result<()> {
         self.schema = schema;
         self.schema_dirty = true;
@@ -259,9 +257,7 @@ impl Catalog {
         self.engine.set_next_table_id(self.schema.next_table_id())
     }
 
-    /// Set the root page for a table's B-tree
     pub fn set_table_root_page(&mut self, table_id: TableId, root_page: u32) -> Result<()> {
-        // Validate table exists
         if self.schema.get_table(table_id).is_none() {
             return Err(crate::error::HematiteError::StorageError(format!(
                 "Table ID {} not found",
@@ -269,14 +265,12 @@ impl Catalog {
             )));
         }
 
-        // Validate root page is not page 0 (reserved for database header)
         if root_page == 0 {
             return Err(crate::error::HematiteError::StorageError(
                 "Root page 0 is reserved for database header".to_string(),
             ));
         }
 
-        // Update in-memory schema
         self.schema.set_table_root_page(table_id, root_page)?;
         self.schema_dirty = true;
         self.save_schema_to_btree()?;
@@ -284,12 +278,9 @@ impl Catalog {
         Ok(())
     }
 
-    /// Get the root page for a table's B-tree
     pub fn get_table_root_page(&self, table_id: TableId) -> Result<Option<u32>> {
         if let Some(table) = self.schema.get_table(table_id) {
-            // Validate that root page is properly set
             if table.root_page_id == 0 {
-                // Table exists but has no B-tree yet
                 Ok(None)
             } else {
                 Ok(Some(table.root_page_id))
@@ -349,11 +340,9 @@ impl Catalog {
         Ok(())
     }
 
-    /// Validate the entire schema
     pub fn validate_schema(&self) -> Result<()> {
         let schema_result = self.schema.validate();
 
-        // Additional catalog-specific validations
         for (table_id, table_name) in self.list_tables()? {
             let table = self.schema.get_table(table_id).ok_or_else(|| {
                 crate::error::HematiteError::StorageError(format!(
@@ -362,14 +351,9 @@ impl Catalog {
                 ))
             })?;
 
-            // Validate root page consistency
             if table.root_page_id == 0 {
-                // This is OK for newly created tables without B-trees
                 continue;
             }
-
-            // For tables with B-trees, ensure root page is valid
-            // (Additional validation could be added here to check if page exists in storage)
         }
 
         schema_result
@@ -434,12 +418,10 @@ impl Catalog {
         Ok(report)
     }
 
-    // ... (rest of the code remains the same)
     pub fn get_total_column_count(&self) -> usize {
         self.schema.get_total_column_count()
     }
 
-    /// Get table statistics
     pub fn get_table_stats(&self, table_id: TableId) -> Result<Option<TableStats>> {
         if let Some(table) = self.schema.get_table(table_id) {
             Ok(Some(TableStats {
@@ -455,7 +437,6 @@ impl Catalog {
         }
     }
 
-    /// Get all table statistics
     pub fn get_all_table_stats(&self) -> Result<Vec<TableStats>> {
         let tables = self.list_tables()?;
         let mut stats = Vec::new();
@@ -469,29 +450,24 @@ impl Catalog {
         Ok(stats)
     }
 
-    /// Check if a table exists by name
     pub fn table_exists(&self, name: &str) -> bool {
         self.schema.get_table_by_name(name).is_some()
     }
 
-    /// Check if a table exists by ID
     pub fn table_exists_by_id(&self, table_id: TableId) -> bool {
         self.schema.get_table(table_id).is_some()
     }
 
-    /// Get the next available table ID without incrementing
     pub fn peek_next_table_id(&self) -> Result<TableId> {
         self.engine.peek_next_table_id()
     }
 
-    /// Create a table with a specific root page (useful for B-tree setup)
     pub fn create_table_with_root(
         &mut self,
         name: &str,
         columns: Vec<Column>,
         root_page: u32,
     ) -> Result<TableId> {
-        // Validate table name doesn't exist
         if self.schema.get_table_by_name(name).is_some() {
             return Err(crate::error::HematiteError::StorageError(format!(
                 "Table '{}' already exists",
@@ -499,7 +475,6 @@ impl Catalog {
             )));
         }
 
-        // Get next table ID
         let table_id = self.get_next_table_id()?;
 
         let table = Table::new(table_id, name.to_string(), columns, root_page)?;
@@ -511,7 +486,6 @@ impl Catalog {
         Ok(table_id)
     }
 
-    /// Get column information for a table
     pub fn get_table_columns(&self, table_id: TableId) -> Result<Option<Vec<Column>>> {
         if let Some(table) = self.schema.get_table(table_id) {
             Ok(Some(table.columns.clone()))
@@ -520,7 +494,6 @@ impl Catalog {
         }
     }
 
-    /// Get column information for a table by name
     pub fn get_table_columns_by_name(&self, name: &str) -> Result<Option<Vec<Column>>> {
         if let Some(table) = self.schema.get_table_by_name(name) {
             Ok(Some(table.columns.clone()))
@@ -529,7 +502,6 @@ impl Catalog {
         }
     }
 
-    /// Get primary key columns for a table
     pub fn get_primary_key_columns(&self, table_id: TableId) -> Result<Option<Vec<Column>>> {
         if let Some(table) = self.schema.get_table(table_id) {
             let pk_columns = table

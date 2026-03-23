@@ -1,11 +1,20 @@
 //! Generic B-tree module over opaque byte keys and values.
 //!
-//! Extraction boundary:
-//! - Higher layers should build on [`ByteTreeStore`], [`ByteTree`], [`ByteTreeCursor`],
-//!   [`TypedTreeStore`], [`TypedTree`], [`TypedTreeCursor`], and [`KeyValueCodec`].
-//! - Node/page/value-store mechanics remain internal so the tree layout can evolve without
-//!   leaking implementation detail into relational code.
-//! - This is the generic data-structure half of the future fork point.
+//! This module is the structural layer between `storage` and `catalog`. It knows how to maintain
+//! ordered trees on top of pages, but it does not know what keys or values mean.
+//!
+//! Public surfaces:
+//! - [`ByteTreeStore`] / [`ByteTree`] / [`ByteTreeCursor`] for raw byte keys and values;
+//! - [`TypedTreeStore`] / [`TypedTree`] / [`TypedTreeCursor`] for typed callers using codecs;
+//! - [`KeyValueCodec`] as the only typed boundary.
+//!
+//! Internal surfaces:
+//! - node serialization and validation;
+//! - split / merge / rebalance logic;
+//! - value overflow handling;
+//! - tree validation and page-space accounting.
+//!
+//! This is the generic data-structure half of the future fork point.
 
 pub mod bytes;
 pub mod codec;
@@ -21,7 +30,7 @@ pub use codec::{KeyValueCodec, RawBytesCodec};
 pub use tree::TreeSpaceStats;
 pub use typed::{TypedTree, TypedTreeCursor, TypedTreeStore};
 
-pub const BTREE_ORDER: usize = 100; // Maximum children per node
+pub const BTREE_ORDER: usize = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeType {

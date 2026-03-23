@@ -7,13 +7,7 @@ use super::engine::CatalogEngine;
 use super::runtime_metadata;
 
 pub(crate) fn load_table_metadata(engine: &mut CatalogEngine) -> Result<()> {
-    let maybe_page = {
-        engine
-            .pager
-            .lock()
-            .unwrap()
-            .read_page(STORAGE_METADATA_PAGE_ID)
-    };
+    let maybe_page = engine.lock_pager()?.read_page(STORAGE_METADATA_PAGE_ID);
     match maybe_page {
         Ok(page) => {
             if page.data.len() >= 4 {
@@ -56,7 +50,7 @@ pub(crate) fn save_table_metadata(engine: &mut CatalogEngine) -> Result<()> {
     let mut page = Page::new(STORAGE_METADATA_PAGE_ID);
     page.data[0..4].copy_from_slice(&(metadata_bytes.len() as u32).to_le_bytes());
     page.data[4..4 + metadata_bytes.len()].copy_from_slice(metadata_bytes);
-    engine.pager.lock().unwrap().write_page(page)?;
+    engine.lock_pager()?.write_page(page)?;
     Ok(())
 }
 

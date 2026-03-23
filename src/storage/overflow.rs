@@ -1,4 +1,24 @@
-//! Overflow page chain support for large table-cell payloads.
+//! Overflow page chains for large payloads.
+//!
+//! Overflow pages are used when a value cannot fit entirely in the local payload space offered by
+//! its owning page or cell format.
+//!
+//! Page layout:
+//!
+//! ```text
+//! +----------------------+----------------------+-------------------+
+//! | magic "OVR1" (4)     | next page id (4)     | chunk length (4)  |
+//! +----------------------+----------------------+-------------------+
+//! | payload bytes for this chunk                                 |
+//! +--------------------------------------------------------------+
+//! ```
+//!
+//! A chain is a forward-linked list terminated by `INVALID_PAGE_ID`. The helper functions in this
+//! file implement four operations:
+//! - write a payload into a new chain;
+//! - read a chain back into a contiguous byte vector;
+//! - collect/validate the page ids in a chain;
+//! - free the whole chain.
 
 use crate::error::{HematiteError, Result};
 use crate::storage::{Page, PageId, Pager, INVALID_PAGE_ID, PAGE_SIZE};

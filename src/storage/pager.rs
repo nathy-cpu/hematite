@@ -1,30 +1,79 @@
-//! Pager abstraction over page IO, cache, and allocation.
+//! Pager implementation.
 //!
-//! M1.1 contract:
-//! - All page reads/writes for the storage engine should flow through this type.
-//! - Buffer pool behavior and file manager behavior are composed here.
-//! - Allocation/deallocation remains file-manager-backed for now and is evolved in later M1 tasks.
+//! The pager is the only stateful component in the storage layer. It presents the rest of the
+//! system with a logical database made of fixed-size pages and hides the machinery required to
+//! make those pages durable, reusable, and transactionally visible.
 //!
-//! M1.2 contract:
-//! - `write_page` is write-back into the cache and marks a page as dirty.
-//! - `flush` is the persistence boundary that writes all dirty pages to disk and fsyncs.
-//! - Dirty state is tracked by page id and cleared only after successful flush/deallocation.
+//! Main file layout:
 //!
-//! M1.5 contract:
-//! - Pager tracks deterministic page checksums for persisted pages.
-//! - On cache-miss reads, persisted checksum records are verified before returning data.
+//! ```text
+//! byte offset 0
+//! +-------------------------------+
+//! | 64-byte file header region    |
+//! +-------------------------------+
+//! | logical page 0  | db header   |
+//! +-----------------+-------------+
+//! | logical page 1  | metadata    |
+//! +-----------------+-------------+
+//! | logical page 2+ | payload     |
+//! +-----------------+-------------+
+//! ```
 //!
-//! M7 contract:
-//! - The pager owns rollback journaling and crash recovery for page/checksum state.
-//! - Writes journal original page images before first modification in a transaction.
-//! - Recovery is process-crash only and replays the rollback journal on open.
+//! Core state inside the pager:
 //!
-//! M10 contract:
-//! - The pager owns the in-process multiple-reader/one-writer lock state for a database file.
-//! - Shared locks protect read scopes; write locks protect write transactions.
-//! - Commit and rollback both release the writer lock only after journal/file state is finalized.
-//! - The future WAL path replaces rollback-journal exclusivity during writes, but keeps the pager
-//!   as the single owner of lock acquisition, visibility boundaries, and recovery coordination.
+//! ```text
+//!                  caller
+//!                    |
+//!                    v
+//!      +----------------------------------+
+//!      | read/write/allocate/deallocate    |
+//!      +----------------------------------+
+//!                    |
+//!      +-------------+--------------+
+//!      |                            |
+//!      v                            v
+//! buffer pool                 transaction state
+//! dirty page ids              original pages / WAL frames
+//! checksum cache              free-page deltas / file-len deltas
+//!      |                            |
+//!      +-------------+--------------+
+//!                    |
+//!                    v
+//!              file manager
+//! ```
+//!
+//! Commit algorithms:
+//!
+//! Rollback mode:
+//! - capture the original page image before first write;
+//! - persist the rollback journal;
+//! - flush dirty main-file pages;
+//! - finalize by deleting the journal.
+//!
+//! WAL mode:
+//! - keep page mutations local to the transaction;
+//! - append a committed record containing page frames plus pager-visible metadata;
+//! - reconstruct reader-visible state by overlaying WAL frames on the main file;
+//! - checkpoint later by copying the visible state back into the main file.
+//!
+//! Reader visibility in WAL mode:
+//!
+//! ```text
+//! main-file page bytes
+//!        +
+//! last committed WAL sequence visible to this reader
+//!        +
+//! WAL frame overrides + checksum overrides + freelist snapshot
+//!        =
+//! effective database image
+//! ```
+//!
+//! Important invariants:
+//! - page allocation and freelist state must stay consistent with both the durable file and any
+//!   in-flight transaction state;
+//! - checksum metadata is part of the durable storage model, not optional verification data;
+//! - checkpoints cannot discard page images that are still needed by an active reader snapshot;
+//! - higher layers never see partial page writes or raw filesystem ordering concerns.
 
 use crate::error::Result;
 use crate::storage::journal::{JournalRecord, JournalState, RollbackJournal};
@@ -39,7 +88,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JournalMode {
@@ -128,6 +177,24 @@ pub struct Pager {
 }
 
 impl Pager {
+    fn lock_registry_map(
+        &self,
+    ) -> Result<MutexGuard<'static, HashMap<PathBuf, LockRegistryEntry>>> {
+        lock_registry().lock().map_err(|_| {
+            crate::error::HematiteError::InternalError(
+                "Pager lock registry mutex is poisoned".to_string(),
+            )
+        })
+    }
+
+    fn database_identity_path(&self) -> Result<&PathBuf> {
+        self.database_identity.as_ref().ok_or_else(|| {
+            crate::error::HematiteError::InternalError(
+                "Pager database identity is not available".to_string(),
+            )
+        })
+    }
+
     pub const CHECKSUM_METADATA_VERSION: u32 = 1;
 
     pub fn new<P: AsRef<Path>>(path: P, cache_capacity: usize) -> Result<Self> {
@@ -294,7 +361,6 @@ impl Pager {
         let dirty_ids = self.dirty_pages.iter().copied().collect::<Vec<_>>();
         let mut metadata_page_dirty = false;
 
-        // Persist all non-metadata dirty pages first.
         for page_id in dirty_ids.iter().copied() {
             if page_id == STORAGE_METADATA_PAGE_ID {
                 metadata_page_dirty = true;
@@ -307,7 +373,7 @@ impl Pager {
             self.dirty_pages.remove(&page_id);
         }
 
-        // Persist metadata page last so it reflects already-persisted state.
+        // Metadata is written last so it cannot describe page state that has not reached disk.
         if metadata_page_dirty {
             if let Some(page) = self.buffer_pool.get(STORAGE_METADATA_PAGE_ID) {
                 self.file_manager.write_page(page)?;
@@ -611,7 +677,6 @@ impl Pager {
     }
 
     fn calculate_page_checksum(page: &Page) -> u32 {
-        // FNV-1a over page bytes for deterministic cross-process checksums using std only.
         let mut hash: u32 = 0x811C9DC5;
         for byte in &page.data {
             hash ^= u32::from(*byte);
@@ -659,8 +724,8 @@ impl Pager {
             PagerLockMode::None => {}
         }
 
-        let path = self.database_identity.as_ref().unwrap().clone();
-        let mut registry = lock_registry().lock().unwrap();
+        let path = self.database_identity_path()?.clone();
+        let mut registry = self.lock_registry_map()?;
         let entry = registry.entry(path).or_default();
         if entry.writer && self.journal_mode == JournalMode::Rollback {
             return Err(crate::error::HematiteError::StorageError(
@@ -686,7 +751,7 @@ impl Pager {
             PagerLockMode::Shared { .. } => {}
         }
 
-        let mut registry = lock_registry().lock().unwrap();
+        let mut registry = self.lock_registry_map()?;
         if let Some(entry) = registry.get_mut(path) {
             entry.readers = entry.readers.saturating_sub(1);
             if entry.readers == 0 && !entry.writer {
@@ -701,7 +766,7 @@ impl Pager {
         let Some(path) = self.database_identity.as_ref() else {
             return Ok(());
         };
-        let mut registry = lock_registry().lock().unwrap();
+        let mut registry = self.lock_registry_map()?;
         let entry = registry.entry(path.clone()).or_default();
         *entry.wal_reader_sequences.entry(sequence).or_insert(0) += 1;
         Ok(())
@@ -711,7 +776,7 @@ impl Pager {
         let Some(path) = self.database_identity.as_ref() else {
             return Ok(());
         };
-        let mut registry = lock_registry().lock().unwrap();
+        let mut registry = self.lock_registry_map()?;
         if let Some(entry) = registry.get_mut(path) {
             if let Some(count) = entry.wal_reader_sequences.get_mut(&sequence) {
                 *count = count.saturating_sub(1);
@@ -740,8 +805,8 @@ impl Pager {
             ));
         }
 
-        let path = self.database_identity.as_ref().unwrap().clone();
-        let mut registry = lock_registry().lock().unwrap();
+        let path = self.database_identity_path()?.clone();
+        let mut registry = self.lock_registry_map()?;
         let entry = registry.entry(path).or_default();
         if entry.writer || (self.journal_mode == JournalMode::Rollback && entry.readers > 0) {
             return Err(crate::error::HematiteError::StorageError(
@@ -762,7 +827,7 @@ impl Pager {
             return Ok(());
         }
 
-        let mut registry = lock_registry().lock().unwrap();
+        let mut registry = self.lock_registry_map()?;
         if let Some(entry) = registry.get_mut(path) {
             entry.writer = false;
             if entry.readers == 0 {
@@ -1247,8 +1312,8 @@ impl Pager {
             return Ok(true);
         }
 
-        let path = self.database_identity.as_ref().unwrap();
-        let registry = lock_registry().lock().unwrap();
+        let path = self.database_identity_path()?;
+        let registry = self.lock_registry_map()?;
         let Some(entry) = registry.get(path) else {
             return Ok(true);
         };

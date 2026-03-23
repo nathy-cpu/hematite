@@ -1,4 +1,17 @@
-//! Buffer pool for in-memory page caching with LRU eviction
+//! In-memory page cache with LRU eviction.
+//!
+//! The buffer pool keeps recently-used pages in memory so the pager can avoid rereading them from
+//! the backing file. It is intentionally simple:
+//!
+//! ```text
+//! HashMap<PageId, Page>   = page storage
+//! VecDeque<PageId>        = recency order
+//! front                   = most recently used
+//! back                    = eviction candidate
+//! ```
+//!
+//! The pool does not know about dirty/clean semantics. The pager owns that policy and uses the
+//! pool purely as a cache.
 
 use crate::storage::{Page, PageId};
 use std::collections::{HashMap, VecDeque};

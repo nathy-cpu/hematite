@@ -1,13 +1,23 @@
-//! Free page list structure used by the storage layer.
+//! Free-page bookkeeping for the storage layer.
 //!
-//! M1.3 contract:
-//! - Encapsulates free-page bookkeeping behind a dedicated type instead of raw vectors.
-//! - Ensures idempotent deallocation tracking.
-//! - Supports trailing high-water compaction with `next_page_id`.
+//! The freelist is small but important because page reuse, file growth, and compaction all depend
+//! on it being correct.
 //!
-//! M1.4 contract:
-//! - Freelist persistence uses dedicated versioned metadata records.
-//! - Deserialization validates version, record shape, and declared count.
+//! Data structure:
+//!
+//! ```text
+//! Vec<PageId>
+//!   tail = next page returned by reuse
+//! ```
+//!
+//! Behavior:
+//! - `push_free_page` is idempotent, so a page should never appear twice;
+//! - `pop_free_page` returns pages in LIFO order, which tends to reuse recently-freed pages first;
+//! - `compact_trailing_pages` removes free ids that form a suffix at the file high-water mark,
+//!   allowing the file to shrink without moving live pages.
+//!
+//! Persistence format is versioned so the pager can reject freelist metadata that belongs to an
+//! incompatible storage format.
 
 use crate::error::Result;
 use crate::storage::PageId;

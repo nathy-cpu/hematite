@@ -1,4 +1,31 @@
-//! Relational storage engine built on top of the pager and generic B-trees.
+//! Catalog storage engine.
+//!
+//! This is the narrow bridge between relational concepts and the generic lower layers.
+//!
+//! ```text
+//! SQL / planner / executor
+//!          |
+//!          v
+//!      CatalogEngine
+//!          |
+//!   +------+------+
+//!   |             |
+//! rows/indexes  schema metadata
+//!   |             |
+//!   +-------> generic B-tree
+//!                    |
+//!                    v
+//!                  pager
+//! ```
+//!
+//! Responsibilities:
+//! - hold runtime metadata such as row counts and next rowid;
+//! - persist schema roots and table metadata;
+//! - expose relational operations in terms of rows, keys, and cursors;
+//! - prevent page- and node-level details from leaking into query/catalog code.
+//!
+//! This file should coordinate access methods, not define relational byte formats. Row codecs and
+//! index-key codecs live beside the catalog model so the generic lower layers remain reusable.
 
 use crate::btree::{ByteTree, ByteTreeStore, KeyValueCodec, TreeSpaceStats, TypedTreeStore};
 use crate::catalog::{DatabaseHeader, JournalMode, Table, TableId, Value};
@@ -8,7 +35,7 @@ use crate::storage::{
 };
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use super::cursor::{IndexCursor, TableCursor};
 use super::{
@@ -66,6 +93,12 @@ impl CatalogEngine {
     pub(crate) const INVALID_PAGE_ID: PageId = crate::storage::INVALID_PAGE_ID;
     pub(crate) const STORAGE_METADATA_VERSION: u32 = 3;
 
+    pub(crate) fn lock_pager(&self) -> Result<MutexGuard<'_, Pager>> {
+        self.pager.lock().map_err(|_| {
+            HematiteError::InternalError("Catalog engine pager mutex is poisoned".to_string())
+        })
+    }
+
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
         let pager = Arc::new(Mutex::new(Pager::new(path, 100)?));
         Self::from_shared_pager(pager)
@@ -86,7 +119,7 @@ impl CatalogEngine {
     }
 
     pub fn read_database_header(&self) -> Result<Option<DatabaseHeader>> {
-        let mut pager = self.pager.lock().unwrap();
+        let mut pager = self.lock_pager()?;
         match pager.read_page(DB_HEADER_PAGE_ID) {
             Ok(page) => Ok(Some(DatabaseHeader::deserialize(&page.data)?)),
             Err(_) => Ok(None),
@@ -98,14 +131,14 @@ impl CatalogEngine {
         let mut page = Page::new(DB_HEADER_PAGE_ID);
         header.serialize(&mut page.data)?;
 
-        let mut pager = self.pager.lock().unwrap();
+        let mut pager = self.lock_pager()?;
         pager.write_page(page)?;
         pager.flush()?;
         Ok(header)
     }
 
     pub fn allocate_table_id(&mut self) -> Result<TableId> {
-        let mut pager = self.pager.lock().unwrap();
+        let mut pager = self.lock_pager()?;
         let header_page = pager.read_page(DB_HEADER_PAGE_ID)?;
         let mut header = DatabaseHeader::deserialize(&header_page.data)?;
         let table_id = header.increment_table_id();
@@ -133,7 +166,7 @@ impl CatalogEngine {
     where
         F: FnOnce(&mut DatabaseHeader),
     {
-        let mut pager = self.pager.lock().unwrap();
+        let mut pager = self.lock_pager()?;
         let header_page = pager.read_page(DB_HEADER_PAGE_ID)?;
         let mut header = DatabaseHeader::deserialize(&header_page.data)?;
         update(&mut header);
@@ -146,17 +179,17 @@ impl CatalogEngine {
 
     #[cfg(test)]
     pub(crate) fn read_page(&self, page_id: PageId) -> Result<Page> {
-        self.pager.lock().unwrap().read_page(page_id)
+        self.lock_pager()?.read_page(page_id)
     }
 
     #[cfg(test)]
     pub(crate) fn write_page(&self, page: Page) -> Result<()> {
-        self.pager.lock().unwrap().write_page(page)
+        self.lock_pager()?.write_page(page)
     }
 
     #[cfg(test)]
     pub(crate) fn allocate_page(&self) -> Result<PageId> {
-        let page_id = self.pager.lock().unwrap().allocate_page()?;
+        let page_id = self.lock_pager()?.allocate_page()?;
         if page_id == DB_HEADER_PAGE_ID || page_id == crate::storage::STORAGE_METADATA_PAGE_ID {
             return self.allocate_page();
         }
@@ -170,16 +203,16 @@ impl CatalogEngine {
                 "Cannot deallocate reserved page".to_string(),
             ));
         }
-        self.pager.lock().unwrap().deallocate_page(page_id)
+        self.lock_pager()?.deallocate_page(page_id)
     }
 
     pub fn flush(&mut self) -> Result<()> {
         engine_metadata::save_table_metadata(self)?;
-        self.pager.lock().unwrap().flush()
+        self.lock_pager()?.flush()
     }
 
     pub fn journal_mode(&self) -> Result<JournalMode> {
-        Ok(match self.pager.lock().unwrap().journal_mode() {
+        Ok(match self.lock_pager()?.journal_mode() {
             PagerJournalMode::Rollback => JournalMode::Rollback,
             PagerJournalMode::Wal => JournalMode::Wal,
         })
@@ -190,36 +223,36 @@ impl CatalogEngine {
             JournalMode::Rollback => PagerJournalMode::Rollback,
             JournalMode::Wal => PagerJournalMode::Wal,
         };
-        self.pager.lock().unwrap().set_journal_mode(mode)
+        self.lock_pager()?.set_journal_mode(mode)
     }
 
     pub fn checkpoint_wal(&mut self) -> Result<()> {
-        self.pager.lock().unwrap().checkpoint_wal()
+        self.lock_pager()?.checkpoint_wal()
     }
 
     pub fn begin_transaction(&mut self) -> Result<()> {
-        self.pager.lock().unwrap().begin_transaction()
+        self.lock_pager()?.begin_transaction()
     }
 
     pub fn commit_transaction(&mut self) -> Result<()> {
         engine_metadata::save_table_metadata(self)?;
-        self.pager.lock().unwrap().commit_transaction()
+        self.lock_pager()?.commit_transaction()
     }
 
     pub fn rollback_transaction(&mut self) -> Result<()> {
-        self.pager.lock().unwrap().rollback_transaction()
+        self.lock_pager()?.rollback_transaction()
     }
 
-    pub fn transaction_active(&self) -> bool {
-        self.pager.lock().unwrap().transaction_active()
+    pub fn transaction_active(&self) -> Result<bool> {
+        Ok(self.lock_pager()?.transaction_active())
     }
 
     pub(crate) fn begin_read(&mut self) -> Result<()> {
-        self.pager.lock().unwrap().begin_read()
+        self.lock_pager()?.begin_read()
     }
 
     pub(crate) fn end_read(&mut self) -> Result<()> {
-        self.pager.lock().unwrap().end_read()
+        self.lock_pager()?.end_read()
     }
 
     pub fn snapshot(&self) -> CatalogEngineSnapshot {
@@ -304,18 +337,18 @@ impl CatalogEngine {
     }
 
     pub(crate) fn pager_integrity_report(&mut self) -> Result<PagerIntegrityReport> {
-        self.pager.lock().unwrap().validate_integrity()
+        self.lock_pager()?.validate_integrity()
     }
 
-    pub(crate) fn free_page_ids(&self) -> Vec<PageId> {
-        self.pager.lock().unwrap().free_pages().to_vec()
+    pub(crate) fn free_page_ids(&self) -> Result<Vec<PageId>> {
+        Ok(self.lock_pager()?.free_pages().to_vec())
     }
 
     pub(crate) fn is_reserved_page(page_id: PageId) -> bool {
         page_id == DB_HEADER_PAGE_ID || page_id == crate::storage::STORAGE_METADATA_PAGE_ID
     }
 
-    pub fn get_storage_stats(&self) -> CatalogStorageStats {
+    pub fn get_storage_stats(&self) -> Result<CatalogStorageStats> {
         table_store::get_storage_stats(self)
     }
 

@@ -1,26 +1,40 @@
-//! B-tree node structure and operations.
+//! B-tree node layout and node-local algorithms.
 //!
-//! M0 storage contract notes:
-//! - B-tree pages are self-validating via magic, version, and page checksum.
-//! - Node payload format here is the authoritative encoding for current tree pages.
-//! - Planned table/index specialization (rowid table cells, overflow payloads, index key->rowid)
-//!   will build on this checksum/version discipline rather than bypass it.
+//! This file defines the page format used by the generic B-tree layer and the local operations
+//! that can be performed on a single node before higher-level tree orchestration takes over.
+//!
+//! On-disk page format:
+//!
+//! ```text
+//! +----------------------+----------------------------------------------+
+//! | header               | magic, version, checksum, type, counts       |
+//! +----------------------+----------------------------------------------+
+//! | key section          | key_len + key bytes, repeated                |
+//! +----------------------+----------------------------------------------+
+//! | child/value section  | child ids for internal nodes, values for leaf|
+//! +----------------------+----------------------------------------------+
+//! ```
+//!
+//! Structural model:
+//! - leaf nodes own `(key, value)` pairs;
+//! - internal nodes own `keys.len() + 1` child pointers;
+//! - internal separator keys route search and equal keys descend to the right subtree;
+//! - page size checks are performed before mutation so split decisions can be made deterministically.
+//!
+//! The split helpers in this file try to balance payload bytes, not just key counts, so large keys
+//! and values do not create badly-skewed pages.
 
 use crate::btree::{BTreeKey, BTreeValue, NodeType, BTREE_ORDER};
 use crate::error::{HematiteError, Result};
 use crate::storage::{Page, PageId, Pager, INVALID_PAGE_ID, PAGE_SIZE};
 
-// Size validation constants
-pub const MAX_KEY_SIZE: usize = 256; // Maximum key size in bytes
-pub const MAX_VALUE_SIZE: usize = 1024; // Maximum value size in bytes
-pub const KEY_LENGTH_SIZE: usize = 2; // u16 for key length
-pub const VALUE_LENGTH_SIZE: usize = 2; // u16 for value length
-pub const CHILD_ID_SIZE: usize = 4; // u32 for PageId
+pub const MAX_KEY_SIZE: usize = 256;
+pub const MAX_VALUE_SIZE: usize = 1024;
+pub const KEY_LENGTH_SIZE: usize = 2;
+pub const VALUE_LENGTH_SIZE: usize = 2;
+pub const CHILD_ID_SIZE: usize = 4;
+pub const PAGE_OVERHEAD: usize = 64;
 
-// Reserve space for page overhead and safety margin
-pub const PAGE_OVERHEAD: usize = 64; // Safety margin for page metadata
-
-// M2.1 pager-backed B-tree page format constants.
 pub const BTREE_MAGIC: &[u8; 4] = b"BTRE";
 pub const BTREE_PAGE_FORMAT_VERSION: u8 = 2;
 pub const CHECKSUM_SIZE: usize = 4;
@@ -41,7 +55,7 @@ pub struct BTreeNode {
     pub node_type: NodeType,
     pub keys: Vec<BTreeKey>,
     pub children: Vec<PageId>,
-    pub values: Vec<BTreeValue>, // Only used for leaf nodes
+    pub values: Vec<BTreeValue>,
 }
 
 impl BTreeNode {
@@ -65,7 +79,6 @@ impl BTreeNode {
         }
     }
 
-    // Size validation methods
     pub fn validate_key_size(key: &BTreeKey) -> Result<()> {
         if key.data.len() > MAX_KEY_SIZE {
             return Err(HematiteError::StorageError(format!(
@@ -136,7 +149,6 @@ impl BTreeNode {
         current_size + additional_size + PAGE_OVERHEAD <= PAGE_SIZE
     }
 
-    // Checksum and validation helper methods
     fn calculate_checksum(data: &[u8]) -> u32 {
         let mut hash: u32 = 0x811C9DC5;
         for byte in data {
@@ -267,7 +279,6 @@ impl BTreeNode {
         let payload_end = payload_start + payload_len;
         let mut offset = payload_start;
 
-        // Read keys
         for _ in 0..key_count {
             if offset + 2 > payload_end {
                 return Err(HematiteError::CorruptedData(
@@ -278,7 +289,6 @@ impl BTreeNode {
             let key_len = u16::from_le_bytes([page.data[offset], page.data[offset + 1]]) as usize;
             offset += 2;
 
-            // Validate key size
             if key_len > MAX_KEY_SIZE {
                 return Err(HematiteError::CorruptedData(format!(
                     "Key size {} exceeds maximum allowed size {}",
@@ -286,7 +296,6 @@ impl BTreeNode {
                 )));
             }
 
-            // Check bounds for key data
             if offset + key_len > payload_end {
                 return Err(HematiteError::CorruptedData(
                     "Key data exceeds page bounds".to_string(),
@@ -298,7 +307,6 @@ impl BTreeNode {
             node.keys.push(BTreeKey::new(key_data));
         }
 
-        // Read children for internal nodes
         if matches!(node_type, NodeType::Internal) {
             for _ in 0..key_count + 1 {
                 if offset + 4 > payload_end {
@@ -318,7 +326,6 @@ impl BTreeNode {
             }
         }
 
-        // Read values for leaf nodes
         if matches!(node_type, NodeType::Leaf) {
             for _ in 0..key_count {
                 if offset + 2 > payload_end {
@@ -331,7 +338,6 @@ impl BTreeNode {
                     u16::from_le_bytes([page.data[offset], page.data[offset + 1]]) as usize;
                 offset += 2;
 
-                // Validate value size
                 if value_len > MAX_VALUE_SIZE {
                     return Err(HematiteError::CorruptedData(format!(
                         "Value size {} exceeds maximum allowed size {}",
@@ -339,7 +345,6 @@ impl BTreeNode {
                     )));
                 }
 
-                // Check bounds for value data
                 if offset + value_len > payload_end {
                     return Err(HematiteError::CorruptedData(
                         "Value data exceeds page bounds".to_string(),
@@ -497,25 +502,20 @@ impl BTreeNode {
     }
 
     pub fn insert_leaf(&mut self, key: BTreeKey, value: BTreeValue) -> Result<()> {
-        // Validate key and value sizes
         Self::validate_key_size(&key)?;
         Self::validate_value_size(&value)?;
 
-        // Check if insertion would exceed page size
         if !self.can_insert_key_value(&key, &value) {
             return Err(HematiteError::StorageError(
                 "Insertion would exceed page size limit".to_string(),
             ));
         }
 
-        // Check if key already exists
         if let Some(pos) = self.keys.iter().position(|k| k == &key) {
-            // Key already exists - replace the value
             self.values[pos] = value;
             return Ok(());
         }
 
-        // Find insertion position for new key
         let pos = self
             .keys
             .iter()
@@ -527,10 +527,8 @@ impl BTreeNode {
     }
 
     pub fn insert_internal(&mut self, key: BTreeKey, child_page_id: PageId) -> Result<()> {
-        // Validate key size
         Self::validate_key_size(&key)?;
 
-        // Check if insertion would exceed page size
         if !self.can_insert_key_child(&key) {
             return Err(HematiteError::StorageError(
                 "Insertion would exceed page size limit".to_string(),
@@ -553,7 +551,6 @@ impl BTreeNode {
         new_key: BTreeKey,
         new_value: BTreeValue,
     ) -> Result<(BTreeKey, PageId)> {
-        // Insert the new key/value first
         let pos = self
             .keys
             .iter()
@@ -568,7 +565,6 @@ impl BTreeNode {
             ));
         }
 
-        // Create new leaf node
         let new_page_id = storage.allocate_page()?;
         let mut new_page = Page::new(new_page_id);
         let mut new_node = Self::new_leaf(new_page_id);
@@ -579,7 +575,6 @@ impl BTreeNode {
         new_node.values = self.values.split_off(split_pos);
         let split_key = new_node.keys[0].clone();
 
-        // Write both nodes
         let mut current_page = storage.read_page(self.page_id)?;
         self.to_page(&mut current_page)?;
         storage.write_page(current_page)?;
@@ -595,7 +590,6 @@ impl BTreeNode {
         new_key: BTreeKey,
         new_child: PageId,
     ) -> Result<(BTreeKey, PageId)> {
-        // Insert the new key/child first
         let pos = self
             .keys
             .iter()
@@ -610,7 +604,6 @@ impl BTreeNode {
             ));
         }
 
-        // Create new internal node
         let new_page_id = storage.allocate_page()?;
         let mut new_page = Page::new(new_page_id);
         let mut new_node = Self::new_internal(new_page_id);
@@ -619,14 +612,11 @@ impl BTreeNode {
         let split_pos = self.best_internal_split_pos();
         let split_key = self.keys[split_pos].clone();
 
-        // Move keys AFTER the median to the right node
         new_node.keys = self.keys.split_off(split_pos + 1);
         new_node.children = self.children.split_off(split_pos + 1);
 
-        // Remove the median key from left node (it moves up to parent)
         self.keys.pop();
 
-        // Write both nodes
         let mut current_page = storage.read_page(self.page_id)?;
         self.to_page(&mut current_page)?;
         storage.write_page(current_page)?;
@@ -727,18 +717,7 @@ impl BTreeNode {
             ));
         }
 
-        // Find the child that might contain the key
         let _child_index = self.find_child_index(key);
-
-        // In a full implementation, we would:
-        // 1. Recursively delete from the appropriate child
-        // 2. Check if the child is underflow after deletion
-        // 3. If underflow, try to borrow from siblings
-        // 4. If borrowing fails, merge with a sibling
-        // 5. Update parent separator keys as needed
-
-        // For now, implement basic deletion without underflow handling
-        // This is a placeholder that assumes the child can handle deletion
         Ok((false, None))
     }
 
@@ -804,7 +783,6 @@ impl BTreeNode {
         self.keys.append(&mut other.keys);
         self.values.append(&mut other.values);
 
-        // Deallocate the 'other' page
         storage.deallocate_page(other.page_id)?;
 
         Ok(())
@@ -832,7 +810,6 @@ impl BTreeNode {
         self.keys.append(&mut other.keys);
         self.children.append(&mut other.children);
 
-        // Deallocate the 'other' page
         storage.deallocate_page(other.page_id)?;
 
         Ok(())
@@ -843,7 +820,6 @@ impl BTreeNode {
         sibling: &mut BTreeNode,
         is_left_sibling: bool,
     ) -> Result<Option<BTreeKey>> {
-        // Both nodes must be of the same type
         if self.node_type != sibling.node_type {
             return Err(HematiteError::StorageError(
                 "Cannot borrow between different node types".to_string(),
@@ -851,20 +827,22 @@ impl BTreeNode {
         }
 
         if sibling.keys.len() <= (MAX_KEYS / 2) {
-            return Ok(None); // Sibling doesn't have enough keys to borrow
+            return Ok(None);
         }
 
         match self.node_type {
             NodeType::Leaf => {
                 if is_left_sibling {
-                    // Borrow from left sibling (take the last key)
-                    let key = sibling.keys.pop().unwrap();
-                    let value = sibling.values.pop().unwrap();
+                    let key = sibling.keys.pop().ok_or_else(|| {
+                        HematiteError::StorageError("Left leaf sibling missing key".to_string())
+                    })?;
+                    let value = sibling.values.pop().ok_or_else(|| {
+                        HematiteError::StorageError("Left leaf sibling missing value".to_string())
+                    })?;
                     self.keys.insert(0, key.clone());
                     self.values.insert(0, value);
                     Ok(Some(key))
                 } else {
-                    // Borrow from right sibling (take the first key)
                     let key = sibling.keys.remove(0);
                     let value = sibling.values.remove(0);
                     self.keys.push(key.clone());
@@ -874,14 +852,18 @@ impl BTreeNode {
             }
             NodeType::Internal => {
                 if is_left_sibling {
-                    // Borrow from left sibling (take last key and last child)
-                    let key = sibling.keys.pop().unwrap();
-                    let child = sibling.children.pop().unwrap();
+                    let key = sibling.keys.pop().ok_or_else(|| {
+                        HematiteError::StorageError("Left internal sibling missing key".to_string())
+                    })?;
+                    let child = sibling.children.pop().ok_or_else(|| {
+                        HematiteError::StorageError(
+                            "Left internal sibling missing child".to_string(),
+                        )
+                    })?;
                     self.keys.insert(0, key.clone());
                     self.children.insert(0, child);
                     Ok(Some(key))
                 } else {
-                    // Borrow from right sibling (take first key and first child)
                     let key = sibling.keys.remove(0);
                     let child = sibling.children.remove(0);
                     self.keys.push(key.clone());

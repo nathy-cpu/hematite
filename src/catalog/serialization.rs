@@ -236,7 +236,9 @@ impl IndexKeyCodec {
                 "Index rowid payload must be exactly 8 bytes".to_string(),
             ));
         }
-        Ok(u64::from_be_bytes(value.try_into().unwrap()))
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(value);
+        Ok(u64::from_be_bytes(bytes))
     }
 
     pub fn split_secondary_key(key: &[u8]) -> Result<(Vec<u8>, u64)> {
@@ -245,7 +247,9 @@ impl IndexKeyCodec {
                 "Index entry is missing rowid bytes".to_string(),
             ));
         }
-        let row_id = u64::from_be_bytes(key[key.len() - 8..].try_into().unwrap());
+        let mut row_id_bytes = [0u8; 8];
+        row_id_bytes.copy_from_slice(&key[key.len() - 8..]);
+        let row_id = u64::from_be_bytes(row_id_bytes);
         Ok((key[..key.len() - 8].to_vec(), row_id))
     }
 }

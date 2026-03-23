@@ -1,11 +1,29 @@
-//! File manager for handling single-file database operations.
+//! Raw file backend for fixed-size logical pages.
 //!
-//! M0 storage contract notes:
-//! - The first 64 bytes are a file-level header region.
-//! - Logical page 0 and page 1 are reserved and never returned by allocation.
-//! - This module currently stores freelist state as an in-memory list hydrated from
-//!   storage metadata; M1 will move this toward a dedicated persisted freelist layout.
-//! - `next_page_id` tracks high-water allocation and compaction can move this backward.
+//! `FileManager` is intentionally dumber than `Pager`. It knows how to read and write page-sized
+//! byte regions, track high-water allocation, and reuse freed page ids, but it does not know
+//! about transactions, checksums, or tree structure.
+//!
+//! Addressing model:
+//!
+//! ```text
+//! file offset
+//!   = 64-byte file header
+//!   + (page_id * PAGE_SIZE)
+//! ```
+//!
+//! Reserved logical pages:
+//! - page `0`: database header
+//! - page `1`: storage metadata
+//! - page `2+`: allocatable payload pages
+//!
+//! Allocation model:
+//! - reuse a page id from the freelist if one exists;
+//! - otherwise allocate `next_page_id` and advance the high-water mark;
+//! - allow trailing free pages to pull the high-water mark backward during compaction.
+//!
+//! This module supports both disk-backed and in-memory backends so the pager can run identical
+//! logic in tests and in the real database.
 
 use crate::error::Result;
 use crate::storage::free_list::FreeList;

@@ -1,24 +1,18 @@
 //! Core storage types and constants.
 //!
-//! M0 storage contract notes:
-//! - Single database file with 64-byte file header followed by fixed-size pages.
-//! - Reserved logical pages:
-//!   - page 0: database header
-//!   - page 1: storage metadata
-//! - The long-term target is a forest of B-trees: one catalog tree, one table tree per table,
-//!   and one index tree per index.
-//! - Row storage target: rowid-keyed table B-tree leaves with fixed cell layout and overflow
-//!   pages for large payloads.
-//! - Index storage target: indexed-key to rowid mappings.
-//! - All durability-sensitive pages are expected to be checksummed.
+//! This file defines the vocabulary shared by the storage layer:
+//! - `PageId`: logical page address;
+//! - `Page`: a full fixed-size page image;
+//! - reserved page ids and page size;
+//! - pager integrity reporting types used by higher layers.
+//!
+//! The key distinction is that a `Page` is just bytes plus an id. Any meaning attached to those
+//! bytes belongs to higher layers such as the B-tree or catalog code.
 
 use crate::error::Result;
 
-pub const PAGE_SIZE: usize = 4096; // 4KB pages
+pub const PAGE_SIZE: usize = 4096;
 
-/// Reserved page IDs for the single-file database layout.
-///
-/// Kept in `storage` to avoid higher-layer dependencies.
 pub const DB_HEADER_PAGE_ID: u32 = 0;
 pub const STORAGE_METADATA_PAGE_ID: u32 = 1;
 pub const INVALID_PAGE_ID: u32 = u32::MAX;

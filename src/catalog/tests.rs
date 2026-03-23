@@ -1206,7 +1206,9 @@ mod catalog_new_tests {
     use crate::catalog::catalog::Catalog;
     use crate::catalog::column::Column;
     use crate::catalog::ids::{ColumnId, TableId};
+    use crate::catalog::serialization::IndexKeyCodec;
     use crate::catalog::types::DataType;
+    use crate::catalog::Value;
     use crate::error::Result;
     use crate::test_utils::TestDbFile;
 
@@ -1588,5 +1590,83 @@ mod catalog_new_tests {
         assert!(err.to_string().contains("overlaps table storage"));
 
         Ok(())
+    }
+
+    #[test]
+    fn test_secondary_index_cursor_exposes_logical_key_only() -> Result<()> {
+        let test_db = TestDbFile::new("_test_secondary_index_cursor_logical_key");
+        let mut catalog = Catalog::open_or_create(test_db.path())?;
+        let table_id = catalog.create_table(
+            "users",
+            vec![
+                Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer)
+                    .primary_key(true)
+                    .nullable(false),
+                Column::new(ColumnId::new(2), "email".to_string(), DataType::Text),
+            ],
+        )?;
+        let table_root_id = catalog.with_engine(|engine| engine.create_table("users"))?;
+        let primary_key_root_id = catalog.with_engine(|engine| engine.create_empty_btree())?;
+        let secondary_index_root_id = catalog.with_engine(|engine| engine.create_empty_btree())?;
+        catalog.set_table_root_page(table_id, table_root_id)?;
+        catalog.set_table_primary_key_root_page(table_id, primary_key_root_id)?;
+        catalog.add_secondary_index(
+            table_id,
+            crate::catalog::SecondaryIndex {
+                name: "idx_users_email".to_string(),
+                column_indices: vec![1],
+                root_page_id: secondary_index_root_id,
+            },
+        )?;
+
+        let row_id = catalog.with_engine(|engine| {
+            engine.insert_into_table(
+                "users",
+                vec![
+                    Value::Integer(1),
+                    Value::Text("alice@example.com".to_string()),
+                ],
+            )
+        })?;
+        let table = catalog
+            .get_table_by_name("users")?
+            .expect("users table should exist");
+        catalog.with_engine(|engine| {
+            let row = crate::catalog::StoredRow {
+                row_id,
+                values: vec![
+                    Value::Integer(1),
+                    Value::Text("alice@example.com".to_string()),
+                ],
+            };
+            engine.register_primary_key_row(&table, row.clone())?;
+            engine.register_secondary_index_row(&table, row)?;
+            let mut cursor = engine.open_secondary_index_cursor(&table, "idx_users_email")?;
+            assert!(cursor.first());
+            let entry = cursor
+                .current()
+                .expect("secondary index entry should exist");
+            assert_eq!(
+                entry.key,
+                IndexKeyCodec::encode_key(&[Value::Text("alice@example.com".to_string())])?
+            );
+            assert_eq!(entry.row_id, row_id);
+            Ok(())
+        })?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_index_key_codec_rejects_truncated_rowid_bytes() {
+        let err = IndexKeyCodec::decode_row_id(&[1, 2, 3]).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Index rowid payload must be exactly 8 bytes"));
+
+        let err = IndexKeyCodec::split_secondary_key(&[1, 2, 3, 4, 5, 6, 7]).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Index entry is missing rowid bytes"));
     }
 }

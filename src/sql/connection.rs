@@ -1,4 +1,26 @@
-//! SQL connection and statement interface
+//! SQL connection boundary.
+//!
+//! A connection owns a catalog instance plus statement-level transaction behavior.
+//!
+//! ```text
+//! SQL text / prepared statement
+//!            |
+//!            v
+//!         parser
+//!            |
+//!            v
+//!    planner + executor
+//!            |
+//!            v
+//!         catalog
+//!            |
+//!            v
+//!      btree + pager
+//! ```
+//!
+//! This is where autocommit, explicit transactions, journal mode changes, and user-facing SQL
+//! errors are coordinated. The connection should not need to understand row encoding or page
+//! structure; it only sequences higher-level components.
 
 use crate::catalog::Catalog;
 use crate::catalog::CatalogEngine;
@@ -8,7 +30,7 @@ use crate::error::{HematiteError, Result};
 use crate::parser::{Lexer, Parser};
 use crate::query::{ExecutionContext, QueryPlanner, QueryResult};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 #[derive(Debug, Clone)]
 struct ConnectionTransaction {
@@ -22,6 +44,12 @@ pub struct Connection {
 }
 
 impl Connection {
+    fn lock_catalog(&self) -> Result<MutexGuard<'_, Catalog>> {
+        self.catalog.lock().map_err(|_| {
+            HematiteError::InternalError("SQL connection catalog mutex is poisoned".to_string())
+        })
+    }
+
     pub fn new(database_path: &str) -> Result<Self> {
         let catalog = Catalog::open_or_create(database_path)?;
         Ok(Self {
@@ -54,7 +82,7 @@ impl Connection {
         statement: crate::parser::ast::Statement,
     ) -> Result<QueryResult> {
         let (schema, table_row_counts) = {
-            let mut catalog_guard = self.catalog.lock().unwrap();
+            let mut catalog_guard = self.lock_catalog()?;
             let schema = catalog_guard.clone_schema();
             let table_row_counts =
                 catalog_guard.with_engine(|engine| Ok(Self::collect_table_row_counts(engine)))?;
@@ -66,7 +94,7 @@ impl Connection {
         let mut executor = plan.into_executor();
 
         let result = {
-            let mut catalog_guard = self.catalog.lock().unwrap();
+            let mut catalog_guard = self.lock_catalog()?;
             catalog_guard.with_read_engine(|engine| {
                 let mut ctx = ExecutionContext::for_read(&schema, engine);
                 executor.execute(&mut ctx)
@@ -83,7 +111,7 @@ impl Connection {
         let explicit_transaction = self.transaction.is_some();
         let persists_schema = statement.mutates_schema();
         let (schema, table_row_counts) = {
-            let mut catalog_guard = self.catalog.lock().unwrap();
+            let mut catalog_guard = self.lock_catalog()?;
             let schema = catalog_guard.clone_schema();
             let table_row_counts =
                 catalog_guard.with_engine(|engine| Ok(Self::collect_table_row_counts(engine)))?;
@@ -97,14 +125,14 @@ impl Connection {
         let implicit_snapshot = if explicit_transaction {
             None
         } else {
-            let mut catalog_guard = self.catalog.lock().unwrap();
+            let mut catalog_guard = self.lock_catalog()?;
             let snapshot = catalog_guard.snapshot();
             catalog_guard.begin_transaction()?;
             Some(snapshot)
         };
 
         let execution_result = {
-            let mut catalog_guard = self.catalog.lock().unwrap();
+            let mut catalog_guard = self.lock_catalog()?;
             catalog_guard.with_engine(|engine| {
                 let mut ctx = ExecutionContext::for_mutation(&schema, engine);
                 let result = executor.execute(&mut ctx)?;
@@ -115,7 +143,7 @@ impl Connection {
         match execution_result {
             Ok((result, updated_schema)) => {
                 if persists_schema {
-                    let mut catalog_guard = self.catalog.lock().unwrap();
+                    let mut catalog_guard = self.lock_catalog()?;
                     if let Err(err) = catalog_guard.replace_schema(updated_schema) {
                         if let Some(snapshot) = implicit_snapshot {
                             let _ = catalog_guard.rollback_transaction();
@@ -126,7 +154,7 @@ impl Connection {
                 }
 
                 if !explicit_transaction {
-                    let mut catalog_guard = self.catalog.lock().unwrap();
+                    let mut catalog_guard = self.lock_catalog()?;
                     if let Err(err) = catalog_guard.commit_transaction() {
                         if let Some(snapshot) = implicit_snapshot {
                             let _ = catalog_guard.rollback_transaction();
@@ -140,7 +168,7 @@ impl Connection {
             }
             Err(err) => {
                 if let Some(snapshot) = implicit_snapshot {
-                    let mut catalog_guard = self.catalog.lock().unwrap();
+                    let mut catalog_guard = self.lock_catalog()?;
                     let _ = catalog_guard.rollback_transaction();
                     catalog_guard.restore_snapshot(snapshot);
                 }
@@ -163,22 +191,22 @@ impl Connection {
                 "Cannot close connection with an active transaction".to_string(),
             ));
         }
-        let mut catalog_guard = self.catalog.lock().unwrap();
+        let mut catalog_guard = self.lock_catalog()?;
         catalog_guard.flush()
     }
 
     pub fn journal_mode(&self) -> Result<JournalMode> {
-        let catalog_guard = self.catalog.lock().unwrap();
+        let catalog_guard = self.lock_catalog()?;
         catalog_guard.journal_mode()
     }
 
     pub fn set_journal_mode(&mut self, journal_mode: JournalMode) -> Result<()> {
-        let mut catalog_guard = self.catalog.lock().unwrap();
+        let mut catalog_guard = self.lock_catalog()?;
         catalog_guard.set_journal_mode(journal_mode)
     }
 
     pub fn checkpoint_wal(&mut self) -> Result<()> {
-        let mut catalog_guard = self.catalog.lock().unwrap();
+        let mut catalog_guard = self.lock_catalog()?;
         catalog_guard.checkpoint_wal()
     }
 
@@ -216,7 +244,7 @@ impl Connection {
             ));
         }
 
-        let mut catalog_guard = self.catalog.lock().unwrap();
+        let mut catalog_guard = self.lock_catalog()?;
         let snapshot = catalog_guard.snapshot();
         catalog_guard.begin_transaction()?;
         drop(catalog_guard);
@@ -230,7 +258,7 @@ impl Connection {
 
     #[cfg(test)]
     pub(crate) fn schema_snapshot(&self) -> Result<crate::catalog::Schema> {
-        let catalog_guard = self.catalog.lock().unwrap();
+        let catalog_guard = self.lock_catalog()?;
         Ok(catalog_guard.clone_schema())
     }
 }
@@ -371,23 +399,15 @@ impl Default for Database {
 
 impl Connection {
     fn commit_active_transaction(&mut self) -> Result<()> {
-        if self.transaction.is_none() {
-            return Err(HematiteError::InternalError(
-                "No active transaction to commit".to_string(),
-            ));
-        }
-
-        let mut catalog_guard = self.catalog.lock().unwrap();
+        let state = self.transaction.take().ok_or_else(|| {
+            HematiteError::InternalError("No active transaction to commit".to_string())
+        })?;
+        let mut catalog_guard = self.lock_catalog()?;
         match catalog_guard.commit_transaction() {
-            Ok(()) => {
-                self.transaction = None;
-                Ok(())
-            }
+            Ok(()) => Ok(()),
             Err(err) => {
-                if let Some(state) = self.transaction.take() {
-                    let _ = catalog_guard.rollback_transaction();
-                    catalog_guard.restore_snapshot(state.snapshot);
-                }
+                let _ = catalog_guard.rollback_transaction();
+                catalog_guard.restore_snapshot(state.snapshot);
                 Err(err)
             }
         }
@@ -397,7 +417,7 @@ impl Connection {
         let state = self.transaction.take().ok_or_else(|| {
             HematiteError::InternalError("No active transaction to roll back".to_string())
         })?;
-        let mut catalog_guard = self.catalog.lock().unwrap();
+        let mut catalog_guard = self.lock_catalog()?;
         catalog_guard.rollback_transaction()?;
         catalog_guard.restore_snapshot(state.snapshot);
         Ok(())

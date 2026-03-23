@@ -1,10 +1,29 @@
-//! Write-ahead log records for pager-managed WAL mode.
+//! Write-ahead log representation for pager-managed WAL mode.
 //!
-//! Contract:
-//! - The WAL stores committed page images plus the logical pager metadata state that becomes
-//!   visible with that commit.
-//! - Records are append-only and self-delimiting so a truncated tail can be ignored on open.
-//! - Reader snapshots are derived from the last committed record visible to that reader.
+//! WAL mode separates "what is committed" from "what is checkpointed into the main file". Each
+//! committed record describes a complete pager-visible state transition.
+//!
+//! Record shape:
+//!
+//! ```text
+//! WalRecord
+//!   sequence number
+//!   visible file length
+//!   visible freelist snapshot
+//!   visible checksum table entries
+//!   page frames[]
+//!       page id
+//!       page bytes
+//! ```
+//!
+//! Reconstruction algorithm:
+//! - decode all complete records in order;
+//! - ignore a truncated tail record;
+//! - keep the last frame for each page id;
+//! - expose the latest committed sequence as a `VisibleWalState`.
+//!
+//! Readers do not see "the current WAL file". They see the last committed sequence captured when
+//! their read scope begins.
 
 use crate::error::{HematiteError, Result};
 use crate::storage::{PageId, PAGE_SIZE};

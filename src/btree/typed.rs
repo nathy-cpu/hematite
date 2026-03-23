@@ -1,7 +1,8 @@
 //! Typed B-tree facade built on top of the raw byte-tree API.
 //!
-//! This is the generic extension point for higher layers that want typed keys and values
-//! without reimplementing byte encoding or touching pager/node details directly.
+//! This is the convenience layer for callers that already have a stable key/value codec. It wires
+//! a [`KeyValueCodec`] into the raw byte-tree API so typed code can work with domain objects while
+//! still relying on the generic tree implementation underneath.
 
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};

@@ -1,11 +1,33 @@
 //! Low-level storage primitives.
 //!
+//! This module is the bottom of the stack. It is responsible for durable page IO and nothing
+//! above it should need to understand file offsets, sidecar files, or crash-recovery record
+//! layouts.
+//!
+//! The storage layer centers on a single abstraction:
+//!
+//! ```text
+//!              Pager
+//!                |
+//!    +-----------+-----------+
+//!    |           |           |
+//! buffer      free pages   durability
+//! pool        + file len   (rollback/WAL)
+//! ```
+//!
+//! Responsibilities:
+//! - map logical page ids to bytes on disk or bytes in the in-memory backend;
+//! - allocate, reuse, and retire pages;
+//! - maintain checksum metadata for durable pages;
+//! - implement transaction visibility for rollback-journal and WAL modes;
+//! - report integrity/accounting information upward without knowing what page contents mean.
+//!
 //! Extraction boundary:
-//! - External callers should treat [`Pager`] plus the page/value types re-exported here as the
-//!   entire storage API.
-//! - Everything else in this module is pager implementation detail and may change as long as the
-//!   pager contract stays stable.
-//! - This is the storage half of the future generic fork point.
+//! - external callers should treat [`Pager`] plus the re-exported page/id types as the entire
+//!   storage API;
+//! - the other submodules are pager internals and are intentionally hidden so the on-disk
+//!   representation can evolve without leaking into higher layers;
+//! - this is the storage half of the future generic fork point.
 
 pub(crate) mod buffer_pool;
 pub(crate) mod file_manager;

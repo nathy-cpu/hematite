@@ -23,7 +23,7 @@ pub(crate) fn validate_integrity(engine: &mut CatalogEngine) -> Result<CatalogIn
         .map(|(name, metadata)| (name.clone(), metadata.clone()))
         .collect::<Vec<_>>();
 
-    let free_pages = engine.free_page_ids().into_iter().collect::<HashSet<_>>();
+    let free_pages = engine.free_page_ids()?.into_iter().collect::<HashSet<_>>();
 
     let mut live_pages = HashSet::new();
     let mut overflow_pages = HashSet::new();
@@ -53,7 +53,9 @@ pub(crate) fn validate_integrity(engine: &mut CatalogEngine) -> Result<CatalogIn
                 )));
             }
 
-            let row_id = u64::from_be_bytes(key.try_into().unwrap());
+            let mut row_id_bytes = [0u8; 8];
+            row_id_bytes.copy_from_slice(&key);
+            let row_id = u64::from_be_bytes(row_id_bytes);
             if let Some(last_row_id) = previous_row_id {
                 if row_id <= last_row_id {
                     return Err(HematiteError::CorruptedData(format!(
@@ -149,7 +151,7 @@ pub(crate) fn validate_catalog_layout(
     engine: &mut CatalogEngine,
     tables: &[Table],
 ) -> Result<CatalogTreeUsage> {
-    let free_pages = engine.free_page_ids().into_iter().collect::<HashSet<_>>();
+    let free_pages = engine.free_page_ids()?.into_iter().collect::<HashSet<_>>();
     let mut table_pages = HashSet::new();
     let mut index_pages = HashSet::new();
     let mut overflow_pages = HashSet::new();

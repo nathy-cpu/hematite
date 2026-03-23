@@ -8,8 +8,8 @@ use super::engine::{CatalogEngine, CatalogStorageStats};
 use super::record::StoredRow;
 use super::serialization::RowCodec;
 
-pub(crate) fn get_storage_stats(engine: &CatalogEngine) -> CatalogStorageStats {
-    let pager = engine.pager.lock().unwrap();
+pub(crate) fn get_storage_stats(engine: &CatalogEngine) -> Result<CatalogStorageStats> {
+    let pager = engine.lock_pager()?;
     let file_bytes = pager.file_len().unwrap_or(0);
     let allocated_page_count = pager.allocated_page_count();
     let free_page_count = pager.free_pages().len();
@@ -27,7 +27,7 @@ pub(crate) fn get_storage_stats(engine: &CatalogEngine) -> CatalogStorageStats {
         }
     }
 
-    CatalogStorageStats {
+    Ok(CatalogStorageStats {
         table_count: engine.table_metadata.len(),
         total_rows: engine.table_metadata.values().map(|m| m.row_count).sum(),
         file_bytes,
@@ -41,7 +41,7 @@ pub(crate) fn get_storage_stats(engine: &CatalogEngine) -> CatalogStorageStats {
         table_unused_bytes: (live_table_page_count + overflow_page_count)
             .saturating_mul(CatalogEngine::PAGE_SIZE)
             .saturating_sub(table_used_bytes),
-    }
+    })
 }
 
 pub(crate) fn create_table(engine: &mut CatalogEngine, table_name: &str) -> Result<u32> {

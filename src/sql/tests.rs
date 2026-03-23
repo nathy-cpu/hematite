@@ -1080,27 +1080,6 @@ mod interface_tests {
 
         Ok(())
     }
-
-    #[test]
-    fn test_sql_debug_simple() -> Result<()> {
-        println!("=== Testing SQL Parsing Only ===");
-
-        use crate::parser::{Lexer, Parser};
-
-        println!("✓ Step 1: Creating lexer...");
-        let mut lexer =
-            Lexer::new("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);".to_string());
-        lexer.tokenize()?;
-        println!("✓ Lexing completed");
-
-        println!("✓ Step 2: Creating parser...");
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-        println!("✓ Parsing completed: {:?}", statement);
-
-        println!("✓ SUCCESS: Parsing test passed");
-        Ok(())
-    }
 }
 
 mod result_tests {

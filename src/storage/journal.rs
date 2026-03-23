@@ -1,9 +1,26 @@
-//! Rollback journal records for pager-managed transactions.
+//! Rollback-journal representation for pager-managed transactions.
 //!
-//! Contract:
-//! - The journal stores original page images and pager checksum state.
-//! - Recovery is process-crash only: `ACTIVE` journals are rolled back on open.
-//! - `COMMITTED` journals are finalized by deleting the journal after reopen.
+//! In rollback mode the journal captures the pre-transaction state of any page that may be
+//! overwritten. Recovery then restores that old state if the process crashes before commit
+//! finishes.
+//!
+//! Logical contents:
+//!
+//! ```text
+//! journal header
+//!   state
+//!   original file length
+//!   original freelist
+//!   original checksum table
+//!   page record count
+//! page record[]
+//!   page id
+//!   full original page image
+//! ```
+//!
+//! The journal stores complete page images rather than logical diffs. That keeps recovery simple:
+//! read the journal, rewrite the saved pages, restore file length / freelist / checksums, then
+//! delete the journal file.
 
 use crate::error::{HematiteError, Result};
 use crate::storage::{PageId, PAGE_SIZE};
