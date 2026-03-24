@@ -32,6 +32,8 @@ mod ast_tests {
             column_aliases: vec![None],
             from: TableReference::Table("users".to_string(), None),
             where_clause: None,
+            group_by: Vec::new(),
+            having_clause: None,
             order_by: Vec::new(),
             limit: None,
             offset: None,
@@ -59,6 +61,8 @@ mod ast_tests {
             column_aliases: vec![None],
             from: TableReference::Table("users".to_string(), None),
             where_clause: None,
+            group_by: Vec::new(),
+            having_clause: None,
             order_by: Vec::new(),
             limit: None,
             offset: None,
@@ -91,6 +95,8 @@ mod ast_tests {
                     right: Expression::Literal(Value::Integer(1)),
                 }],
             }),
+            group_by: Vec::new(),
+            having_clause: None,
             order_by: Vec::new(),
             limit: None,
             offset: None,
@@ -312,6 +318,37 @@ mod lexer_tests {
             Token::RightParen,
             Token::From,
             Token::Identifier("users".to_string()),
+            Token::Semicolon,
+        ];
+
+        assert_eq!(lexer.get_tokens(), &expected);
+        Ok(())
+    }
+
+    #[test]
+    fn test_group_by_having_statement() -> Result<()> {
+        let mut lexer = Lexer::new(
+            "SELECT name, COUNT(id) FROM users GROUP BY name HAVING name = 'Alice';".to_string(),
+        );
+        lexer.tokenize()?;
+
+        let expected = vec![
+            Token::Select,
+            Token::Identifier("name".to_string()),
+            Token::Comma,
+            Token::Count,
+            Token::LeftParen,
+            Token::Identifier("id".to_string()),
+            Token::RightParen,
+            Token::From,
+            Token::Identifier("users".to_string()),
+            Token::Group,
+            Token::By,
+            Token::Identifier("name".to_string()),
+            Token::Having,
+            Token::Identifier("name".to_string()),
+            Token::Equal,
+            Token::StringLiteral("Alice".to_string()),
             Token::Semicolon,
         ];
 
@@ -846,6 +883,51 @@ mod parser_tests {
                         ref column,
                     } if column == "score"
                 ));
+            }
+            _ => panic!("Expected SELECT statement"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_count_column() -> Result<()> {
+        let mut lexer = Lexer::new("SELECT COUNT(score) FROM users;".to_string());
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let statement = parser.parse()?;
+        match statement {
+            Statement::Select(select) => {
+                assert!(matches!(
+                    select.columns[0],
+                    SelectItem::Aggregate {
+                        function: AggregateFunction::Count,
+                        ref column,
+                    } if column == "score"
+                ));
+            }
+            _ => panic!("Expected SELECT statement"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_group_by_having() -> Result<()> {
+        let mut lexer = Lexer::new(
+            "SELECT name, COUNT(id) AS total_count FROM users GROUP BY name HAVING total_count > 1;"
+                .to_string(),
+        );
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let statement = parser.parse()?;
+        match statement {
+            Statement::Select(select) => {
+                assert_eq!(select.group_by.len(), 1);
+                assert!(matches!(
+                    &select.group_by[0],
+                    Expression::Column(name) if name == "name"
+                ));
+                assert!(select.having_clause.is_some());
+                assert_eq!(select.column_aliases[1].as_deref(), Some("total_count"));
             }
             _ => panic!("Expected SELECT statement"),
         }

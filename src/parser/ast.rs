@@ -26,6 +26,8 @@ pub struct SelectStatement {
     pub column_aliases: Vec<Option<String>>,
     pub from: TableReference,
     pub where_clause: Option<WhereClause>,
+    pub group_by: Vec<Expression>,
+    pub having_clause: Option<WhereClause>,
     pub order_by: Vec<OrderByItem>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
@@ -45,6 +47,7 @@ pub enum SelectItem {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AggregateFunction {
+    Count,
     Sum,
     Avg,
     Min,
@@ -258,6 +261,12 @@ impl Statement {
                 if let Some(where_clause) = &select.where_clause {
                     where_clause.visit_parameters(f);
                 }
+                for expr in &select.group_by {
+                    expr.visit_parameters(f);
+                }
+                if let Some(having_clause) = &select.having_clause {
+                    having_clause.visit_parameters(f);
+                }
             }
             Statement::Update(update) => {
                 for assignment in &update.assignments {
@@ -304,6 +313,16 @@ impl Statement {
                     .where_clause
                     .as_ref()
                     .map(|where_clause| where_clause.bind(parameters))
+                    .transpose()?,
+                group_by: select
+                    .group_by
+                    .iter()
+                    .map(|expr| expr.bind(parameters))
+                    .collect::<Result<Vec<_>>>()?,
+                having_clause: select
+                    .having_clause
+                    .as_ref()
+                    .map(|having_clause| having_clause.bind(parameters))
                     .transpose()?,
                 order_by: select.order_by.clone(),
                 limit: select.limit,
@@ -618,7 +637,6 @@ impl SelectStatement {
             }
         };
 
-        // Validate columns
         let has_aggregate = self
             .columns
             .iter()
@@ -626,21 +644,6 @@ impl SelectStatement {
         if self.distinct && has_aggregate {
             return Err(HematiteError::ParseError(
                 "DISTINCT cannot be combined with aggregate select items yet".to_string(),
-            ));
-        }
-        if has_aggregate && self.columns.len() > 1 {
-            return Err(HematiteError::ParseError(
-                "Aggregate select items cannot be combined with other select items yet".to_string(),
-            ));
-        }
-
-        let has_count_all = self
-            .columns
-            .iter()
-            .any(|item| matches!(item, SelectItem::CountAll));
-        if has_count_all && self.columns.len() > 1 {
-            return Err(HematiteError::ParseError(
-                "COUNT(*) cannot be combined with other select items yet".to_string(),
             ));
         }
 
@@ -663,6 +666,56 @@ impl SelectStatement {
             for condition in &where_clause.conditions {
                 Self::validate_condition(condition, table, &self.from)?;
             }
+        }
+
+        for expr in &self.group_by {
+            Self::validate_expression(expr, table, &self.from)?;
+        }
+
+        if !self.group_by.is_empty() {
+            for item in &self.columns {
+                match item {
+                    SelectItem::Wildcard => {
+                        return Err(HematiteError::ParseError(
+                            "Wildcard select is not supported with GROUP BY".to_string(),
+                        ));
+                    }
+                    SelectItem::Column(name) => {
+                        let grouped = self.group_by.iter().any(|expr| {
+                            matches!(expr, Expression::Column(group_name) if group_name == name)
+                        });
+                        if !grouped {
+                            return Err(HematiteError::ParseError(format!(
+                                "Selected column '{}' must appear in GROUP BY or be aggregated",
+                                name
+                            )));
+                        }
+                    }
+                    SelectItem::Expression(_) => {
+                        return Err(HematiteError::ParseError(
+                            "Expression select items are not supported with GROUP BY yet"
+                                .to_string(),
+                        ));
+                    }
+                    SelectItem::CountAll | SelectItem::Aggregate { .. } => {}
+                }
+            }
+        } else if has_aggregate
+            && self
+                .columns
+                .iter()
+                .any(|item| !matches!(item, SelectItem::CountAll | SelectItem::Aggregate { .. }))
+        {
+            return Err(HematiteError::ParseError(
+                "Aggregate select items cannot be combined with non-aggregate select items without GROUP BY"
+                    .to_string(),
+            ));
+        }
+
+        if self.having_clause.is_some() && self.group_by.is_empty() && !has_aggregate {
+            return Err(HematiteError::ParseError(
+                "HAVING requires GROUP BY or aggregate select items".to_string(),
+            ));
         }
 
         for item in &self.order_by {

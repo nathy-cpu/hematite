@@ -462,6 +462,7 @@ impl SelectExecutor {
                         format!(
                             "{}({})",
                             match function {
+                                AggregateFunction::Count => "COUNT",
                                 AggregateFunction::Sum => "SUM",
                                 AggregateFunction::Avg => "AVG",
                                 AggregateFunction::Min => "MIN",
@@ -534,10 +535,14 @@ impl SelectExecutor {
                     .collect();
 
                 if values.is_empty() {
-                    return Ok(Some(Value::Null));
+                    return Ok(Some(match function {
+                        AggregateFunction::Count => Value::Integer(0),
+                        _ => Value::Null,
+                    }));
                 }
 
                 match function {
+                    AggregateFunction::Count => Ok(Some(Value::Integer(values.len() as i32))),
                     AggregateFunction::Min => {
                         let mut current = values[0].clone();
                         for value in values.into_iter().skip(1) {
@@ -948,6 +953,8 @@ impl InsertExecutor {
                         column_aliases: vec![None],
                         from: TableReference::Table(String::new(), None),
                         where_clause: None,
+                        group_by: Vec::new(),
+                        having_clause: None,
                         order_by: Vec::new(),
                         limit: None,
                         offset: None,
@@ -1223,6 +1230,8 @@ impl QueryExecutor for UpdateExecutor {
                 column_aliases: vec![None],
                 from: TableReference::Table(self.statement.table.clone(), None),
                 where_clause: self.statement.where_clause.clone(),
+                group_by: Vec::new(),
+                having_clause: None,
                 order_by: Vec::new(),
                 limit: None,
                 offset: None,
@@ -1453,6 +1462,8 @@ impl QueryExecutor for DeleteExecutor {
                 column_aliases: vec![None],
                 from: TableReference::Table(self.statement.table.clone(), None),
                 where_clause: self.statement.where_clause.clone(),
+                group_by: Vec::new(),
+                having_clause: None,
                 order_by: Vec::new(),
                 limit: None,
                 offset: None,

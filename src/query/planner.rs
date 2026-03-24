@@ -311,6 +311,8 @@ impl QueryPlanner {
             column_aliases: vec![None],
             from: TableReference::Table(table_name.clone(), None),
             where_clause: where_clause.clone(),
+            group_by: Vec::new(),
+            having_clause: None,
             order_by: Vec::new(),
             limit: None,
             offset: None,

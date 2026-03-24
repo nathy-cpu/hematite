@@ -100,6 +100,18 @@ impl Parser {
             None
         };
 
+        let group_by = if matches!(self.peek_token(), Ok(Token::Group)) {
+            self.parse_group_by_clause()?
+        } else {
+            Vec::new()
+        };
+
+        let having_clause = if matches!(self.peek_token(), Ok(Token::Having)) {
+            Some(self.parse_having_clause()?)
+        } else {
+            None
+        };
+
         let order_by = if matches!(self.peek_token(), Ok(Token::Order)) {
             self.parse_order_by_clause()?
         } else {
@@ -126,6 +138,8 @@ impl Parser {
             column_aliases,
             from,
             where_clause,
+            group_by,
+            having_clause,
             order_by,
             limit,
             offset,
@@ -146,15 +160,7 @@ impl Parser {
             loop {
                 let token = self.peek_token()?;
                 match token {
-                    Token::Count => {
-                        self.consume_token(&Token::Count)?;
-                        self.consume_token(&Token::LeftParen)?;
-                        self.consume_token(&Token::Asterisk)?;
-                        self.consume_token(&Token::RightParen)?;
-                        columns.push(SelectItem::CountAll);
-                        aliases.push(self.parse_optional_alias()?);
-                    }
-                    Token::Sum | Token::Avg | Token::Min | Token::Max => {
+                    Token::Count | Token::Sum | Token::Avg | Token::Min | Token::Max => {
                         columns.push(self.parse_aggregate_select_item()?);
                         aliases.push(self.parse_optional_alias()?);
                     }
@@ -196,6 +202,10 @@ impl Parser {
 
     fn parse_aggregate_select_item(&mut self) -> Result<SelectItem> {
         let function = match self.peek_token()? {
+            Token::Count => {
+                self.consume_token(&Token::Count)?;
+                AggregateFunction::Count
+            }
             Token::Sum => {
                 self.consume_token(&Token::Sum)?;
                 AggregateFunction::Sum
@@ -221,6 +231,13 @@ impl Parser {
         };
 
         self.consume_token(&Token::LeftParen)?;
+        if function == AggregateFunction::Count && matches!(self.peek_token(), Ok(Token::Asterisk))
+        {
+            self.consume_token(&Token::Asterisk)?;
+            self.consume_token(&Token::RightParen)?;
+            return Ok(SelectItem::CountAll);
+        }
+
         let column = self.parse_identifier_reference()?;
         self.consume_token(&Token::RightParen)?;
 
@@ -279,6 +296,28 @@ impl Parser {
         }
 
         Ok(items)
+    }
+
+    fn parse_group_by_clause(&mut self) -> Result<Vec<Expression>> {
+        self.consume_token(&Token::Group)?;
+        self.consume_token(&Token::By)?;
+
+        let mut items = Vec::new();
+        loop {
+            items.push(self.parse_expression()?);
+            if matches!(self.peek_token(), Ok(Token::Comma)) {
+                self.consume_token(&Token::Comma)?;
+                continue;
+            }
+            break;
+        }
+        Ok(items)
+    }
+
+    fn parse_having_clause(&mut self) -> Result<WhereClause> {
+        self.consume_token(&Token::Having)?;
+        let conditions = self.parse_conditions()?;
+        Ok(WhereClause { conditions })
     }
 
     fn parse_limit_clause(&mut self) -> Result<usize> {
