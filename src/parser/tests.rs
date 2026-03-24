@@ -104,6 +104,47 @@ mod ast_tests {
 
         assert!(select.validate(&catalog).is_err());
     }
+
+    #[test]
+    fn test_group_by_rejects_non_grouped_column_projection() {
+        let mut catalog = crate::catalog::Schema::new();
+
+        let columns = vec![
+            crate::catalog::Column::new(
+                crate::catalog::ColumnId::new(1),
+                "id".to_string(),
+                DataType::Integer,
+            )
+            .primary_key(true),
+            crate::catalog::Column::new(
+                crate::catalog::ColumnId::new(2),
+                "name".to_string(),
+                DataType::Text,
+            ),
+        ];
+        catalog.create_table("users".to_string(), columns).unwrap();
+
+        let select = SelectStatement {
+            distinct: false,
+            columns: vec![
+                SelectItem::Column("id".to_string()),
+                SelectItem::Aggregate {
+                    function: AggregateFunction::Count,
+                    column: "name".to_string(),
+                },
+            ],
+            column_aliases: vec![None, Some("name_count".to_string())],
+            from: TableReference::Table("users".to_string(), None),
+            where_clause: None,
+            group_by: vec![Expression::Column("name".to_string())],
+            having_clause: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+        };
+
+        assert!(select.validate(&catalog).is_err());
+    }
 }
 
 mod lexer_tests {

@@ -852,6 +852,7 @@ mod connection_tests {
         conn.execute("INSERT INTO test (id, name, score) VALUES (1, 'Alice', 10);")?;
         conn.execute("INSERT INTO test (id, name, score) VALUES (2, 'Alice', NULL);")?;
         conn.execute("INSERT INTO test (id, name, score) VALUES (3, 'Bob', 7);")?;
+        conn.execute("INSERT INTO test (id, name, score) VALUES (4, 'Cara', NULL);")?;
 
         let result = conn.execute(
             "SELECT name, COUNT(score) AS score_count, SUM(score) AS total_score \
@@ -871,6 +872,11 @@ mod connection_tests {
                     crate::catalog::Value::Text("Bob".to_string()),
                     crate::catalog::Value::Integer(1),
                     crate::catalog::Value::Integer(7),
+                ],
+                vec![
+                    crate::catalog::Value::Text("Cara".to_string()),
+                    crate::catalog::Value::Integer(0),
+                    crate::catalog::Value::Null,
                 ],
             ]
         );
