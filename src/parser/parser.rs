@@ -200,7 +200,7 @@ impl Parser {
         Ok((columns, aliases))
     }
 
-    fn parse_aggregate_select_item(&mut self) -> Result<SelectItem> {
+    fn parse_aggregate_expression(&mut self) -> Result<Expression> {
         let function = match self.peek_token()? {
             Token::Count => {
                 self.consume_token(&Token::Count)?;
@@ -235,13 +235,35 @@ impl Parser {
         {
             self.consume_token(&Token::Asterisk)?;
             self.consume_token(&Token::RightParen)?;
-            return Ok(SelectItem::CountAll);
+            return Ok(Expression::AggregateCall {
+                function,
+                target: AggregateTarget::All,
+            });
         }
 
         let column = self.parse_identifier_reference()?;
         self.consume_token(&Token::RightParen)?;
 
-        Ok(SelectItem::Aggregate { function, column })
+        Ok(Expression::AggregateCall {
+            function,
+            target: AggregateTarget::Column(column),
+        })
+    }
+
+    fn parse_aggregate_select_item(&mut self) -> Result<SelectItem> {
+        match self.parse_aggregate_expression()? {
+            Expression::AggregateCall {
+                function: AggregateFunction::Count,
+                target: AggregateTarget::All,
+            } => Ok(SelectItem::CountAll),
+            Expression::AggregateCall {
+                function,
+                target: AggregateTarget::Column(column),
+            } => Ok(SelectItem::Aggregate { function, column }),
+            _ => Err(HematiteError::InternalError(
+                "aggregate expression parser returned a non-aggregate expression".to_string(),
+            )),
+        }
     }
 
     fn parse_table_reference(&mut self) -> Result<TableReference> {
@@ -571,6 +593,9 @@ impl Parser {
     fn parse_primary_expression(&mut self) -> Result<Expression> {
         let token = self.peek_token()?;
         match token {
+            Token::Count | Token::Sum | Token::Avg | Token::Min | Token::Max => {
+                self.parse_aggregate_expression()
+            }
             Token::Identifier(_) => Ok(Expression::Column(self.parse_identifier_reference()?)),
             Token::StringLiteral(value) => {
                 self.consume_token(&Token::StringLiteral(value.clone()))?;

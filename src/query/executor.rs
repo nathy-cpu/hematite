@@ -89,6 +89,9 @@ impl SelectExecutor {
                 "Unbound parameter {} reached execution",
                 index + 1
             ))),
+            Expression::AggregateCall { .. } => Err(HematiteError::ParseError(
+                "Aggregate expressions can only be evaluated in grouped query contexts".to_string(),
+            )),
             Expression::Column(name) => {
                 if let Some(table_name) = self.get_table_name() {
                     if let Some(table) = ctx.catalog.get_table_by_name(table_name) {
@@ -508,6 +511,127 @@ impl SelectExecutor {
         }
     }
 
+    fn evaluate_aggregate_value(
+        &self,
+        ctx: &ExecutionContext,
+        function: AggregateFunction,
+        target: &AggregateTarget,
+        rows: &[Vec<Value>],
+    ) -> Result<Option<Value>> {
+        if matches!(target, AggregateTarget::All) {
+            return match function {
+                AggregateFunction::Count => Ok(Some(Value::Integer(rows.len() as i32))),
+                _ => Err(HematiteError::ParseError(format!(
+                    "{:?}(*) is not supported",
+                    function
+                ))),
+            };
+        }
+
+        let AggregateTarget::Column(column) = target else {
+            return Ok(None);
+        };
+
+        let table_name = self
+            .get_table_name()
+            .ok_or_else(|| HematiteError::ParseError("Missing table name".to_string()))?;
+        let table = ctx.catalog.get_table_by_name(table_name).ok_or_else(|| {
+            HematiteError::ParseError(format!("Table '{}' not found", table_name))
+        })?;
+        let index = table
+            .get_column_index(SelectStatement::column_reference_name(column))
+            .ok_or_else(|| {
+                HematiteError::ParseError(format!(
+                    "Column '{}' does not exist in table '{}'",
+                    column, table_name
+                ))
+            })?;
+
+        let values: Vec<&Value> = rows
+            .iter()
+            .map(|row| &row[index])
+            .filter(|value| !value.is_null())
+            .collect();
+
+        if values.is_empty() {
+            return Ok(Some(match function {
+                AggregateFunction::Count => Value::Integer(0),
+                _ => Value::Null,
+            }));
+        }
+
+        match function {
+            AggregateFunction::Count => Ok(Some(Value::Integer(values.len() as i32))),
+            AggregateFunction::Min => {
+                let mut current = values[0].clone();
+                for value in values.into_iter().skip(1) {
+                    if value.partial_cmp(&current).is_some_and(|ord| ord.is_lt()) {
+                        current = value.clone();
+                    }
+                }
+                Ok(Some(current))
+            }
+            AggregateFunction::Max => {
+                let mut current = values[0].clone();
+                for value in values.into_iter().skip(1) {
+                    if value.partial_cmp(&current).is_some_and(|ord| ord.is_gt()) {
+                        current = value.clone();
+                    }
+                }
+                Ok(Some(current))
+            }
+            AggregateFunction::Sum => {
+                let mut int_sum: i64 = 0;
+                let mut float_sum: f64 = 0.0;
+                let mut has_float = false;
+
+                for value in values {
+                    match value {
+                        Value::Integer(i) => {
+                            int_sum += *i as i64;
+                            float_sum += *i as f64;
+                        }
+                        Value::Float(f) => {
+                            has_float = true;
+                            float_sum += *f;
+                        }
+                        _ => {
+                            return Err(HematiteError::ParseError(format!(
+                                "SUM() requires numeric values, found {:?}",
+                                value
+                            )))
+                        }
+                    }
+                }
+
+                if has_float {
+                    Ok(Some(Value::Float(float_sum)))
+                } else {
+                    Ok(Some(Value::Integer(int_sum as i32)))
+                }
+            }
+            AggregateFunction::Avg => {
+                let mut sum: f64 = 0.0;
+                let count = values.len() as f64;
+
+                for value in values {
+                    match value {
+                        Value::Integer(i) => sum += *i as f64,
+                        Value::Float(f) => sum += *f,
+                        _ => {
+                            return Err(HematiteError::ParseError(format!(
+                                "AVG() requires numeric values, found {:?}",
+                                value
+                            )))
+                        }
+                    }
+                }
+
+                Ok(Some(Value::Float(sum / count)))
+            }
+        }
+    }
+
     fn evaluate_aggregate_item(
         &self,
         ctx: &ExecutionContext,
@@ -515,107 +639,18 @@ impl SelectExecutor {
         rows: &[Vec<Value>],
     ) -> Result<Option<Value>> {
         match item {
-            SelectItem::CountAll => Ok(Some(Value::Integer(rows.len() as i32))),
-            SelectItem::Aggregate { function, column } => {
-                let table_name = self
-                    .get_table_name()
-                    .ok_or_else(|| HematiteError::ParseError("Missing table name".to_string()))?;
-                let table = ctx.catalog.get_table_by_name(table_name).ok_or_else(|| {
-                    HematiteError::ParseError(format!("Table '{}' not found", table_name))
-                })?;
-                let index = table
-                    .get_column_index(SelectStatement::column_reference_name(column))
-                    .ok_or_else(|| {
-                        HematiteError::ParseError(format!(
-                            "Column '{}' does not exist in table '{}'",
-                            column, table_name
-                        ))
-                    })?;
-
-                let values: Vec<&Value> = rows
-                    .iter()
-                    .map(|row| &row[index])
-                    .filter(|value| !value.is_null())
-                    .collect();
-
-                if values.is_empty() {
-                    return Ok(Some(match function {
-                        AggregateFunction::Count => Value::Integer(0),
-                        _ => Value::Null,
-                    }));
-                }
-
-                match function {
-                    AggregateFunction::Count => Ok(Some(Value::Integer(values.len() as i32))),
-                    AggregateFunction::Min => {
-                        let mut current = values[0].clone();
-                        for value in values.into_iter().skip(1) {
-                            if value.partial_cmp(&current).is_some_and(|ord| ord.is_lt()) {
-                                current = value.clone();
-                            }
-                        }
-                        Ok(Some(current))
-                    }
-                    AggregateFunction::Max => {
-                        let mut current = values[0].clone();
-                        for value in values.into_iter().skip(1) {
-                            if value.partial_cmp(&current).is_some_and(|ord| ord.is_gt()) {
-                                current = value.clone();
-                            }
-                        }
-                        Ok(Some(current))
-                    }
-                    AggregateFunction::Sum => {
-                        let mut int_sum: i64 = 0;
-                        let mut float_sum: f64 = 0.0;
-                        let mut has_float = false;
-
-                        for value in values {
-                            match value {
-                                Value::Integer(i) => {
-                                    int_sum += *i as i64;
-                                    float_sum += *i as f64;
-                                }
-                                Value::Float(f) => {
-                                    has_float = true;
-                                    float_sum += *f;
-                                }
-                                _ => {
-                                    return Err(HematiteError::ParseError(format!(
-                                        "SUM() requires numeric values, found {:?}",
-                                        value
-                                    )))
-                                }
-                            }
-                        }
-
-                        if has_float {
-                            Ok(Some(Value::Float(float_sum)))
-                        } else {
-                            Ok(Some(Value::Integer(int_sum as i32)))
-                        }
-                    }
-                    AggregateFunction::Avg => {
-                        let mut sum: f64 = 0.0;
-                        let count = values.len() as f64;
-
-                        for value in values {
-                            match value {
-                                Value::Integer(i) => sum += *i as f64,
-                                Value::Float(f) => sum += *f,
-                                _ => {
-                                    return Err(HematiteError::ParseError(format!(
-                                        "AVG() requires numeric values, found {:?}",
-                                        value
-                                    )))
-                                }
-                            }
-                        }
-
-                        Ok(Some(Value::Float(sum / count)))
-                    }
-                }
-            }
+            SelectItem::CountAll => self.evaluate_aggregate_value(
+                ctx,
+                AggregateFunction::Count,
+                &AggregateTarget::All,
+                rows,
+            ),
+            SelectItem::Aggregate { function, column } => self.evaluate_aggregate_value(
+                ctx,
+                *function,
+                &AggregateTarget::Column(column.clone()),
+                rows,
+            ),
             _ => Ok(None),
         }
     }
@@ -657,9 +692,11 @@ impl SelectExecutor {
 
     fn evaluate_projected_expression(
         &self,
+        ctx: &ExecutionContext,
         expr: &Expression,
         row: &[Value],
         output_columns: &[String],
+        group_rows: &[Vec<Value>],
     ) -> Result<Value> {
         match expr {
             Expression::Literal(value) => Ok(value.clone()),
@@ -667,6 +704,13 @@ impl SelectExecutor {
                 "Unbound parameter {} reached execution",
                 index + 1
             ))),
+            Expression::AggregateCall { function, target } => self
+                .evaluate_aggregate_value(ctx, *function, target, group_rows)?
+                .ok_or_else(|| {
+                    HematiteError::InternalError(
+                        "Aggregate expression evaluation produced no value".to_string(),
+                    )
+                }),
             Expression::Column(name) => {
                 let index = self
                     .result_column_index(output_columns, name)
@@ -684,7 +728,13 @@ impl SelectExecutor {
                 })
             }
             Expression::UnaryMinus(expr) => {
-                match self.evaluate_projected_expression(expr, row, output_columns)? {
+                match self.evaluate_projected_expression(
+                    ctx,
+                    expr,
+                    row,
+                    output_columns,
+                    group_rows,
+                )? {
                     Value::Integer(value) => {
                         value.checked_neg().map(Value::Integer).ok_or_else(|| {
                             HematiteError::ParseError(
@@ -706,17 +756,19 @@ impl SelectExecutor {
                 right,
             } => self.evaluate_arithmetic(
                 operator,
-                self.evaluate_projected_expression(left, row, output_columns)?,
-                self.evaluate_projected_expression(right, row, output_columns)?,
+                self.evaluate_projected_expression(ctx, left, row, output_columns, group_rows)?,
+                self.evaluate_projected_expression(ctx, right, row, output_columns, group_rows)?,
             ),
         }
     }
 
     fn evaluate_projected_condition(
         &self,
+        ctx: &ExecutionContext,
         condition: &Condition,
         row: &[Value],
         output_columns: &[String],
+        group_rows: &[Vec<Value>],
     ) -> Result<Option<bool>> {
         match condition {
             Condition::Comparison {
@@ -724,8 +776,15 @@ impl SelectExecutor {
                 operator,
                 right,
             } => {
-                let left_val = self.evaluate_projected_expression(left, row, output_columns)?;
-                let right_val = self.evaluate_projected_expression(right, row, output_columns)?;
+                let left_val =
+                    self.evaluate_projected_expression(ctx, left, row, output_columns, group_rows)?;
+                let right_val = self.evaluate_projected_expression(
+                    ctx,
+                    right,
+                    row,
+                    output_columns,
+                    group_rows,
+                )?;
                 Ok(self.compare_values(&left_val, operator, &right_val))
             }
             Condition::InList {
@@ -733,7 +792,8 @@ impl SelectExecutor {
                 values,
                 is_not,
             } => {
-                let probe = self.evaluate_projected_expression(expr, row, output_columns)?;
+                let probe =
+                    self.evaluate_projected_expression(ctx, expr, row, output_columns, group_rows)?;
                 if probe.is_null() {
                     return Ok(None);
                 }
@@ -741,8 +801,13 @@ impl SelectExecutor {
                 let mut matched = false;
                 let mut saw_null = false;
                 for value_expr in values {
-                    let candidate =
-                        self.evaluate_projected_expression(value_expr, row, output_columns)?;
+                    let candidate = self.evaluate_projected_expression(
+                        ctx,
+                        value_expr,
+                        row,
+                        output_columns,
+                        group_rows,
+                    )?;
                     if candidate.is_null() {
                         saw_null = true;
                         continue;
@@ -767,9 +832,22 @@ impl SelectExecutor {
                 upper,
                 is_not,
             } => {
-                let value = self.evaluate_projected_expression(expr, row, output_columns)?;
-                let lower_value = self.evaluate_projected_expression(lower, row, output_columns)?;
-                let upper_value = self.evaluate_projected_expression(upper, row, output_columns)?;
+                let value =
+                    self.evaluate_projected_expression(ctx, expr, row, output_columns, group_rows)?;
+                let lower_value = self.evaluate_projected_expression(
+                    ctx,
+                    lower,
+                    row,
+                    output_columns,
+                    group_rows,
+                )?;
+                let upper_value = self.evaluate_projected_expression(
+                    ctx,
+                    upper,
+                    row,
+                    output_columns,
+                    group_rows,
+                )?;
 
                 if value.is_null() || lower_value.is_null() || upper_value.is_null() {
                     return Ok(None);
@@ -793,9 +871,15 @@ impl SelectExecutor {
                 pattern,
                 is_not,
             } => {
-                let value = self.evaluate_projected_expression(expr, row, output_columns)?;
-                let pattern_value =
-                    self.evaluate_projected_expression(pattern, row, output_columns)?;
+                let value =
+                    self.evaluate_projected_expression(ctx, expr, row, output_columns, group_rows)?;
+                let pattern_value = self.evaluate_projected_expression(
+                    ctx,
+                    pattern,
+                    row,
+                    output_columns,
+                    group_rows,
+                )?;
 
                 match (value, pattern_value) {
                     (Value::Text(text), Value::Text(pattern)) => {
@@ -807,20 +891,23 @@ impl SelectExecutor {
                 }
             }
             Condition::NullCheck { expr, is_not } => {
-                let value = self.evaluate_projected_expression(expr, row, output_columns)?;
+                let value =
+                    self.evaluate_projected_expression(ctx, expr, row, output_columns, group_rows)?;
                 let is_null = value.is_null();
                 Ok(Some(if *is_not { !is_null } else { is_null }))
             }
             Condition::Not(condition) => Ok(self
-                .evaluate_projected_condition(condition, row, output_columns)?
+                .evaluate_projected_condition(ctx, condition, row, output_columns, group_rows)?
                 .map(|value| !value)),
             Condition::Logical {
                 left,
                 operator,
                 right,
             } => {
-                let left_result = self.evaluate_projected_condition(left, row, output_columns)?;
-                let right_result = self.evaluate_projected_condition(right, row, output_columns)?;
+                let left_result =
+                    self.evaluate_projected_condition(ctx, left, row, output_columns, group_rows)?;
+                let right_result =
+                    self.evaluate_projected_condition(ctx, right, row, output_columns, group_rows)?;
 
                 match operator {
                     LogicalOperator::And => Ok(self.logical_and(left_result, right_result)),
@@ -899,18 +986,23 @@ impl SelectExecutor {
         }
 
         let output_columns = self.get_column_names(ctx);
-        let mut projected_rows = Vec::with_capacity(groups.len());
+        let mut grouped_projected_rows = Vec::with_capacity(groups.len());
         for (_, rows) in groups {
-            projected_rows.push(self.project_grouped_row(ctx, &rows)?);
+            grouped_projected_rows.push((self.project_grouped_row(ctx, &rows)?, rows));
         }
 
         if let Some(having_clause) = &self.statement.having_clause {
-            let mut filtered_projected_rows = Vec::with_capacity(projected_rows.len());
-            for row in projected_rows {
+            let mut filtered_projected_rows = Vec::with_capacity(grouped_projected_rows.len());
+            for (row, group_rows) in grouped_projected_rows {
                 let mut include = true;
                 for condition in &having_clause.conditions {
-                    if self.evaluate_projected_condition(condition, &row, &output_columns)?
-                        != Some(true)
+                    if self.evaluate_projected_condition(
+                        ctx,
+                        condition,
+                        &row,
+                        &output_columns,
+                        &group_rows,
+                    )? != Some(true)
                     {
                         include = false;
                         break;
@@ -920,9 +1012,24 @@ impl SelectExecutor {
                     filtered_projected_rows.push(row);
                 }
             }
-            projected_rows = filtered_projected_rows;
+
+            return self.finalize_grouped_rows(output_columns, filtered_projected_rows);
         }
 
+        self.finalize_grouped_rows(
+            output_columns,
+            grouped_projected_rows
+                .into_iter()
+                .map(|(row, _)| row)
+                .collect(),
+        )
+    }
+
+    fn finalize_grouped_rows(
+        &self,
+        output_columns: Vec<String>,
+        mut projected_rows: Vec<Vec<Value>>,
+    ) -> Result<QueryResult> {
         if self.statement.distinct {
             let mut distinct_rows = Vec::new();
             for row in projected_rows {
@@ -1241,6 +1348,9 @@ impl InsertExecutor {
                 "Unbound parameter {} reached execution",
                 index + 1
             ))),
+            Expression::AggregateCall { .. } => Err(HematiteError::ParseError(
+                "INSERT expressions cannot use aggregate functions".to_string(),
+            )),
             Expression::UnaryMinus(expr) => match self.evaluate_value_expression(expr)? {
                 Value::Integer(value) => value.checked_neg().map(Value::Integer).ok_or_else(|| {
                     HematiteError::ParseError(

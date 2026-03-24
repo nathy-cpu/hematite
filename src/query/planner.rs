@@ -468,6 +468,18 @@ impl QueryPlanner {
                     });
                 }
             }
+            Expression::AggregateCall { target, .. } => {
+                if let AggregateTarget::Column(name) = target {
+                    if let Some(column) =
+                        table.get_column_by_name(SelectStatement::column_reference_name(name))
+                    {
+                        accessed_columns.push(ColumnAccess {
+                            column_id: column.id,
+                            access_type: ColumnAccessType::Read,
+                        });
+                    }
+                }
+            }
             Expression::UnaryMinus(expr) => {
                 self.collect_expression_columns(expr, table, accessed_columns);
             }

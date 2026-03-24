@@ -961,6 +961,32 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_having_supports_raw_aggregate_calls() -> Result<()> {
+        let db = TestDbFile::new("_test_having_supports_raw_aggregate_calls");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT, score INTEGER);")?;
+        conn.execute("INSERT INTO test (id, name, score) VALUES (1, 'Alice', 10);")?;
+        conn.execute("INSERT INTO test (id, name, score) VALUES (2, 'Alice', 2);")?;
+        conn.execute("INSERT INTO test (id, name, score) VALUES (3, 'Bob', 3);")?;
+
+        let grouped = conn.execute(
+            "SELECT name FROM test GROUP BY name HAVING COUNT(*) > 1 ORDER BY name ASC;",
+        )?;
+        assert_eq!(
+            grouped.rows,
+            vec![vec![crate::catalog::Value::Text("Alice".to_string())]]
+        );
+
+        let implicit =
+            conn.execute("SELECT COUNT(*) AS total_rows FROM test HAVING SUM(score) > 10;")?;
+        assert_eq!(implicit.rows, vec![vec![crate::catalog::Value::Integer(3)]]);
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_reopen_preserves_exact_schema() -> Result<()> {
         let db = TestDbFile::new("_test_reopen_preserves_exact_schema");
 

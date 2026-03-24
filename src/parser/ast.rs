@@ -116,6 +116,10 @@ pub enum Expression {
     Column(String),
     Literal(Value),
     Parameter(usize),
+    AggregateCall {
+        function: AggregateFunction,
+        target: AggregateTarget,
+    },
     UnaryMinus(Box<Expression>),
     Binary {
         left: Box<Expression>,
@@ -130,6 +134,12 @@ pub enum ArithmeticOperator {
     Subtract,
     Multiply,
     Divide,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AggregateTarget {
+    All,
+    Column(String),
 }
 
 #[derive(Debug, Clone)]
@@ -530,6 +540,7 @@ impl Expression {
     {
         match self {
             Expression::Parameter(index) => f(*index),
+            Expression::AggregateCall { .. } => {}
             Expression::UnaryMinus(expr) => expr.visit_parameters(f),
             Expression::Binary { left, right, .. } => {
                 left.visit_parameters(f);
@@ -553,6 +564,10 @@ impl Expression {
                         index + 1
                     ))
                 }),
+            Expression::AggregateCall { function, target } => Ok(Expression::AggregateCall {
+                function: *function,
+                target: target.clone(),
+            }),
             Expression::UnaryMinus(expr) => {
                 Ok(Expression::UnaryMinus(Box::new(expr.bind(parameters)?)))
             }
@@ -637,10 +652,16 @@ impl SelectStatement {
             }
         };
 
-        let has_aggregate = self
-            .columns
-            .iter()
-            .any(|item| matches!(item, SelectItem::CountAll | SelectItem::Aggregate { .. }));
+        let has_aggregate = self.columns.iter().any(|item| match item {
+            SelectItem::CountAll | SelectItem::Aggregate { .. } => true,
+            SelectItem::Expression(expr) => Self::expression_contains_aggregate(expr),
+            SelectItem::Wildcard | SelectItem::Column(_) => false,
+        }) || self.having_clause.as_ref().is_some_and(|having| {
+            having
+                .conditions
+                .iter()
+                .any(Self::condition_contains_aggregate)
+        });
         if self.distinct && has_aggregate {
             return Err(HematiteError::ParseError(
                 "DISTINCT cannot be combined with aggregate select items yet".to_string(),
@@ -774,6 +795,11 @@ impl SelectStatement {
     ) -> Result<()> {
         match expr {
             Expression::Column(name) => Self::validate_column_reference(name, table, from)?,
+            Expression::AggregateCall { target, .. } => {
+                if let AggregateTarget::Column(name) = target {
+                    Self::validate_column_reference(name, table, from)?;
+                }
+            }
             Expression::UnaryMinus(expr) => Self::validate_expression(expr, table, from)?,
             Expression::Binary { left, right, .. } => {
                 Self::validate_expression(left, table, from)?;
@@ -783,6 +809,48 @@ impl SelectStatement {
         }
 
         Ok(())
+    }
+
+    fn expression_contains_aggregate(expr: &Expression) -> bool {
+        match expr {
+            Expression::AggregateCall { .. } => true,
+            Expression::UnaryMinus(expr) => Self::expression_contains_aggregate(expr),
+            Expression::Binary { left, right, .. } => {
+                Self::expression_contains_aggregate(left)
+                    || Self::expression_contains_aggregate(right)
+            }
+            Expression::Column(_) | Expression::Literal(_) | Expression::Parameter(_) => false,
+        }
+    }
+
+    fn condition_contains_aggregate(condition: &Condition) -> bool {
+        match condition {
+            Condition::Comparison { left, right, .. } => {
+                Self::expression_contains_aggregate(left)
+                    || Self::expression_contains_aggregate(right)
+            }
+            Condition::InList { expr, values, .. } => {
+                Self::expression_contains_aggregate(expr)
+                    || values.iter().any(Self::expression_contains_aggregate)
+            }
+            Condition::Between {
+                expr, lower, upper, ..
+            } => {
+                Self::expression_contains_aggregate(expr)
+                    || Self::expression_contains_aggregate(lower)
+                    || Self::expression_contains_aggregate(upper)
+            }
+            Condition::Like { expr, pattern, .. } => {
+                Self::expression_contains_aggregate(expr)
+                    || Self::expression_contains_aggregate(pattern)
+            }
+            Condition::NullCheck { expr, .. } => Self::expression_contains_aggregate(expr),
+            Condition::Not(condition) => Self::condition_contains_aggregate(condition),
+            Condition::Logical { left, right, .. } => {
+                Self::condition_contains_aggregate(left)
+                    || Self::condition_contains_aggregate(right)
+            }
+        }
     }
 }
 
