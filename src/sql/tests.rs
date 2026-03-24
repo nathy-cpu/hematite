@@ -641,6 +641,62 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_join_rejects_ambiguous_unqualified_columns() -> Result<()> {
+        let db = TestDbFile::new("_test_join_rejects_ambiguous_unqualified_columns");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("CREATE TABLE posts (id INTEGER PRIMARY KEY, user_id INTEGER, title TEXT);")?;
+
+        let error = conn
+            .execute("SELECT id FROM users AS u INNER JOIN posts AS p ON u.id = p.user_id;")
+            .expect_err("ambiguous unqualified join column should be rejected");
+
+        assert!(format!("{}", error).contains("ambiguous"));
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_group_by_over_joined_rows() -> Result<()> {
+        let db = TestDbFile::new("_test_group_by_over_joined_rows");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("CREATE TABLE posts (id INTEGER PRIMARY KEY, user_id INTEGER, title TEXT);")?;
+        conn.execute("INSERT INTO users (id, name) VALUES (1, 'Alice');")?;
+        conn.execute("INSERT INTO users (id, name) VALUES (2, 'Bob');")?;
+        conn.execute("INSERT INTO posts (id, user_id, title) VALUES (10, 1, 'First');")?;
+        conn.execute("INSERT INTO posts (id, user_id, title) VALUES (11, 1, 'Second');")?;
+        conn.execute("INSERT INTO posts (id, user_id, title) VALUES (12, 2, 'Third');")?;
+
+        let result = conn.execute(
+            "SELECT u.name, COUNT(p.id) AS post_count \
+             FROM users AS u INNER JOIN posts AS p ON u.id = p.user_id \
+             GROUP BY u.name HAVING COUNT(p.id) >= 1 ORDER BY u.name ASC;",
+        )?;
+
+        assert_eq!(result.columns, vec!["name", "post_count"]);
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![
+                    crate::catalog::Value::Text("Alice".to_string()),
+                    crate::catalog::Value::Integer(2),
+                ],
+                vec![
+                    crate::catalog::Value::Text("Bob".to_string()),
+                    crate::catalog::Value::Integer(1),
+                ],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_select_distinct_deduplicates_rows() -> Result<()> {
         let db = TestDbFile::new("_test_select_distinct_deduplicates_rows");
         let mut conn = Connection::new(db.path())?;
