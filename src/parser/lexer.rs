@@ -46,6 +46,7 @@ pub enum Token {
     Null,
     Default,
     In,
+    Between,
     And,
     Or,
 
@@ -207,6 +208,7 @@ impl Lexer {
             "NULL" => Token::Null,
             "DEFAULT" => Token::Default,
             "IN" => Token::In,
+            "BETWEEN" => Token::Between,
             "AND" => Token::And,
             "OR" => Token::Or,
             "TRUE" => Token::BooleanLiteral(true),

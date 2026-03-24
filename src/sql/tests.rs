@@ -627,6 +627,31 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_where_between() -> Result<()> {
+        let db = TestDbFile::new("_test_where_between");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (1, 'Alice');")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (2, 'Bob');")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (3, 'Cara');")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (4, 'Dina');")?;
+
+        let result =
+            conn.execute("SELECT id FROM test WHERE id BETWEEN 2 AND 3 ORDER BY id ASC;")?;
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![crate::catalog::Value::Integer(2)],
+                vec![crate::catalog::Value::Integer(3)],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_limit_applies_after_order_by() -> Result<()> {
         let db = TestDbFile::new("_test_limit_applies_after_order_by");
         let mut conn = Connection::new(db.path())?;

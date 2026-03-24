@@ -197,6 +197,33 @@ impl SelectExecutor {
                     Ok(Some(*is_not))
                 }
             }
+            Condition::Between {
+                expr,
+                lower,
+                upper,
+                is_not,
+            } => {
+                let value = self.evaluate_expression(ctx, expr, row)?;
+                let lower_value = self.evaluate_expression(ctx, lower, row)?;
+                let upper_value = self.evaluate_expression(ctx, upper, row)?;
+
+                if value.is_null() || lower_value.is_null() || upper_value.is_null() {
+                    return Ok(None);
+                }
+
+                let lower_ok = value
+                    .partial_cmp(&lower_value)
+                    .map(|ordering| !ordering.is_lt());
+                let upper_ok = value
+                    .partial_cmp(&upper_value)
+                    .map(|ordering| !ordering.is_gt());
+
+                match (lower_ok, upper_ok) {
+                    (Some(true), Some(true)) => Ok(Some(!is_not)),
+                    (Some(_), Some(_)) => Ok(Some(*is_not)),
+                    _ => Ok(None),
+                }
+            }
             Condition::NullCheck { expr, is_not } => {
                 let value = self.evaluate_expression(ctx, expr, row)?;
                 let is_null = value.is_null();

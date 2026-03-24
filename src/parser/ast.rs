@@ -84,6 +84,12 @@ pub enum Condition {
         values: Vec<Expression>,
         is_not: bool,
     },
+    Between {
+        expr: Expression,
+        lower: Expression,
+        upper: Expression,
+        is_not: bool,
+    },
     NullCheck {
         expr: Expression,
         is_not: bool,
@@ -361,6 +367,13 @@ impl Condition {
                     value.visit_parameters(f);
                 }
             }
+            Condition::Between {
+                expr, lower, upper, ..
+            } => {
+                expr.visit_parameters(f);
+                lower.visit_parameters(f);
+                upper.visit_parameters(f);
+            }
             Condition::NullCheck { expr, .. } => expr.visit_parameters(f),
             Condition::Logical { left, right, .. } => {
                 left.visit_parameters(f);
@@ -390,6 +403,17 @@ impl Condition {
                     .iter()
                     .map(|value| value.bind(parameters))
                     .collect::<Result<Vec<_>>>()?,
+                is_not: *is_not,
+            }),
+            Condition::Between {
+                expr,
+                lower,
+                upper,
+                is_not,
+            } => Ok(Condition::Between {
+                expr: expr.bind(parameters)?,
+                lower: lower.bind(parameters)?,
+                upper: upper.bind(parameters)?,
                 is_not: *is_not,
             }),
             Condition::NullCheck { expr, is_not } => Ok(Condition::NullCheck {
@@ -571,6 +595,13 @@ impl SelectStatement {
                 for value in values {
                     Self::validate_expression(value, table, from)?;
                 }
+            }
+            Condition::Between {
+                expr, lower, upper, ..
+            } => {
+                Self::validate_expression(expr, table, from)?;
+                Self::validate_expression(lower, table, from)?;
+                Self::validate_expression(upper, table, from)?;
             }
             Condition::NullCheck { expr, .. } => {
                 Self::validate_expression(expr, table, from)?;

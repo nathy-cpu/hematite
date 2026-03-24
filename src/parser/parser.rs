@@ -358,6 +358,11 @@ impl Parser {
             return self.parse_in_list_condition(left, false);
         }
 
+        if matches!(self.peek_token(), Ok(Token::Between)) {
+            self.consume_token(&Token::Between)?;
+            return self.parse_between_condition(left, false);
+        }
+
         if matches!(self.peek_token(), Ok(Token::Is)) {
             self.consume_token(&Token::Is)?;
             let is_not = if matches!(self.peek_token(), Ok(Token::Not)) {
@@ -404,6 +409,18 @@ impl Parser {
         Ok(Condition::InList {
             expr,
             values,
+            is_not,
+        })
+    }
+
+    fn parse_between_condition(&mut self, expr: Expression, is_not: bool) -> Result<Condition> {
+        let lower = self.parse_expression()?;
+        self.consume_token(&Token::And)?;
+        let upper = self.parse_expression()?;
+        Ok(Condition::Between {
+            expr,
+            lower,
+            upper,
             is_not,
         })
     }
