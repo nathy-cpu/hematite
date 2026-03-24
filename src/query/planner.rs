@@ -241,6 +241,7 @@ impl QueryPlanner {
 
         SelectPlanNode {
             table_name: analysis.table_name.clone(),
+            source_count: analysis.source_count,
             access_path,
             projection,
             distinct: statement.distinct,
@@ -288,16 +289,46 @@ impl QueryPlanner {
     }
 
     fn analyze_select(&self, statement: &SelectStatement) -> Result<SelectAnalysis> {
-        let table_name = match &statement.from {
-            TableReference::Table(name, _) => name.clone(),
-            TableReference::CrossJoin(_, _) | TableReference::InnerJoin { .. } => {
-                return Err(HematiteError::ParseError(
-                    "Multi-table SELECT planning is not implemented yet".to_string(),
-                ))
-            }
-        };
+        let bindings = SelectStatement::collect_table_bindings(&statement.from);
+        let primary = bindings.first().ok_or_else(|| {
+            HematiteError::ParseError("SELECT requires at least one table source".to_string())
+        })?;
 
-        self.analyze_table_access(&table_name, &statement.where_clause)
+        if bindings.len() == 1 {
+            return self.analyze_table_access(&primary.table_name, &statement.where_clause);
+        }
+
+        let table = self
+            .catalog
+            .get_table_by_name(&primary.table_name)
+            .ok_or_else(|| {
+                HematiteError::ParseError(format!("Table '{}' not found", primary.table_name))
+            })?;
+        let estimated_rows =
+            bindings
+                .iter()
+                .try_fold(1usize, |product, binding| -> Result<usize> {
+                    let table = self
+                        .catalog
+                        .get_table_by_name(&binding.table_name)
+                        .ok_or_else(|| {
+                            HematiteError::ParseError(format!(
+                                "Table '{}' not found",
+                                binding.table_name
+                            ))
+                        })?;
+                    Ok(product.saturating_mul(self.estimate_table_rows(table).max(1)))
+                })?;
+
+        Ok(SelectAnalysis {
+            table_name: primary.table_name.clone(),
+            source_count: bindings.len(),
+            table_id: table.id,
+            rowid_lookup: None,
+            estimated_rows,
+            usable_indexes: Vec::new(),
+            accessed_columns: Vec::new(),
+        })
     }
 
     fn analyze_table_access(
@@ -332,6 +363,7 @@ impl QueryPlanner {
 
         Ok(SelectAnalysis {
             table_name,
+            source_count: 1,
             table_id: table.id,
             rowid_lookup,
             estimated_rows: self.estimate_table_rows(table),
@@ -341,7 +373,9 @@ impl QueryPlanner {
     }
 
     fn choose_access_path(&self, analysis: &SelectAnalysis) -> SelectAccessPath {
-        if analysis.rowid_lookup.is_some() {
+        if analysis.source_count > 1 {
+            SelectAccessPath::JoinScan
+        } else if analysis.rowid_lookup.is_some() {
             SelectAccessPath::RowIdLookup
         } else if analysis
             .usable_indexes
@@ -539,6 +573,7 @@ impl QueryPlanner {
         access_path: &SelectAccessPath,
     ) -> f64 {
         match access_path {
+            SelectAccessPath::JoinScan => analysis.estimated_rows as f64,
             SelectAccessPath::RowIdLookup | SelectAccessPath::PrimaryKeyLookup => 1.0,
             SelectAccessPath::SecondaryIndexLookup(index_name) => self
                 .secondary_index_selectivity(analysis, index_name)
@@ -554,6 +589,7 @@ impl QueryPlanner {
         access_path: &SelectAccessPath,
     ) -> f64 {
         match access_path {
+            SelectAccessPath::JoinScan => analysis.estimated_rows as f64 * 1.5,
             SelectAccessPath::RowIdLookup => 1.0,
             SelectAccessPath::PrimaryKeyLookup => 2.0,
             SelectAccessPath::SecondaryIndexLookup(index_name) => {

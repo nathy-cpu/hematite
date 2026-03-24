@@ -600,6 +600,7 @@ mod optimizer_tests {
 
         let analysis = SelectAnalysis {
             table_name: "users".to_string(),
+            source_count: 1,
             table_id: crate::catalog::TableId::new(1),
             rowid_lookup: None,
             estimated_rows: 1000,
@@ -745,6 +746,84 @@ mod planner_tests {
                     node.access_path,
                     SelectAccessPath::SecondaryIndexLookup("idx_users_email".to_string())
                 );
+            }
+            other => panic!("expected select plan node, got {:?}", other),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_query_planner_select_uses_join_scan_for_multi_table_sources() -> Result<()> {
+        let mut catalog = Schema::new();
+
+        catalog.create_table(
+            "users".to_string(),
+            vec![
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(1),
+                    "id".to_string(),
+                    DataType::Integer,
+                )
+                .primary_key(true),
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(2),
+                    "name".to_string(),
+                    DataType::Text,
+                ),
+            ],
+        )?;
+        catalog.create_table(
+            "posts".to_string(),
+            vec![
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(3),
+                    "id".to_string(),
+                    DataType::Integer,
+                )
+                .primary_key(true),
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(4),
+                    "user_id".to_string(),
+                    DataType::Integer,
+                ),
+            ],
+        )?;
+
+        let planner = QueryPlanner::new(catalog);
+        let statement = SelectStatement {
+            distinct: false,
+            columns: vec![SelectItem::Column("u.name".to_string())],
+            column_aliases: vec![None],
+            from: TableReference::InnerJoin {
+                left: Box::new(TableReference::Table(
+                    "users".to_string(),
+                    Some("u".to_string()),
+                )),
+                right: Box::new(TableReference::Table(
+                    "posts".to_string(),
+                    Some("p".to_string()),
+                )),
+                on: Condition::Comparison {
+                    left: Expression::Column("u.id".to_string()),
+                    operator: ComparisonOperator::Equal,
+                    right: Expression::Column("p.user_id".to_string()),
+                },
+            },
+            where_clause: None,
+            group_by: Vec::new(),
+            having_clause: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+        };
+
+        let plan = planner.plan(Statement::Select(statement))?;
+
+        match &plan.node {
+            PlanNode::Select(node) => {
+                assert_eq!(node.access_path, SelectAccessPath::JoinScan);
+                assert_eq!(node.source_count, 2);
             }
             other => panic!("expected select plan node, got {:?}", other),
         }

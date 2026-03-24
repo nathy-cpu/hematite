@@ -575,6 +575,72 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_select_with_cross_join() -> Result<()> {
+        let db = TestDbFile::new("_test_select_with_cross_join");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("CREATE TABLE posts (id INTEGER PRIMARY KEY, user_id INTEGER, title TEXT);")?;
+        conn.execute("INSERT INTO users (id, name) VALUES (1, 'Alice');")?;
+        conn.execute("INSERT INTO users (id, name) VALUES (2, 'Bob');")?;
+        conn.execute("INSERT INTO posts (id, user_id, title) VALUES (10, 1, 'First');")?;
+        conn.execute("INSERT INTO posts (id, user_id, title) VALUES (11, 2, 'Second');")?;
+
+        let result = conn.execute(
+            "SELECT u.name, p.title FROM users AS u, posts AS p ORDER BY u.name ASC, p.title ASC;",
+        )?;
+
+        assert_eq!(result.columns, vec!["name", "title"]);
+        assert_eq!(result.rows.len(), 4);
+        assert_eq!(
+            result.rows[0],
+            vec![
+                crate::catalog::Value::Text("Alice".to_string()),
+                crate::catalog::Value::Text("First".to_string()),
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_select_with_inner_join() -> Result<()> {
+        let db = TestDbFile::new("_test_select_with_inner_join");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("CREATE TABLE posts (id INTEGER PRIMARY KEY, user_id INTEGER, title TEXT);")?;
+        conn.execute("INSERT INTO users (id, name) VALUES (1, 'Alice');")?;
+        conn.execute("INSERT INTO users (id, name) VALUES (2, 'Bob');")?;
+        conn.execute("INSERT INTO posts (id, user_id, title) VALUES (10, 1, 'First');")?;
+        conn.execute("INSERT INTO posts (id, user_id, title) VALUES (11, 1, 'Second');")?;
+        conn.execute("INSERT INTO posts (id, user_id, title) VALUES (12, 3, 'Orphan');")?;
+
+        let result = conn.execute(
+            "SELECT u.name, p.title FROM users AS u INNER JOIN posts AS p ON u.id = p.user_id ORDER BY u.name ASC, p.title ASC;",
+        )?;
+
+        assert_eq!(result.columns, vec!["name", "title"]);
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![
+                    crate::catalog::Value::Text("Alice".to_string()),
+                    crate::catalog::Value::Text("First".to_string()),
+                ],
+                vec![
+                    crate::catalog::Value::Text("Alice".to_string()),
+                    crate::catalog::Value::Text("Second".to_string()),
+                ],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_select_distinct_deduplicates_rows() -> Result<()> {
         let db = TestDbFile::new("_test_select_distinct_deduplicates_rows");
         let mut conn = Connection::new(db.path())?;

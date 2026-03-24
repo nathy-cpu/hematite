@@ -74,6 +74,7 @@ pub enum PlanNode {
 #[derive(Debug, Clone)]
 pub struct SelectPlanNode {
     pub table_name: String,
+    pub source_count: usize,
     pub access_path: SelectAccessPath,
     pub projection: SelectProjection,
     pub distinct: bool,
@@ -86,6 +87,7 @@ pub struct SelectPlanNode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelectAccessPath {
     FullTableScan,
+    JoinScan,
     RowIdLookup,
     PrimaryKeyLookup,
     SecondaryIndexLookup(String),
@@ -151,6 +153,7 @@ pub struct DropIndexPlanNode {
 #[derive(Debug, Clone)]
 pub struct SelectAnalysis {
     pub table_name: String,
+    pub source_count: usize,
     pub table_id: crate::catalog::TableId,
     pub rowid_lookup: Option<u64>,
     pub estimated_rows: usize,

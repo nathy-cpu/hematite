@@ -958,7 +958,7 @@ impl SelectStatement {
 
 impl InsertStatement {
     pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
-        catalog.get_table_by_name(&self.table).ok_or_else(|| {
+        let table = catalog.get_table_by_name(&self.table).ok_or_else(|| {
             HematiteError::ParseError(format!("Table '{}' does not exist", self.table))
         })?;
 
@@ -1095,7 +1095,7 @@ impl CreateStatement {
 
 impl DeleteStatement {
     pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
-        let table = catalog.get_table_by_name(&self.table).ok_or_else(|| {
+        let _table = catalog.get_table_by_name(&self.table).ok_or_else(|| {
             HematiteError::ParseError(format!("Table '{}' does not exist", self.table))
         })?;
 

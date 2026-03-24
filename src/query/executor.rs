@@ -63,6 +63,13 @@ pub struct SelectExecutor {
     pub access_path: SelectAccessPath,
 }
 
+#[derive(Debug, Clone)]
+struct ResolvedSource {
+    table: Table,
+    alias: Option<String>,
+    offset: usize,
+}
+
 impl SelectExecutor {
     pub fn new(statement: SelectStatement, access_path: SelectAccessPath) -> Self {
         Self {
@@ -71,14 +78,72 @@ impl SelectExecutor {
         }
     }
 
-    fn resolve_column_index(&self, table: &Table, column_reference: &str) -> Result<Option<usize>> {
-        let column_name = SelectStatement::column_reference_name(column_reference);
-        Ok(table.get_column_index(column_name))
+    fn resolve_sources(&self, ctx: &ExecutionContext) -> Result<Vec<ResolvedSource>> {
+        let bindings = SelectStatement::collect_table_bindings(&self.statement.from);
+        let mut sources = Vec::with_capacity(bindings.len());
+        let mut offset = 0usize;
+
+        for binding in bindings {
+            let table = ctx
+                .catalog
+                .get_table_by_name(&binding.table_name)
+                .ok_or_else(|| {
+                    HematiteError::ParseError(format!("Table '{}' not found", binding.table_name))
+                })?
+                .clone();
+            sources.push(ResolvedSource {
+                offset,
+                table,
+                alias: binding.alias,
+            });
+            offset += sources
+                .last()
+                .map(|source| source.table.columns.len())
+                .unwrap_or(0);
+        }
+
+        Ok(sources)
+    }
+
+    fn resolve_column_index(
+        &self,
+        sources: &[ResolvedSource],
+        column_reference: &str,
+    ) -> Result<Option<usize>> {
+        let (qualifier, column_name) = SelectStatement::split_column_reference(column_reference);
+        let mut matches = Vec::new();
+
+        for source in sources {
+            if let Some(qualifier) = qualifier {
+                if qualifier != source.table.name
+                    && source
+                        .alias
+                        .as_deref()
+                        .is_none_or(|alias| alias != qualifier)
+                {
+                    continue;
+                }
+            }
+
+            if let Some(index) = source.table.get_column_index(column_name) {
+                matches.push(source.offset + index);
+            }
+        }
+
+        match matches.len() {
+            0 => Ok(None),
+            1 => Ok(matches.into_iter().next()),
+            _ => Err(HematiteError::ParseError(format!(
+                "Column reference '{}' is ambiguous",
+                column_reference
+            ))),
+        }
     }
 
     fn evaluate_expression(
         &self,
         ctx: &ExecutionContext,
+        sources: &[ResolvedSource],
         expr: &Expression,
         row: &[Value],
     ) -> Result<Value> {
@@ -91,22 +156,13 @@ impl SelectExecutor {
             Expression::AggregateCall { .. } => Err(HematiteError::ParseError(
                 "Aggregate expressions can only be evaluated in grouped query contexts".to_string(),
             )),
-            Expression::Column(name) => {
-                if let Some(table_name) = self.get_table_name() {
-                    if let Some(table) = ctx.catalog.get_table_by_name(table_name) {
-                        if let Some(index) = self.resolve_column_index(table, name)? {
-                            if index < row.len() {
-                                return Ok(row[index].clone());
-                            }
-                        }
-                    }
-                }
-                Err(HematiteError::ParseError(format!(
-                    "Column '{}' not found",
-                    name
-                )))
-            }
-            Expression::UnaryMinus(expr) => match self.evaluate_expression(ctx, expr, row)? {
+            Expression::Column(name) => self
+                .resolve_column_index(sources, name)?
+                .and_then(|index| row.get(index).cloned())
+                .ok_or_else(|| HematiteError::ParseError(format!("Column '{}' not found", name))),
+            Expression::UnaryMinus(expr) => match self
+                .evaluate_expression(ctx, sources, expr, row)?
+            {
                 Value::Integer(value) => value.checked_neg().map(Value::Integer).ok_or_else(|| {
                     HematiteError::ParseError(
                         "Integer overflow while evaluating unary '-'".to_string(),
@@ -124,8 +180,8 @@ impl SelectExecutor {
                 operator,
                 right,
             } => {
-                let left = self.evaluate_expression(ctx, left, row)?;
-                let right = self.evaluate_expression(ctx, right, row)?;
+                let left = self.evaluate_expression(ctx, sources, left, row)?;
+                let right = self.evaluate_expression(ctx, sources, right, row)?;
                 self.evaluate_arithmetic(operator, left, right)
             }
         }
@@ -279,9 +335,10 @@ impl SelectExecutor {
         }
     }
 
-    pub(crate) fn evaluate_condition(
+    fn evaluate_condition(
         &self,
         ctx: &ExecutionContext,
+        sources: &[ResolvedSource],
         condition: &Condition,
         row: &[Value],
     ) -> Result<Option<bool>> {
@@ -291,8 +348,8 @@ impl SelectExecutor {
                 operator,
                 right,
             } => {
-                let left_val = self.evaluate_expression(ctx, left, row)?;
-                let right_val = self.evaluate_expression(ctx, right, row)?;
+                let left_val = self.evaluate_expression(ctx, sources, left, row)?;
+                let right_val = self.evaluate_expression(ctx, sources, right, row)?;
                 Ok(self.compare_values(&left_val, operator, &right_val))
             }
             Condition::InList {
@@ -300,7 +357,7 @@ impl SelectExecutor {
                 values,
                 is_not,
             } => {
-                let probe = self.evaluate_expression(ctx, expr, row)?;
+                let probe = self.evaluate_expression(ctx, sources, expr, row)?;
                 if probe.is_null() {
                     return Ok(None);
                 }
@@ -308,7 +365,7 @@ impl SelectExecutor {
                 let mut matched = false;
                 let mut saw_null = false;
                 for value_expr in values {
-                    let candidate = self.evaluate_expression(ctx, value_expr, row)?;
+                    let candidate = self.evaluate_expression(ctx, sources, value_expr, row)?;
                     if candidate.is_null() {
                         saw_null = true;
                         continue;
@@ -333,9 +390,9 @@ impl SelectExecutor {
                 upper,
                 is_not,
             } => {
-                let value = self.evaluate_expression(ctx, expr, row)?;
-                let lower_value = self.evaluate_expression(ctx, lower, row)?;
-                let upper_value = self.evaluate_expression(ctx, upper, row)?;
+                let value = self.evaluate_expression(ctx, sources, expr, row)?;
+                let lower_value = self.evaluate_expression(ctx, sources, lower, row)?;
+                let upper_value = self.evaluate_expression(ctx, sources, upper, row)?;
 
                 if value.is_null() || lower_value.is_null() || upper_value.is_null() {
                     return Ok(None);
@@ -359,8 +416,8 @@ impl SelectExecutor {
                 pattern,
                 is_not,
             } => {
-                let value = self.evaluate_expression(ctx, expr, row)?;
-                let pattern_value = self.evaluate_expression(ctx, pattern, row)?;
+                let value = self.evaluate_expression(ctx, sources, expr, row)?;
+                let pattern_value = self.evaluate_expression(ctx, sources, pattern, row)?;
 
                 match (value, pattern_value) {
                     (Value::Text(text), Value::Text(pattern)) => {
@@ -372,20 +429,20 @@ impl SelectExecutor {
                 }
             }
             Condition::NullCheck { expr, is_not } => {
-                let value = self.evaluate_expression(ctx, expr, row)?;
+                let value = self.evaluate_expression(ctx, sources, expr, row)?;
                 let is_null = value.is_null();
                 Ok(Some(if *is_not { !is_null } else { is_null }))
             }
             Condition::Not(condition) => Ok(self
-                .evaluate_condition(ctx, condition, row)?
+                .evaluate_condition(ctx, sources, condition, row)?
                 .map(|value| !value)),
             Condition::Logical {
                 left,
                 operator,
                 right,
             } => {
-                let left_result = self.evaluate_condition(ctx, left, row)?;
-                let right_result = self.evaluate_condition(ctx, right, row)?;
+                let left_result = self.evaluate_condition(ctx, sources, left, row)?;
+                let right_result = self.evaluate_condition(ctx, sources, right, row)?;
 
                 match operator {
                     LogicalOperator::And => Ok(self.logical_and(left_result, right_result)),
@@ -395,32 +452,26 @@ impl SelectExecutor {
         }
     }
 
-    fn get_table_name(&self) -> Option<&String> {
-        match &self.statement.from {
-            TableReference::Table(name, _) => Some(name),
-            TableReference::CrossJoin(_, _) | TableReference::InnerJoin { .. } => None,
-        }
-    }
-
-    fn project_row(&self, ctx: &ExecutionContext, row: &[Value]) -> Result<Vec<Value>> {
+    fn project_row(
+        &self,
+        ctx: &ExecutionContext,
+        sources: &[ResolvedSource],
+        row: &[Value],
+    ) -> Result<Vec<Value>> {
         let mut projected = Vec::new();
 
         for item in &self.statement.columns {
             match item {
                 SelectItem::Wildcard => projected.extend(row.iter().cloned()),
                 SelectItem::Column(name) => {
-                    if let Some(table_name) = self.get_table_name() {
-                        if let Some(table) = ctx.catalog.get_table_by_name(table_name) {
-                            if let Some(index) = self.resolve_column_index(table, name)? {
-                                if index < row.len() {
-                                    projected.push(row[index].clone());
-                                }
-                            }
+                    if let Some(index) = self.resolve_column_index(sources, name)? {
+                        if index < row.len() {
+                            projected.push(row[index].clone());
                         }
                     }
                 }
                 SelectItem::Expression(expr) => {
-                    projected.push(self.evaluate_expression(ctx, expr, row)?);
+                    projected.push(self.evaluate_expression(ctx, sources, expr, row)?);
                 }
                 SelectItem::CountAll => {}
                 SelectItem::Aggregate { .. } => {}
@@ -430,7 +481,7 @@ impl SelectExecutor {
         Ok(projected)
     }
 
-    fn get_column_names(&self, ctx: &ExecutionContext) -> Vec<String> {
+    fn get_column_names(&self, sources: &[ResolvedSource]) -> Vec<String> {
         let mut columns = Vec::new();
 
         for (index, item) in self.statement.columns.iter().enumerate() {
@@ -441,11 +492,9 @@ impl SelectExecutor {
                 .and_then(|alias| alias.clone());
             match item {
                 SelectItem::Wildcard => {
-                    if let Some(table_name) = self.get_table_name() {
-                        if let Some(table) = ctx.catalog.get_table_by_name(table_name) {
-                            for col in &table.columns {
-                                columns.push(col.name.clone());
-                            }
+                    for source in sources {
+                        for col in &source.table.columns {
+                            columns.push(col.name.clone());
                         }
                     }
                 }
@@ -481,6 +530,83 @@ impl SelectExecutor {
         columns
     }
 
+    fn shifted_sources(
+        &self,
+        mut sources: Vec<ResolvedSource>,
+        offset: usize,
+    ) -> Vec<ResolvedSource> {
+        for source in &mut sources {
+            source.offset += offset;
+        }
+        sources
+    }
+
+    fn materialize_reference(
+        &self,
+        ctx: &mut ExecutionContext,
+        from: &TableReference,
+    ) -> Result<(Vec<ResolvedSource>, Vec<Vec<Value>>)> {
+        match from {
+            TableReference::Table(table_name, alias) => {
+                let table = ctx.catalog.get_table_by_name(table_name).ok_or_else(|| {
+                    HematiteError::ParseError(format!("Table '{}' not found", table_name))
+                })?;
+                Ok((
+                    vec![ResolvedSource {
+                        table: table.clone(),
+                        alias: alias.clone(),
+                        offset: 0,
+                    }],
+                    ctx.engine.read_from_table(table_name)?,
+                ))
+            }
+            TableReference::CrossJoin(left, right) => {
+                let (left_sources, left_rows) = self.materialize_reference(ctx, left)?;
+                let left_width = left_sources
+                    .iter()
+                    .map(|source| source.table.columns.len())
+                    .sum::<usize>();
+                let (right_sources, right_rows) = self.materialize_reference(ctx, right)?;
+                let mut rows = Vec::new();
+                for left_row in &left_rows {
+                    for right_row in &right_rows {
+                        let mut combined = left_row.clone();
+                        combined.extend(right_row.iter().cloned());
+                        rows.push(combined);
+                    }
+                }
+
+                let mut sources = left_sources;
+                sources.extend(self.shifted_sources(right_sources, left_width));
+                Ok((sources, rows))
+            }
+            TableReference::InnerJoin { left, right, on } => {
+                let (left_sources, left_rows) = self.materialize_reference(ctx, left)?;
+                let left_width = left_sources
+                    .iter()
+                    .map(|source| source.table.columns.len())
+                    .sum::<usize>();
+                let (right_sources, right_rows) = self.materialize_reference(ctx, right)?;
+                let shifted_right_sources = self.shifted_sources(right_sources, left_width);
+                let mut sources = left_sources;
+                sources.extend(shifted_right_sources);
+
+                let mut rows = Vec::new();
+                for left_row in &left_rows {
+                    for right_row in &right_rows {
+                        let mut combined = left_row.clone();
+                        combined.extend(right_row.iter().cloned());
+                        if self.evaluate_condition(ctx, &sources, on, &combined)? == Some(true) {
+                            rows.push(combined);
+                        }
+                    }
+                }
+
+                Ok((sources, rows))
+            }
+        }
+    }
+
     fn compare_sort_values(&self, left: &Value, right: &Value) -> Ordering {
         match (left.is_null(), right.is_null()) {
             (true, true) => Ordering::Equal,
@@ -513,7 +639,7 @@ impl SelectExecutor {
 
     fn evaluate_aggregate_value(
         &self,
-        ctx: &ExecutionContext,
+        sources: &[ResolvedSource],
         function: AggregateFunction,
         target: &AggregateTarget,
         rows: &[Vec<Value>],
@@ -532,20 +658,9 @@ impl SelectExecutor {
             return Ok(None);
         };
 
-        let table_name = self
-            .get_table_name()
-            .ok_or_else(|| HematiteError::ParseError("Missing table name".to_string()))?;
-        let table = ctx.catalog.get_table_by_name(table_name).ok_or_else(|| {
-            HematiteError::ParseError(format!("Table '{}' not found", table_name))
-        })?;
-        let index = table
-            .get_column_index(SelectStatement::column_reference_name(column))
-            .ok_or_else(|| {
-                HematiteError::ParseError(format!(
-                    "Column '{}' does not exist in table '{}'",
-                    column, table_name
-                ))
-            })?;
+        let index = self
+            .resolve_column_index(sources, column)?
+            .ok_or_else(|| HematiteError::ParseError(format!("Column '{}' not found", column)))?;
 
         let values: Vec<&Value> = rows
             .iter()
@@ -634,19 +749,19 @@ impl SelectExecutor {
 
     fn evaluate_aggregate_item(
         &self,
-        ctx: &ExecutionContext,
+        sources: &[ResolvedSource],
         item: &SelectItem,
         rows: &[Vec<Value>],
     ) -> Result<Option<Value>> {
         match item {
             SelectItem::CountAll => self.evaluate_aggregate_value(
-                ctx,
+                sources,
                 AggregateFunction::Count,
                 &AggregateTarget::All,
                 rows,
             ),
             SelectItem::Aggregate { function, column } => self.evaluate_aggregate_value(
-                ctx,
+                sources,
                 *function,
                 &AggregateTarget::Column(column.clone()),
                 rows,
@@ -692,7 +807,7 @@ impl SelectExecutor {
 
     fn evaluate_projected_expression(
         &self,
-        ctx: &ExecutionContext,
+        sources: &[ResolvedSource],
         expr: &Expression,
         row: &[Value],
         output_columns: &[String],
@@ -705,7 +820,7 @@ impl SelectExecutor {
                 index + 1
             ))),
             Expression::AggregateCall { function, target } => self
-                .evaluate_aggregate_value(ctx, *function, target, group_rows)?
+                .evaluate_aggregate_value(sources, *function, target, group_rows)?
                 .ok_or_else(|| {
                     HematiteError::InternalError(
                         "Aggregate expression evaluation produced no value".to_string(),
@@ -729,7 +844,7 @@ impl SelectExecutor {
             }
             Expression::UnaryMinus(expr) => {
                 match self.evaluate_projected_expression(
-                    ctx,
+                    sources,
                     expr,
                     row,
                     output_columns,
@@ -756,15 +871,21 @@ impl SelectExecutor {
                 right,
             } => self.evaluate_arithmetic(
                 operator,
-                self.evaluate_projected_expression(ctx, left, row, output_columns, group_rows)?,
-                self.evaluate_projected_expression(ctx, right, row, output_columns, group_rows)?,
+                self.evaluate_projected_expression(sources, left, row, output_columns, group_rows)?,
+                self.evaluate_projected_expression(
+                    sources,
+                    right,
+                    row,
+                    output_columns,
+                    group_rows,
+                )?,
             ),
         }
     }
 
     fn evaluate_projected_condition(
         &self,
-        ctx: &ExecutionContext,
+        sources: &[ResolvedSource],
         condition: &Condition,
         row: &[Value],
         output_columns: &[String],
@@ -776,10 +897,15 @@ impl SelectExecutor {
                 operator,
                 right,
             } => {
-                let left_val =
-                    self.evaluate_projected_expression(ctx, left, row, output_columns, group_rows)?;
+                let left_val = self.evaluate_projected_expression(
+                    sources,
+                    left,
+                    row,
+                    output_columns,
+                    group_rows,
+                )?;
                 let right_val = self.evaluate_projected_expression(
-                    ctx,
+                    sources,
                     right,
                     row,
                     output_columns,
@@ -792,8 +918,13 @@ impl SelectExecutor {
                 values,
                 is_not,
             } => {
-                let probe =
-                    self.evaluate_projected_expression(ctx, expr, row, output_columns, group_rows)?;
+                let probe = self.evaluate_projected_expression(
+                    sources,
+                    expr,
+                    row,
+                    output_columns,
+                    group_rows,
+                )?;
                 if probe.is_null() {
                     return Ok(None);
                 }
@@ -802,7 +933,7 @@ impl SelectExecutor {
                 let mut saw_null = false;
                 for value_expr in values {
                     let candidate = self.evaluate_projected_expression(
-                        ctx,
+                        sources,
                         value_expr,
                         row,
                         output_columns,
@@ -832,17 +963,22 @@ impl SelectExecutor {
                 upper,
                 is_not,
             } => {
-                let value =
-                    self.evaluate_projected_expression(ctx, expr, row, output_columns, group_rows)?;
+                let value = self.evaluate_projected_expression(
+                    sources,
+                    expr,
+                    row,
+                    output_columns,
+                    group_rows,
+                )?;
                 let lower_value = self.evaluate_projected_expression(
-                    ctx,
+                    sources,
                     lower,
                     row,
                     output_columns,
                     group_rows,
                 )?;
                 let upper_value = self.evaluate_projected_expression(
-                    ctx,
+                    sources,
                     upper,
                     row,
                     output_columns,
@@ -871,10 +1007,15 @@ impl SelectExecutor {
                 pattern,
                 is_not,
             } => {
-                let value =
-                    self.evaluate_projected_expression(ctx, expr, row, output_columns, group_rows)?;
+                let value = self.evaluate_projected_expression(
+                    sources,
+                    expr,
+                    row,
+                    output_columns,
+                    group_rows,
+                )?;
                 let pattern_value = self.evaluate_projected_expression(
-                    ctx,
+                    sources,
                     pattern,
                     row,
                     output_columns,
@@ -891,23 +1032,38 @@ impl SelectExecutor {
                 }
             }
             Condition::NullCheck { expr, is_not } => {
-                let value =
-                    self.evaluate_projected_expression(ctx, expr, row, output_columns, group_rows)?;
+                let value = self.evaluate_projected_expression(
+                    sources,
+                    expr,
+                    row,
+                    output_columns,
+                    group_rows,
+                )?;
                 let is_null = value.is_null();
                 Ok(Some(if *is_not { !is_null } else { is_null }))
             }
             Condition::Not(condition) => Ok(self
-                .evaluate_projected_condition(ctx, condition, row, output_columns, group_rows)?
+                .evaluate_projected_condition(sources, condition, row, output_columns, group_rows)?
                 .map(|value| !value)),
             Condition::Logical {
                 left,
                 operator,
                 right,
             } => {
-                let left_result =
-                    self.evaluate_projected_condition(ctx, left, row, output_columns, group_rows)?;
-                let right_result =
-                    self.evaluate_projected_condition(ctx, right, row, output_columns, group_rows)?;
+                let left_result = self.evaluate_projected_condition(
+                    sources,
+                    left,
+                    row,
+                    output_columns,
+                    group_rows,
+                )?;
+                let right_result = self.evaluate_projected_condition(
+                    sources,
+                    right,
+                    row,
+                    output_columns,
+                    group_rows,
+                )?;
 
                 match operator {
                     LogicalOperator::And => Ok(self.logical_and(left_result, right_result)),
@@ -920,6 +1076,7 @@ impl SelectExecutor {
     fn project_grouped_row(
         &self,
         ctx: &ExecutionContext,
+        sources: &[ResolvedSource],
         group_rows: &[Vec<Value>],
     ) -> Result<Vec<Value>> {
         let representative = group_rows.first().ok_or_else(|| {
@@ -931,22 +1088,18 @@ impl SelectExecutor {
             match item {
                 SelectItem::Wildcard => {}
                 SelectItem::Column(name) => {
-                    if let Some(table_name) = self.get_table_name() {
-                        if let Some(table) = ctx.catalog.get_table_by_name(table_name) {
-                            if let Some(index) = self.resolve_column_index(table, name)? {
-                                if index < representative.len() {
-                                    projected.push(representative[index].clone());
-                                }
-                            }
+                    if let Some(index) = self.resolve_column_index(sources, name)? {
+                        if index < representative.len() {
+                            projected.push(representative[index].clone());
                         }
                     }
                 }
                 SelectItem::Expression(expr) => {
-                    projected.push(self.evaluate_expression(ctx, expr, representative)?);
+                    projected.push(self.evaluate_expression(ctx, sources, expr, representative)?);
                 }
                 SelectItem::CountAll | SelectItem::Aggregate { .. } => {
                     projected.push(
-                        self.evaluate_aggregate_item(ctx, item, group_rows)?
+                        self.evaluate_aggregate_item(sources, item, group_rows)?
                             .unwrap_or(Value::Null),
                     );
                 }
@@ -959,6 +1112,7 @@ impl SelectExecutor {
     fn execute_grouped(
         &self,
         ctx: &mut ExecutionContext,
+        sources: &[ResolvedSource],
         filtered_rows: &[Vec<Value>],
     ) -> Result<QueryResult> {
         let mut groups: Vec<(Vec<Value>, Vec<Vec<Value>>)> = Vec::new();
@@ -971,7 +1125,7 @@ impl SelectExecutor {
                     .statement
                     .group_by
                     .iter()
-                    .map(|expr| self.evaluate_expression(ctx, expr, row))
+                    .map(|expr| self.evaluate_expression(ctx, sources, expr, row))
                     .collect::<Result<Vec<_>>>()?;
 
                 if let Some((_, rows)) = groups
@@ -985,10 +1139,10 @@ impl SelectExecutor {
             }
         }
 
-        let output_columns = self.get_column_names(ctx);
+        let output_columns = self.get_column_names(sources);
         let mut grouped_projected_rows = Vec::with_capacity(groups.len());
         for (_, rows) in groups {
-            grouped_projected_rows.push((self.project_grouped_row(ctx, &rows)?, rows));
+            grouped_projected_rows.push((self.project_grouped_row(ctx, sources, &rows)?, rows));
         }
 
         if let Some(having_clause) = &self.statement.having_clause {
@@ -997,7 +1151,7 @@ impl SelectExecutor {
                 let mut include = true;
                 for condition in &having_clause.conditions {
                     if self.evaluate_projected_condition(
-                        ctx,
+                        sources,
                         condition,
                         &row,
                         &output_columns,
@@ -1171,20 +1325,17 @@ impl QueryExecutor for SelectExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext) -> Result<QueryResult> {
         self.statement.validate(&ctx.catalog)?;
 
-        let table_name = match &self.statement.from {
-            TableReference::Table(name, _) => name.clone(),
-            TableReference::CrossJoin(_, _) | TableReference::InnerJoin { .. } => {
-                return Err(HematiteError::ParseError(
-                    "Multi-table SELECT execution is not implemented yet".to_string(),
-                ))
-            }
-        };
-
-        let table = ctx.catalog.get_table_by_name(&table_name).ok_or_else(|| {
-            HematiteError::ParseError(format!("Table '{}' not found", table_name))
-        })?;
+        let sources = self.resolve_sources(ctx)?;
+        let table_name = sources
+            .first()
+            .map(|source| source.table.name.clone())
+            .ok_or_else(|| {
+                HematiteError::ParseError("SELECT requires at least one table source".to_string())
+            })?;
+        let table = &sources[0].table;
 
         let all_rows = match self.access_path {
+            SelectAccessPath::JoinScan => self.materialize_reference(ctx, &self.statement.from)?.1,
             SelectAccessPath::RowIdLookup => {
                 let rowid = self.extract_rowid_lookup().ok_or_else(|| {
                     HematiteError::InternalError(
@@ -1270,7 +1421,8 @@ impl QueryExecutor for SelectExecutor {
                     Some(where_clause) => {
                         let mut all_conditions_met = true;
                         for condition in &where_clause.conditions {
-                            if self.evaluate_condition(ctx, condition, row)? != Some(true) {
+                            if self.evaluate_condition(ctx, &sources, condition, row)? != Some(true)
+                            {
                                 all_conditions_met = false;
                                 break;
                             }
@@ -1289,8 +1441,7 @@ impl QueryExecutor for SelectExecutor {
         if !self.statement.order_by.is_empty() {
             filtered_rows.sort_by(|left, right| {
                 for item in &self.statement.order_by {
-                    let base_name = SelectStatement::column_reference_name(&item.column);
-                    let Some(index) = table.get_column_index(base_name) else {
+                    let Ok(Some(index)) = self.resolve_column_index(&sources, &item.column) else {
                         continue;
                     };
 
@@ -1308,12 +1459,12 @@ impl QueryExecutor for SelectExecutor {
         }
 
         if !self.statement.group_by.is_empty() || self.has_aggregate_projection() {
-            return self.execute_grouped(ctx, &filtered_rows);
+            return self.execute_grouped(ctx, &sources, &filtered_rows);
         }
 
         let mut projected_rows = Vec::new();
         for row in filtered_rows {
-            projected_rows.push(self.project_row(ctx, &row)?);
+            projected_rows.push(self.project_row(ctx, &sources, &row)?);
         }
 
         if self.statement.distinct {
@@ -1330,7 +1481,7 @@ impl QueryExecutor for SelectExecutor {
 
         Ok(QueryResult {
             affected_rows: projected_rows.len(),
-            columns: self.get_column_names(ctx),
+            columns: self.get_column_names(&sources),
             rows: projected_rows,
         })
     }
@@ -1676,6 +1827,7 @@ impl QueryExecutor for UpdateExecutor {
         )?;
         let mut updated_rows_data = Vec::with_capacity(rows_to_update.len());
         let mut updated_rows = 0usize;
+        let sources = select_executor.resolve_sources(ctx)?;
 
         for stored_row in rows_to_update {
             let mut updated_row = stored_row.values.clone();
@@ -1687,8 +1839,12 @@ impl QueryExecutor for UpdateExecutor {
                     ))
                 })?;
                 let column = &table.columns[column_index];
-                let value =
-                    select_executor.evaluate_expression(ctx, &assignment.value, &updated_row)?;
+                let value = select_executor.evaluate_expression(
+                    ctx,
+                    &sources,
+                    &assignment.value,
+                    &updated_row,
+                )?;
                 updated_row[column_index] = self.coerce_assignment_value(column, value)?;
             }
 
@@ -1768,6 +1924,9 @@ fn locate_rowids_for_access_path(
     select_executor: &SelectExecutor,
 ) -> Result<Vec<u64>> {
     match access_path {
+        SelectAccessPath::JoinScan => Err(HematiteError::ParseError(
+            "Join scans are not valid for UPDATE or DELETE locators".to_string(),
+        )),
         SelectAccessPath::RowIdLookup => {
             Ok(select_executor.extract_rowid_lookup().into_iter().collect())
         }
@@ -1848,9 +2007,14 @@ fn locate_rows_for_access_path(
                 let include = match &select_executor.statement.where_clause {
                     Some(where_clause) => {
                         let mut matches_where = true;
+                        let sources = select_executor.resolve_sources(ctx)?;
                         for condition in &where_clause.conditions {
-                            if select_executor.evaluate_condition(ctx, condition, &row.values)?
-                                != Some(true)
+                            if select_executor.evaluate_condition(
+                                ctx,
+                                &sources,
+                                condition,
+                                &row.values,
+                            )? != Some(true)
                             {
                                 matches_where = false;
                                 break;
