@@ -294,6 +294,40 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_create_unique_index_blocks_future_duplicate_insert() -> Result<()> {
+        let db = TestDbFile::new("_test_create_unique_index_blocks_future_duplicate_insert");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT);")?;
+        conn.execute("INSERT INTO users (id, email) VALUES (1, 'a@example.com');")?;
+        conn.execute("CREATE UNIQUE INDEX idx_users_email ON users (email);")?;
+
+        let err = conn
+            .execute("INSERT INTO users (id, email) VALUES (2, 'a@example.com');")
+            .unwrap_err();
+        assert!(err.to_string().contains("UNIQUE index"));
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_alter_table_add_column_requires_nullable_or_default() -> Result<()> {
+        let db = TestDbFile::new("_test_alter_table_add_column_requires_nullable_or_default");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+
+        let err = conn
+            .execute("ALTER TABLE users ADD COLUMN active BOOL NOT NULL;")
+            .unwrap_err();
+        assert!(err.to_string().contains("nullable or have a DEFAULT"));
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_writer_transaction_blocks_second_writer_connection() -> Result<()> {
         let db = TestDbFile::new("_test_writer_transaction_blocks_second_writer");
         let mut conn1 = Connection::new(db.path())?;
