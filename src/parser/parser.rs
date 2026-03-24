@@ -106,6 +106,12 @@ impl Parser {
             None
         };
 
+        let offset = if matches!(self.peek_token(), Ok(Token::Offset)) {
+            Some(self.parse_offset_clause()?)
+        } else {
+            None
+        };
+
         self.consume_token(&Token::Semicolon)?;
 
         Ok(Statement::Select(SelectStatement {
@@ -115,6 +121,7 @@ impl Parser {
             where_clause,
             order_by,
             limit,
+            offset,
         }))
     }
 
@@ -257,14 +264,23 @@ impl Parser {
 
     fn parse_limit_clause(&mut self) -> Result<usize> {
         self.consume_token(&Token::Limit)?;
+        self.parse_non_negative_integer_clause("LIMIT")
+    }
+
+    fn parse_offset_clause(&mut self) -> Result<usize> {
+        self.consume_token(&Token::Offset)?;
+        self.parse_non_negative_integer_clause("OFFSET")
+    }
+
+    fn parse_non_negative_integer_clause(&mut self, clause_name: &str) -> Result<usize> {
         match self.peek_token()? {
             Token::NumberLiteral(value) if value.fract() == 0.0 && value >= 0.0 => {
                 self.consume_token(&Token::NumberLiteral(value))?;
                 Ok(value as usize)
             }
             token => Err(HematiteError::ParseError(format!(
-                "Expected non-negative integer after LIMIT, found: {:?}",
-                token
+                "Expected non-negative integer after {}, found: {:?}",
+                clause_name, token
             ))),
         }
     }

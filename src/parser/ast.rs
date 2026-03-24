@@ -27,6 +27,7 @@ pub struct SelectStatement {
     pub where_clause: Option<WhereClause>,
     pub order_by: Vec<OrderByItem>,
     pub limit: Option<usize>,
+    pub offset: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -265,6 +266,7 @@ impl Statement {
                     .transpose()?,
                 order_by: select.order_by.clone(),
                 limit: select.limit,
+                offset: select.offset,
             })),
             Statement::Update(update) => Ok(Statement::Update(UpdateStatement {
                 table: update.table.clone(),

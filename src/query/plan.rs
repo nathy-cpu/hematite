@@ -79,6 +79,7 @@ pub struct SelectPlanNode {
     pub has_filter: bool,
     pub order_by_columns: Vec<String>,
     pub limit: Option<usize>,
+    pub offset: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

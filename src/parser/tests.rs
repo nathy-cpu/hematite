@@ -33,6 +33,7 @@ mod ast_tests {
             where_clause: None,
             order_by: Vec::new(),
             limit: None,
+            offset: None,
         };
 
         assert!(select.validate(&catalog).is_ok());
@@ -58,6 +59,7 @@ mod ast_tests {
             where_clause: None,
             order_by: Vec::new(),
             limit: None,
+            offset: None,
         };
 
         assert!(select.validate(&catalog).is_err());
@@ -88,6 +90,7 @@ mod ast_tests {
             }),
             order_by: Vec::new(),
             limit: None,
+            offset: None,
         };
 
         assert!(select.validate(&catalog).is_err());
@@ -172,6 +175,32 @@ mod lexer_tests {
             Token::Desc,
             Token::Limit,
             Token::NumberLiteral(5.0),
+            Token::Semicolon,
+        ];
+
+        assert_eq!(lexer.get_tokens(), &expected);
+        Ok(())
+    }
+
+    #[test]
+    fn test_offset_statement() -> Result<()> {
+        let mut lexer =
+            Lexer::new("SELECT id FROM users ORDER BY name DESC LIMIT 5 OFFSET 2;".to_string());
+        lexer.tokenize()?;
+
+        let expected = vec![
+            Token::Select,
+            Token::Identifier("id".to_string()),
+            Token::From,
+            Token::Identifier("users".to_string()),
+            Token::Order,
+            Token::By,
+            Token::Identifier("name".to_string()),
+            Token::Desc,
+            Token::Limit,
+            Token::NumberLiteral(5.0),
+            Token::Offset,
+            Token::NumberLiteral(2.0),
             Token::Semicolon,
         ];
 
@@ -559,6 +588,24 @@ mod parser_tests {
             Statement::Select(select) => {
                 assert_eq!(select.order_by.len(), 1);
                 assert_eq!(select.limit, Some(5));
+            }
+            _ => panic!("Expected SELECT statement"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_offset() -> Result<()> {
+        let mut lexer =
+            Lexer::new("SELECT id FROM users ORDER BY name DESC LIMIT 5 OFFSET 2;".to_string());
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let statement = parser.parse()?;
+        match statement {
+            Statement::Select(select) => {
+                assert_eq!(select.order_by.len(), 1);
+                assert_eq!(select.limit, Some(5));
+                assert_eq!(select.offset, Some(2));
             }
             _ => panic!("Expected SELECT statement"),
         }

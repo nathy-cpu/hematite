@@ -637,7 +637,20 @@ impl QueryExecutor for SelectExecutor {
         }
 
         if let Some(limit) = self.statement.limit {
+            if let Some(offset) = self.statement.offset {
+                if offset >= filtered_rows.len() {
+                    filtered_rows.clear();
+                } else {
+                    filtered_rows.drain(0..offset);
+                }
+            }
             filtered_rows.truncate(limit);
+        } else if let Some(offset) = self.statement.offset {
+            if offset >= filtered_rows.len() {
+                filtered_rows.clear();
+            } else {
+                filtered_rows.drain(0..offset);
+            }
         }
 
         if self
@@ -944,6 +957,7 @@ impl QueryExecutor for UpdateExecutor {
                 where_clause: self.statement.where_clause.clone(),
                 order_by: Vec::new(),
                 limit: None,
+                offset: None,
             },
             self.access_path.clone(),
         );
@@ -1172,6 +1186,7 @@ impl QueryExecutor for DeleteExecutor {
                 where_clause: self.statement.where_clause.clone(),
                 order_by: Vec::new(),
                 limit: None,
+                offset: None,
             },
             self.access_path.clone(),
         );

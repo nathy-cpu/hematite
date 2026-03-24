@@ -601,6 +601,32 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_offset_applies_after_order_by() -> Result<()> {
+        let db = TestDbFile::new("_test_offset_applies_after_order_by");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (3, 'Cara');")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (1, 'Alice');")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (2, 'Bob');")?;
+
+        let result = conn.execute("SELECT id FROM test ORDER BY id ASC OFFSET 1;")?;
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![crate::catalog::Value::Integer(2)],
+                vec![crate::catalog::Value::Integer(3)],
+            ]
+        );
+
+        let paged = conn.execute("SELECT id FROM test ORDER BY id ASC LIMIT 1 OFFSET 1;")?;
+        assert_eq!(paged.rows, vec![vec![crate::catalog::Value::Integer(2)]]);
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_count_all_returns_single_row() -> Result<()> {
         let db = TestDbFile::new("_test_count_all_returns_single_row");
         let mut conn = Connection::new(db.path())?;

@@ -249,6 +249,7 @@ impl QueryPlanner {
                 .map(|item| item.column.clone())
                 .collect(),
             limit: statement.limit,
+            offset: statement.offset,
         }
     }
 
@@ -309,6 +310,7 @@ impl QueryPlanner {
             where_clause: where_clause.clone(),
             order_by: Vec::new(),
             limit: None,
+            offset: None,
         };
         let rowid_lookup = self.extract_rowid_lookup(&synthetic_select);
 
