@@ -135,6 +135,23 @@ impl Parser {
             None
         };
 
+        let set_operation = if matches!(self.peek_token(), Ok(Token::Union)) {
+            self.consume_token(&Token::Union)?;
+            let operator = if matches!(self.peek_token(), Ok(Token::All)) {
+                self.consume_token(&Token::All)?;
+                SetOperator::UnionAll
+            } else {
+                SetOperator::Union
+            };
+
+            Some(SetOperation {
+                operator,
+                right: Box::new(self.parse_select_statement(false)?),
+            })
+        } else {
+            None
+        };
+
         if expect_semicolon {
             self.consume_token(&Token::Semicolon)?;
         }
@@ -150,6 +167,7 @@ impl Parser {
             order_by,
             limit,
             offset,
+            set_operation,
         })
     }
 

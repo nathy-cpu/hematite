@@ -32,6 +32,19 @@ pub struct SelectStatement {
     pub order_by: Vec<OrderByItem>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
+    pub set_operation: Option<SetOperation>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SetOperation {
+    pub operator: SetOperator,
+    pub right: Box<SelectStatement>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetOperator {
+    Union,
+    UnionAll,
 }
 
 #[derive(Debug, Clone)]
@@ -312,18 +325,7 @@ impl Statement {
         match self {
             Statement::Begin | Statement::Commit | Statement::Rollback => {}
             Statement::Select(select) => {
-                for item in &select.columns {
-                    item.visit_parameters(f);
-                }
-                if let Some(where_clause) = &select.where_clause {
-                    where_clause.visit_parameters(f);
-                }
-                for expr in &select.group_by {
-                    expr.visit_parameters(f);
-                }
-                if let Some(having_clause) = &select.having_clause {
-                    having_clause.visit_parameters(f);
-                }
+                select.visit_parameters(f);
             }
             Statement::Update(update) => {
                 for assignment in &update.assignments {
@@ -385,6 +387,20 @@ impl Statement {
                 order_by: select.order_by.clone(),
                 limit: select.limit,
                 offset: select.offset,
+                set_operation: select
+                    .set_operation
+                    .as_ref()
+                    .map(|set_operation| {
+                        Ok::<SetOperation, HematiteError>(SetOperation {
+                            operator: set_operation.operator,
+                            right: Box::new(
+                                Statement::Select((*set_operation.right).clone())
+                                    .bind_parameters(parameters)?
+                                    .into_select()?,
+                            ),
+                        })
+                    })
+                    .transpose()?,
             })),
             Statement::Update(update) => Ok(Statement::Update(UpdateStatement {
                 table: update.table.clone(),
@@ -676,6 +692,9 @@ impl SelectStatement {
         if let Some(having_clause) = &self.having_clause {
             having_clause.visit_parameters(f);
         }
+        if let Some(set_operation) = &self.set_operation {
+            set_operation.right.visit_parameters(f);
+        }
     }
 
     fn is_hidden_rowid(name: &str) -> bool {
@@ -791,6 +810,16 @@ impl SelectStatement {
     }
 
     pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
+        if let Some(set_operation) = &self.set_operation {
+            set_operation.right.validate(catalog)?;
+            if self.columns.len() != set_operation.right.columns.len() {
+                return Err(HematiteError::ParseError(
+                    "Set operations require both queries to project the same number of columns"
+                        .to_string(),
+                ));
+            }
+        }
+
         let bindings = Self::collect_table_bindings(&self.from);
         if bindings.is_empty() {
             return Err(HematiteError::ParseError(

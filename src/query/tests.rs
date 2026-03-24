@@ -60,6 +60,7 @@ mod executor_tests {
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            set_operation: None,
         };
 
         let mut executor = SelectExecutor::new(
@@ -169,6 +170,7 @@ mod executor_tests {
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            set_operation: None,
         };
 
         let mut executor = SelectExecutor::new(
@@ -258,6 +260,7 @@ mod executor_tests {
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            set_operation: None,
         };
 
         let mut executor = SelectExecutor::new(
@@ -320,6 +323,7 @@ mod executor_tests {
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            set_operation: None,
         };
 
         let mut executor = SelectExecutor::new(
@@ -665,6 +669,7 @@ mod planner_tests {
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            set_operation: None,
         };
 
         let plan = planner.plan(Statement::Select(statement))?;
@@ -739,6 +744,7 @@ mod planner_tests {
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            set_operation: None,
         };
 
         let plan = planner.plan(Statement::Select(statement))?;
@@ -819,6 +825,7 @@ mod planner_tests {
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            set_operation: None,
         };
 
         let plan = planner.plan(Statement::Select(statement))?;
@@ -960,6 +967,7 @@ mod planner_tests {
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            set_operation: None,
         }))?;
         let rowid_lookup = planner.plan(Statement::Select(SelectStatement {
             distinct: false,
@@ -978,6 +986,7 @@ mod planner_tests {
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            set_operation: None,
         }))?;
         let delete_full_scan = planner.plan(Statement::Delete(DeleteStatement {
             table: "users".to_string(),
@@ -1037,6 +1046,7 @@ mod planner_tests {
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            set_operation: None,
         };
 
         let plan = planner.plan(Statement::Select(statement))?;
@@ -1086,6 +1096,7 @@ mod planner_tests {
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            set_operation: None,
         };
 
         let plan = planner.plan(Statement::Select(statement))?;

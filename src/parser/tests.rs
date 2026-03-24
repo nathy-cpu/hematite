@@ -37,6 +37,7 @@ mod ast_tests {
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            set_operation: None,
         };
 
         assert!(select.validate(&catalog).is_ok());
@@ -66,6 +67,7 @@ mod ast_tests {
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            set_operation: None,
         };
 
         assert!(select.validate(&catalog).is_err());
@@ -100,6 +102,7 @@ mod ast_tests {
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            set_operation: None,
         };
 
         assert!(select.validate(&catalog).is_err());
@@ -141,6 +144,7 @@ mod ast_tests {
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            set_operation: None,
         };
 
         assert!(select.validate(&catalog).is_err());
@@ -202,6 +206,7 @@ mod ast_tests {
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            set_operation: None,
         };
 
         assert!(ambiguous.validate(&catalog).is_err());
@@ -1551,6 +1556,28 @@ mod parser_tests {
                         Condition::Exists { is_not: false, .. }
                     )
                 ));
+            }
+            _ => panic!("Expected SELECT statement"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_select_with_union() -> Result<()> {
+        let mut lexer =
+            Lexer::new("SELECT id FROM users UNION ALL SELECT user_id FROM posts;".to_string());
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let statement = parser.parse()?;
+
+        match statement {
+            Statement::Select(select) => {
+                let set_operation = select
+                    .set_operation
+                    .expect("expected set operation on parsed union");
+                assert_eq!(set_operation.operator, SetOperator::UnionAll);
+                assert!(matches!(*set_operation.right, SelectStatement { .. }));
             }
             _ => panic!("Expected SELECT statement"),
         }

@@ -1310,6 +1310,21 @@ impl QueryExecutor for SelectExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext) -> Result<QueryResult> {
         self.statement.validate(&ctx.catalog)?;
 
+        if let Some(set_operation) = &self.statement.set_operation {
+            let mut left_statement = self.statement.clone();
+            left_statement.set_operation = None;
+            let mut left_executor = SelectExecutor::new(left_statement, self.access_path.clone());
+            let mut left_result = left_executor.execute(ctx)?;
+            let right_result = self.execute_subquery(ctx, &set_operation.right)?;
+
+            left_result.rows.extend(right_result.rows);
+            if set_operation.operator == SetOperator::Union {
+                apply_distinct_if_needed(true, &mut left_result.rows);
+            }
+            left_result.affected_rows = left_result.rows.len();
+            return Ok(left_result);
+        }
+
         let sources = self.resolve_sources(ctx)?;
         let table_name = sources
             .first()
@@ -2417,6 +2432,7 @@ fn locator_select_statement(
         order_by: Vec::new(),
         limit: None,
         offset: None,
+        set_operation: None,
     }
 }
 

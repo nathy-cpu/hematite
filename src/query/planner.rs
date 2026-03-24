@@ -605,5 +605,6 @@ fn synthetic_table_select(table_name: &str, where_clause: Option<WhereClause>) -
         order_by: Vec::new(),
         limit: None,
         offset: None,
+        set_operation: None,
     }
 }
