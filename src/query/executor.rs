@@ -165,6 +165,38 @@ impl SelectExecutor {
                 let right_val = self.evaluate_expression(ctx, right, row)?;
                 Ok(self.compare_values(&left_val, operator, &right_val))
             }
+            Condition::InList {
+                expr,
+                values,
+                is_not,
+            } => {
+                let probe = self.evaluate_expression(ctx, expr, row)?;
+                if probe.is_null() {
+                    return Ok(None);
+                }
+
+                let mut matched = false;
+                let mut saw_null = false;
+                for value_expr in values {
+                    let candidate = self.evaluate_expression(ctx, value_expr, row)?;
+                    if candidate.is_null() {
+                        saw_null = true;
+                        continue;
+                    }
+                    if candidate == probe {
+                        matched = true;
+                        break;
+                    }
+                }
+
+                if matched {
+                    Ok(Some(!is_not))
+                } else if saw_null {
+                    Ok(None)
+                } else {
+                    Ok(Some(*is_not))
+                }
+            }
             Condition::NullCheck { expr, is_not } => {
                 let value = self.evaluate_expression(ctx, expr, row)?;
                 let is_null = value.is_null();

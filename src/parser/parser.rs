@@ -342,6 +342,22 @@ impl Parser {
     fn parse_condition(&mut self) -> Result<Condition> {
         let left = self.parse_expression()?;
 
+        if matches!(self.peek_token(), Ok(Token::Not)) {
+            self.consume_token(&Token::Not)?;
+            if matches!(self.peek_token(), Ok(Token::In)) {
+                self.consume_token(&Token::In)?;
+                return self.parse_in_list_condition(left, true);
+            }
+            return Err(HematiteError::ParseError(
+                "Expected IN after NOT in predicate".to_string(),
+            ));
+        }
+
+        if matches!(self.peek_token(), Ok(Token::In)) {
+            self.consume_token(&Token::In)?;
+            return self.parse_in_list_condition(left, false);
+        }
+
         if matches!(self.peek_token(), Ok(Token::Is)) {
             self.consume_token(&Token::Is)?;
             let is_not = if matches!(self.peek_token(), Ok(Token::Not)) {
@@ -362,6 +378,33 @@ impl Parser {
             left,
             operator,
             right,
+        })
+    }
+
+    fn parse_in_list_condition(&mut self, expr: Expression, is_not: bool) -> Result<Condition> {
+        self.consume_token(&Token::LeftParen)?;
+        let mut values = Vec::new();
+
+        loop {
+            values.push(self.parse_expression()?);
+            if matches!(self.peek_token(), Ok(Token::Comma)) {
+                self.consume_token(&Token::Comma)?;
+                continue;
+            }
+            break;
+        }
+
+        if values.is_empty() {
+            return Err(HematiteError::ParseError(
+                "IN list must contain at least one expression".to_string(),
+            ));
+        }
+
+        self.consume_token(&Token::RightParen)?;
+        Ok(Condition::InList {
+            expr,
+            values,
+            is_not,
         })
     }
 

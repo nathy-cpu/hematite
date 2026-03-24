@@ -600,6 +600,33 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_where_in_and_not_in() -> Result<()> {
+        let db = TestDbFile::new("_test_where_in_and_not_in");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (1, 'Alice');")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (2, 'Bob');")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (3, 'Cara');")?;
+
+        let included = conn.execute("SELECT id FROM test WHERE id IN (1, 3) ORDER BY id ASC;")?;
+        assert_eq!(
+            included.rows,
+            vec![
+                vec![crate::catalog::Value::Integer(1)],
+                vec![crate::catalog::Value::Integer(3)],
+            ]
+        );
+
+        let excluded =
+            conn.execute("SELECT id FROM test WHERE id NOT IN (1, 3) ORDER BY id ASC;")?;
+        assert_eq!(excluded.rows, vec![vec![crate::catalog::Value::Integer(2)]]);
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_limit_applies_after_order_by() -> Result<()> {
         let db = TestDbFile::new("_test_limit_applies_after_order_by");
         let mut conn = Connection::new(db.path())?;
