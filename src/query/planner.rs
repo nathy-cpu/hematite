@@ -92,22 +92,11 @@ impl QueryPlanner {
     }
 
     fn plan_create(&self, statement: CreateStatement) -> Result<QueryPlan> {
-        // For CREATE, the planning is straightforward
         let node = PlanNode::Create(CreatePlanNode {
             table_name: statement.table.clone(),
             column_count: statement.columns.len(),
         });
-
-        // Cost estimation for CREATE is fixed
-        let estimated_cost = 1.0;
-
-        Ok(QueryPlan {
-            node,
-            program: ExecutionProgram::Create { statement },
-            estimated_cost,
-            select_analysis: None,
-            optimizations: None,
-        })
+        Ok(self.simple_plan(node, ExecutionProgram::Create { statement }))
     }
 
     fn plan_update(&self, statement: UpdateStatement) -> Result<QueryPlan> {
@@ -160,30 +149,14 @@ impl QueryPlanner {
         let node = PlanNode::Drop(DropPlanNode {
             table_name: statement.table.clone(),
         });
-        let estimated_cost = 1.0;
-
-        Ok(QueryPlan {
-            node,
-            program: ExecutionProgram::Drop { statement },
-            estimated_cost,
-            select_analysis: None,
-            optimizations: None,
-        })
+        Ok(self.simple_plan(node, ExecutionProgram::Drop { statement }))
     }
 
     fn plan_alter(&self, statement: AlterStatement) -> Result<QueryPlan> {
         let node = PlanNode::Alter(AlterPlanNode {
             table_name: statement.table.clone(),
         });
-        let estimated_cost = 1.0;
-
-        Ok(QueryPlan {
-            node,
-            program: ExecutionProgram::Alter { statement },
-            estimated_cost,
-            select_analysis: None,
-            optimizations: None,
-        })
+        Ok(self.simple_plan(node, ExecutionProgram::Alter { statement }))
     }
 
     fn plan_create_index(&self, statement: CreateIndexStatement) -> Result<QueryPlan> {
@@ -192,14 +165,7 @@ impl QueryPlanner {
             index_name: statement.index_name.clone(),
             column_count: statement.columns.len(),
         });
-
-        Ok(QueryPlan {
-            node,
-            program: ExecutionProgram::CreateIndex { statement },
-            estimated_cost: 1.0,
-            select_analysis: None,
-            optimizations: None,
-        })
+        Ok(self.simple_plan(node, ExecutionProgram::CreateIndex { statement }))
     }
 
     fn plan_drop_index(&self, statement: DropIndexStatement) -> Result<QueryPlan> {
@@ -207,14 +173,17 @@ impl QueryPlanner {
             table_name: statement.table.clone(),
             index_name: statement.index_name.clone(),
         });
+        Ok(self.simple_plan(node, ExecutionProgram::DropIndex { statement }))
+    }
 
-        Ok(QueryPlan {
+    fn simple_plan(&self, node: PlanNode, program: ExecutionProgram) -> QueryPlan {
+        QueryPlan {
             node,
-            program: ExecutionProgram::DropIndex { statement },
+            program,
             estimated_cost: 1.0,
             select_analysis: None,
             optimizations: None,
-        })
+        }
     }
 
     fn build_select_plan_node(
@@ -357,18 +326,7 @@ impl QueryPlanner {
             HematiteError::ParseError(format!("Table '{}' not found", table_name))
         })?;
 
-        let synthetic_select = SelectStatement {
-            distinct: false,
-            columns: vec![SelectItem::Wildcard],
-            column_aliases: vec![None],
-            from: TableReference::Table(table_name.clone(), None),
-            where_clause: where_clause.clone(),
-            group_by: Vec::new(),
-            having_clause: None,
-            order_by: Vec::new(),
-            limit: None,
-            offset: None,
-        };
+        let synthetic_select = synthetic_table_select(&table_name, where_clause.clone());
         let rowid_lookup = self.extract_rowid_lookup(&synthetic_select);
 
         // Analyze WHERE clause for index usage opportunities
@@ -632,5 +590,20 @@ impl QueryPlanner {
                     && usage.index_name.as_deref() == Some(index_name)
             })
             .map(|usage| usage.selectivity)
+    }
+}
+
+fn synthetic_table_select(table_name: &str, where_clause: Option<WhereClause>) -> SelectStatement {
+    SelectStatement {
+        distinct: false,
+        columns: vec![SelectItem::Wildcard],
+        column_aliases: vec![None],
+        from: TableReference::Table(table_name.to_string(), None),
+        where_clause,
+        group_by: Vec::new(),
+        having_clause: None,
+        order_by: Vec::new(),
+        limit: None,
+        offset: None,
     }
 }

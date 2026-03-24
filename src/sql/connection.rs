@@ -28,7 +28,7 @@ use crate::catalog::JournalMode;
 use crate::catalog::Value;
 use crate::error::{HematiteError, Result};
 use crate::parser::{Lexer, Parser};
-use crate::query::{ExecutionContext, QueryPlanner, QueryResult};
+use crate::query::{ExecutionContext, QueryExecutor, QueryPlanner, QueryResult};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -44,6 +44,14 @@ pub struct Connection {
 }
 
 impl Connection {
+    fn empty_result() -> QueryResult {
+        QueryResult {
+            affected_rows: 0,
+            columns: Vec::new(),
+            rows: Vec::new(),
+        }
+    }
+
     fn lock_catalog(&self) -> Result<MutexGuard<'_, Catalog>> {
         self.catalog.lock().map_err(|_| {
             HematiteError::InternalError("SQL connection catalog mutex is poisoned".to_string())
@@ -73,27 +81,15 @@ impl Connection {
         match statement {
             crate::parser::ast::Statement::Begin => {
                 self.begin_active_transaction()?;
-                return Ok(QueryResult {
-                    affected_rows: 0,
-                    columns: Vec::new(),
-                    rows: Vec::new(),
-                });
+                return Ok(Self::empty_result());
             }
             crate::parser::ast::Statement::Commit => {
                 self.commit_active_transaction()?;
-                return Ok(QueryResult {
-                    affected_rows: 0,
-                    columns: Vec::new(),
-                    rows: Vec::new(),
-                });
+                return Ok(Self::empty_result());
             }
             crate::parser::ast::Statement::Rollback => {
                 self.rollback_active_transaction()?;
-                return Ok(QueryResult {
-                    affected_rows: 0,
-                    columns: Vec::new(),
-                    rows: Vec::new(),
-                });
+                return Ok(Self::empty_result());
             }
             _ => {}
         }
@@ -109,17 +105,7 @@ impl Connection {
         &mut self,
         statement: crate::parser::ast::Statement,
     ) -> Result<QueryResult> {
-        let (schema, table_row_counts) = {
-            let mut catalog_guard = self.lock_catalog()?;
-            let schema = catalog_guard.clone_schema();
-            let table_row_counts =
-                catalog_guard.with_engine(|engine| Ok(Self::collect_table_row_counts(engine)))?;
-            (schema, table_row_counts)
-        };
-
-        let planner = QueryPlanner::new(schema.clone()).with_table_row_counts(table_row_counts);
-        let plan = planner.plan(statement)?;
-        let mut executor = plan.into_executor();
+        let (schema, mut executor) = self.plan_executor(statement)?;
 
         let result = {
             let mut catalog_guard = self.lock_catalog()?;
@@ -138,19 +124,9 @@ impl Connection {
     ) -> Result<QueryResult> {
         let explicit_transaction = self.transaction.is_some();
         let persists_schema = statement.mutates_schema();
-        let (schema, table_row_counts) = {
-            let mut catalog_guard = self.lock_catalog()?;
-            let schema = catalog_guard.clone_schema();
-            let table_row_counts =
-                catalog_guard.with_engine(|engine| Ok(Self::collect_table_row_counts(engine)))?;
-            (schema, table_row_counts)
-        };
+        let (schema, mut executor) = self.plan_executor(statement)?;
 
-        let planner = QueryPlanner::new(schema.clone()).with_table_row_counts(table_row_counts);
-        let plan = planner.plan(statement)?;
-        let mut executor = plan.into_executor();
-
-        let implicit_snapshot = if explicit_transaction {
+        let mut implicit_snapshot = if explicit_transaction {
             None
         } else {
             let mut catalog_guard = self.lock_catalog()?;
@@ -173,10 +149,10 @@ impl Connection {
                 if persists_schema {
                     let mut catalog_guard = self.lock_catalog()?;
                     if let Err(err) = catalog_guard.replace_schema(updated_schema) {
-                        if let Some(snapshot) = implicit_snapshot {
-                            let _ = catalog_guard.rollback_transaction();
-                            catalog_guard.restore_snapshot(snapshot);
-                        }
+                        Self::rollback_implicit_snapshot(
+                            &mut catalog_guard,
+                            implicit_snapshot.take(),
+                        );
                         return Err(err);
                     }
                 }
@@ -184,10 +160,10 @@ impl Connection {
                 if !explicit_transaction {
                     let mut catalog_guard = self.lock_catalog()?;
                     if let Err(err) = catalog_guard.commit_transaction() {
-                        if let Some(snapshot) = implicit_snapshot {
-                            let _ = catalog_guard.rollback_transaction();
-                            catalog_guard.restore_snapshot(snapshot);
-                        }
+                        Self::rollback_implicit_snapshot(
+                            &mut catalog_guard,
+                            implicit_snapshot.take(),
+                        );
                         return Err(err);
                     }
                 }
@@ -195,13 +171,38 @@ impl Connection {
                 Ok(result)
             }
             Err(err) => {
-                if let Some(snapshot) = implicit_snapshot {
-                    let mut catalog_guard = self.lock_catalog()?;
-                    let _ = catalog_guard.rollback_transaction();
-                    catalog_guard.restore_snapshot(snapshot);
-                }
+                let mut catalog_guard = self.lock_catalog()?;
+                Self::rollback_implicit_snapshot(&mut catalog_guard, implicit_snapshot.take());
                 Err(err)
             }
+        }
+    }
+
+    fn plan_executor(
+        &self,
+        statement: crate::parser::ast::Statement,
+    ) -> Result<(crate::catalog::Schema, Box<dyn QueryExecutor>)> {
+        let (schema, table_row_counts) = self.read_planning_state()?;
+        let planner = QueryPlanner::new(schema.clone()).with_table_row_counts(table_row_counts);
+        let plan = planner.plan(statement)?;
+        Ok((schema, plan.into_executor()))
+    }
+
+    fn read_planning_state(&self) -> Result<(crate::catalog::Schema, HashMap<String, usize>)> {
+        let mut catalog_guard = self.lock_catalog()?;
+        let schema = catalog_guard.clone_schema();
+        let table_row_counts =
+            catalog_guard.with_engine(|engine| Ok(Self::collect_table_row_counts(engine)))?;
+        Ok((schema, table_row_counts))
+    }
+
+    fn rollback_implicit_snapshot(
+        catalog_guard: &mut Catalog,
+        snapshot: Option<crate::catalog::catalog::CatalogSnapshot>,
+    ) {
+        if let Some(snapshot) = snapshot {
+            let _ = catalog_guard.rollback_transaction();
+            catalog_guard.restore_snapshot(snapshot);
         }
     }
 
