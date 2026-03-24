@@ -1523,4 +1523,38 @@ mod parser_tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_parse_select_with_subquery_predicates() -> Result<()> {
+        let mut lexer = Lexer::new(
+            "SELECT id FROM users WHERE id IN (SELECT user_id FROM posts) OR EXISTS (SELECT id FROM posts);"
+                .to_string(),
+        );
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let statement = parser.parse()?;
+
+        match statement {
+            Statement::Select(select) => {
+                assert_eq!(
+                    select.where_clause.as_ref().map(|w| w.conditions.len()),
+                    Some(1)
+                );
+                assert!(matches!(
+                    &select.where_clause.as_ref().unwrap().conditions[0],
+                    Condition::Logical { left, operator: LogicalOperator::Or, right }
+                    if matches!(
+                        &**left,
+                        Condition::InSubquery { is_not: false, .. }
+                    ) && matches!(
+                        &**right,
+                        Condition::Exists { is_not: false, .. }
+                    )
+                ));
+            }
+            _ => panic!("Expected SELECT statement"),
+        }
+
+        Ok(())
+    }
 }

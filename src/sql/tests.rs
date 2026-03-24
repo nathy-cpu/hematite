@@ -901,6 +901,67 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_where_in_subquery_and_exists() -> Result<()> {
+        let db = TestDbFile::new("_test_where_in_subquery_and_exists");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("CREATE TABLE posts (id INTEGER PRIMARY KEY, user_id INTEGER, title TEXT);")?;
+        conn.execute("INSERT INTO users (id, name) VALUES (1, 'Alice');")?;
+        conn.execute("INSERT INTO users (id, name) VALUES (2, 'Bob');")?;
+        conn.execute("INSERT INTO users (id, name) VALUES (3, 'Cara');")?;
+        conn.execute("INSERT INTO posts (id, user_id, title) VALUES (10, 1, 'First');")?;
+        conn.execute("INSERT INTO posts (id, user_id, title) VALUES (11, 1, 'Second');")?;
+        conn.execute("INSERT INTO posts (id, user_id, title) VALUES (12, 3, 'Third');")?;
+
+        let in_result = conn.execute(
+            "SELECT id FROM users WHERE id IN (SELECT user_id FROM posts) ORDER BY id ASC;",
+        )?;
+        assert_eq!(
+            in_result.rows,
+            vec![
+                vec![crate::catalog::Value::Integer(1)],
+                vec![crate::catalog::Value::Integer(3)],
+            ]
+        );
+
+        let not_in_result = conn.execute(
+            "SELECT id FROM users WHERE id NOT IN (SELECT user_id FROM posts) ORDER BY id ASC;",
+        )?;
+        assert_eq!(
+            not_in_result.rows,
+            vec![vec![crate::catalog::Value::Integer(2)]]
+        );
+
+        let exists_result = conn.execute(
+            "SELECT id FROM users WHERE EXISTS (SELECT user_id FROM posts WHERE user_id = 1) ORDER BY id ASC;",
+        )?;
+        assert_eq!(
+            exists_result.rows,
+            vec![
+                vec![crate::catalog::Value::Integer(1)],
+                vec![crate::catalog::Value::Integer(2)],
+                vec![crate::catalog::Value::Integer(3)],
+            ]
+        );
+
+        let not_exists_result = conn.execute(
+            "SELECT id FROM users WHERE NOT EXISTS (SELECT user_id FROM posts WHERE user_id = 99) ORDER BY id ASC;",
+        )?;
+        assert_eq!(
+            not_exists_result.rows,
+            vec![
+                vec![crate::catalog::Value::Integer(1)],
+                vec![crate::catalog::Value::Integer(2)],
+                vec![crate::catalog::Value::Integer(3)],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_where_between() -> Result<()> {
         let db = TestDbFile::new("_test_where_between");
         let mut conn = Connection::new(db.path())?;

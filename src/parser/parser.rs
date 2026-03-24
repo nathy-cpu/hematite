@@ -81,6 +81,10 @@ impl Parser {
     }
 
     fn parse_select(&mut self) -> Result<Statement> {
+        Ok(Statement::Select(self.parse_select_statement(true)?))
+    }
+
+    fn parse_select_statement(&mut self, expect_semicolon: bool) -> Result<SelectStatement> {
         self.consume_token(&Token::Select)?;
         let distinct = if matches!(self.peek_token(), Ok(Token::Distinct)) {
             self.consume_token(&Token::Distinct)?;
@@ -131,9 +135,11 @@ impl Parser {
             None
         };
 
-        self.consume_token(&Token::Semicolon)?;
+        if expect_semicolon {
+            self.consume_token(&Token::Semicolon)?;
+        }
 
-        Ok(Statement::Select(SelectStatement {
+        Ok(SelectStatement {
             distinct,
             columns,
             column_aliases,
@@ -144,7 +150,7 @@ impl Parser {
             order_by,
             limit,
             offset,
-        }))
+        })
     }
 
     fn parse_select_columns(&mut self) -> Result<(Vec<SelectItem>, Vec<Option<String>>)> {
@@ -445,7 +451,16 @@ impl Parser {
     fn parse_primary_condition(&mut self) -> Result<Condition> {
         if self.peek_token()? == Token::Not {
             self.consume_token(&Token::Not)?;
+            if self.peek_token()? == Token::Exists {
+                self.consume_token(&Token::Exists)?;
+                return self.parse_exists_condition(true);
+            }
             return Ok(Condition::Not(Box::new(self.parse_primary_condition()?)));
+        }
+
+        if self.peek_token()? == Token::Exists {
+            self.consume_token(&Token::Exists)?;
+            return self.parse_exists_condition(false);
         }
 
         if self.peek_token()? == Token::LeftParen {
@@ -516,6 +531,16 @@ impl Parser {
 
     fn parse_in_list_condition(&mut self, expr: Expression, is_not: bool) -> Result<Condition> {
         self.consume_token(&Token::LeftParen)?;
+        if matches!(self.peek_token(), Ok(Token::Select)) {
+            let subquery = self.parse_select_statement(false)?;
+            self.consume_token(&Token::RightParen)?;
+            return Ok(Condition::InSubquery {
+                expr,
+                subquery: Box::new(subquery),
+                is_not,
+            });
+        }
+
         let mut values = Vec::new();
 
         loop {
@@ -537,6 +562,16 @@ impl Parser {
         Ok(Condition::InList {
             expr,
             values,
+            is_not,
+        })
+    }
+
+    fn parse_exists_condition(&mut self, is_not: bool) -> Result<Condition> {
+        self.consume_token(&Token::LeftParen)?;
+        let subquery = self.parse_select_statement(false)?;
+        self.consume_token(&Token::RightParen)?;
+        Ok(Condition::Exists {
+            subquery: Box::new(subquery),
             is_not,
         })
     }

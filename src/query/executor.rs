@@ -25,6 +25,7 @@ use crate::error::{HematiteError, Result};
 use crate::parser::ast::*;
 use crate::query::plan::{ExecutionProgram, QueryPlan, SelectAccessPath};
 pub use crate::query::runtime::{ExecutionContext, QueryExecutor, QueryResult};
+use crate::query::QueryPlanner;
 use std::cmp::Ordering;
 
 impl QueryPlan {
@@ -267,9 +268,52 @@ impl SelectExecutor {
         }
     }
 
+    fn evaluate_in_candidates(
+        &self,
+        probe: Value,
+        candidates: impl IntoIterator<Item = Value>,
+        is_not: bool,
+    ) -> Option<bool> {
+        if probe.is_null() {
+            return None;
+        }
+
+        let mut matched = false;
+        let mut saw_null = false;
+        for candidate in candidates {
+            if candidate.is_null() {
+                saw_null = true;
+                continue;
+            }
+            if candidate == probe {
+                matched = true;
+                break;
+            }
+        }
+
+        if matched {
+            Some(!is_not)
+        } else if saw_null {
+            None
+        } else {
+            Some(is_not)
+        }
+    }
+
+    fn execute_subquery(
+        &self,
+        ctx: &mut ExecutionContext<'_>,
+        subquery: &SelectStatement,
+    ) -> Result<QueryResult> {
+        let planner = QueryPlanner::new(ctx.catalog.clone());
+        let plan = planner.plan(Statement::Select(subquery.clone()))?;
+        let mut executor = plan.into_executor();
+        executor.execute(ctx)
+    }
+
     fn evaluate_condition(
         &self,
-        ctx: &ExecutionContext,
+        ctx: &mut ExecutionContext<'_>,
         sources: &[ResolvedSource],
         condition: &Condition,
         row: &[Value],
@@ -290,31 +334,25 @@ impl SelectExecutor {
                 is_not,
             } => {
                 let probe = self.evaluate_expression(ctx, sources, expr, row)?;
-                if probe.is_null() {
-                    return Ok(None);
-                }
-
-                let mut matched = false;
-                let mut saw_null = false;
-                for value_expr in values {
-                    let candidate = self.evaluate_expression(ctx, sources, value_expr, row)?;
-                    if candidate.is_null() {
-                        saw_null = true;
-                        continue;
-                    }
-                    if candidate == probe {
-                        matched = true;
-                        break;
-                    }
-                }
-
-                if matched {
-                    Ok(Some(!is_not))
-                } else if saw_null {
-                    Ok(None)
-                } else {
-                    Ok(Some(*is_not))
-                }
+                let candidates = values
+                    .iter()
+                    .map(|value_expr| self.evaluate_expression(ctx, sources, value_expr, row))
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(self.evaluate_in_candidates(probe, candidates, *is_not))
+            }
+            Condition::InSubquery {
+                expr,
+                subquery,
+                is_not,
+            } => {
+                let probe = self.evaluate_expression(ctx, sources, expr, row)?;
+                let subquery_result = self.execute_subquery(ctx, subquery)?;
+                let candidates = subquery_result
+                    .rows
+                    .into_iter()
+                    .map(|row| row.into_iter().next().unwrap_or(Value::Null))
+                    .collect::<Vec<_>>();
+                Ok(self.evaluate_in_candidates(probe, candidates, *is_not))
             }
             Condition::Between {
                 expr,
@@ -359,6 +397,11 @@ impl SelectExecutor {
                     (left, right) if left.is_null() || right.is_null() => Ok(None),
                     _ => Ok(None),
                 }
+            }
+            Condition::Exists { subquery, is_not } => {
+                let subquery_result = self.execute_subquery(ctx, subquery)?;
+                let exists = !subquery_result.rows.is_empty();
+                Ok(Some(if *is_not { !exists } else { exists }))
             }
             Condition::NullCheck { expr, is_not } => {
                 let value = self.evaluate_expression(ctx, sources, expr, row)?;
@@ -817,6 +860,7 @@ impl SelectExecutor {
 
     fn evaluate_projected_condition(
         &self,
+        ctx: &mut ExecutionContext<'_>,
         sources: &[ResolvedSource],
         condition: &Condition,
         row: &[Value],
@@ -857,37 +901,39 @@ impl SelectExecutor {
                     output_columns,
                     group_rows,
                 )?;
-                if probe.is_null() {
-                    return Ok(None);
-                }
-
-                let mut matched = false;
-                let mut saw_null = false;
-                for value_expr in values {
-                    let candidate = self.evaluate_projected_expression(
-                        sources,
-                        value_expr,
-                        row,
-                        output_columns,
-                        group_rows,
-                    )?;
-                    if candidate.is_null() {
-                        saw_null = true;
-                        continue;
-                    }
-                    if candidate == probe {
-                        matched = true;
-                        break;
-                    }
-                }
-
-                if matched {
-                    Ok(Some(!is_not))
-                } else if saw_null {
-                    Ok(None)
-                } else {
-                    Ok(Some(*is_not))
-                }
+                let candidates = values
+                    .iter()
+                    .map(|value_expr| {
+                        self.evaluate_projected_expression(
+                            sources,
+                            value_expr,
+                            row,
+                            output_columns,
+                            group_rows,
+                        )
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(self.evaluate_in_candidates(probe, candidates, *is_not))
+            }
+            Condition::InSubquery {
+                expr,
+                subquery,
+                is_not,
+            } => {
+                let probe = self.evaluate_projected_expression(
+                    sources,
+                    expr,
+                    row,
+                    output_columns,
+                    group_rows,
+                )?;
+                let subquery_result = self.execute_subquery(ctx, subquery)?;
+                let candidates = subquery_result
+                    .rows
+                    .into_iter()
+                    .map(|row| row.into_iter().next().unwrap_or(Value::Null))
+                    .collect::<Vec<_>>();
+                Ok(self.evaluate_in_candidates(probe, candidates, *is_not))
             }
             Condition::Between {
                 expr,
@@ -963,6 +1009,11 @@ impl SelectExecutor {
                     _ => Ok(None),
                 }
             }
+            Condition::Exists { subquery, is_not } => {
+                let subquery_result = self.execute_subquery(ctx, subquery)?;
+                let exists = !subquery_result.rows.is_empty();
+                Ok(Some(if *is_not { !exists } else { exists }))
+            }
             Condition::NullCheck { expr, is_not } => {
                 let value = self.evaluate_projected_expression(
                     sources,
@@ -975,7 +1026,14 @@ impl SelectExecutor {
                 Ok(Some(if *is_not { !is_null } else { is_null }))
             }
             Condition::Not(condition) => Ok(self
-                .evaluate_projected_condition(sources, condition, row, output_columns, group_rows)?
+                .evaluate_projected_condition(
+                    ctx,
+                    sources,
+                    condition,
+                    row,
+                    output_columns,
+                    group_rows,
+                )?
                 .map(|value| !value)),
             Condition::Logical {
                 left,
@@ -983,6 +1041,7 @@ impl SelectExecutor {
                 right,
             } => {
                 let left_result = self.evaluate_projected_condition(
+                    ctx,
                     sources,
                     left,
                     row,
@@ -990,6 +1049,7 @@ impl SelectExecutor {
                     group_rows,
                 )?;
                 let right_result = self.evaluate_projected_condition(
+                    ctx,
                     sources,
                     right,
                     row,
@@ -1083,6 +1143,7 @@ impl SelectExecutor {
                 let mut include = true;
                 for condition in &having_clause.conditions {
                     if self.evaluate_projected_condition(
+                        ctx,
                         sources,
                         condition,
                         &row,

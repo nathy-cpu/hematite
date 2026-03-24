@@ -101,6 +101,11 @@ pub enum Condition {
         values: Vec<Expression>,
         is_not: bool,
     },
+    InSubquery {
+        expr: Expression,
+        subquery: Box<SelectStatement>,
+        is_not: bool,
+    },
     Between {
         expr: Expression,
         lower: Expression,
@@ -110,6 +115,10 @@ pub enum Condition {
     Like {
         expr: Expression,
         pattern: Expression,
+        is_not: bool,
+    },
+    Exists {
+        subquery: Box<SelectStatement>,
         is_not: bool,
     },
     NullCheck {
@@ -257,6 +266,15 @@ impl Statement {
             Statement::Alter(alter) => alter.validate(catalog),
             Statement::Drop(drop) => drop.validate(catalog),
             Statement::DropIndex(drop_index) => drop_index.validate(catalog),
+        }
+    }
+
+    fn into_select(self) -> Result<SelectStatement> {
+        match self {
+            Statement::Select(select) => Ok(select),
+            _ => Err(HematiteError::InternalError(
+                "expected SELECT statement while binding a subquery".to_string(),
+            )),
         }
     }
 
@@ -455,6 +473,10 @@ impl Condition {
                     value.visit_parameters(f);
                 }
             }
+            Condition::InSubquery { expr, subquery, .. } => {
+                expr.visit_parameters(f);
+                subquery.visit_parameters(f);
+            }
             Condition::Between {
                 expr, lower, upper, ..
             } => {
@@ -466,6 +488,7 @@ impl Condition {
                 expr.visit_parameters(f);
                 pattern.visit_parameters(f);
             }
+            Condition::Exists { subquery, .. } => subquery.visit_parameters(f),
             Condition::NullCheck { expr, .. } => expr.visit_parameters(f),
             Condition::Not(condition) => condition.visit_parameters(f),
             Condition::Logical { left, right, .. } => {
@@ -498,6 +521,19 @@ impl Condition {
                     .collect::<Result<Vec<_>>>()?,
                 is_not: *is_not,
             }),
+            Condition::InSubquery {
+                expr,
+                subquery,
+                is_not,
+            } => Ok(Condition::InSubquery {
+                expr: expr.bind(parameters)?,
+                subquery: Box::new(
+                    Statement::Select((**subquery).clone())
+                        .bind_parameters(parameters)?
+                        .into_select()?,
+                ),
+                is_not: *is_not,
+            }),
             Condition::Between {
                 expr,
                 lower,
@@ -516,6 +552,14 @@ impl Condition {
             } => Ok(Condition::Like {
                 expr: expr.bind(parameters)?,
                 pattern: pattern.bind(parameters)?,
+                is_not: *is_not,
+            }),
+            Condition::Exists { subquery, is_not } => Ok(Condition::Exists {
+                subquery: Box::new(
+                    Statement::Select((**subquery).clone())
+                        .bind_parameters(parameters)?
+                        .into_select()?,
+                ),
                 is_not: *is_not,
             }),
             Condition::NullCheck { expr, is_not } => Ok(Condition::NullCheck {
@@ -616,6 +660,24 @@ impl Expression {
 }
 
 impl SelectStatement {
+    fn visit_parameters<F>(&self, f: &mut F)
+    where
+        F: FnMut(usize),
+    {
+        for item in &self.columns {
+            item.visit_parameters(f);
+        }
+        if let Some(where_clause) = &self.where_clause {
+            where_clause.visit_parameters(f);
+        }
+        for expr in &self.group_by {
+            expr.visit_parameters(f);
+        }
+        if let Some(having_clause) = &self.having_clause {
+            having_clause.visit_parameters(f);
+        }
+    }
+
     fn is_hidden_rowid(name: &str) -> bool {
         name.eq_ignore_ascii_case("rowid")
     }
@@ -874,6 +936,15 @@ impl SelectStatement {
                     Self::validate_expression(value, catalog, from)?;
                 }
             }
+            Condition::InSubquery { expr, subquery, .. } => {
+                Self::validate_expression(expr, catalog, from)?;
+                subquery.validate(catalog)?;
+                if subquery.columns.len() != 1 {
+                    return Err(HematiteError::ParseError(
+                        "Subquery predicates require exactly one selected column".to_string(),
+                    ));
+                }
+            }
             Condition::Between {
                 expr, lower, upper, ..
             } => {
@@ -884,6 +955,9 @@ impl SelectStatement {
             Condition::Like { expr, pattern, .. } => {
                 Self::validate_expression(expr, catalog, from)?;
                 Self::validate_expression(pattern, catalog, from)?;
+            }
+            Condition::Exists { subquery, .. } => {
+                subquery.validate(catalog)?;
             }
             Condition::NullCheck { expr, .. } => {
                 Self::validate_expression(expr, catalog, from)?;
@@ -945,6 +1019,18 @@ impl SelectStatement {
                 Self::expression_contains_aggregate(expr)
                     || values.iter().any(Self::expression_contains_aggregate)
             }
+            Condition::InSubquery { expr, subquery, .. } => {
+                Self::expression_contains_aggregate(expr)
+                    || subquery.columns.iter().any(|item| {
+                        matches!(item, SelectItem::CountAll | SelectItem::Aggregate { .. })
+                    })
+                    || subquery.having_clause.as_ref().is_some_and(|having| {
+                        having
+                            .conditions
+                            .iter()
+                            .any(Self::condition_contains_aggregate)
+                    })
+            }
             Condition::Between {
                 expr, lower, upper, ..
             } => {
@@ -955,6 +1041,18 @@ impl SelectStatement {
             Condition::Like { expr, pattern, .. } => {
                 Self::expression_contains_aggregate(expr)
                     || Self::expression_contains_aggregate(pattern)
+            }
+            Condition::Exists { subquery, .. } => {
+                subquery
+                    .columns
+                    .iter()
+                    .any(|item| matches!(item, SelectItem::CountAll | SelectItem::Aggregate { .. }))
+                    || subquery.having_clause.as_ref().is_some_and(|having| {
+                        having
+                            .conditions
+                            .iter()
+                            .any(Self::condition_contains_aggregate)
+                    })
             }
             Condition::NullCheck { expr, .. } => Self::expression_contains_aggregate(expr),
             Condition::Not(condition) => Self::condition_contains_aggregate(condition),
