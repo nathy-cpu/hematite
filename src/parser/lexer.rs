@@ -66,7 +66,10 @@ pub enum Token {
     Semicolon,
     LeftParen,
     RightParen,
+    Plus,
+    Minus,
     Asterisk,
+    Slash,
     Placeholder,
 
     // Literals
@@ -345,7 +348,10 @@ impl Lexer {
             ';' => Token::Semicolon,
             '(' => Token::LeftParen,
             ')' => Token::RightParen,
+            '+' => Token::Plus,
+            '-' => Token::Minus,
             '*' => Token::Asterisk,
+            '/' => Token::Slash,
             '?' => Token::Placeholder,
             _ => {
                 return Err(HematiteError::ParseError(format!(

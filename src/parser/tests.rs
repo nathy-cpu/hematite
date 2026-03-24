@@ -730,6 +730,38 @@ mod parser_tests {
     }
 
     #[test]
+    fn test_parse_arithmetic_expression() -> Result<()> {
+        let mut lexer =
+            Lexer::new("SELECT id + 1 AS next_id FROM users WHERE -id < 0;".to_string());
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let statement = parser.parse()?;
+
+        match statement {
+            Statement::Select(select) => {
+                assert!(matches!(
+                    &select.columns[0],
+                    SelectItem::Expression(Expression::Binary {
+                        operator: ArithmeticOperator::Add,
+                        ..
+                    })
+                ));
+                assert_eq!(select.column_aliases[0].as_deref(), Some("next_id"));
+                let where_clause = select.where_clause.expect("missing WHERE clause");
+                assert!(matches!(
+                    &where_clause.conditions[0],
+                    Condition::Comparison {
+                        left: Expression::UnaryMinus(_),
+                        ..
+                    }
+                ));
+            }
+            _ => panic!("Expected SELECT statement"),
+        }
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_order_by() -> Result<()> {
         let mut lexer = Lexer::new("SELECT id FROM users ORDER BY name DESC, id ASC;".to_string());
         lexer.tokenize()?;

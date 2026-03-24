@@ -35,6 +35,7 @@ pub struct SelectStatement {
 pub enum SelectItem {
     Wildcard,
     Column(String),
+    Expression(Expression),
     CountAll,
     Aggregate {
         function: AggregateFunction,
@@ -112,6 +113,20 @@ pub enum Expression {
     Column(String),
     Literal(Value),
     Parameter(usize),
+    UnaryMinus(Box<Expression>),
+    Binary {
+        left: Box<Expression>,
+        operator: ArithmeticOperator,
+        right: Box<Expression>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArithmeticOperator {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
 }
 
 #[derive(Debug, Clone)]
@@ -237,6 +252,9 @@ impl Statement {
         match self {
             Statement::Begin | Statement::Commit | Statement::Rollback => {}
             Statement::Select(select) => {
+                for item in &select.columns {
+                    item.visit_parameters(f);
+                }
                 if let Some(where_clause) = &select.where_clause {
                     where_clause.visit_parameters(f);
                 }
@@ -275,7 +293,11 @@ impl Statement {
             Statement::Rollback => Ok(Statement::Rollback),
             Statement::Select(select) => Ok(Statement::Select(SelectStatement {
                 distinct: select.distinct,
-                columns: select.columns.clone(),
+                columns: select
+                    .columns
+                    .iter()
+                    .map(|item| item.bind(parameters))
+                    .collect::<Result<Vec<_>>>()?,
                 column_aliases: select.column_aliases.clone(),
                 from: select.from.clone(),
                 where_clause: select
@@ -454,13 +476,47 @@ impl Condition {
     }
 }
 
+impl SelectItem {
+    fn visit_parameters<F>(&self, f: &mut F)
+    where
+        F: FnMut(usize),
+    {
+        match self {
+            SelectItem::Expression(expr) => expr.visit_parameters(f),
+            SelectItem::Wildcard
+            | SelectItem::Column(_)
+            | SelectItem::CountAll
+            | SelectItem::Aggregate { .. } => {}
+        }
+    }
+
+    fn bind(&self, parameters: &[Value]) -> Result<SelectItem> {
+        match self {
+            SelectItem::Wildcard => Ok(SelectItem::Wildcard),
+            SelectItem::Column(name) => Ok(SelectItem::Column(name.clone())),
+            SelectItem::Expression(expr) => Ok(SelectItem::Expression(expr.bind(parameters)?)),
+            SelectItem::CountAll => Ok(SelectItem::CountAll),
+            SelectItem::Aggregate { function, column } => Ok(SelectItem::Aggregate {
+                function: *function,
+                column: column.clone(),
+            }),
+        }
+    }
+}
+
 impl Expression {
     fn visit_parameters<F>(&self, f: &mut F)
     where
         F: FnMut(usize),
     {
-        if let Expression::Parameter(index) = self {
-            f(*index);
+        match self {
+            Expression::Parameter(index) => f(*index),
+            Expression::UnaryMinus(expr) => expr.visit_parameters(f),
+            Expression::Binary { left, right, .. } => {
+                left.visit_parameters(f);
+                right.visit_parameters(f);
+            }
+            Expression::Column(_) | Expression::Literal(_) => {}
         }
     }
 
@@ -478,6 +534,18 @@ impl Expression {
                         index + 1
                     ))
                 }),
+            Expression::UnaryMinus(expr) => {
+                Ok(Expression::UnaryMinus(Box::new(expr.bind(parameters)?)))
+            }
+            Expression::Binary {
+                left,
+                operator,
+                right,
+            } => Ok(Expression::Binary {
+                left: Box::new(left.bind(parameters)?),
+                operator: *operator,
+                right: Box::new(right.bind(parameters)?),
+            }),
         }
     }
 }
@@ -581,6 +649,9 @@ impl SelectStatement {
                 SelectItem::Column(name) => {
                     Self::validate_column_reference(name, table, &self.from)?
                 }
+                SelectItem::Expression(expr) => {
+                    Self::validate_expression(expr, table, &self.from)?;
+                }
                 SelectItem::Aggregate { column, .. } => {
                     Self::validate_column_reference(column, table, &self.from)?;
                 }
@@ -648,8 +719,14 @@ impl SelectStatement {
         table: &crate::catalog::Table,
         from: &TableReference,
     ) -> Result<()> {
-        if let Expression::Column(name) = expr {
-            Self::validate_column_reference(name, table, from)?;
+        match expr {
+            Expression::Column(name) => Self::validate_column_reference(name, table, from)?,
+            Expression::UnaryMinus(expr) => Self::validate_expression(expr, table, from)?,
+            Expression::Binary { left, right, .. } => {
+                Self::validate_expression(left, table, from)?;
+                Self::validate_expression(right, table, from)?;
+            }
+            Expression::Literal(_) | Expression::Parameter(_) => {}
         }
 
         Ok(())
@@ -695,6 +772,15 @@ impl InsertStatement {
                     value_row.len(),
                     self.columns.len()
                 )));
+            }
+
+            for value in value_row {
+                if matches!(value, Expression::Column(_)) {
+                    return Err(HematiteError::ParseError(format!(
+                        "INSERT value row {} cannot reference columns",
+                        i
+                    )));
+                }
             }
         }
 

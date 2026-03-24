@@ -104,7 +104,107 @@ impl SelectExecutor {
                     name
                 )))
             }
+            Expression::UnaryMinus(expr) => match self.evaluate_expression(ctx, expr, row)? {
+                Value::Integer(value) => value.checked_neg().map(Value::Integer).ok_or_else(|| {
+                    HematiteError::ParseError(
+                        "Integer overflow while evaluating unary '-'".to_string(),
+                    )
+                }),
+                Value::Float(value) => Ok(Value::Float(-value)),
+                Value::Null => Ok(Value::Null),
+                value => Err(HematiteError::ParseError(format!(
+                    "Unary '-' requires a numeric value, found {:?}",
+                    value
+                ))),
+            },
+            Expression::Binary {
+                left,
+                operator,
+                right,
+            } => {
+                let left = self.evaluate_expression(ctx, left, row)?;
+                let right = self.evaluate_expression(ctx, right, row)?;
+                self.evaluate_arithmetic(operator, left, right)
+            }
         }
+    }
+
+    fn evaluate_arithmetic(
+        &self,
+        operator: &ArithmeticOperator,
+        left: Value,
+        right: Value,
+    ) -> Result<Value> {
+        if left.is_null() || right.is_null() {
+            return Ok(Value::Null);
+        }
+
+        match (left, right) {
+            (Value::Integer(left), Value::Integer(right)) => match operator {
+                ArithmeticOperator::Add => {
+                    left.checked_add(right).map(Value::Integer).ok_or_else(|| {
+                        HematiteError::ParseError(
+                            "Integer overflow while evaluating '+'".to_string(),
+                        )
+                    })
+                }
+                ArithmeticOperator::Subtract => {
+                    left.checked_sub(right).map(Value::Integer).ok_or_else(|| {
+                        HematiteError::ParseError(
+                            "Integer overflow while evaluating '-'".to_string(),
+                        )
+                    })
+                }
+                ArithmeticOperator::Multiply => {
+                    left.checked_mul(right).map(Value::Integer).ok_or_else(|| {
+                        HematiteError::ParseError(
+                            "Integer overflow while evaluating '*'".to_string(),
+                        )
+                    })
+                }
+                ArithmeticOperator::Divide => {
+                    if right == 0 {
+                        Err(HematiteError::ParseError("Division by zero".to_string()))
+                    } else {
+                        Ok(Value::Float(left as f64 / right as f64))
+                    }
+                }
+            },
+            (Value::Integer(left), Value::Float(right)) => {
+                self.evaluate_float_arithmetic(operator, left as f64, right)
+            }
+            (Value::Float(left), Value::Integer(right)) => {
+                self.evaluate_float_arithmetic(operator, left, right as f64)
+            }
+            (Value::Float(left), Value::Float(right)) => {
+                self.evaluate_float_arithmetic(operator, left, right)
+            }
+            (left, right) => Err(HematiteError::ParseError(format!(
+                "Arithmetic requires numeric values, found {:?} and {:?}",
+                left, right
+            ))),
+        }
+    }
+
+    fn evaluate_float_arithmetic(
+        &self,
+        operator: &ArithmeticOperator,
+        left: f64,
+        right: f64,
+    ) -> Result<Value> {
+        let value = match operator {
+            ArithmeticOperator::Add => left + right,
+            ArithmeticOperator::Subtract => left - right,
+            ArithmeticOperator::Multiply => left * right,
+            ArithmeticOperator::Divide => {
+                if right == 0.0 {
+                    return Err(HematiteError::ParseError("Division by zero".to_string()));
+                }
+                left / right
+            }
+        };
+
+        Ok(Value::Float(value))
     }
 
     fn compare_values(
@@ -316,6 +416,9 @@ impl SelectExecutor {
                         }
                     }
                 }
+                SelectItem::Expression(expr) => {
+                    projected.push(self.evaluate_expression(ctx, expr, row)?);
+                }
                 SelectItem::CountAll => {}
                 SelectItem::Aggregate { .. } => {}
             }
@@ -347,6 +450,9 @@ impl SelectExecutor {
                     columns.push(alias.unwrap_or_else(|| {
                         SelectStatement::column_reference_name(name).to_string()
                     }))
+                }
+                SelectItem::Expression(_) => {
+                    columns.push(alias.unwrap_or_else(|| format!("expr{}", index + 1)))
                 }
                 SelectItem::CountAll => {
                     columns.push(alias.unwrap_or_else(|| "COUNT(*)".to_string()))
@@ -810,6 +916,57 @@ impl InsertExecutor {
         Self { statement }
     }
 
+    fn evaluate_value_expression(&self, expr: &Expression) -> Result<Value> {
+        match expr {
+            Expression::Literal(value) => Ok(value.clone()),
+            Expression::Parameter(index) => Err(HematiteError::ParseError(format!(
+                "Unbound parameter {} reached execution",
+                index + 1
+            ))),
+            Expression::UnaryMinus(expr) => match self.evaluate_value_expression(expr)? {
+                Value::Integer(value) => value.checked_neg().map(Value::Integer).ok_or_else(|| {
+                    HematiteError::ParseError(
+                        "Integer overflow while evaluating unary '-'".to_string(),
+                    )
+                }),
+                Value::Float(value) => Ok(Value::Float(-value)),
+                Value::Null => Ok(Value::Null),
+                value => Err(HematiteError::ParseError(format!(
+                    "Unary '-' requires a numeric value, found {:?}",
+                    value
+                ))),
+            },
+            Expression::Binary {
+                left,
+                operator,
+                right,
+            } => {
+                let select_executor = SelectExecutor::new(
+                    SelectStatement {
+                        distinct: false,
+                        columns: vec![SelectItem::Wildcard],
+                        column_aliases: vec![None],
+                        from: TableReference::Table(String::new(), None),
+                        where_clause: None,
+                        order_by: Vec::new(),
+                        limit: None,
+                        offset: None,
+                    },
+                    SelectAccessPath::FullTableScan,
+                );
+                select_executor.evaluate_arithmetic(
+                    operator,
+                    self.evaluate_value_expression(left)?,
+                    self.evaluate_value_expression(right)?,
+                )
+            }
+            Expression::Column(name) => Err(HematiteError::ParseError(format!(
+                "INSERT expressions cannot reference column '{}'",
+                name
+            ))),
+        }
+    }
+
     fn ensure_primary_key_is_unique(
         &self,
         ctx: &mut ExecutionContext,
@@ -861,15 +1018,7 @@ impl InsertExecutor {
                 let expr = value_row.get(position).ok_or_else(|| {
                     HematiteError::ParseError(format!("Missing value for column '{}'", column.name))
                 })?;
-                let literal = match expr {
-                    Expression::Literal(value) => value.clone(),
-                    _ => {
-                        return Err(HematiteError::ParseError(format!(
-                            "Only literal values are supported in INSERT, column '{}'",
-                            column.name
-                        )));
-                    }
-                };
+                let literal = self.evaluate_value_expression(expr)?;
 
                 match (&column.data_type, literal) {
                     (DataType::Integer, Value::Integer(i)) => Value::Integer(i),

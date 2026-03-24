@@ -158,13 +158,25 @@ impl Parser {
                         columns.push(self.parse_aggregate_select_item()?);
                         aliases.push(self.parse_optional_alias()?);
                     }
-                    Token::Identifier(_) => {
-                        columns.push(SelectItem::Column(self.parse_identifier_reference()?));
+                    Token::Identifier(_)
+                    | Token::StringLiteral(_)
+                    | Token::NumberLiteral(_)
+                    | Token::BooleanLiteral(_)
+                    | Token::Null
+                    | Token::NullLiteral
+                    | Token::Placeholder
+                    | Token::LeftParen
+                    | Token::Minus => {
+                        let expr = self.parse_expression()?;
+                        columns.push(match expr {
+                            Expression::Column(name) => SelectItem::Column(name),
+                            expr => SelectItem::Expression(expr),
+                        });
                         aliases.push(self.parse_optional_alias()?);
                     }
                     _ => {
                         return Err(HematiteError::ParseError(format!(
-                            "Expected column name or aggregate, found: {:?}",
+                            "Expected select item or aggregate, found: {:?}",
                             token
                         )))
                     }
@@ -449,6 +461,75 @@ impl Parser {
     }
 
     fn parse_expression(&mut self) -> Result<Expression> {
+        self.parse_additive_expression()
+    }
+
+    fn parse_additive_expression(&mut self) -> Result<Expression> {
+        let mut expr = self.parse_multiplicative_expression()?;
+
+        loop {
+            let operator = match self.peek_token() {
+                Ok(Token::Plus) => ArithmeticOperator::Add,
+                Ok(Token::Minus) => ArithmeticOperator::Subtract,
+                _ => break,
+            };
+
+            match operator {
+                ArithmeticOperator::Add => self.consume_token(&Token::Plus)?,
+                ArithmeticOperator::Subtract => self.consume_token(&Token::Minus)?,
+                ArithmeticOperator::Multiply | ArithmeticOperator::Divide => unreachable!(),
+            }
+
+            let right = self.parse_multiplicative_expression()?;
+            expr = Expression::Binary {
+                left: Box::new(expr),
+                operator,
+                right: Box::new(right),
+            };
+        }
+
+        Ok(expr)
+    }
+
+    fn parse_multiplicative_expression(&mut self) -> Result<Expression> {
+        let mut expr = self.parse_unary_expression()?;
+
+        loop {
+            let operator = match self.peek_token() {
+                Ok(Token::Asterisk) => ArithmeticOperator::Multiply,
+                Ok(Token::Slash) => ArithmeticOperator::Divide,
+                _ => break,
+            };
+
+            match operator {
+                ArithmeticOperator::Multiply => self.consume_token(&Token::Asterisk)?,
+                ArithmeticOperator::Divide => self.consume_token(&Token::Slash)?,
+                ArithmeticOperator::Add | ArithmeticOperator::Subtract => unreachable!(),
+            }
+
+            let right = self.parse_unary_expression()?;
+            expr = Expression::Binary {
+                left: Box::new(expr),
+                operator,
+                right: Box::new(right),
+            };
+        }
+
+        Ok(expr)
+    }
+
+    fn parse_unary_expression(&mut self) -> Result<Expression> {
+        if matches!(self.peek_token(), Ok(Token::Minus)) {
+            self.consume_token(&Token::Minus)?;
+            return Ok(Expression::UnaryMinus(Box::new(
+                self.parse_unary_expression()?,
+            )));
+        }
+
+        self.parse_primary_expression()
+    }
+
+    fn parse_primary_expression(&mut self) -> Result<Expression> {
         let token = self.peek_token()?;
         match token {
             Token::Identifier(_) => Ok(Expression::Column(self.parse_identifier_reference()?)),
@@ -490,6 +571,12 @@ impl Parser {
                 let index = self.parameter_count;
                 self.parameter_count += 1;
                 Ok(Expression::Parameter(index))
+            }
+            Token::LeftParen => {
+                self.consume_token(&Token::LeftParen)?;
+                let expr = self.parse_expression()?;
+                self.consume_token(&Token::RightParen)?;
+                Ok(expr)
             }
             _ => Err(HematiteError::ParseError(format!(
                 "Expected expression, found: {:?}",

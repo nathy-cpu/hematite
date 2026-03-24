@@ -697,6 +697,54 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_select_expression_projection_and_where_arithmetic() -> Result<()> {
+        let db = TestDbFile::new("_test_select_expression_projection_and_where_arithmetic");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, score INTEGER);")?;
+        conn.execute("INSERT INTO test (id, score) VALUES (1, 1);")?;
+        conn.execute("INSERT INTO test (id, score) VALUES (2, 2);")?;
+        conn.execute("INSERT INTO test (id, score) VALUES (3, 3);")?;
+
+        let result = conn.execute(
+            "SELECT score + 1 AS next_score FROM test WHERE score * 2 >= 4 ORDER BY id ASC;",
+        )?;
+        assert_eq!(result.columns, vec!["next_score"]);
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![crate::catalog::Value::Integer(3)],
+                vec![crate::catalog::Value::Integer(4)],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_insert_and_update_with_arithmetic_expressions() -> Result<()> {
+        let db = TestDbFile::new("_test_insert_and_update_with_arithmetic_expressions");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, score INTEGER);")?;
+        conn.execute("INSERT INTO test (id, score) VALUES (1 + 1, -3);")?;
+        conn.execute("UPDATE test SET score = score + 5 WHERE id = 2;")?;
+
+        let result = conn.execute("SELECT id, score FROM test ORDER BY id ASC;")?;
+        assert_eq!(
+            result.rows,
+            vec![vec![
+                crate::catalog::Value::Integer(2),
+                crate::catalog::Value::Integer(2)
+            ]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_limit_applies_after_order_by() -> Result<()> {
         let db = TestDbFile::new("_test_limit_applies_after_order_by");
         let mut conn = Connection::new(db.path())?;

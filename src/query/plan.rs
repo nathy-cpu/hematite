@@ -95,6 +95,7 @@ pub enum SelectAccessPath {
 pub enum SelectProjection {
     Wildcard,
     Columns(Vec<String>),
+    Expressions(usize),
     CountAll,
     Aggregate {
         function: AggregateFunction,

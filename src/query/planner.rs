@@ -221,6 +221,7 @@ impl QueryPlanner {
                     function: *function,
                     column: column.clone(),
                 },
+                SelectItem::Expression(_) => SelectProjection::Expressions(statement.columns.len()),
                 _ => SelectProjection::Columns(
                     statement
                         .columns
@@ -437,12 +438,43 @@ impl QueryPlanner {
                         });
                     }
                 }
+                SelectItem::Expression(expr) => {
+                    self.collect_expression_columns(expr, table, &mut accessed_columns);
+                }
                 SelectItem::CountAll => {}
                 SelectItem::Aggregate { .. } => {}
             }
         }
 
         Ok(accessed_columns)
+    }
+
+    fn collect_expression_columns(
+        &self,
+        expr: &Expression,
+        table: &Table,
+        accessed_columns: &mut Vec<ColumnAccess>,
+    ) {
+        match expr {
+            Expression::Column(name) => {
+                if let Some(column) =
+                    table.get_column_by_name(SelectStatement::column_reference_name(name))
+                {
+                    accessed_columns.push(ColumnAccess {
+                        column_id: column.id,
+                        access_type: ColumnAccessType::Read,
+                    });
+                }
+            }
+            Expression::UnaryMinus(expr) => {
+                self.collect_expression_columns(expr, table, accessed_columns);
+            }
+            Expression::Binary { left, right, .. } => {
+                self.collect_expression_columns(left, table, accessed_columns);
+                self.collect_expression_columns(right, table, accessed_columns);
+            }
+            Expression::Literal(_) | Expression::Parameter(_) => {}
+        }
     }
 
     fn estimate_table_rows(&self, table: &Table) -> usize {
