@@ -1020,10 +1020,27 @@ impl Parser {
     fn parse_data_type(&mut self) -> Result<crate::catalog::DataType> {
         let token = self.peek_token()?;
         let data_type = match token {
-            Token::Integer => crate::catalog::DataType::Integer,
+            Token::Integer | Token::Int => crate::catalog::DataType::Integer,
             Token::Text => crate::catalog::DataType::Text,
-            Token::Boolean => crate::catalog::DataType::Boolean,
-            Token::Float => crate::catalog::DataType::Float,
+            Token::Boolean | Token::Bool => crate::catalog::DataType::Boolean,
+            Token::Float | Token::Double => crate::catalog::DataType::Float,
+            Token::Varchar => {
+                self.consume_token(&Token::Varchar)?;
+                self.consume_token(&Token::LeftParen)?;
+                match self.peek_token()? {
+                    Token::NumberLiteral(length) if length.fract() == 0.0 && length > 0.0 => {
+                        self.consume_token(&Token::NumberLiteral(length))?;
+                    }
+                    token => {
+                        return Err(HematiteError::ParseError(format!(
+                            "Expected positive integer length for VARCHAR, found: {:?}",
+                            token
+                        )))
+                    }
+                }
+                self.consume_token(&Token::RightParen)?;
+                return Ok(crate::catalog::DataType::Text);
+            }
             _ => {
                 return Err(HematiteError::ParseError(format!(
                     "Expected data type, found: {:?}",

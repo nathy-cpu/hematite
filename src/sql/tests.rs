@@ -176,6 +176,36 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_mysql_identifier_quoting_and_type_aliases() -> Result<()> {
+        let db = TestDbFile::new("_test_mysql_identifier_quoting_and_type_aliases");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute(
+            "CREATE TABLE `user data` (`id` INT PRIMARY KEY, `active` BOOL NOT NULL DEFAULT TRUE, `score` DOUBLE, `name` VARCHAR(32));",
+        )?;
+        conn.execute(
+            "INSERT INTO `user data` (`id`, `active`, `score`, `name`) VALUES (1, TRUE, 2.5, 'alice');",
+        )?;
+
+        let result = conn.execute(
+            "SELECT `id`, `active`, `score`, `name` FROM `user data` WHERE `name` = 'alice';",
+        )?;
+
+        assert_eq!(
+            result.rows,
+            vec![vec![
+                crate::catalog::Value::Integer(1),
+                crate::catalog::Value::Boolean(true),
+                crate::catalog::Value::Float(2.5),
+                crate::catalog::Value::Text("alice".to_string()),
+            ]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_writer_transaction_blocks_second_writer_connection() -> Result<()> {
         let db = TestDbFile::new("_test_writer_transaction_blocks_second_writer");
         let mut conn1 = Connection::new(db.path())?;

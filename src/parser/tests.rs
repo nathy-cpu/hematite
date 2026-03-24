@@ -255,6 +255,43 @@ mod lexer_tests {
     }
 
     #[test]
+    fn test_backtick_identifier_and_type_alias_tokens() -> Result<()> {
+        let mut lexer = Lexer::new(
+            "CREATE TABLE `user data` (`id` INT PRIMARY KEY, `active` BOOL, `score` DOUBLE, `name` VARCHAR(32));"
+                .to_string(),
+        );
+        lexer.tokenize()?;
+
+        let expected = vec![
+            Token::Create,
+            Token::Table,
+            Token::Identifier("user data".to_string()),
+            Token::LeftParen,
+            Token::Identifier("id".to_string()),
+            Token::Int,
+            Token::Primary,
+            Token::Key,
+            Token::Comma,
+            Token::Identifier("active".to_string()),
+            Token::Bool,
+            Token::Comma,
+            Token::Identifier("score".to_string()),
+            Token::Double,
+            Token::Comma,
+            Token::Identifier("name".to_string()),
+            Token::Varchar,
+            Token::LeftParen,
+            Token::NumberLiteral(32.0),
+            Token::RightParen,
+            Token::RightParen,
+            Token::Semicolon,
+        ];
+
+        assert_eq!(lexer.get_tokens(), &expected);
+        Ok(())
+    }
+
+    #[test]
     fn test_in_statement() -> Result<()> {
         let mut lexer = Lexer::new("SELECT id FROM users WHERE id IN (1, 2, 3);".to_string());
         lexer.tokenize()?;
@@ -730,6 +767,7 @@ mod lexer_tests {
 }
 
 mod parser_tests {
+    use crate::catalog::types::DataType;
     use crate::error::Result;
     use crate::parser::ast::*;
     use crate::parser::lexer::*;
@@ -1276,6 +1314,41 @@ mod parser_tests {
                 assert_eq!(drop_index.table, "users");
             }
             _ => panic!("Expected DROP INDEX statement"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_create_with_backticks_and_type_aliases() -> Result<()> {
+        let mut lexer = Lexer::new(
+            "CREATE TABLE `user data` (`id` INT PRIMARY KEY, `active` BOOL NOT NULL, `score` DOUBLE DEFAULT 1.5, `name` VARCHAR(32) DEFAULT 'x');"
+                .to_string(),
+        );
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let statement = parser.parse()?;
+
+        match statement {
+            Statement::Create(create) => {
+                assert_eq!(create.table, "user data");
+                assert_eq!(create.columns.len(), 4);
+                assert_eq!(create.columns[0].name, "id");
+                assert_eq!(create.columns[0].data_type, DataType::Integer);
+                assert_eq!(create.columns[1].data_type, DataType::Boolean);
+                assert!(!create.columns[1].nullable);
+                assert_eq!(create.columns[2].data_type, DataType::Float);
+                assert_eq!(
+                    create.columns[2].default_value,
+                    Some(crate::catalog::Value::Float(1.5))
+                );
+                assert_eq!(create.columns[3].data_type, DataType::Text);
+                assert_eq!(
+                    create.columns[3].default_value,
+                    Some(crate::catalog::Value::Text("x".to_string()))
+                );
+            }
+            _ => panic!("Expected CREATE statement"),
         }
 
         Ok(())

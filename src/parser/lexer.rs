@@ -43,6 +43,10 @@ pub enum Token {
     Text,
     Boolean,
     Float,
+    Int,
+    Bool,
+    Double,
+    Varchar,
     Primary,
     Key,
     Not,
@@ -113,6 +117,8 @@ impl Lexer {
             // Handle identifiers and keywords
             if ch.is_alphabetic() || ch == '_' {
                 self.read_identifier()?;
+            } else if ch == '`' {
+                self.read_quoted_identifier()?;
             }
             // Handle string literals
             else if ch == '\'' {
@@ -210,9 +216,13 @@ impl Lexer {
             "MIN" => Token::Min,
             "MAX" => Token::Max,
             "INTEGER" => Token::Integer,
+            "INT" => Token::Int,
             "TEXT" => Token::Text,
             "BOOLEAN" => Token::Boolean,
+            "BOOL" => Token::Bool,
             "FLOAT" => Token::Float,
+            "DOUBLE" => Token::Double,
+            "VARCHAR" => Token::Varchar,
             "PRIMARY" => Token::Primary,
             "KEY" => Token::Key,
             "NOT" => Token::Not,
@@ -231,6 +241,34 @@ impl Lexer {
 
         self.tokens.push(token);
         Ok(())
+    }
+
+    fn read_quoted_identifier(&mut self) -> Result<()> {
+        self.advance_char();
+        let mut identifier = String::new();
+
+        while self.position < self.input.len() {
+            let ch = self.current_char();
+            if ch == '`' {
+                if self.peek_char() == Some('`') {
+                    identifier.push('`');
+                    self.advance_char();
+                    self.advance_char();
+                    continue;
+                }
+
+                self.advance_char();
+                self.tokens.push(Token::Identifier(identifier));
+                return Ok(());
+            }
+
+            identifier.push(ch);
+            self.advance_char();
+        }
+
+        Err(HematiteError::ParseError(
+            "Unterminated quoted identifier".to_string(),
+        ))
     }
 
     fn read_string_literal(&mut self) -> Result<()> {
