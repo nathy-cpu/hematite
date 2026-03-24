@@ -2226,6 +2226,40 @@ impl QueryExecutor for AlterExecutor {
                 ctx.engine
                     .rename_table_runtime_metadata(&self.statement.table, new_name)?;
             }
+            AlterOperation::AddColumn(column_def) => {
+                let table = ctx
+                    .catalog
+                    .get_table_by_name(&self.statement.table)
+                    .ok_or_else(|| {
+                        HematiteError::ParseError(format!(
+                            "Table '{}' not found",
+                            self.statement.table
+                        ))
+                    })?
+                    .clone();
+
+                let column = Column::new(
+                    crate::catalog::ColumnId::new(ctx.catalog.next_column_id()),
+                    column_def.name.clone(),
+                    column_def.data_type,
+                )
+                .nullable(column_def.nullable)
+                .primary_key(column_def.primary_key);
+                let column = if let Some(default_value) = &column_def.default_value {
+                    column.default_value(default_value.clone())
+                } else {
+                    column
+                };
+
+                let fill_value = column.get_default_or_null();
+                let mut rows = ctx.engine.read_rows_with_ids(&self.statement.table)?;
+                for row in &mut rows {
+                    row.values.push(fill_value.clone());
+                }
+
+                ctx.catalog.add_column(table.id, column)?;
+                ctx.engine.replace_table_rows(&self.statement.table, rows)?;
+            }
         }
 
         Ok(QueryResult {

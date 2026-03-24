@@ -230,6 +230,7 @@ pub struct AlterStatement {
 #[derive(Debug, Clone)]
 pub enum AlterOperation {
     RenameTo(String),
+    AddColumn(ColumnDefinition),
 }
 
 #[derive(Debug, Clone)]
@@ -1147,6 +1148,43 @@ impl AlterStatement {
                         "Table '{}' already exists",
                         new_name
                     )));
+                }
+            }
+            AlterOperation::AddColumn(column) => {
+                let table = catalog.get_table_by_name(&self.table).ok_or_else(|| {
+                    HematiteError::ParseError(format!("Table '{}' does not exist", self.table))
+                })?;
+                if table.get_column_by_name(&column.name).is_some() {
+                    return Err(HematiteError::ParseError(format!(
+                        "Column '{}' already exists in table '{}'",
+                        column.name, self.table
+                    )));
+                }
+                if column.primary_key {
+                    return Err(HematiteError::ParseError(
+                        "ALTER TABLE ADD COLUMN cannot add a PRIMARY KEY column".to_string(),
+                    ));
+                }
+                if !column.nullable && column.default_value.is_none() {
+                    return Err(HematiteError::ParseError(
+                        "ALTER TABLE ADD COLUMN requires the new column to be nullable or have a DEFAULT value".to_string(),
+                    ));
+                }
+                if let Some(default_value) = &column.default_value {
+                    if default_value.is_null() && !column.nullable {
+                        return Err(HematiteError::ParseError(format!(
+                            "Column '{}' cannot use DEFAULT NULL when declared NOT NULL",
+                            column.name
+                        )));
+                    }
+                    if !default_value.is_null()
+                        && !default_value.is_compatible_with(column.data_type)
+                    {
+                        return Err(HematiteError::ParseError(format!(
+                            "DEFAULT value for column '{}' is incompatible with {:?}",
+                            column.name, column.data_type
+                        )));
+                    }
                 }
             }
         }

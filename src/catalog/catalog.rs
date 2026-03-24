@@ -176,6 +176,13 @@ impl Catalog {
         Ok(())
     }
 
+    pub fn add_column(&mut self, table_id: TableId, column: Column) -> Result<()> {
+        self.schema.add_column(table_id, column)?;
+        self.schema_dirty = true;
+        self.save_schema_to_btree()?;
+        Ok(())
+    }
+
     pub fn list_tables(&self) -> Result<Vec<(TableId, String)>> {
         Ok(self.schema.list_tables())
     }

@@ -147,6 +147,17 @@ impl Schema {
         table.add_secondary_index(index)
     }
 
+    pub fn add_column(&mut self, table_id: TableId, column: Column) -> Result<()> {
+        let table = self
+            .tables
+            .get_mut(&table_id)
+            .ok_or_else(|| HematiteError::StorageError("Table not found".to_string()))?;
+        self.next_column_id = self
+            .next_column_id
+            .max(column.id.as_u32().saturating_add(1));
+        table.add_column(column)
+    }
+
     pub fn drop_secondary_index(&mut self, table_id: TableId, index_name: &str) -> Result<()> {
         let table = self
             .tables

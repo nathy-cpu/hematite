@@ -166,6 +166,25 @@ impl Table {
         Ok(())
     }
 
+    pub fn add_column(&mut self, column: Column) -> Result<()> {
+        if self.column_indices.contains_key(&column.name) {
+            return Err(HematiteError::StorageError(format!(
+                "Column '{}' already exists in table '{}'",
+                column.name, self.name
+            )));
+        }
+        if column.primary_key {
+            return Err(HematiteError::StorageError(
+                "Cannot add a primary-key column to an existing table".to_string(),
+            ));
+        }
+
+        let index = self.columns.len();
+        self.column_indices.insert(column.name.clone(), index);
+        self.columns.push(column);
+        Ok(())
+    }
+
     pub fn drop_secondary_index(&mut self, name: &str) -> Result<SecondaryIndex> {
         let index = self
             .secondary_indexes

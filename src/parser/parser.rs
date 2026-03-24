@@ -859,6 +859,18 @@ impl Parser {
                     operation: AlterOperation::RenameTo(new_name),
                 }))
             }
+            Token::Add => {
+                self.consume_token(&Token::Add)?;
+                if matches!(self.peek_token(), Ok(Token::Column)) {
+                    self.consume_token(&Token::Column)?;
+                }
+                let column = self.parse_column_definition()?;
+                self.consume_token(&Token::Semicolon)?;
+                Ok(Statement::Alter(AlterStatement {
+                    table,
+                    operation: AlterOperation::AddColumn(column),
+                }))
+            }
             token => Err(HematiteError::ParseError(format!(
                 "Expected supported ALTER TABLE operation, found: {:?}",
                 token

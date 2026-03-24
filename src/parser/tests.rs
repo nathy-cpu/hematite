@@ -1376,6 +1376,35 @@ mod parser_tests {
     }
 
     #[test]
+    fn test_parse_alter_table_add_column() -> Result<()> {
+        let mut lexer = Lexer::new(
+            "ALTER TABLE users ADD COLUMN active BOOL NOT NULL DEFAULT TRUE;".to_string(),
+        );
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let statement = parser.parse()?;
+
+        match statement {
+            Statement::Alter(alter) => {
+                assert_eq!(alter.table, "users");
+                assert!(matches!(
+                    alter.operation,
+                    AlterOperation::AddColumn(ColumnDefinition {
+                        name,
+                        data_type: DataType::Boolean,
+                        nullable: false,
+                        primary_key: false,
+                        default_value: Some(crate::catalog::Value::Boolean(true)),
+                    }) if name == "active"
+                ));
+            }
+            _ => panic!("Expected ALTER statement"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_begin_commit_rollback() -> Result<()> {
         for (sql, expected) in [
             ("BEGIN;", "begin"),
