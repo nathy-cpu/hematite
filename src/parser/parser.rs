@@ -92,7 +92,7 @@ impl Parser {
 
         self.consume_token(&Token::From)?;
 
-        let from = self.parse_table_reference()?;
+        let from = self.parse_from_clause()?;
 
         let where_clause = if self.peek_token()? == Token::Where {
             Some(self.parse_where_clause()?)
@@ -264,6 +264,46 @@ impl Parser {
                 "aggregate expression parser returned a non-aggregate expression".to_string(),
             )),
         }
+    }
+
+    fn parse_from_clause(&mut self) -> Result<TableReference> {
+        let mut from = self.parse_table_reference()?;
+
+        loop {
+            match self.peek_token()? {
+                Token::Comma => {
+                    self.consume_token(&Token::Comma)?;
+                    let right = self.parse_table_reference()?;
+                    from = TableReference::CrossJoin(Box::new(from), Box::new(right));
+                }
+                Token::Join => {
+                    self.consume_token(&Token::Join)?;
+                    let right = self.parse_table_reference()?;
+                    self.consume_token(&Token::On)?;
+                    let on = self.parse_or_condition()?;
+                    from = TableReference::InnerJoin {
+                        left: Box::new(from),
+                        right: Box::new(right),
+                        on,
+                    };
+                }
+                Token::Inner => {
+                    self.consume_token(&Token::Inner)?;
+                    self.consume_token(&Token::Join)?;
+                    let right = self.parse_table_reference()?;
+                    self.consume_token(&Token::On)?;
+                    let on = self.parse_or_condition()?;
+                    from = TableReference::InnerJoin {
+                        left: Box::new(from),
+                        right: Box::new(right),
+                        on,
+                    };
+                }
+                _ => break,
+            }
+        }
+
+        Ok(from)
     }
 
     fn parse_table_reference(&mut self) -> Result<TableReference> {

@@ -72,7 +72,6 @@ impl SelectExecutor {
     }
 
     fn resolve_column_index(&self, table: &Table, column_reference: &str) -> Result<Option<usize>> {
-        SelectStatement::validate_column_reference(column_reference, table, &self.statement.from)?;
         let column_name = SelectStatement::column_reference_name(column_reference);
         Ok(table.get_column_index(column_name))
     }
@@ -399,6 +398,7 @@ impl SelectExecutor {
     fn get_table_name(&self) -> Option<&String> {
         match &self.statement.from {
             TableReference::Table(name, _) => Some(name),
+            TableReference::CrossJoin(_, _) | TableReference::InnerJoin { .. } => None,
         }
     }
 
@@ -1173,6 +1173,11 @@ impl QueryExecutor for SelectExecutor {
 
         let table_name = match &self.statement.from {
             TableReference::Table(name, _) => name.clone(),
+            TableReference::CrossJoin(_, _) | TableReference::InnerJoin { .. } => {
+                return Err(HematiteError::ParseError(
+                    "Multi-table SELECT execution is not implemented yet".to_string(),
+                ))
+            }
         };
 
         let table = ctx.catalog.get_table_by_name(&table_name).ok_or_else(|| {

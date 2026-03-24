@@ -290,6 +290,11 @@ impl QueryPlanner {
     fn analyze_select(&self, statement: &SelectStatement) -> Result<SelectAnalysis> {
         let table_name = match &statement.from {
             TableReference::Table(name, _) => name.clone(),
+            TableReference::CrossJoin(_, _) | TableReference::InnerJoin { .. } => {
+                return Err(HematiteError::ParseError(
+                    "Multi-table SELECT planning is not implemented yet".to_string(),
+                ))
+            }
         };
 
         self.analyze_table_access(&table_name, &statement.where_clause)

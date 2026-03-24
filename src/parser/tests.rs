@@ -145,6 +145,75 @@ mod ast_tests {
 
         assert!(select.validate(&catalog).is_err());
     }
+
+    #[test]
+    fn test_multi_table_column_resolution_requires_qualification_when_ambiguous() -> Result<()> {
+        let mut catalog = crate::catalog::Schema::new();
+        catalog.create_table(
+            "users".to_string(),
+            vec![
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(1),
+                    "id".to_string(),
+                    DataType::Integer,
+                )
+                .primary_key(true),
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(2),
+                    "name".to_string(),
+                    DataType::Text,
+                ),
+            ],
+        )?;
+        catalog.create_table(
+            "posts".to_string(),
+            vec![
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(3),
+                    "id".to_string(),
+                    DataType::Integer,
+                )
+                .primary_key(true),
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(4),
+                    "user_id".to_string(),
+                    DataType::Integer,
+                ),
+            ],
+        )?;
+
+        let ambiguous = SelectStatement {
+            distinct: false,
+            columns: vec![SelectItem::Column("id".to_string())],
+            column_aliases: vec![None],
+            from: TableReference::CrossJoin(
+                Box::new(TableReference::Table(
+                    "users".to_string(),
+                    Some("u".to_string()),
+                )),
+                Box::new(TableReference::Table(
+                    "posts".to_string(),
+                    Some("p".to_string()),
+                )),
+            ),
+            where_clause: None,
+            group_by: Vec::new(),
+            having_clause: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+        };
+
+        assert!(ambiguous.validate(&catalog).is_err());
+
+        let qualified = SelectStatement {
+            columns: vec![SelectItem::Column("u.id".to_string())],
+            ..ambiguous.clone()
+        };
+
+        assert!(qualified.validate(&catalog).is_ok());
+        Ok(())
+    }
 }
 
 mod lexer_tests {
@@ -1257,6 +1326,71 @@ mod parser_tests {
                         if name == "users" && alias == "u"
                 ));
             }
+            _ => panic!("Expected SELECT statement"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_select_with_cross_join_sources() -> Result<()> {
+        let mut lexer = Lexer::new("SELECT u.id, p.user_id FROM users u, posts p;".to_string());
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let statement = parser.parse()?;
+
+        match statement {
+            Statement::Select(select) => match select.from {
+                TableReference::CrossJoin(left, right) => {
+                    assert!(matches!(
+                        *left,
+                        TableReference::Table(name, Some(alias)) if name == "users" && alias == "u"
+                    ));
+                    assert!(matches!(
+                        *right,
+                        TableReference::Table(name, Some(alias)) if name == "posts" && alias == "p"
+                    ));
+                }
+                _ => panic!("Expected cross join source tree"),
+            },
+            _ => panic!("Expected SELECT statement"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_select_with_inner_join() -> Result<()> {
+        let mut lexer = Lexer::new(
+            "SELECT u.name, p.title FROM users u INNER JOIN posts p ON u.id = p.user_id;"
+                .to_string(),
+        );
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let statement = parser.parse()?;
+
+        match statement {
+            Statement::Select(select) => match select.from {
+                TableReference::InnerJoin { left, right, on } => {
+                    assert!(matches!(
+                        *left,
+                        TableReference::Table(name, Some(alias)) if name == "users" && alias == "u"
+                    ));
+                    assert!(matches!(
+                        *right,
+                        TableReference::Table(name, Some(alias)) if name == "posts" && alias == "p"
+                    ));
+                    assert!(matches!(
+                        on,
+                        Condition::Comparison {
+                            left: Expression::Column(left),
+                            operator: ComparisonOperator::Equal,
+                            right: Expression::Column(right),
+                        } if left == "u.id" && right == "p.user_id"
+                    ));
+                }
+                _ => panic!("Expected inner join source tree"),
+            },
             _ => panic!("Expected SELECT statement"),
         }
 
