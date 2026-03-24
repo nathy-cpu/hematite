@@ -44,6 +44,7 @@ impl QueryPlanner {
             Statement::Delete(delete) => self.plan_delete(delete),
             Statement::Create(create) => self.plan_create(create),
             Statement::CreateIndex(create_index) => self.plan_create_index(create_index),
+            Statement::Alter(alter) => self.plan_alter(alter),
             Statement::Drop(drop) => self.plan_drop(drop),
             Statement::DropIndex(drop_index) => self.plan_drop_index(drop_index),
         }?;
@@ -164,6 +165,21 @@ impl QueryPlanner {
         Ok(QueryPlan {
             node,
             program: ExecutionProgram::Drop { statement },
+            estimated_cost,
+            select_analysis: None,
+            optimizations: None,
+        })
+    }
+
+    fn plan_alter(&self, statement: AlterStatement) -> Result<QueryPlan> {
+        let node = PlanNode::Alter(AlterPlanNode {
+            table_name: statement.table.clone(),
+        });
+        let estimated_cost = 1.0;
+
+        Ok(QueryPlan {
+            node,
+            program: ExecutionProgram::Alter { statement },
             estimated_cost,
             select_analysis: None,
             optimizations: None,

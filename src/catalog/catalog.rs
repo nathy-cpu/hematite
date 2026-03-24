@@ -165,6 +165,17 @@ impl Catalog {
         Ok(())
     }
 
+    pub fn rename_table(&mut self, old_name: &str, new_name: &str) -> Result<()> {
+        let table = self.schema.get_table_by_name(old_name).ok_or_else(|| {
+            crate::error::HematiteError::StorageError(format!("Table '{}' not found", old_name))
+        })?;
+
+        self.schema.rename_table(table.id, new_name.to_string())?;
+        self.schema_dirty = true;
+        self.save_schema_to_btree()?;
+        Ok(())
+    }
+
     pub fn list_tables(&self) -> Result<Vec<(TableId, String)>> {
         Ok(self.schema.list_tables())
     }

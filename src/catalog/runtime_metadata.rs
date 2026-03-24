@@ -47,6 +47,24 @@ pub(crate) fn remove_table_metadata(
     })
 }
 
+pub(crate) fn rename_table_metadata(
+    engine: &mut CatalogEngine,
+    old_name: &str,
+    new_name: &str,
+) -> Result<()> {
+    if engine.table_metadata.contains_key(new_name) {
+        return Err(HematiteError::StorageError(format!(
+            "Table '{}' already exists",
+            new_name
+        )));
+    }
+
+    let mut metadata = remove_table_metadata(engine, old_name)?;
+    metadata.name = new_name.to_string();
+    engine.table_metadata.insert(new_name.to_string(), metadata);
+    Ok(())
+}
+
 pub(crate) fn apply_insert(
     engine: &mut CatalogEngine,
     table_name: &str,

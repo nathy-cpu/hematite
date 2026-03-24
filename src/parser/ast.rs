@@ -15,6 +15,7 @@ pub enum Statement {
     Delete(DeleteStatement),
     Create(CreateStatement),
     CreateIndex(CreateIndexStatement),
+    Alter(AlterStatement),
     Drop(DropStatement),
     DropIndex(DropIndexStatement),
 }
@@ -221,6 +222,17 @@ pub struct DropIndexStatement {
 }
 
 #[derive(Debug, Clone)]
+pub struct AlterStatement {
+    pub table: String,
+    pub operation: AlterOperation,
+}
+
+#[derive(Debug, Clone)]
+pub enum AlterOperation {
+    RenameTo(String),
+}
+
+#[derive(Debug, Clone)]
 pub struct ColumnDefinition {
     pub name: String,
     pub data_type: DataType,
@@ -239,6 +251,7 @@ impl Statement {
             Statement::Delete(delete) => delete.validate(catalog),
             Statement::Create(create) => create.validate(catalog),
             Statement::CreateIndex(create_index) => create_index.validate(catalog),
+            Statement::Alter(alter) => alter.validate(catalog),
             Statement::Drop(drop) => drop.validate(catalog),
             Statement::DropIndex(drop_index) => drop_index.validate(catalog),
         }
@@ -253,6 +266,7 @@ impl Statement {
             self,
             Statement::Create(_)
                 | Statement::CreateIndex(_)
+                | Statement::Alter(_)
                 | Statement::Drop(_)
                 | Statement::DropIndex(_)
         )
@@ -312,6 +326,7 @@ impl Statement {
             }
             Statement::Create(_)
             | Statement::CreateIndex(_)
+            | Statement::Alter(_)
             | Statement::Drop(_)
             | Statement::DropIndex(_) => {}
         }
@@ -393,6 +408,7 @@ impl Statement {
             Statement::CreateIndex(create_index) => {
                 Ok(Statement::CreateIndex(create_index.clone()))
             }
+            Statement::Alter(alter) => Ok(Statement::Alter(alter.clone())),
             Statement::Drop(drop) => Ok(Statement::Drop(drop.clone())),
             Statement::DropIndex(drop_index) => Ok(Statement::DropIndex(drop_index.clone())),
         }
@@ -1109,6 +1125,32 @@ impl DropStatement {
         catalog.get_table_by_name(&self.table).ok_or_else(|| {
             HematiteError::ParseError(format!("Table '{}' does not exist", self.table))
         })?;
+        Ok(())
+    }
+}
+
+impl AlterStatement {
+    pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
+        catalog.get_table_by_name(&self.table).ok_or_else(|| {
+            HematiteError::ParseError(format!("Table '{}' does not exist", self.table))
+        })?;
+
+        match &self.operation {
+            AlterOperation::RenameTo(new_name) => {
+                if new_name == &self.table {
+                    return Err(HematiteError::ParseError(
+                        "ALTER TABLE RENAME TO requires a different table name".to_string(),
+                    ));
+                }
+                if catalog.get_table_by_name(new_name).is_some() {
+                    return Err(HematiteError::ParseError(format!(
+                        "Table '{}' already exists",
+                        new_name
+                    )));
+                }
+            }
+        }
+
         Ok(())
     }
 }

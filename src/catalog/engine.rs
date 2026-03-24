@@ -371,6 +371,14 @@ impl CatalogEngine {
         runtime_metadata::remove_table_metadata(self, table_name)
     }
 
+    pub(crate) fn rename_table_runtime_metadata(
+        &mut self,
+        old_name: &str,
+        new_name: &str,
+    ) -> Result<()> {
+        runtime_metadata::rename_table_metadata(self, old_name, new_name)
+    }
+
     pub(crate) fn record_generated_row_insert(
         &mut self,
         table_name: &str,

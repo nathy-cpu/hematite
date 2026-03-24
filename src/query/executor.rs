@@ -52,6 +52,7 @@ pub fn build_executor(program: ExecutionProgram) -> Box<dyn QueryExecutor> {
         ExecutionProgram::CreateIndex { statement } => {
             Box::new(CreateIndexExecutor::new(statement))
         }
+        ExecutionProgram::Alter { statement } => Box::new(AlterExecutor::new(statement)),
         ExecutionProgram::Drop { statement } => Box::new(DropExecutor::new(statement)),
         ExecutionProgram::DropIndex { statement } => Box::new(DropIndexExecutor::new(statement)),
     }
@@ -2185,6 +2186,47 @@ impl QueryExecutor for DropExecutor {
         ctx.catalog
             .drop_table(table.id)
             .map_err(|err| HematiteError::ParseError(err.to_string()))?;
+
+        Ok(QueryResult {
+            affected_rows: 0,
+            columns: Vec::new(),
+            rows: Vec::new(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AlterExecutor {
+    pub statement: AlterStatement,
+}
+
+impl AlterExecutor {
+    pub fn new(statement: AlterStatement) -> Self {
+        Self { statement }
+    }
+}
+
+impl QueryExecutor for AlterExecutor {
+    fn execute(&mut self, ctx: &mut ExecutionContext<'_>) -> Result<QueryResult> {
+        self.statement.validate(&ctx.catalog)?;
+
+        match &self.statement.operation {
+            AlterOperation::RenameTo(new_name) => {
+                let table = ctx
+                    .catalog
+                    .get_table_by_name(&self.statement.table)
+                    .ok_or_else(|| {
+                        HematiteError::ParseError(format!(
+                            "Table '{}' not found",
+                            self.statement.table
+                        ))
+                    })?
+                    .clone();
+                ctx.catalog.rename_table(table.id, new_name.clone())?;
+                ctx.engine
+                    .rename_table_runtime_metadata(&self.statement.table, new_name)?;
+            }
+        }
 
         Ok(QueryResult {
             affected_rows: 0,

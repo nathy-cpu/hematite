@@ -206,6 +206,23 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_alter_table_rename_to() -> Result<()> {
+        let db = TestDbFile::new("_test_alter_table_rename_to");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("INSERT INTO users (id, name) VALUES (1, 'alice');")?;
+        conn.execute("ALTER TABLE users RENAME TO members;")?;
+
+        let result = conn.execute("SELECT * FROM members;")?;
+        assert_eq!(result.rows.len(), 1);
+        assert!(conn.execute("SELECT * FROM users;").is_err());
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_writer_transaction_blocks_second_writer_connection() -> Result<()> {
         let db = TestDbFile::new("_test_writer_transaction_blocks_second_writer");
         let mut conn1 = Connection::new(db.path())?;

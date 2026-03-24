@@ -53,9 +53,10 @@ impl Parser {
             Token::Insert => self.parse_insert(),
             Token::Delete => self.parse_delete(),
             Token::Create => self.parse_create(),
+            Token::Alter => self.parse_alter(),
             Token::Drop => self.parse_drop(),
             _ => Err(HematiteError::ParseError(format!(
-                "Expected BEGIN, COMMIT, ROLLBACK, SELECT, UPDATE, INSERT, DELETE, CREATE, or DROP, found: {:?}",
+                "Expected BEGIN, COMMIT, ROLLBACK, SELECT, UPDATE, INSERT, DELETE, CREATE, ALTER, or DROP, found: {:?}",
                 token
             ))),
         }
@@ -837,6 +838,29 @@ impl Parser {
             }
             token => Err(HematiteError::ParseError(format!(
                 "Expected TABLE or INDEX after DROP, found: {:?}",
+                token
+            ))),
+        }
+    }
+
+    fn parse_alter(&mut self) -> Result<Statement> {
+        self.consume_token(&Token::Alter)?;
+        self.consume_token(&Token::Table)?;
+        let table = self.parse_identifier()?;
+
+        match self.peek_token()? {
+            Token::Rename => {
+                self.consume_token(&Token::Rename)?;
+                self.consume_token(&Token::To)?;
+                let new_name = self.parse_identifier()?;
+                self.consume_token(&Token::Semicolon)?;
+                Ok(Statement::Alter(AlterStatement {
+                    table,
+                    operation: AlterOperation::RenameTo(new_name),
+                }))
+            }
+            token => Err(HematiteError::ParseError(format!(
+                "Expected supported ALTER TABLE operation, found: {:?}",
                 token
             ))),
         }

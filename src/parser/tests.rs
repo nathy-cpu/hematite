@@ -1355,6 +1355,27 @@ mod parser_tests {
     }
 
     #[test]
+    fn test_parse_alter_table_rename_to() -> Result<()> {
+        let mut lexer = Lexer::new("ALTER TABLE users RENAME TO members;".to_string());
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let statement = parser.parse()?;
+
+        match statement {
+            Statement::Alter(alter) => {
+                assert_eq!(alter.table, "users");
+                assert!(matches!(
+                    alter.operation,
+                    AlterOperation::RenameTo(ref new_name) if new_name == "members"
+                ));
+            }
+            _ => panic!("Expected ALTER statement"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_begin_commit_rollback() -> Result<()> {
         for (sql, expected) in [
             ("BEGIN;", "begin"),

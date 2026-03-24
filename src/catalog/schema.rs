@@ -121,6 +121,24 @@ impl Schema {
         Ok(())
     }
 
+    pub fn rename_table(&mut self, table_id: TableId, new_name: String) -> Result<()> {
+        if self.table_names.contains_key(&new_name) {
+            return Err(HematiteError::ParseError(format!(
+                "Table '{}' already exists",
+                new_name
+            )));
+        }
+
+        let table = self
+            .tables
+            .get_mut(&table_id)
+            .ok_or_else(|| HematiteError::StorageError("Table not found".to_string()))?;
+        let old_name = std::mem::replace(&mut table.name, new_name.clone());
+        self.table_names.remove(&old_name);
+        self.table_names.insert(new_name, table_id);
+        Ok(())
+    }
+
     pub fn add_secondary_index(&mut self, table_id: TableId, index: SecondaryIndex) -> Result<()> {
         let table = self
             .tables
