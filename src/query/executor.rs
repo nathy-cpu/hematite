@@ -655,6 +655,181 @@ impl SelectExecutor {
         });
     }
 
+    fn evaluate_projected_expression(
+        &self,
+        expr: &Expression,
+        row: &[Value],
+        output_columns: &[String],
+    ) -> Result<Value> {
+        match expr {
+            Expression::Literal(value) => Ok(value.clone()),
+            Expression::Parameter(index) => Err(HematiteError::ParseError(format!(
+                "Unbound parameter {} reached execution",
+                index + 1
+            ))),
+            Expression::Column(name) => {
+                let index = self
+                    .result_column_index(output_columns, name)
+                    .ok_or_else(|| {
+                        HematiteError::ParseError(format!(
+                            "HAVING column '{}' does not match any grouped output column or alias",
+                            name
+                        ))
+                    })?;
+                row.get(index).cloned().ok_or_else(|| {
+                    HematiteError::InternalError(format!(
+                        "Grouped output row is missing column index {} for '{}'",
+                        index, name
+                    ))
+                })
+            }
+            Expression::UnaryMinus(expr) => {
+                match self.evaluate_projected_expression(expr, row, output_columns)? {
+                    Value::Integer(value) => {
+                        value.checked_neg().map(Value::Integer).ok_or_else(|| {
+                            HematiteError::ParseError(
+                                "Integer overflow while evaluating unary '-'".to_string(),
+                            )
+                        })
+                    }
+                    Value::Float(value) => Ok(Value::Float(-value)),
+                    Value::Null => Ok(Value::Null),
+                    value => Err(HematiteError::ParseError(format!(
+                        "Unary '-' requires a numeric value, found {:?}",
+                        value
+                    ))),
+                }
+            }
+            Expression::Binary {
+                left,
+                operator,
+                right,
+            } => self.evaluate_arithmetic(
+                operator,
+                self.evaluate_projected_expression(left, row, output_columns)?,
+                self.evaluate_projected_expression(right, row, output_columns)?,
+            ),
+        }
+    }
+
+    fn evaluate_projected_condition(
+        &self,
+        condition: &Condition,
+        row: &[Value],
+        output_columns: &[String],
+    ) -> Result<Option<bool>> {
+        match condition {
+            Condition::Comparison {
+                left,
+                operator,
+                right,
+            } => {
+                let left_val = self.evaluate_projected_expression(left, row, output_columns)?;
+                let right_val = self.evaluate_projected_expression(right, row, output_columns)?;
+                Ok(self.compare_values(&left_val, operator, &right_val))
+            }
+            Condition::InList {
+                expr,
+                values,
+                is_not,
+            } => {
+                let probe = self.evaluate_projected_expression(expr, row, output_columns)?;
+                if probe.is_null() {
+                    return Ok(None);
+                }
+
+                let mut matched = false;
+                let mut saw_null = false;
+                for value_expr in values {
+                    let candidate =
+                        self.evaluate_projected_expression(value_expr, row, output_columns)?;
+                    if candidate.is_null() {
+                        saw_null = true;
+                        continue;
+                    }
+                    if candidate == probe {
+                        matched = true;
+                        break;
+                    }
+                }
+
+                if matched {
+                    Ok(Some(!is_not))
+                } else if saw_null {
+                    Ok(None)
+                } else {
+                    Ok(Some(*is_not))
+                }
+            }
+            Condition::Between {
+                expr,
+                lower,
+                upper,
+                is_not,
+            } => {
+                let value = self.evaluate_projected_expression(expr, row, output_columns)?;
+                let lower_value = self.evaluate_projected_expression(lower, row, output_columns)?;
+                let upper_value = self.evaluate_projected_expression(upper, row, output_columns)?;
+
+                if value.is_null() || lower_value.is_null() || upper_value.is_null() {
+                    return Ok(None);
+                }
+
+                let lower_ok = value
+                    .partial_cmp(&lower_value)
+                    .map(|ordering| !ordering.is_lt());
+                let upper_ok = value
+                    .partial_cmp(&upper_value)
+                    .map(|ordering| !ordering.is_gt());
+
+                match (lower_ok, upper_ok) {
+                    (Some(true), Some(true)) => Ok(Some(!is_not)),
+                    (Some(_), Some(_)) => Ok(Some(*is_not)),
+                    _ => Ok(None),
+                }
+            }
+            Condition::Like {
+                expr,
+                pattern,
+                is_not,
+            } => {
+                let value = self.evaluate_projected_expression(expr, row, output_columns)?;
+                let pattern_value =
+                    self.evaluate_projected_expression(pattern, row, output_columns)?;
+
+                match (value, pattern_value) {
+                    (Value::Text(text), Value::Text(pattern)) => {
+                        let matched = Self::like_matches(&pattern, &text);
+                        Ok(Some(if *is_not { !matched } else { matched }))
+                    }
+                    (left, right) if left.is_null() || right.is_null() => Ok(None),
+                    _ => Ok(None),
+                }
+            }
+            Condition::NullCheck { expr, is_not } => {
+                let value = self.evaluate_projected_expression(expr, row, output_columns)?;
+                let is_null = value.is_null();
+                Ok(Some(if *is_not { !is_null } else { is_null }))
+            }
+            Condition::Not(condition) => Ok(self
+                .evaluate_projected_condition(condition, row, output_columns)?
+                .map(|value| !value)),
+            Condition::Logical {
+                left,
+                operator,
+                right,
+            } => {
+                let left_result = self.evaluate_projected_condition(left, row, output_columns)?;
+                let right_result = self.evaluate_projected_condition(right, row, output_columns)?;
+
+                match operator {
+                    LogicalOperator::And => Ok(self.logical_and(left_result, right_result)),
+                    LogicalOperator::Or => Ok(self.logical_or(left_result, right_result)),
+                }
+            }
+        }
+    }
+
     fn project_grouped_row(
         &self,
         ctx: &ExecutionContext,
@@ -727,6 +902,25 @@ impl SelectExecutor {
         let mut projected_rows = Vec::with_capacity(groups.len());
         for (_, rows) in groups {
             projected_rows.push(self.project_grouped_row(ctx, &rows)?);
+        }
+
+        if let Some(having_clause) = &self.statement.having_clause {
+            let mut filtered_projected_rows = Vec::with_capacity(projected_rows.len());
+            for row in projected_rows {
+                let mut include = true;
+                for condition in &having_clause.conditions {
+                    if self.evaluate_projected_condition(condition, &row, &output_columns)?
+                        != Some(true)
+                    {
+                        include = false;
+                        break;
+                    }
+                }
+                if include {
+                    filtered_projected_rows.push(row);
+                }
+            }
+            projected_rows = filtered_projected_rows;
         }
 
         if self.statement.distinct {
