@@ -487,6 +487,13 @@ impl SelectExecutor {
         }
     }
 
+    fn has_aggregate_projection(&self) -> bool {
+        self.statement
+            .columns
+            .iter()
+            .any(|item| matches!(item, SelectItem::CountAll | SelectItem::Aggregate { .. }))
+    }
+
     fn apply_select_window(&self, rows: &mut Vec<Vec<Value>>) {
         if let Some(offset) = self.statement.offset {
             if offset >= rows.len() {
@@ -501,15 +508,12 @@ impl SelectExecutor {
         }
     }
 
-    fn evaluate_aggregate(
+    fn evaluate_aggregate_item(
         &self,
         ctx: &ExecutionContext,
+        item: &SelectItem,
         rows: &[Vec<Value>],
     ) -> Result<Option<Value>> {
-        let Some(item) = self.statement.columns.first() else {
-            return Ok(None);
-        };
-
         match item {
             SelectItem::CountAll => Ok(Some(Value::Integer(rows.len() as i32))),
             SelectItem::Aggregate { function, column } => {
@@ -614,6 +618,135 @@ impl SelectExecutor {
             }
             _ => Ok(None),
         }
+    }
+
+    fn result_column_index(
+        &self,
+        output_columns: &[String],
+        order_by_column: &str,
+    ) -> Option<usize> {
+        let base_name = SelectStatement::column_reference_name(order_by_column);
+        output_columns.iter().position(|column| {
+            column.eq_ignore_ascii_case(order_by_column) || column.eq_ignore_ascii_case(base_name)
+        })
+    }
+
+    fn sort_projected_rows(&self, output_columns: &[String], rows: &mut [Vec<Value>]) {
+        if self.statement.order_by.is_empty() {
+            return;
+        }
+
+        rows.sort_by(|left, right| {
+            for item in &self.statement.order_by {
+                let Some(index) = self.result_column_index(output_columns, &item.column) else {
+                    continue;
+                };
+
+                let ordering = self.compare_sort_values(&left[index], &right[index]);
+                if ordering != Ordering::Equal {
+                    return match item.direction {
+                        SortDirection::Asc => ordering,
+                        SortDirection::Desc => ordering.reverse(),
+                    };
+                }
+            }
+
+            Ordering::Equal
+        });
+    }
+
+    fn project_grouped_row(
+        &self,
+        ctx: &ExecutionContext,
+        group_rows: &[Vec<Value>],
+    ) -> Result<Vec<Value>> {
+        let representative = group_rows.first().ok_or_else(|| {
+            HematiteError::InternalError("Cannot project an empty aggregate group".to_string())
+        })?;
+        let mut projected = Vec::new();
+
+        for item in &self.statement.columns {
+            match item {
+                SelectItem::Wildcard => {}
+                SelectItem::Column(name) => {
+                    if let Some(table_name) = self.get_table_name() {
+                        if let Some(table) = ctx.catalog.get_table_by_name(table_name) {
+                            if let Some(index) = self.resolve_column_index(table, name)? {
+                                if index < representative.len() {
+                                    projected.push(representative[index].clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                SelectItem::Expression(expr) => {
+                    projected.push(self.evaluate_expression(ctx, expr, representative)?);
+                }
+                SelectItem::CountAll | SelectItem::Aggregate { .. } => {
+                    projected.push(
+                        self.evaluate_aggregate_item(ctx, item, group_rows)?
+                            .unwrap_or(Value::Null),
+                    );
+                }
+            }
+        }
+
+        Ok(projected)
+    }
+
+    fn execute_grouped(
+        &self,
+        ctx: &mut ExecutionContext,
+        filtered_rows: &[Vec<Value>],
+    ) -> Result<QueryResult> {
+        let mut groups: Vec<(Vec<Value>, Vec<Vec<Value>>)> = Vec::new();
+
+        if self.statement.group_by.is_empty() {
+            groups.push((Vec::new(), filtered_rows.to_vec()));
+        } else {
+            for row in filtered_rows {
+                let key = self
+                    .statement
+                    .group_by
+                    .iter()
+                    .map(|expr| self.evaluate_expression(ctx, expr, row))
+                    .collect::<Result<Vec<_>>>()?;
+
+                if let Some((_, rows)) = groups
+                    .iter_mut()
+                    .find(|(existing_key, _)| *existing_key == key)
+                {
+                    rows.push(row.clone());
+                } else {
+                    groups.push((key, vec![row.clone()]));
+                }
+            }
+        }
+
+        let output_columns = self.get_column_names(ctx);
+        let mut projected_rows = Vec::with_capacity(groups.len());
+        for (_, rows) in groups {
+            projected_rows.push(self.project_grouped_row(ctx, &rows)?);
+        }
+
+        if self.statement.distinct {
+            let mut distinct_rows = Vec::new();
+            for row in projected_rows {
+                if !distinct_rows.contains(&row) {
+                    distinct_rows.push(row);
+                }
+            }
+            projected_rows = distinct_rows;
+        }
+
+        self.sort_projected_rows(&output_columns, &mut projected_rows);
+        self.apply_select_window(&mut projected_rows);
+
+        Ok(QueryResult {
+            affected_rows: projected_rows.len(),
+            columns: output_columns,
+            rows: projected_rows,
+        })
     }
 
     fn extract_primary_key_lookup(&self, table: &Table) -> Option<Vec<Value>> {
@@ -868,22 +1001,8 @@ impl QueryExecutor for SelectExecutor {
             });
         }
 
-        if self
-            .statement
-            .columns
-            .iter()
-            .any(|item| matches!(item, SelectItem::CountAll | SelectItem::Aggregate { .. }))
-        {
-            let aggregate_value = self
-                .evaluate_aggregate(ctx, &filtered_rows)?
-                .unwrap_or(Value::Null);
-            let mut rows = vec![vec![aggregate_value]];
-            self.apply_select_window(&mut rows);
-            return Ok(QueryResult {
-                affected_rows: rows.len(),
-                columns: self.get_column_names(ctx),
-                rows,
-            });
+        if !self.statement.group_by.is_empty() || self.has_aggregate_projection() {
+            return self.execute_grouped(ctx, &filtered_rows);
         }
 
         let mut projected_rows = Vec::new();

@@ -844,6 +844,68 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_group_by_with_count_and_sum() -> Result<()> {
+        let db = TestDbFile::new("_test_group_by_with_count_and_sum");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT, score INTEGER);")?;
+        conn.execute("INSERT INTO test (id, name, score) VALUES (1, 'Alice', 10);")?;
+        conn.execute("INSERT INTO test (id, name, score) VALUES (2, 'Alice', NULL);")?;
+        conn.execute("INSERT INTO test (id, name, score) VALUES (3, 'Bob', 7);")?;
+
+        let result = conn.execute(
+            "SELECT name, COUNT(score) AS score_count, SUM(score) AS total_score \
+             FROM test GROUP BY name ORDER BY name ASC;",
+        )?;
+
+        assert_eq!(result.columns, vec!["name", "score_count", "total_score"]);
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![
+                    crate::catalog::Value::Text("Alice".to_string()),
+                    crate::catalog::Value::Integer(1),
+                    crate::catalog::Value::Integer(10),
+                ],
+                vec![
+                    crate::catalog::Value::Text("Bob".to_string()),
+                    crate::catalog::Value::Integer(1),
+                    crate::catalog::Value::Integer(7),
+                ],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_multiple_aggregates_without_group_by() -> Result<()> {
+        let db = TestDbFile::new("_test_multiple_aggregates_without_group_by");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, score INTEGER);")?;
+        conn.execute("INSERT INTO test (id, score) VALUES (1, 10);")?;
+        conn.execute("INSERT INTO test (id, score) VALUES (2, NULL);")?;
+        conn.execute("INSERT INTO test (id, score) VALUES (3, 5);")?;
+
+        let result = conn
+            .execute("SELECT COUNT(score) AS score_count, SUM(score) AS total_score FROM test;")?;
+
+        assert_eq!(result.columns, vec!["score_count", "total_score"]);
+        assert_eq!(
+            result.rows,
+            vec![vec![
+                crate::catalog::Value::Integer(2),
+                crate::catalog::Value::Integer(15),
+            ]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_reopen_preserves_exact_schema() -> Result<()> {
         let db = TestDbFile::new("_test_reopen_preserves_exact_schema");
 
