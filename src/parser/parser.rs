@@ -348,8 +348,12 @@ impl Parser {
                 self.consume_token(&Token::In)?;
                 return self.parse_in_list_condition(left, true);
             }
+            if matches!(self.peek_token(), Ok(Token::Like)) {
+                self.consume_token(&Token::Like)?;
+                return self.parse_like_condition(left, true);
+            }
             return Err(HematiteError::ParseError(
-                "Expected IN after NOT in predicate".to_string(),
+                "Expected IN or LIKE after NOT in predicate".to_string(),
             ));
         }
 
@@ -361,6 +365,11 @@ impl Parser {
         if matches!(self.peek_token(), Ok(Token::Between)) {
             self.consume_token(&Token::Between)?;
             return self.parse_between_condition(left, false);
+        }
+
+        if matches!(self.peek_token(), Ok(Token::Like)) {
+            self.consume_token(&Token::Like)?;
+            return self.parse_like_condition(left, false);
         }
 
         if matches!(self.peek_token(), Ok(Token::Is)) {
@@ -421,6 +430,15 @@ impl Parser {
             expr,
             lower,
             upper,
+            is_not,
+        })
+    }
+
+    fn parse_like_condition(&mut self, expr: Expression, is_not: bool) -> Result<Condition> {
+        let pattern = self.parse_expression()?;
+        Ok(Condition::Like {
+            expr,
+            pattern,
             is_not,
         })
     }

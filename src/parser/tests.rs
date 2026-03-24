@@ -690,6 +690,27 @@ mod parser_tests {
     }
 
     #[test]
+    fn test_parse_like_condition() -> Result<()> {
+        let mut lexer = Lexer::new("SELECT name FROM users WHERE name LIKE 'A%';".to_string());
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let statement = parser.parse()?;
+
+        match statement {
+            Statement::Select(select) => {
+                let where_clause = select.where_clause.expect("missing WHERE clause");
+                assert_eq!(where_clause.conditions.len(), 1);
+                assert!(matches!(
+                    &where_clause.conditions[0],
+                    Condition::Like { is_not: false, .. }
+                ));
+            }
+            _ => panic!("Expected SELECT statement"),
+        }
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_order_by() -> Result<()> {
         let mut lexer = Lexer::new("SELECT id FROM users ORDER BY name DESC, id ASC;".to_string());
         lexer.tokenize()?;

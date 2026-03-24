@@ -90,6 +90,11 @@ pub enum Condition {
         upper: Expression,
         is_not: bool,
     },
+    Like {
+        expr: Expression,
+        pattern: Expression,
+        is_not: bool,
+    },
     NullCheck {
         expr: Expression,
         is_not: bool,
@@ -374,6 +379,10 @@ impl Condition {
                 lower.visit_parameters(f);
                 upper.visit_parameters(f);
             }
+            Condition::Like { expr, pattern, .. } => {
+                expr.visit_parameters(f);
+                pattern.visit_parameters(f);
+            }
             Condition::NullCheck { expr, .. } => expr.visit_parameters(f),
             Condition::Logical { left, right, .. } => {
                 left.visit_parameters(f);
@@ -414,6 +423,15 @@ impl Condition {
                 expr: expr.bind(parameters)?,
                 lower: lower.bind(parameters)?,
                 upper: upper.bind(parameters)?,
+                is_not: *is_not,
+            }),
+            Condition::Like {
+                expr,
+                pattern,
+                is_not,
+            } => Ok(Condition::Like {
+                expr: expr.bind(parameters)?,
+                pattern: pattern.bind(parameters)?,
                 is_not: *is_not,
             }),
             Condition::NullCheck { expr, is_not } => Ok(Condition::NullCheck {
@@ -602,6 +620,10 @@ impl SelectStatement {
                 Self::validate_expression(expr, table, from)?;
                 Self::validate_expression(lower, table, from)?;
                 Self::validate_expression(upper, table, from)?;
+            }
+            Condition::Like { expr, pattern, .. } => {
+                Self::validate_expression(expr, table, from)?;
+                Self::validate_expression(pattern, table, from)?;
             }
             Condition::NullCheck { expr, .. } => {
                 Self::validate_expression(expr, table, from)?;

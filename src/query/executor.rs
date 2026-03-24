@@ -133,6 +133,34 @@ impl SelectExecutor {
         }
     }
 
+    fn like_matches(pattern: &str, text: &str) -> bool {
+        fn matches(pattern: &[char], text: &[char]) -> bool {
+            if pattern.is_empty() {
+                return text.is_empty();
+            }
+
+            match pattern[0] {
+                '%' => {
+                    if matches(&pattern[1..], text) {
+                        return true;
+                    }
+                    for index in 0..text.len() {
+                        if matches(&pattern[1..], &text[index + 1..]) {
+                            return true;
+                        }
+                    }
+                    false
+                }
+                '_' => !text.is_empty() && matches(&pattern[1..], &text[1..]),
+                ch => !text.is_empty() && text[0] == ch && matches(&pattern[1..], &text[1..]),
+            }
+        }
+
+        let pattern_chars: Vec<char> = pattern.chars().collect();
+        let text_chars: Vec<char> = text.chars().collect();
+        matches(&pattern_chars, &text_chars)
+    }
+
     fn logical_and(&self, left: Option<bool>, right: Option<bool>) -> Option<bool> {
         match (left, right) {
             (Some(false), _) | (_, Some(false)) => Some(false),
@@ -221,6 +249,23 @@ impl SelectExecutor {
                 match (lower_ok, upper_ok) {
                     (Some(true), Some(true)) => Ok(Some(!is_not)),
                     (Some(_), Some(_)) => Ok(Some(*is_not)),
+                    _ => Ok(None),
+                }
+            }
+            Condition::Like {
+                expr,
+                pattern,
+                is_not,
+            } => {
+                let value = self.evaluate_expression(ctx, expr, row)?;
+                let pattern_value = self.evaluate_expression(ctx, pattern, row)?;
+
+                match (value, pattern_value) {
+                    (Value::Text(text), Value::Text(pattern)) => {
+                        let matched = Self::like_matches(&pattern, &text);
+                        Ok(Some(if *is_not { !matched } else { matched }))
+                    }
+                    (left, right) if left.is_null() || right.is_null() => Ok(None),
                     _ => Ok(None),
                 }
             }

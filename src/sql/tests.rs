@@ -652,6 +652,33 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_where_like_and_not_like() -> Result<()> {
+        let db = TestDbFile::new("_test_where_like_and_not_like");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (1, 'Alice');")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (2, 'Al');")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (3, 'Bob');")?;
+
+        let like = conn.execute("SELECT id FROM test WHERE name LIKE 'Al%' ORDER BY id ASC;")?;
+        assert_eq!(
+            like.rows,
+            vec![
+                vec![crate::catalog::Value::Integer(1)],
+                vec![crate::catalog::Value::Integer(2)],
+            ]
+        );
+
+        let not_like =
+            conn.execute("SELECT id FROM test WHERE name NOT LIKE 'Al%' ORDER BY id ASC;")?;
+        assert_eq!(not_like.rows, vec![vec![crate::catalog::Value::Integer(3)]]);
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_limit_applies_after_order_by() -> Result<()> {
         let db = TestDbFile::new("_test_limit_applies_after_order_by");
         let mut conn = Connection::new(db.path())?;
