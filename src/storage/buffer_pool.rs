@@ -74,22 +74,14 @@ impl BufferPool {
         self.lru_order.push_front(page_id);
     }
 
-    pub fn clear(&mut self) {
-        self.pages.clear();
-        self.lru_order.clear();
-    }
-
     pub fn remove(&mut self, page_id: PageId) {
         self.pages.remove(&page_id);
         // Remove from LRU order
         self.lru_order.retain(|&id| id != page_id);
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.pages.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.pages.is_empty()
     }
 }

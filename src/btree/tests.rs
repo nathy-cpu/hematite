@@ -149,7 +149,7 @@ mod mod_tests {
         assert_eq!(tree.get(&7)?, Some("seven".to_string()));
         assert_eq!(tree.delete(&9)?, Some("nine".to_string()));
 
-        let mut cursor = tree.cursor()?;
+        let cursor = tree.cursor()?;
         assert!(cursor.is_valid());
         assert_eq!(cursor.current()?, Some((7, "seven".to_string())));
         assert!(trees.validate_tree(root_page_id)?);

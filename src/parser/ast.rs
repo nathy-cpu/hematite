@@ -612,15 +612,6 @@ impl SelectStatement {
         Self::split_column_reference(name).1
     }
 
-    pub(crate) fn table_reference_parts(from: &TableReference) -> Option<(&str, Option<&str>)> {
-        match from {
-            TableReference::Table(table_name, alias) => {
-                Some((table_name.as_str(), alias.as_deref()))
-            }
-            TableReference::CrossJoin(_, _) | TableReference::InnerJoin { .. } => None,
-        }
-    }
-
     pub(crate) fn collect_table_bindings(from: &TableReference) -> Vec<TableBinding> {
         let mut bindings = Vec::new();
         Self::collect_table_bindings_into(from, &mut bindings);

@@ -47,7 +47,6 @@ const HEADER_OFFSET_KEY_COUNT: usize = 10;
 const HEADER_OFFSET_PAYLOAD_LEN: usize = 14;
 
 pub const MAX_KEYS: usize = BTREE_ORDER - 1;
-pub const MAX_CHILDREN: usize = BTREE_ORDER;
 
 #[derive(Debug, Clone)]
 pub struct BTreeNode {
@@ -710,17 +709,6 @@ impl BTreeNode {
         Ok(None)
     }
 
-    pub fn delete_from_internal(&mut self, key: &BTreeKey) -> Result<(bool, Option<BTreeKey>)> {
-        if self.node_type != NodeType::Internal {
-            return Err(HematiteError::StorageError(
-                "Not an internal node".to_string(),
-            ));
-        }
-
-        let _child_index = self.find_child_index(key);
-        Ok((false, None))
-    }
-
     pub fn find_child_index(&self, key: &BTreeKey) -> usize {
         for (i, k) in self.keys.iter().enumerate() {
             if key < k {
@@ -813,65 +801,6 @@ impl BTreeNode {
         storage.deallocate_page(other.page_id)?;
 
         Ok(())
-    }
-
-    pub fn borrow_from_sibling(
-        &mut self,
-        sibling: &mut BTreeNode,
-        is_left_sibling: bool,
-    ) -> Result<Option<BTreeKey>> {
-        if self.node_type != sibling.node_type {
-            return Err(HematiteError::StorageError(
-                "Cannot borrow between different node types".to_string(),
-            ));
-        }
-
-        if sibling.keys.len() <= (MAX_KEYS / 2) {
-            return Ok(None);
-        }
-
-        match self.node_type {
-            NodeType::Leaf => {
-                if is_left_sibling {
-                    let key = sibling.keys.pop().ok_or_else(|| {
-                        HematiteError::StorageError("Left leaf sibling missing key".to_string())
-                    })?;
-                    let value = sibling.values.pop().ok_or_else(|| {
-                        HematiteError::StorageError("Left leaf sibling missing value".to_string())
-                    })?;
-                    self.keys.insert(0, key.clone());
-                    self.values.insert(0, value);
-                    Ok(Some(key))
-                } else {
-                    let key = sibling.keys.remove(0);
-                    let value = sibling.values.remove(0);
-                    self.keys.push(key.clone());
-                    self.values.push(value);
-                    Ok(Some(key))
-                }
-            }
-            NodeType::Internal => {
-                if is_left_sibling {
-                    let key = sibling.keys.pop().ok_or_else(|| {
-                        HematiteError::StorageError("Left internal sibling missing key".to_string())
-                    })?;
-                    let child = sibling.children.pop().ok_or_else(|| {
-                        HematiteError::StorageError(
-                            "Left internal sibling missing child".to_string(),
-                        )
-                    })?;
-                    self.keys.insert(0, key.clone());
-                    self.children.insert(0, child);
-                    Ok(Some(key))
-                } else {
-                    let key = sibling.keys.remove(0);
-                    let child = sibling.children.remove(0);
-                    self.keys.push(key.clone());
-                    self.children.push(child);
-                    Ok(Some(key))
-                }
-            }
-        }
     }
 
     pub fn is_underflow(&self) -> bool {

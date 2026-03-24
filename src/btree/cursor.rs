@@ -9,10 +9,10 @@
 //!         -> leaf frame (current key/value index)
 //! ```
 //!
-//! That stack makes `next` and `prev` work without parent pointers in the on-disk format:
+//! That stack makes `next` work without parent pointers in the on-disk format:
 //! - move within the current leaf if possible;
 //! - otherwise walk upward until a sibling subtree is available;
-//! - descend again to the leftmost or rightmost leaf of that subtree.
+//! - descend again to the leftmost leaf of that subtree.
 //!
 //! The cursor reads nodes through the shared pager but exposes only logical key/value positions.
 use crate::btree::node::BTreeNode;
@@ -26,6 +26,7 @@ pub struct BTreeCursor {
     storage: Arc<Mutex<Pager>>,
     stack: Vec<CursorFrame>,
     at_end: bool,
+    #[cfg(test)]
     root_page_id: PageId,
 }
 
@@ -39,10 +40,11 @@ struct CursorFrame {
 impl BTreeCursor {
     pub fn new(storage: Arc<Mutex<Pager>>, root_page_id: PageId) -> Result<Self> {
         let mut cursor = Self {
-            storage: storage,
+            storage,
             stack: Vec::new(),
             at_end: false,
-            root_page_id: root_page_id,
+            #[cfg(test)]
+            root_page_id,
         };
 
         cursor.seek_to_first(root_page_id)?;
@@ -110,15 +112,6 @@ impl BTreeCursor {
         self.seek_to_first(root_page_id)
     }
 
-    pub fn last(&mut self) -> Result<()> {
-        if self.stack.is_empty() {
-            return Err(HematiteError::InternalError("No root page".to_string()));
-        }
-
-        let root_page_id = self.stack[0].page_id;
-        self.seek_to_last(root_page_id)
-    }
-
     pub fn seek(&mut self, key: &BTreeKey) -> Result<()> {
         if self.stack.is_empty() {
             return Err(HematiteError::InternalError("No root page".to_string()));
@@ -126,6 +119,16 @@ impl BTreeCursor {
 
         let root_page_id = self.stack[0].page_id;
         self.seek_to_key(root_page_id, key)
+    }
+
+    #[cfg(test)]
+    pub fn last(&mut self) -> Result<()> {
+        if self.stack.is_empty() {
+            return Err(HematiteError::InternalError("No root page".to_string()));
+        }
+
+        let root_page_id = self.stack[0].page_id;
+        self.seek_to_last(root_page_id)
     }
 
     fn seek_to_first(&mut self, root_page_id: PageId) -> Result<()> {
@@ -140,6 +143,7 @@ impl BTreeCursor {
         Ok(())
     }
 
+    #[cfg(test)]
     fn seek_to_last(&mut self, root_page_id: PageId) -> Result<()> {
         self.stack.clear();
         self.at_end = false;
@@ -241,9 +245,9 @@ impl BTreeCursor {
         self.move_to_next_leaf()
     }
 
+    #[cfg(test)]
     pub fn prev(&mut self) -> Result<()> {
         if self.at_end {
-            // We're at the end, move to the last valid position
             self.move_to_last_position()?;
             return Ok(());
         }
@@ -258,13 +262,11 @@ impl BTreeCursor {
             HematiteError::InternalError("B-tree cursor has no current frame".to_string())
         })?;
 
-        // Check if we can move within current leaf
         if current_frame.index > 0 {
             current_frame.index -= 1;
             return Ok(());
         }
 
-        // Need to move to previous leaf
         self.move_to_previous_leaf()
     }
 
@@ -296,11 +298,10 @@ impl BTreeCursor {
         Ok(())
     }
 
+    #[cfg(test)]
     fn move_to_previous_leaf(&mut self) -> Result<()> {
-        // Find the previous leaf by traversing up and then down
         while let Some(_frame) = self.stack.pop() {
             if self.stack.is_empty() {
-                // We're at the root, no previous leaves
                 self.at_end = true;
                 return Ok(());
             }
@@ -309,25 +310,21 @@ impl BTreeCursor {
                 HematiteError::InternalError("B-tree cursor lost its parent frame".to_string())
             })?;
             if parent_frame.index > 0 {
-                // Move to previous child in parent
                 parent_frame.index -= 1;
                 let prev_child_id = parent_frame.node.children[parent_frame.index];
-
-                // Traverse down to the rightmost leaf of this subtree
                 self.traverse_to_rightmost_leaf(prev_child_id)?;
                 return Ok(());
             }
         }
 
-        // No previous leaves
         self.at_end = true;
         Ok(())
     }
 
+    #[cfg(test)]
     fn move_to_last_position(&mut self) -> Result<()> {
         self.at_end = false;
 
-        // If we have a current position, move to the last key in the current leaf
         if let Some(frame) = self.stack.last_mut() {
             if frame.index >= frame.node.keys.len() {
                 frame.index = frame.node.keys.len().saturating_sub(1);
@@ -335,9 +332,7 @@ impl BTreeCursor {
             return Ok(());
         }
 
-        // Otherwise, traverse to the rightmost leaf
         self.traverse_to_rightmost_leaf(self.root_page_id)?;
-
         Ok(())
     }
 
@@ -374,6 +369,7 @@ impl BTreeCursor {
         Ok(())
     }
 
+    #[cfg(test)]
     fn traverse_to_rightmost_leaf(&mut self, page_id: PageId) -> Result<()> {
         let mut current_page_id = page_id;
 
@@ -382,9 +378,9 @@ impl BTreeCursor {
             let node = BTreeNode::from_page(page)?;
 
             let index = if node.node_type == NodeType::Leaf {
-                node.keys.len().saturating_sub(1) // Point to last key in leaf
+                node.keys.len().saturating_sub(1)
             } else {
-                node.children.len() - 1 // Point to last child in internal node
+                node.children.len() - 1
             };
 
             let frame = CursorFrame {
@@ -396,9 +392,7 @@ impl BTreeCursor {
             self.stack.push(frame);
 
             match node.node_type {
-                NodeType::Leaf => {
-                    break;
-                }
+                NodeType::Leaf => break,
                 NodeType::Internal => {
                     if node.children.is_empty() {
                         return Err(HematiteError::CorruptedData(

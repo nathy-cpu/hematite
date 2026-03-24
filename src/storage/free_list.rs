@@ -19,6 +19,7 @@
 //! Persistence format is versioned so the pager can reject freelist metadata that belongs to an
 //! incompatible storage format.
 
+#[cfg(test)]
 use crate::error::Result;
 use crate::storage::PageId;
 
@@ -28,6 +29,7 @@ pub struct FreeList {
 }
 
 impl FreeList {
+    #[cfg(test)]
     pub const METADATA_VERSION: u32 = 1;
 
     pub fn new() -> Self {
@@ -52,14 +54,6 @@ impl FreeList {
         self.pages = free_pages;
     }
 
-    pub fn from_page_ids(pages: Vec<PageId>) -> Self {
-        Self { pages }
-    }
-
-    pub fn into_page_ids(self) -> Vec<PageId> {
-        self.pages
-    }
-
     pub fn compact_trailing_pages(&mut self, next_page_id: &mut u32, minimum_next_page_id: u32) {
         while *next_page_id > minimum_next_page_id {
             let candidate = *next_page_id - 1;
@@ -72,21 +66,7 @@ impl FreeList {
         }
     }
 
-    pub fn serialize_metadata_lines(&self) -> Vec<String> {
-        let mut lines = vec![
-            format!("freelist_version={}", Self::METADATA_VERSION),
-            format!("freelist_count={}", self.pages.len()),
-        ];
-
-        let mut pages = self.pages.clone();
-        pages.sort_by_key(|page_id| *page_id);
-        for page_id in pages {
-            lines.push(format!("freelist|{}", page_id));
-        }
-
-        lines
-    }
-
+    #[cfg(test)]
     pub fn deserialize_metadata_lines(
         version: u32,
         expected_count: usize,

@@ -61,6 +61,7 @@ impl WalRecord {
     const VERSION: u32 = 1;
     const FILE_HEADER_LEN: usize = 8;
 
+    #[cfg(test)]
     pub fn encode_file(records: &[Self]) -> Result<Vec<u8>> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&Self::file_header());

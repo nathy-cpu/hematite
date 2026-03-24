@@ -50,13 +50,6 @@ impl BTreeIndex {
         }
     }
 
-    pub fn new(storage: Pager, root_page_id: PageId) -> Self {
-        Self {
-            storage: Arc::new(Mutex::new(storage)),
-            root_page_id,
-        }
-    }
-
     pub fn from_shared_storage(storage: Arc<Mutex<Pager>>, root_page_id: PageId) -> Self {
         Self {
             storage,
@@ -66,35 +59,6 @@ impl BTreeIndex {
 
     pub fn root_page_id(&self) -> PageId {
         self.root_page_id
-    }
-
-    pub fn new_with_init(storage: Pager) -> Result<Self> {
-        let storage_arc = Arc::new(Mutex::new(storage));
-        let root_page_id = storage_arc
-            .lock()
-            .map_err(|_| {
-                crate::error::HematiteError::InternalError(
-                    "B-tree index storage mutex is poisoned".to_string(),
-                )
-            })?
-            .allocate_page()?;
-
-        let root_node = BTreeNode::new_leaf(root_page_id);
-        let mut root_page = Page::new(root_page_id);
-        root_node.to_page(&mut root_page)?;
-        storage_arc
-            .lock()
-            .map_err(|_| {
-                crate::error::HematiteError::InternalError(
-                    "B-tree index storage mutex is poisoned".to_string(),
-                )
-            })?
-            .write_page(root_page)?;
-
-        Ok(Self {
-            storage: storage_arc,
-            root_page_id,
-        })
     }
 
     pub fn search(&mut self, key: &BTreeKey) -> Result<Option<BTreeValue>> {
@@ -123,10 +87,6 @@ impl BTreeIndex {
         }
     }
 
-    pub fn insert(&mut self, key: BTreeKey, value: BTreeValue) -> Result<()> {
-        self.insert_with_mutation(key, value).map(|_| ())
-    }
-
     pub fn insert_with_mutation(
         &mut self,
         key: BTreeKey,
@@ -146,12 +106,6 @@ impl BTreeIndex {
             root_page_id: self.root_page_id,
             root_changed: self.root_page_id != original_root_page_id,
         })
-    }
-
-    pub fn insert_typed<C: KeyValueCodec>(&mut self, key: &C::Key, value: &C::Value) -> Result<()> {
-        let encoded_key = C::encode_key(key)?;
-        let encoded_value = C::encode_value(value)?;
-        self.insert(BTreeKey::new(encoded_key), BTreeValue::new(encoded_value))
     }
 
     pub fn insert_typed_with_mutation<C: KeyValueCodec>(
@@ -244,10 +198,6 @@ impl BTreeIndex {
         self.lock_storage()?.write_page(root_page)
     }
 
-    pub fn delete(&mut self, key: &BTreeKey) -> Result<Option<BTreeValue>> {
-        self.delete_with_mutation(key).map(|(value, _)| value)
-    }
-
     pub fn delete_with_mutation(
         &mut self,
         key: &BTreeKey,
@@ -264,15 +214,6 @@ impl BTreeIndex {
                 root_changed: self.root_page_id != original_root_page_id,
             },
         ))
-    }
-
-    pub fn delete_typed<C: KeyValueCodec>(&mut self, key: &C::Key) -> Result<Option<C::Value>> {
-        let encoded_key = C::encode_key(key)?;
-        let raw = self.delete(&BTreeKey::new(encoded_key))?;
-        match raw {
-            Some(value) => Ok(Some(C::decode_value(value.as_bytes())?)),
-            None => Ok(None),
-        }
     }
 
     pub fn delete_typed_with_mutation<C: KeyValueCodec>(
@@ -590,5 +531,60 @@ impl BTreeIndex {
         // Note: right_page becomes unused and could be deallocated
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+impl BTreeIndex {
+    pub fn new_with_init(storage: Pager) -> Result<Self> {
+        let storage_arc = Arc::new(Mutex::new(storage));
+        let root_page_id = storage_arc
+            .lock()
+            .map_err(|_| {
+                crate::error::HematiteError::InternalError(
+                    "B-tree index storage mutex is poisoned".to_string(),
+                )
+            })?
+            .allocate_page()?;
+
+        let root_node = BTreeNode::new_leaf(root_page_id);
+        let mut root_page = Page::new(root_page_id);
+        root_node.to_page(&mut root_page)?;
+        storage_arc
+            .lock()
+            .map_err(|_| {
+                crate::error::HematiteError::InternalError(
+                    "B-tree index storage mutex is poisoned".to_string(),
+                )
+            })?
+            .write_page(root_page)?;
+
+        Ok(Self {
+            storage: storage_arc,
+            root_page_id,
+        })
+    }
+
+    pub fn insert(&mut self, key: BTreeKey, value: BTreeValue) -> Result<()> {
+        self.insert_with_mutation(key, value).map(|_| ())
+    }
+
+    pub fn insert_typed<C: KeyValueCodec>(&mut self, key: &C::Key, value: &C::Value) -> Result<()> {
+        let encoded_key = C::encode_key(key)?;
+        let encoded_value = C::encode_value(value)?;
+        self.insert(BTreeKey::new(encoded_key), BTreeValue::new(encoded_value))
+    }
+
+    pub fn delete(&mut self, key: &BTreeKey) -> Result<Option<BTreeValue>> {
+        self.delete_with_mutation(key).map(|(value, _)| value)
+    }
+
+    pub fn delete_typed<C: KeyValueCodec>(&mut self, key: &C::Key) -> Result<Option<C::Value>> {
+        let encoded_key = C::encode_key(key)?;
+        let raw = self.delete(&BTreeKey::new(encoded_key))?;
+        match raw {
+            Some(value) => Ok(Some(C::decode_value(value.as_bytes())?)),
+            None => Ok(None),
+        }
     }
 }

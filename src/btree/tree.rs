@@ -33,6 +33,7 @@ impl BTreeManager {
         })
     }
 
+    #[cfg(test)]
     pub fn new(storage: Pager) -> Self {
         Self {
             storage: Arc::new(Mutex::new(storage)),
@@ -203,44 +204,6 @@ impl BTreeManager {
             }
         }
     }
-
-    pub fn get_tree_stats(&mut self, root_page_id: PageId) -> Result<TreeStats> {
-        let page = self.lock_storage()?.read_page(root_page_id)?;
-        let root_node = BTreeNode::from_page(page)?;
-
-        let mut stats = TreeStats::default();
-        self.collect_stats_recursive(&root_node, &mut stats, 0)?;
-
-        Ok(stats)
-    }
-
-    pub fn collect_stats_recursive(
-        &mut self,
-        node: &BTreeNode,
-        stats: &mut TreeStats,
-        depth: usize,
-    ) -> Result<()> {
-        stats.total_nodes += 1;
-        stats.total_keys += node.keys.len();
-        stats.max_depth = stats.max_depth.max(depth);
-
-        match node.node_type {
-            NodeType::Leaf => {
-                stats.leaf_nodes += 1;
-            }
-            NodeType::Internal => {
-                stats.internal_nodes += 1;
-
-                for child_page_id in &node.children {
-                    let page = self.lock_storage()?.read_page(*child_page_id)?;
-                    let child_node = BTreeNode::from_page(page)?;
-                    self.collect_stats_recursive(&child_node, stats, depth + 1)?;
-                }
-            }
-        }
-
-        Ok(())
-    }
 }
 
 pub fn create_tree_root(pager: &mut Pager) -> Result<PageId> {
@@ -362,23 +325,4 @@ struct TreeValidationState {
 struct KeyBound {
     key: Vec<u8>,
     inclusive: bool,
-}
-
-#[derive(Debug, Default)]
-pub struct TreeStats {
-    pub total_nodes: usize,
-    pub leaf_nodes: usize,
-    pub internal_nodes: usize,
-    pub total_keys: usize,
-    pub max_depth: usize,
-}
-
-impl TreeStats {
-    pub fn average_keys_per_node(&self) -> f64 {
-        if self.total_nodes == 0 {
-            0.0
-        } else {
-            self.total_keys as f64 / self.total_nodes as f64
-        }
-    }
 }
