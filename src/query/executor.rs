@@ -1599,20 +1599,13 @@ impl InsertExecutor {
         candidate_row: &[Value],
     ) -> Result<()> {
         for index in table.secondary_indexes.iter().filter(|index| index.unique) {
-            let key_values = index
-                .column_indices
-                .iter()
-                .map(|&column_index| candidate_row[column_index].clone())
-                .collect::<Vec<_>>();
+            let key_values = secondary_index_key_values(index, candidate_row);
             if !ctx
                 .engine
                 .lookup_secondary_index_rowids(table, &index.name, &key_values)?
                 .is_empty()
             {
-                return Err(HematiteError::ParseError(format!(
-                    "Duplicate value for UNIQUE index '{}' on table '{}'",
-                    index.name, table.name
-                )));
+                return Err(unique_index_parse_error(&index.name, &table.name));
             }
         }
 
@@ -1829,26 +1822,15 @@ impl UpdateExecutor {
         for index in table.secondary_indexes.iter().filter(|index| index.unique) {
             encoded_keys.clear();
             for row in updated_rows {
-                let key_values = index
-                    .column_indices
-                    .iter()
-                    .map(|&column_index| row.values[column_index].clone())
-                    .collect::<Vec<_>>();
+                let key_values = secondary_index_key_values(index, &row.values);
                 let encoded_key = ctx.engine.encode_secondary_index_key(&key_values)?;
                 if !encoded_keys.insert(encoded_key) {
-                    return Err(HematiteError::ParseError(format!(
-                        "Duplicate value for UNIQUE index '{}' on table '{}'",
-                        index.name, table.name
-                    )));
+                    return Err(unique_index_parse_error(&index.name, &table.name));
                 }
             }
 
             for row in updated_rows {
-                let key_values = index
-                    .column_indices
-                    .iter()
-                    .map(|&column_index| row.values[column_index].clone())
-                    .collect::<Vec<_>>();
+                let key_values = secondary_index_key_values(index, &row.values);
                 let existing_rowids =
                     ctx.engine
                         .lookup_secondary_index_rowids(table, &index.name, &key_values)?;
@@ -1858,10 +1840,7 @@ impl UpdateExecutor {
                             .iter()
                             .any(|updated_row| updated_row.row_id == existing_rowid)
                 }) {
-                    return Err(HematiteError::ParseError(format!(
-                        "Duplicate value for UNIQUE index '{}' on table '{}'",
-                        index.name, table.name
-                    )));
+                    return Err(unique_index_parse_error(&index.name, &table.name));
                 }
             }
         }
@@ -2222,12 +2201,7 @@ impl CreateExecutor {
             .filter_map(|(index, column)| {
                 if column.unique && !column.primary_key {
                     Some((
-                        format!(
-                            "uq_{}_{}_{}",
-                            sanitize_identifier(&self.statement.table),
-                            sanitize_identifier(&column.name),
-                            index
-                        ),
+                        auto_unique_index_name(&self.statement.table, &column.name, index),
                         vec![index],
                     ))
                 } else {
@@ -2464,6 +2438,33 @@ impl QueryExecutor for CreateIndexExecutor {
             rows: Vec::new(),
         })
     }
+}
+
+fn secondary_index_key_values(
+    index: &crate::catalog::SecondaryIndex,
+    row_values: &[Value],
+) -> Vec<Value> {
+    index
+        .column_indices
+        .iter()
+        .map(|&column_index| row_values[column_index].clone())
+        .collect()
+}
+
+fn unique_index_parse_error(index_name: &str, table_name: &str) -> HematiteError {
+    HematiteError::ParseError(format!(
+        "Duplicate value for UNIQUE index '{}' on table '{}'",
+        index_name, table_name
+    ))
+}
+
+fn auto_unique_index_name(table_name: &str, column_name: &str, position: usize) -> String {
+    format!(
+        "uq_{}_{}_{}",
+        sanitize_identifier(table_name),
+        sanitize_identifier(column_name),
+        position
+    )
 }
 
 fn sanitize_identifier(identifier: &str) -> String {

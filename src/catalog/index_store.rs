@@ -126,15 +126,8 @@ pub(crate) fn register_secondary_index_row(
             index.root_page_id,
             &format!("secondary index '{}' on table '{}'", index.name, table.name),
         )?;
-        if index.unique
-            && !tree
-                .entries_with_prefix(&IndexKeyCodec::encode_key(&key_values)?)?
-                .is_empty()
-        {
-            return Err(HematiteError::StorageError(format!(
-                "Duplicate value for UNIQUE index '{}' on table '{}'",
-                index.name, table.name
-            )));
+        if index.unique && tree_has_secondary_key(&tree, &key_values)? {
+            return Err(unique_index_storage_error(&index.name, &table.name));
         }
         tree.insert_with_mutation(
             &IndexKeyCodec::encode_secondary_key(&key_values, row.row_id)?,
@@ -317,11 +310,7 @@ pub(crate) fn validate_table_indexes(engine: &mut CatalogEngine, table: &Table) 
                 index.root_page_id,
                 &format!("secondary index '{}' on table '{}'", index.name, table.name),
             )?;
-            let rowids = tree
-                .entries_with_prefix(&IndexKeyCodec::encode_key(&key_values)?)?
-                .into_iter()
-                .map(|(_key, value)| IndexKeyCodec::decode_row_id(&value))
-                .collect::<Result<Vec<_>>>()?;
+            let rowids = secondary_index_rowids_for_key(&tree, &key_values)?;
             if index.unique && rowids.len() > 1 {
                 return Err(HematiteError::CorruptedData(format!(
                     "UNIQUE index '{}' contains duplicate entries for table '{}'",
@@ -369,6 +358,29 @@ fn secondary_index_values(
         .iter()
         .map(|&column_index| row.values[column_index].clone())
         .collect()
+}
+
+fn tree_has_secondary_key(tree: &crate::btree::ByteTree, key_values: &[Value]) -> Result<bool> {
+    Ok(!tree
+        .entries_with_prefix(&IndexKeyCodec::encode_key(key_values)?)?
+        .is_empty())
+}
+
+fn secondary_index_rowids_for_key(
+    tree: &crate::btree::ByteTree,
+    key_values: &[Value],
+) -> Result<Vec<u64>> {
+    tree.entries_with_prefix(&IndexKeyCodec::encode_key(key_values)?)?
+        .into_iter()
+        .map(|(_key, value)| IndexKeyCodec::decode_row_id(&value))
+        .collect()
+}
+
+fn unique_index_storage_error(index_name: &str, table_name: &str) -> HematiteError {
+    HematiteError::StorageError(format!(
+        "Duplicate value for UNIQUE index '{}' on table '{}'",
+        index_name, table_name
+    ))
 }
 
 pub(crate) fn require_index_root_page(root_page_id: u32, label: &str) -> Result<u32> {
