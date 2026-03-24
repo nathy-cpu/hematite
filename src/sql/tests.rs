@@ -679,6 +679,24 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_where_not_with_grouping() -> Result<()> {
+        let db = TestDbFile::new("_test_where_not_with_grouping");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (1, 'Alice');")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (2, 'Bob');")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (3, 'Cara');")?;
+
+        let result =
+            conn.execute("SELECT id FROM test WHERE NOT (id = 1 OR id = 2) ORDER BY id ASC;")?;
+        assert_eq!(result.rows, vec![vec![crate::catalog::Value::Integer(3)]]);
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_limit_applies_after_order_by() -> Result<()> {
         let db = TestDbFile::new("_test_limit_applies_after_order_by");
         let mut conn = Connection::new(db.path())?;

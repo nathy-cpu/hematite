@@ -711,6 +711,25 @@ mod parser_tests {
     }
 
     #[test]
+    fn test_parse_not_condition() -> Result<()> {
+        let mut lexer =
+            Lexer::new("SELECT id FROM users WHERE NOT (id = 1 OR id = 2);".to_string());
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let statement = parser.parse()?;
+
+        match statement {
+            Statement::Select(select) => {
+                let where_clause = select.where_clause.expect("missing WHERE clause");
+                assert_eq!(where_clause.conditions.len(), 1);
+                assert!(matches!(&where_clause.conditions[0], Condition::Not(_)));
+            }
+            _ => panic!("Expected SELECT statement"),
+        }
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_order_by() -> Result<()> {
         let mut lexer = Lexer::new("SELECT id FROM users ORDER BY name DESC, id ASC;".to_string());
         lexer.tokenize()?;

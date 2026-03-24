@@ -274,6 +274,9 @@ impl SelectExecutor {
                 let is_null = value.is_null();
                 Ok(Some(if *is_not { !is_null } else { is_null }))
             }
+            Condition::Not(condition) => Ok(self
+                .evaluate_condition(ctx, condition, row)?
+                .map(|value| !value)),
             Condition::Logical {
                 left,
                 operator,

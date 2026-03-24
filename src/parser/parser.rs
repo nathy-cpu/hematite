@@ -329,6 +329,11 @@ impl Parser {
     }
 
     fn parse_primary_condition(&mut self) -> Result<Condition> {
+        if self.peek_token()? == Token::Not {
+            self.consume_token(&Token::Not)?;
+            return Ok(Condition::Not(Box::new(self.parse_primary_condition()?)));
+        }
+
         if self.peek_token()? == Token::LeftParen {
             self.consume_token(&Token::LeftParen)?;
             let condition = self.parse_or_condition()?;

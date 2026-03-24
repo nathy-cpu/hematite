@@ -99,6 +99,7 @@ pub enum Condition {
         expr: Expression,
         is_not: bool,
     },
+    Not(Box<Condition>),
     Logical {
         left: Box<Condition>,
         operator: LogicalOperator,
@@ -384,6 +385,7 @@ impl Condition {
                 pattern.visit_parameters(f);
             }
             Condition::NullCheck { expr, .. } => expr.visit_parameters(f),
+            Condition::Not(condition) => condition.visit_parameters(f),
             Condition::Logical { left, right, .. } => {
                 left.visit_parameters(f);
                 right.visit_parameters(f);
@@ -438,6 +440,7 @@ impl Condition {
                 expr: expr.bind(parameters)?,
                 is_not: *is_not,
             }),
+            Condition::Not(condition) => Ok(Condition::Not(Box::new(condition.bind(parameters)?))),
             Condition::Logical {
                 left,
                 operator,
@@ -627,6 +630,9 @@ impl SelectStatement {
             }
             Condition::NullCheck { expr, .. } => {
                 Self::validate_expression(expr, table, from)?;
+            }
+            Condition::Not(condition) => {
+                Self::validate_condition(condition, table, from)?;
             }
             Condition::Logical { left, right, .. } => {
                 Self::validate_condition(left, table, from)?;
