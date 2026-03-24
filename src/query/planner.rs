@@ -226,7 +226,9 @@ impl QueryPlanner {
                         .columns
                         .iter()
                         .filter_map(|item| match item {
-                            SelectItem::Column(name) => Some(name.clone()),
+                            SelectItem::Column(name) => {
+                                Some(SelectStatement::column_reference_name(name).to_string())
+                            }
                             _ => None,
                         })
                         .collect(),
@@ -263,12 +265,16 @@ impl QueryPlanner {
                 right,
             } => match (left, right) {
                 (Expression::Column(column_name), Expression::Literal(Value::Integer(v)))
-                    if column_name.eq_ignore_ascii_case("rowid") && *v >= 0 =>
+                    if SelectStatement::column_reference_name(column_name)
+                        .eq_ignore_ascii_case("rowid")
+                        && *v >= 0 =>
                 {
                     Some(*v as u64)
                 }
                 (Expression::Literal(Value::Integer(v)), Expression::Column(column_name))
-                    if column_name.eq_ignore_ascii_case("rowid") && *v >= 0 =>
+                    if SelectStatement::column_reference_name(column_name)
+                        .eq_ignore_ascii_case("rowid")
+                        && *v >= 0 =>
                 {
                     Some(*v as u64)
                 }
@@ -280,7 +286,7 @@ impl QueryPlanner {
 
     fn analyze_select(&self, statement: &SelectStatement) -> Result<SelectAnalysis> {
         let table_name = match &statement.from {
-            TableReference::Table(name) => name.clone(),
+            TableReference::Table(name, _) => name.clone(),
         };
 
         self.analyze_table_access(&table_name, &statement.where_clause)
@@ -298,7 +304,8 @@ impl QueryPlanner {
 
         let synthetic_select = SelectStatement {
             columns: vec![SelectItem::Wildcard],
-            from: TableReference::Table(table_name.clone()),
+            column_aliases: vec![None],
+            from: TableReference::Table(table_name.clone(), None),
             where_clause: where_clause.clone(),
             order_by: Vec::new(),
             limit: None,
@@ -363,7 +370,8 @@ impl QueryPlanner {
                 {
                     // Check if this is a simple equality on an indexed column
                     if let (Expression::Column(col_name), Expression::Literal(_)) = (left, right) {
-                        if let Some(column) = table.get_column_by_name(col_name) {
+                        let base_name = SelectStatement::column_reference_name(col_name);
+                        if let Some(column) = table.get_column_by_name(base_name) {
                             if column.primary_key && matches!(operator, ComparisonOperator::Equal) {
                                 usable_indexes.push(IndexUsage {
                                     column_id: column.id,
@@ -372,7 +380,7 @@ impl QueryPlanner {
                                     selectivity: 1.0, // Primary key equality is highly selective
                                 });
                             } else if matches!(operator, ComparisonOperator::Equal) {
-                                let Some(column_index) = table.get_column_index(col_name) else {
+                                let Some(column_index) = table.get_column_index(base_name) else {
                                     continue;
                                 };
                                 for index in &table.secondary_indexes {
@@ -416,7 +424,9 @@ impl QueryPlanner {
                     }
                 }
                 SelectItem::Column(name) => {
-                    if let Some(column) = table.get_column_by_name(name) {
+                    if let Some(column) =
+                        table.get_column_by_name(SelectStatement::column_reference_name(name))
+                    {
                         accessed_columns.push(ColumnAccess {
                             column_id: column.id,
                             access_type: ColumnAccessType::Read,

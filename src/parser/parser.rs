@@ -82,7 +82,7 @@ impl Parser {
     fn parse_select(&mut self) -> Result<Statement> {
         self.consume_token(&Token::Select)?;
 
-        let columns = self.parse_select_columns()?;
+        let (columns, column_aliases) = self.parse_select_columns()?;
 
         self.consume_token(&Token::From)?;
 
@@ -110,6 +110,7 @@ impl Parser {
 
         Ok(Statement::Select(SelectStatement {
             columns,
+            column_aliases,
             from,
             where_clause,
             order_by,
@@ -117,14 +118,16 @@ impl Parser {
         }))
     }
 
-    fn parse_select_columns(&mut self) -> Result<Vec<SelectItem>> {
+    fn parse_select_columns(&mut self) -> Result<(Vec<SelectItem>, Vec<Option<String>>)> {
         let mut columns = Vec::new();
+        let mut aliases = Vec::new();
 
         let token = self.peek_token()?;
 
         if token == Token::Asterisk {
             self.consume_token(&Token::Asterisk)?;
             columns.push(SelectItem::Wildcard);
+            aliases.push(None);
         } else {
             loop {
                 let token = self.peek_token()?;
@@ -135,13 +138,15 @@ impl Parser {
                         self.consume_token(&Token::Asterisk)?;
                         self.consume_token(&Token::RightParen)?;
                         columns.push(SelectItem::CountAll);
+                        aliases.push(self.parse_optional_alias()?);
                     }
                     Token::Sum | Token::Avg | Token::Min | Token::Max => {
                         columns.push(self.parse_aggregate_select_item()?);
+                        aliases.push(self.parse_optional_alias()?);
                     }
-                    Token::Identifier(name) => {
-                        self.consume_token(&Token::Identifier(name.clone()))?;
-                        columns.push(SelectItem::Column(name));
+                    Token::Identifier(_) => {
+                        columns.push(SelectItem::Column(self.parse_identifier_reference()?));
+                        aliases.push(self.parse_optional_alias()?);
                     }
                     _ => {
                         return Err(HematiteError::ParseError(format!(
@@ -160,7 +165,7 @@ impl Parser {
             }
         }
 
-        Ok(columns)
+        Ok((columns, aliases))
     }
 
     fn parse_aggregate_select_item(&mut self) -> Result<SelectItem> {
@@ -190,22 +195,22 @@ impl Parser {
         };
 
         self.consume_token(&Token::LeftParen)?;
-        let column = self.parse_identifier()?;
+        let column = self.parse_identifier_reference()?;
         self.consume_token(&Token::RightParen)?;
 
         Ok(SelectItem::Aggregate { function, column })
     }
 
     fn parse_table_reference(&mut self) -> Result<TableReference> {
-        let token = self.peek_token()?;
-        match token {
-            Token::Identifier(name) => {
-                self.consume_token(&Token::Identifier(name.clone()))?;
-                Ok(TableReference::Table(name))
+        match self.peek_token()? {
+            Token::Identifier(_) => {
+                let table_name = self.parse_identifier()?;
+                let alias = self.parse_optional_alias()?;
+                Ok(TableReference::Table(table_name, alias))
             }
             _ => Err(HematiteError::ParseError(format!(
                 "Expected table name, found: {:?}",
-                token
+                self.peek_token()?
             ))),
         }
     }
@@ -224,7 +229,7 @@ impl Parser {
 
         let mut items = Vec::new();
         loop {
-            let column = self.parse_identifier()?;
+            let column = self.parse_identifier_reference()?;
             let direction = match self.peek_token() {
                 Ok(Token::Asc) => {
                     self.consume_token(&Token::Asc)?;
@@ -340,10 +345,7 @@ impl Parser {
     fn parse_expression(&mut self) -> Result<Expression> {
         let token = self.peek_token()?;
         match token {
-            Token::Identifier(name) => {
-                self.consume_token(&Token::Identifier(name.clone()))?;
-                Ok(Expression::Column(name))
-            }
+            Token::Identifier(_) => Ok(Expression::Column(self.parse_identifier_reference()?)),
             Token::StringLiteral(value) => {
                 self.consume_token(&Token::StringLiteral(value.clone()))?;
                 Ok(Expression::Literal(crate::catalog::types::Value::Text(
@@ -554,6 +556,28 @@ impl Parser {
                 "Expected identifier, found: {:?}",
                 token
             ))),
+        }
+    }
+
+    fn parse_identifier_reference(&mut self) -> Result<String> {
+        let first = self.parse_identifier()?;
+        if matches!(self.peek_token(), Ok(Token::Dot)) {
+            self.consume_token(&Token::Dot)?;
+            let second = self.parse_identifier()?;
+            Ok(format!("{}.{}", first, second))
+        } else {
+            Ok(first)
+        }
+    }
+
+    fn parse_optional_alias(&mut self) -> Result<Option<String>> {
+        match self.peek_token() {
+            Ok(Token::As) => {
+                self.consume_token(&Token::As)?;
+                Ok(Some(self.parse_identifier()?))
+            }
+            Ok(Token::Identifier(_)) => Ok(Some(self.parse_identifier()?)),
+            _ => Ok(None),
         }
     }
 

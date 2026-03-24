@@ -51,7 +51,8 @@ mod executor_tests {
 
         let statement = SelectStatement {
             columns: vec![SelectItem::Column("id".to_string())],
-            from: TableReference::Table("users".to_string()),
+            column_aliases: vec![None],
+            from: TableReference::Table("users".to_string(), None),
             where_clause: None,
             order_by: Vec::new(),
             limit: None,
@@ -148,7 +149,8 @@ mod executor_tests {
         let mut ctx = ExecutionContext::for_read(&catalog, &mut storage);
         let statement = SelectStatement {
             columns: vec![SelectItem::Column("id".to_string())],
-            from: TableReference::Table("users".to_string()),
+            column_aliases: vec![None],
+            from: TableReference::Table("users".to_string(), None),
             where_clause: Some(WhereClause {
                 conditions: vec![Condition::Comparison {
                     left: Expression::Column("email".to_string()),
@@ -232,7 +234,8 @@ mod executor_tests {
         let mut ctx = ExecutionContext::for_read(&catalog, &mut storage);
         let statement = SelectStatement {
             columns: vec![SelectItem::Column("name".to_string())],
-            from: TableReference::Table("users".to_string()),
+            column_aliases: vec![None],
+            from: TableReference::Table("users".to_string(), None),
             where_clause: Some(WhereClause {
                 conditions: vec![Condition::Comparison {
                     left: Expression::Column("id".to_string()),
@@ -289,7 +292,8 @@ mod executor_tests {
         let mut ctx = ExecutionContext::for_read(&catalog, &mut storage);
         let statement = SelectStatement {
             columns: vec![SelectItem::Column("id".to_string())],
-            from: TableReference::Table("users".to_string()),
+            column_aliases: vec![None],
+            from: TableReference::Table("users".to_string(), None),
             where_clause: Some(WhereClause {
                 conditions: vec![Condition::Comparison {
                     left: Expression::Column("rowid".to_string()),
@@ -627,7 +631,8 @@ mod planner_tests {
 
         let statement = SelectStatement {
             columns: vec![SelectItem::Column("id".to_string())],
-            from: TableReference::Table("users".to_string()),
+            column_aliases: vec![None],
+            from: TableReference::Table("users".to_string(), None),
             where_clause: Some(WhereClause {
                 conditions: vec![Condition::Comparison {
                     left: Expression::Column("id".to_string()),
@@ -695,7 +700,8 @@ mod planner_tests {
 
         let statement = SelectStatement {
             columns: vec![SelectItem::Column("id".to_string())],
-            from: TableReference::Table("users".to_string()),
+            column_aliases: vec![None],
+            from: TableReference::Table("users".to_string(), None),
             where_clause: Some(WhereClause {
                 conditions: vec![Condition::Comparison {
                     left: Expression::Column("email".to_string()),
@@ -839,14 +845,16 @@ mod planner_tests {
 
         let full_scan = planner.plan(Statement::Select(SelectStatement {
             columns: vec![SelectItem::Column("name".to_string())],
-            from: TableReference::Table("users".to_string()),
+            column_aliases: vec![None],
+            from: TableReference::Table("users".to_string(), None),
             where_clause: None,
             order_by: Vec::new(),
             limit: None,
         }))?;
         let rowid_lookup = planner.plan(Statement::Select(SelectStatement {
             columns: vec![SelectItem::Column("name".to_string())],
-            from: TableReference::Table("users".to_string()),
+            column_aliases: vec![None],
+            from: TableReference::Table("users".to_string(), None),
             where_clause: Some(WhereClause {
                 conditions: vec![Condition::Comparison {
                     left: Expression::Column("rowid".to_string()),
@@ -900,7 +908,8 @@ mod planner_tests {
         let planner = QueryPlanner::new(catalog);
         let statement = SelectStatement {
             columns: vec![SelectItem::Column("id".to_string())],
-            from: TableReference::Table("users".to_string()),
+            column_aliases: vec![None],
+            from: TableReference::Table("users".to_string(), None),
             where_clause: Some(WhereClause {
                 conditions: vec![Condition::Comparison {
                     left: Expression::Column("rowid".to_string()),
@@ -950,7 +959,8 @@ mod planner_tests {
 
         let statement = SelectStatement {
             columns: vec![SelectItem::Column("id".to_string())],
-            from: TableReference::Table("users".to_string()),
+            column_aliases: vec![None],
+            from: TableReference::Table("users".to_string(), None),
             where_clause: None,
             order_by: Vec::new(),
             limit: None,

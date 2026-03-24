@@ -22,6 +22,7 @@ pub enum Statement {
 #[derive(Debug, Clone)]
 pub struct SelectStatement {
     pub columns: Vec<SelectItem>,
+    pub column_aliases: Vec<Option<String>>,
     pub from: TableReference,
     pub where_clause: Option<WhereClause>,
     pub order_by: Vec<OrderByItem>,
@@ -49,7 +50,7 @@ pub enum AggregateFunction {
 
 #[derive(Debug, Clone)]
 pub enum TableReference {
-    Table(String),
+    Table(String, Option<String>),
 }
 
 #[derive(Debug, Clone)]
@@ -255,6 +256,7 @@ impl Statement {
             Statement::Rollback => Ok(Statement::Rollback),
             Statement::Select(select) => Ok(Statement::Select(SelectStatement {
                 columns: select.columns.clone(),
+                column_aliases: select.column_aliases.clone(),
                 from: select.from.clone(),
                 where_clause: select
                     .where_clause
@@ -413,9 +415,63 @@ impl SelectStatement {
         name.eq_ignore_ascii_case("rowid")
     }
 
+    pub(crate) fn split_column_reference(name: &str) -> (Option<&str>, &str) {
+        match name.split_once('.') {
+            Some((qualifier, column_name)) => (Some(qualifier), column_name),
+            None => (None, name),
+        }
+    }
+
+    pub(crate) fn column_reference_name(name: &str) -> &str {
+        Self::split_column_reference(name).1
+    }
+
+    pub(crate) fn table_reference_parts(from: &TableReference) -> (&str, Option<&str>) {
+        match from {
+            TableReference::Table(table_name, alias) => (table_name.as_str(), alias.as_deref()),
+        }
+    }
+
+    fn qualifier_matches(from: &TableReference, qualifier: Option<&str>) -> bool {
+        let Some(qualifier) = qualifier else {
+            return true;
+        };
+        let (table_name, alias) = Self::table_reference_parts(from);
+        qualifier == table_name || alias.is_some_and(|alias| alias == qualifier)
+    }
+
+    pub(crate) fn validate_column_reference(
+        name: &str,
+        table: &crate::catalog::Table,
+        from: &TableReference,
+    ) -> Result<()> {
+        let (qualifier, column_name) = Self::split_column_reference(name);
+        if !Self::qualifier_matches(from, qualifier) {
+            let (table_name, alias) = Self::table_reference_parts(from);
+            return Err(HematiteError::ParseError(format!(
+                "Column reference '{}' does not match table '{}'{}",
+                name,
+                table_name,
+                alias
+                    .map(|alias| format!(" or alias '{}'", alias))
+                    .unwrap_or_default()
+            )));
+        }
+
+        if table.get_column_by_name(column_name).is_none() && !Self::is_hidden_rowid(column_name) {
+            let (table_name, _) = Self::table_reference_parts(from);
+            return Err(HematiteError::ParseError(format!(
+                "Column '{}' does not exist in table '{}'",
+                column_name, table_name
+            )));
+        }
+
+        Ok(())
+    }
+
     pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
         let table = match &self.from {
-            TableReference::Table(table_name) => {
+            TableReference::Table(table_name, _) => {
                 catalog.get_table_by_name(table_name).ok_or_else(|| {
                     HematiteError::ParseError(format!("Table '{}' does not exist", table_name))
                 })?
@@ -446,23 +502,10 @@ impl SelectStatement {
         for item in &self.columns {
             match item {
                 SelectItem::Column(name) => {
-                    if table.get_column_by_name(name).is_none() && !Self::is_hidden_rowid(name) {
-                        let TableReference::Table(table_name) = &self.from;
-                        return Err(HematiteError::ParseError(format!(
-                            "Column '{}' does not exist in table '{}'",
-                            name, table_name
-                        )));
-                    }
+                    Self::validate_column_reference(name, table, &self.from)?
                 }
                 SelectItem::Aggregate { column, .. } => {
-                    if table.get_column_by_name(column).is_none() && !Self::is_hidden_rowid(column)
-                    {
-                        let TableReference::Table(table_name) = &self.from;
-                        return Err(HematiteError::ParseError(format!(
-                            "Column '{}' does not exist in table '{}'",
-                            column, table_name
-                        )));
-                    }
+                    Self::validate_column_reference(column, table, &self.from)?;
                 }
                 SelectItem::Wildcard | SelectItem::CountAll => {} // Always valid
             }
@@ -475,15 +518,7 @@ impl SelectStatement {
         }
 
         for item in &self.order_by {
-            if table.get_column_by_name(&item.column).is_none()
-                && !Self::is_hidden_rowid(&item.column)
-            {
-                let TableReference::Table(table_name) = &self.from;
-                return Err(HematiteError::ParseError(format!(
-                    "Column '{}' does not exist in table '{}'",
-                    item.column, table_name
-                )));
-            }
+            Self::validate_column_reference(&item.column, table, &self.from)?;
         }
 
         Ok(())
@@ -517,13 +552,7 @@ impl SelectStatement {
         from: &TableReference,
     ) -> Result<()> {
         if let Expression::Column(name) = expr {
-            if table.get_column_by_name(name).is_none() && !Self::is_hidden_rowid(name) {
-                let TableReference::Table(table_name) = from;
-                return Err(HematiteError::ParseError(format!(
-                    "Column '{}' does not exist in table '{}'",
-                    name, table_name
-                )));
-            }
+            Self::validate_column_reference(name, table, from)?;
         }
 
         Ok(())
@@ -607,7 +636,7 @@ impl UpdateStatement {
             SelectStatement::validate_expression(
                 &assignment.value,
                 table,
-                &TableReference::Table(self.table.clone()),
+                &TableReference::Table(self.table.clone(), None),
             )?;
         }
 
@@ -616,7 +645,7 @@ impl UpdateStatement {
                 SelectStatement::validate_condition(
                     condition,
                     table,
-                    &TableReference::Table(self.table.clone()),
+                    &TableReference::Table(self.table.clone(), None),
                 )?;
             }
         }
@@ -669,7 +698,7 @@ impl DeleteStatement {
                 SelectStatement::validate_condition(
                     condition,
                     table,
-                    &TableReference::Table(self.table.clone()),
+                    &TableReference::Table(self.table.clone(), None),
                 )?;
             }
         }

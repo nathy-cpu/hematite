@@ -552,6 +552,29 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_select_with_table_alias_and_projection_alias() -> Result<()> {
+        let db = TestDbFile::new("_test_select_with_aliases");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("INSERT INTO users (id, name) VALUES (1, 'Alice');")?;
+        conn.execute("INSERT INTO users (id, name) VALUES (2, 'Bob');")?;
+
+        let result = conn.execute(
+            "SELECT u.name AS user_name FROM users AS u WHERE u.id = 1 ORDER BY u.name;",
+        )?;
+
+        assert_eq!(result.columns, vec!["user_name"]);
+        assert_eq!(
+            result.rows,
+            vec![vec![crate::catalog::Value::Text("Alice".to_string())]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_limit_applies_after_order_by() -> Result<()> {
         let db = TestDbFile::new("_test_limit_applies_after_order_by");
         let mut conn = Connection::new(db.path())?;

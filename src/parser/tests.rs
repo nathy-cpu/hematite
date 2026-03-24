@@ -28,7 +28,8 @@ mod ast_tests {
 
         let select = SelectStatement {
             columns: vec![SelectItem::Column("id".to_string())],
-            from: TableReference::Table("users".to_string()),
+            column_aliases: vec![None],
+            from: TableReference::Table("users".to_string(), None),
             where_clause: None,
             order_by: Vec::new(),
             limit: None,
@@ -52,7 +53,8 @@ mod ast_tests {
 
         let select = SelectStatement {
             columns: vec![SelectItem::Column("invalid".to_string())],
-            from: TableReference::Table("users".to_string()),
+            column_aliases: vec![None],
+            from: TableReference::Table("users".to_string(), None),
             where_clause: None,
             order_by: Vec::new(),
             limit: None,
@@ -75,7 +77,8 @@ mod ast_tests {
 
         let select = SelectStatement {
             columns: vec![SelectItem::Wildcard],
-            from: TableReference::Table("users".to_string()),
+            column_aliases: vec![None],
+            from: TableReference::Table("users".to_string(), None),
             where_clause: Some(WhereClause {
                 conditions: vec![Condition::Comparison {
                     left: Expression::Column("missing".to_string()),
@@ -495,7 +498,9 @@ mod parser_tests {
             Statement::Select(select) => {
                 assert_eq!(select.columns.len(), 1);
                 assert!(matches!(select.columns[0], SelectItem::Wildcard));
-                assert!(matches!(select.from, TableReference::Table(name) if name == "users"));
+                assert!(
+                    matches!(select.from, TableReference::Table(name, None) if name == "users")
+                );
                 assert!(select.where_clause.is_none());
                 assert!(select.order_by.is_empty());
                 assert!(select.limit.is_none());
@@ -853,6 +858,34 @@ mod parser_tests {
                 | ("rollback", Statement::Rollback) => {}
                 _ => panic!("unexpected transaction statement parse result"),
             }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_select_with_table_and_column_aliases() -> Result<()> {
+        let mut lexer =
+            Lexer::new("SELECT u.name AS user_name FROM users AS u WHERE u.id = 1;".to_string());
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let statement = parser.parse()?;
+
+        match statement {
+            Statement::Select(select) => {
+                assert_eq!(select.columns.len(), 1);
+                assert!(matches!(
+                    &select.columns[0],
+                    SelectItem::Column(name) if name == "u.name"
+                ));
+                assert_eq!(select.column_aliases, vec![Some("user_name".to_string())]);
+                assert!(matches!(
+                    select.from,
+                    TableReference::Table(name, Some(alias))
+                        if name == "users" && alias == "u"
+                ));
+            }
+            _ => panic!("Expected SELECT statement"),
         }
 
         Ok(())

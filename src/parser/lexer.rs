@@ -20,6 +20,7 @@ pub enum Token {
     Create,
     Index,
     On,
+    As,
     Table,
     Where,
     Order,
@@ -56,6 +57,7 @@ pub enum Token {
 
     // Punctuation
     Comma,
+    Dot,
     Semicolon,
     LeftParen,
     RightParen,
@@ -176,6 +178,7 @@ impl Lexer {
             "CREATE" => Token::Create,
             "INDEX" => Token::Index,
             "ON" => Token::On,
+            "AS" => Token::As,
             "TABLE" => Token::Table,
             "WHERE" => Token::Where,
             "ORDER" => Token::Order,
@@ -328,6 +331,7 @@ impl Lexer {
                 }
             }
             ',' => Token::Comma,
+            '.' => Token::Dot,
             ';' => Token::Semicolon,
             '(' => Token::LeftParen,
             ')' => Token::RightParen,

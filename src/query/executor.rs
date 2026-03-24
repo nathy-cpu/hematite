@@ -71,6 +71,12 @@ impl SelectExecutor {
         }
     }
 
+    fn resolve_column_index(&self, table: &Table, column_reference: &str) -> Result<Option<usize>> {
+        SelectStatement::validate_column_reference(column_reference, table, &self.statement.from)?;
+        let column_name = SelectStatement::column_reference_name(column_reference);
+        Ok(table.get_column_index(column_name))
+    }
+
     fn evaluate_expression(
         &self,
         ctx: &ExecutionContext,
@@ -86,11 +92,9 @@ impl SelectExecutor {
             Expression::Column(name) => {
                 if let Some(table_name) = self.get_table_name() {
                     if let Some(table) = ctx.catalog.get_table_by_name(table_name) {
-                        for (i, col) in table.columns.iter().enumerate() {
-                            if col.name == *name {
-                                if i < row.len() {
-                                    return Ok(row[i].clone());
-                                }
+                        if let Some(index) = self.resolve_column_index(table, name)? {
+                            if index < row.len() {
+                                return Ok(row[index].clone());
                             }
                         }
                     }
@@ -184,7 +188,7 @@ impl SelectExecutor {
 
     fn get_table_name(&self) -> Option<&String> {
         match &self.statement.from {
-            TableReference::Table(name) => Some(name),
+            TableReference::Table(name, _) => Some(name),
         }
     }
 
@@ -197,10 +201,9 @@ impl SelectExecutor {
                 SelectItem::Column(name) => {
                     if let Some(table_name) = self.get_table_name() {
                         if let Some(table) = ctx.catalog.get_table_by_name(table_name) {
-                            for (i, col) in table.columns.iter().enumerate() {
-                                if col.name == *name && i < row.len() {
-                                    projected.push(row[i].clone());
-                                    break;
+                            if let Some(index) = self.resolve_column_index(table, name)? {
+                                if index < row.len() {
+                                    projected.push(row[index].clone());
                                 }
                             }
                         }
@@ -217,7 +220,12 @@ impl SelectExecutor {
     fn get_column_names(&self, ctx: &ExecutionContext) -> Vec<String> {
         let mut columns = Vec::new();
 
-        for item in &self.statement.columns {
+        for (index, item) in self.statement.columns.iter().enumerate() {
+            let alias = self
+                .statement
+                .column_aliases
+                .get(index)
+                .and_then(|alias| alias.clone());
             match item {
                 SelectItem::Wildcard => {
                     if let Some(table_name) = self.get_table_name() {
@@ -228,18 +236,28 @@ impl SelectExecutor {
                         }
                     }
                 }
-                SelectItem::Column(name) => columns.push(name.clone()),
-                SelectItem::CountAll => columns.push("COUNT(*)".to_string()),
-                SelectItem::Aggregate { function, column } => columns.push(format!(
-                    "{}({})",
-                    match function {
-                        AggregateFunction::Sum => "SUM",
-                        AggregateFunction::Avg => "AVG",
-                        AggregateFunction::Min => "MIN",
-                        AggregateFunction::Max => "MAX",
-                    },
-                    column
-                )),
+                SelectItem::Column(name) => {
+                    columns.push(alias.unwrap_or_else(|| {
+                        SelectStatement::column_reference_name(name).to_string()
+                    }))
+                }
+                SelectItem::CountAll => {
+                    columns.push(alias.unwrap_or_else(|| "COUNT(*)".to_string()))
+                }
+                SelectItem::Aggregate { function, column } => {
+                    columns.push(alias.unwrap_or_else(|| {
+                        format!(
+                            "{}({})",
+                            match function {
+                                AggregateFunction::Sum => "SUM",
+                                AggregateFunction::Avg => "AVG",
+                                AggregateFunction::Min => "MIN",
+                                AggregateFunction::Max => "MAX",
+                            },
+                            column
+                        )
+                    }))
+                }
             }
         }
 
@@ -273,12 +291,14 @@ impl SelectExecutor {
                 let table = ctx.catalog.get_table_by_name(table_name).ok_or_else(|| {
                     HematiteError::ParseError(format!("Table '{}' not found", table_name))
                 })?;
-                let index = table.get_column_index(column).ok_or_else(|| {
-                    HematiteError::ParseError(format!(
-                        "Column '{}' does not exist in table '{}'",
-                        column, table_name
-                    ))
-                })?;
+                let index = table
+                    .get_column_index(SelectStatement::column_reference_name(column))
+                    .ok_or_else(|| {
+                        HematiteError::ParseError(format!(
+                            "Column '{}' does not exist in table '{}'",
+                            column, table_name
+                        ))
+                    })?;
 
                 let values: Vec<&Value> = rows
                     .iter()
@@ -385,7 +405,9 @@ impl SelectExecutor {
                         .primary_key_columns
                         .first()
                         .and_then(|index| table.columns.get(*index))
-                        .is_some_and(|column| column.name == *column_name) =>
+                        .is_some_and(|column| {
+                            column.name == SelectStatement::column_reference_name(column_name)
+                        }) =>
                 {
                     Some(vec![value.clone()])
                 }
@@ -394,7 +416,9 @@ impl SelectExecutor {
                         .primary_key_columns
                         .first()
                         .and_then(|index| table.columns.get(*index))
-                        .is_some_and(|column| column.name == *column_name) =>
+                        .is_some_and(|column| {
+                            column.name == SelectStatement::column_reference_name(column_name)
+                        }) =>
                 {
                     Some(vec![value.clone()])
                 }
@@ -427,12 +451,14 @@ impl SelectExecutor {
                 right,
             } => match (left, right) {
                 (Expression::Column(column_name), Expression::Literal(value))
-                    if indexed_column.name == *column_name =>
+                    if indexed_column.name
+                        == SelectStatement::column_reference_name(column_name) =>
                 {
                     Some(vec![value.clone()])
                 }
                 (Expression::Literal(value), Expression::Column(column_name))
-                    if indexed_column.name == *column_name =>
+                    if indexed_column.name
+                        == SelectStatement::column_reference_name(column_name) =>
                 {
                     Some(vec![value.clone()])
                 }
@@ -455,12 +481,16 @@ impl SelectExecutor {
                 right,
             } => match (left, right) {
                 (Expression::Column(column_name), Expression::Literal(Value::Integer(v)))
-                    if column_name.eq_ignore_ascii_case("rowid") && *v >= 0 =>
+                    if SelectStatement::column_reference_name(column_name)
+                        .eq_ignore_ascii_case("rowid")
+                        && *v >= 0 =>
                 {
                     Some(*v as u64)
                 }
                 (Expression::Literal(Value::Integer(v)), Expression::Column(column_name))
-                    if column_name.eq_ignore_ascii_case("rowid") && *v >= 0 =>
+                    if SelectStatement::column_reference_name(column_name)
+                        .eq_ignore_ascii_case("rowid")
+                        && *v >= 0 =>
                 {
                     Some(*v as u64)
                 }
@@ -476,7 +506,7 @@ impl QueryExecutor for SelectExecutor {
         self.statement.validate(&ctx.catalog)?;
 
         let table_name = match &self.statement.from {
-            TableReference::Table(name) => name.clone(),
+            TableReference::Table(name, _) => name.clone(),
         };
 
         let table = ctx.catalog.get_table_by_name(&table_name).ok_or_else(|| {
@@ -588,7 +618,8 @@ impl QueryExecutor for SelectExecutor {
         if !self.statement.order_by.is_empty() {
             filtered_rows.sort_by(|left, right| {
                 for item in &self.statement.order_by {
-                    let Some(index) = table.get_column_index(&item.column) else {
+                    let base_name = SelectStatement::column_reference_name(&item.column);
+                    let Some(index) = table.get_column_index(base_name) else {
                         continue;
                     };
 
@@ -908,7 +939,8 @@ impl QueryExecutor for UpdateExecutor {
         let select_executor = SelectExecutor::new(
             SelectStatement {
                 columns: vec![SelectItem::Wildcard],
-                from: TableReference::Table(self.statement.table.clone()),
+                column_aliases: vec![None],
+                from: TableReference::Table(self.statement.table.clone(), None),
                 where_clause: self.statement.where_clause.clone(),
                 order_by: Vec::new(),
                 limit: None,
@@ -1135,7 +1167,8 @@ impl QueryExecutor for DeleteExecutor {
         let select_executor = SelectExecutor::new(
             SelectStatement {
                 columns: vec![SelectItem::Wildcard],
-                from: TableReference::Table(self.statement.table.clone()),
+                column_aliases: vec![None],
+                from: TableReference::Table(self.statement.table.clone(), None),
                 where_clause: self.statement.where_clause.clone(),
                 order_by: Vec::new(),
                 limit: None,
