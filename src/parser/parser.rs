@@ -778,8 +778,19 @@ impl Parser {
 
     fn parse_create(&mut self) -> Result<Statement> {
         self.consume_token(&Token::Create)?;
+        let unique = if matches!(self.peek_token(), Ok(Token::Unique)) {
+            self.consume_token(&Token::Unique)?;
+            true
+        } else {
+            false
+        };
         match self.peek_token()? {
             Token::Table => {
+                if unique {
+                    return Err(HematiteError::ParseError(
+                        "CREATE UNIQUE TABLE is not supported".to_string(),
+                    ));
+                }
                 self.consume_token(&Token::Table)?;
 
                 let table = self.parse_identifier()?;
@@ -807,6 +818,7 @@ impl Parser {
                     index_name,
                     table,
                     columns,
+                    unique,
                 }))
             }
             token => Err(HematiteError::ParseError(format!(
@@ -1019,6 +1031,7 @@ impl Parser {
 
         let mut nullable = true;
         let mut primary_key = false;
+        let mut unique = false;
         let mut default_value = None;
 
         while let Ok(token) = self.peek_token() {
@@ -1036,6 +1049,10 @@ impl Parser {
                     primary_key = true;
                     nullable = false;
                 }
+                Token::Unique => {
+                    self.consume_token(&Token::Unique)?;
+                    unique = true;
+                }
                 Token::Default => {
                     self.consume_token(&Token::Default)?;
                     default_value = Some(self.parse_default_value()?);
@@ -1049,6 +1066,7 @@ impl Parser {
             data_type,
             nullable,
             primary_key,
+            unique,
             default_value,
         })
     }

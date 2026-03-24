@@ -1592,6 +1592,33 @@ impl InsertExecutor {
         Ok(())
     }
 
+    fn ensure_unique_secondary_indexes_are_unique(
+        &self,
+        ctx: &mut ExecutionContext,
+        table: &Table,
+        candidate_row: &[Value],
+    ) -> Result<()> {
+        for index in table.secondary_indexes.iter().filter(|index| index.unique) {
+            let key_values = index
+                .column_indices
+                .iter()
+                .map(|&column_index| candidate_row[column_index].clone())
+                .collect::<Vec<_>>();
+            if !ctx
+                .engine
+                .lookup_secondary_index_rowids(table, &index.name, &key_values)?
+                .is_empty()
+            {
+                return Err(HematiteError::ParseError(format!(
+                    "Duplicate value for UNIQUE index '{}' on table '{}'",
+                    index.name, table.name
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
     fn build_row(&self, table: &Table, value_row: &[Expression]) -> Result<Vec<Value>> {
         let mut row = Vec::with_capacity(table.columns.len());
 
@@ -1664,6 +1691,7 @@ impl QueryExecutor for InsertExecutor {
         for value_row in &self.statement.values {
             let row_values = self.build_row(&table, value_row)?;
             self.ensure_primary_key_is_unique(ctx, &table, &[], &row_values)?;
+            self.ensure_unique_secondary_indexes_are_unique(ctx, &table, &row_values)?;
 
             let row_id = ctx
                 .engine
@@ -1789,6 +1817,57 @@ impl UpdateExecutor {
 
         Ok(())
     }
+
+    fn ensure_updated_unique_indexes_remain_unique(
+        &self,
+        ctx: &mut ExecutionContext<'_>,
+        table: &Table,
+        updated_rows: &[StoredRow],
+    ) -> Result<()> {
+        let mut encoded_keys = std::collections::HashSet::new();
+
+        for index in table.secondary_indexes.iter().filter(|index| index.unique) {
+            encoded_keys.clear();
+            for row in updated_rows {
+                let key_values = index
+                    .column_indices
+                    .iter()
+                    .map(|&column_index| row.values[column_index].clone())
+                    .collect::<Vec<_>>();
+                let encoded_key = ctx.engine.encode_secondary_index_key(&key_values)?;
+                if !encoded_keys.insert(encoded_key) {
+                    return Err(HematiteError::ParseError(format!(
+                        "Duplicate value for UNIQUE index '{}' on table '{}'",
+                        index.name, table.name
+                    )));
+                }
+            }
+
+            for row in updated_rows {
+                let key_values = index
+                    .column_indices
+                    .iter()
+                    .map(|&column_index| row.values[column_index].clone())
+                    .collect::<Vec<_>>();
+                let existing_rowids =
+                    ctx.engine
+                        .lookup_secondary_index_rowids(table, &index.name, &key_values)?;
+                if existing_rowids.into_iter().any(|existing_rowid| {
+                    existing_rowid != row.row_id
+                        && !updated_rows
+                            .iter()
+                            .any(|updated_row| updated_row.row_id == existing_rowid)
+                }) {
+                    return Err(HematiteError::ParseError(format!(
+                        "Duplicate value for UNIQUE index '{}' on table '{}'",
+                        index.name, table.name
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl QueryExecutor for UpdateExecutor {
@@ -1860,6 +1939,7 @@ impl QueryExecutor for UpdateExecutor {
         }
 
         self.ensure_updated_primary_keys_remain_unique(ctx, &table, &updated_rows_data)?;
+        self.ensure_updated_unique_indexes_remain_unique(ctx, &table, &updated_rows_data)?;
 
         for original_row in &updated_rows_data {
             if let Some(existing_row) = ctx
@@ -2133,6 +2213,29 @@ impl CreateExecutor {
 
         Ok(columns)
     }
+
+    fn unique_index_specs(&self) -> Vec<(String, Vec<usize>)> {
+        self.statement
+            .columns
+            .iter()
+            .enumerate()
+            .filter_map(|(index, column)| {
+                if column.unique && !column.primary_key {
+                    Some((
+                        format!(
+                            "uq_{}_{}_{}",
+                            sanitize_identifier(&self.statement.table),
+                            sanitize_identifier(&column.name),
+                            index
+                        ),
+                        vec![index],
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
 }
 
 impl QueryExecutor for CreateExecutor {
@@ -2150,6 +2253,29 @@ impl QueryExecutor for CreateExecutor {
             root_page_id,
             primary_key_root_page_id,
         )?;
+
+        let table = ctx
+            .catalog
+            .get_table_by_name(&self.statement.table)
+            .ok_or_else(|| {
+                HematiteError::InternalError(format!(
+                    "Table '{}' disappeared during CREATE TABLE execution",
+                    self.statement.table
+                ))
+            })?
+            .clone();
+        for (index_name, column_indices) in self.unique_index_specs() {
+            let unique_index_root_page_id = ctx.engine.create_empty_btree()?;
+            ctx.catalog.add_secondary_index(
+                table.id,
+                crate::catalog::SecondaryIndex {
+                    name: index_name,
+                    column_indices,
+                    root_page_id: unique_index_root_page_id,
+                    unique: true,
+                },
+            )?;
+        }
 
         Ok(QueryResult {
             affected_rows: 0,
@@ -2314,6 +2440,7 @@ impl QueryExecutor for CreateIndexExecutor {
                 name: self.statement.index_name.clone(),
                 column_indices,
                 root_page_id,
+                unique: self.statement.unique,
             },
         )?;
 
@@ -2337,6 +2464,18 @@ impl QueryExecutor for CreateIndexExecutor {
             rows: Vec::new(),
         })
     }
+}
+
+fn sanitize_identifier(identifier: &str) -> String {
+    let mut sanitized = String::with_capacity(identifier.len());
+    for ch in identifier.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            sanitized.push(ch);
+        } else {
+            sanitized.push('_');
+        }
+    }
+    sanitized
 }
 
 #[derive(Debug, Clone)]

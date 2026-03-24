@@ -1704,6 +1704,7 @@ mod mod_tests {
             name: "idx_users_email".to_string(),
             column_indices: vec![1],
             root_page_id: secondary_index_root_page_id.into(),
+            unique: false,
         })?;
 
         let row_id_1 = storage.insert_into_table(
@@ -1793,6 +1794,7 @@ mod mod_tests {
                 name: "idx_users_email".to_string(),
                 column_indices: vec![1],
                 root_page_id: secondary_index_root_page_id.into(),
+                unique: false,
             })?;
 
             let row_id = storage.insert_into_table(
@@ -1861,6 +1863,7 @@ mod mod_tests {
             name: "idx_users_email".to_string(),
             column_indices: vec![1],
             root_page_id: secondary_index_root_page_id.into(),
+            unique: false,
         })?;
 
         let row_id = storage.insert_into_table(

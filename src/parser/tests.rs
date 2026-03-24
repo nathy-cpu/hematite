@@ -1291,7 +1291,8 @@ mod parser_tests {
 
     #[test]
     fn test_parse_create_and_drop_index() -> Result<()> {
-        let mut lexer = Lexer::new("CREATE INDEX idx_users_name ON users (name);".to_string());
+        let mut lexer =
+            Lexer::new("CREATE UNIQUE INDEX idx_users_name ON users (name);".to_string());
         lexer.tokenize()?;
         let mut parser = Parser::new(lexer.get_tokens().to_vec());
         let statement = parser.parse()?;
@@ -1300,6 +1301,7 @@ mod parser_tests {
                 assert_eq!(create_index.index_name, "idx_users_name");
                 assert_eq!(create_index.table, "users");
                 assert_eq!(create_index.columns, vec!["name"]);
+                assert!(create_index.unique);
             }
             _ => panic!("Expected CREATE INDEX statement"),
         }
@@ -1322,7 +1324,7 @@ mod parser_tests {
     #[test]
     fn test_parse_create_with_backticks_and_type_aliases() -> Result<()> {
         let mut lexer = Lexer::new(
-            "CREATE TABLE `user data` (`id` INT PRIMARY KEY, `active` BOOL NOT NULL, `score` DOUBLE DEFAULT 1.5, `name` VARCHAR(32) DEFAULT 'x');"
+            "CREATE TABLE `user data` (`id` INT PRIMARY KEY UNIQUE, `active` BOOL NOT NULL, `score` DOUBLE DEFAULT 1.5, `name` VARCHAR(32) DEFAULT 'x');"
                 .to_string(),
         );
         lexer.tokenize()?;
@@ -1335,6 +1337,7 @@ mod parser_tests {
                 assert_eq!(create.columns.len(), 4);
                 assert_eq!(create.columns[0].name, "id");
                 assert_eq!(create.columns[0].data_type, DataType::Integer);
+                assert!(create.columns[0].unique);
                 assert_eq!(create.columns[1].data_type, DataType::Boolean);
                 assert!(!create.columns[1].nullable);
                 assert_eq!(create.columns[2].data_type, DataType::Float);
@@ -1394,6 +1397,7 @@ mod parser_tests {
                         data_type: DataType::Boolean,
                         nullable: false,
                         primary_key: false,
+                        unique: false,
                         default_value: Some(crate::catalog::Value::Boolean(true)),
                     }) if name == "active"
                 ));

@@ -24,6 +24,7 @@ pub struct SecondaryIndex {
     pub name: String,
     pub column_indices: Vec<usize>,
     pub root_page_id: u32,
+    pub unique: bool,
 }
 
 impl Table {
@@ -236,6 +237,7 @@ impl Table {
             buffer.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
             buffer.extend_from_slice(name_bytes);
             buffer.extend_from_slice(&index.root_page_id.to_le_bytes());
+            buffer.push(index.unique as u8);
             buffer.extend_from_slice(&(index.column_indices.len() as u32).to_le_bytes());
             for &column_index in &index.column_indices {
                 buffer.extend_from_slice(&(column_index as u32).to_le_bytes());
@@ -390,7 +392,7 @@ impl Table {
                 })?;
             *offset += name_len;
 
-            if *offset + 8 > buffer.len() {
+            if *offset + 9 > buffer.len() {
                 return Err(HematiteError::CorruptedData(
                     "Invalid secondary index metadata".to_string(),
                 ));
@@ -402,6 +404,17 @@ impl Table {
                 buffer[*offset + 3],
             ]);
             *offset += 4;
+
+            let unique = match buffer[*offset] {
+                0 => false,
+                1 => true,
+                _ => {
+                    return Err(HematiteError::CorruptedData(
+                        "Invalid secondary index uniqueness flag".to_string(),
+                    ))
+                }
+            };
+            *offset += 1;
 
             let column_count = u32::from_le_bytes([
                 buffer[*offset],
@@ -432,6 +445,7 @@ impl Table {
                 name,
                 column_indices,
                 root_page_id: index_root_page_id,
+                unique,
             })?;
         }
 

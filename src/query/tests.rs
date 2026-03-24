@@ -108,6 +108,7 @@ mod executor_tests {
             name: "idx_users_email".to_string(),
             column_indices: vec![1],
             root_page_id: secondary_index_root_page_id.into(),
+            unique: false,
         })?;
         catalog.insert_table(table)?;
 
@@ -554,6 +555,7 @@ mod executor_tests {
                 data_type: DataType::Integer,
                 nullable: false,
                 primary_key: true,
+                unique: false,
                 default_value: None,
             }],
         };
@@ -714,6 +716,7 @@ mod planner_tests {
             name: "idx_users_email".to_string(),
             column_indices: vec![1],
             root_page_id: 11u32.into(),
+            unique: false,
         })?;
         catalog.insert_table(table)?;
 
@@ -1147,6 +1150,7 @@ mod planner_tests {
                 data_type: DataType::Integer,
                 nullable: false,
                 primary_key: true,
+                unique: false,
                 default_value: None,
             }],
         };

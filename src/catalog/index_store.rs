@@ -126,6 +126,16 @@ pub(crate) fn register_secondary_index_row(
             index.root_page_id,
             &format!("secondary index '{}' on table '{}'", index.name, table.name),
         )?;
+        if index.unique
+            && !tree
+                .entries_with_prefix(&IndexKeyCodec::encode_key(&key_values)?)?
+                .is_empty()
+        {
+            return Err(HematiteError::StorageError(format!(
+                "Duplicate value for UNIQUE index '{}' on table '{}'",
+                index.name, table.name
+            )));
+        }
         tree.insert_with_mutation(
             &IndexKeyCodec::encode_secondary_key(&key_values, row.row_id)?,
             &row.row_id.to_be_bytes(),
@@ -174,9 +184,17 @@ pub(crate) fn rebuild_secondary_indexes(
             &format!("secondary index '{}' on table '{}'", index.name, table.name),
         )?;
         engine.reset_tree(root_page_id)?;
+        let mut seen = HashSet::new();
         let mut tree = engine.open_tree(root_page_id)?;
         for row in rows {
             let key_values = secondary_index_values(index, row);
+            let encoded_key = IndexKeyCodec::encode_key(&key_values)?;
+            if index.unique && !seen.insert(encoded_key) {
+                return Err(HematiteError::StorageError(format!(
+                    "Duplicate value encountered while rebuilding UNIQUE index '{}' on table '{}'",
+                    index.name, table.name
+                )));
+            }
             tree.insert_with_mutation(
                 &IndexKeyCodec::encode_secondary_key(&key_values, row.row_id)?,
                 &row.row_id.to_be_bytes(),
@@ -304,6 +322,12 @@ pub(crate) fn validate_table_indexes(engine: &mut CatalogEngine, table: &Table) 
                 .into_iter()
                 .map(|(_key, value)| IndexKeyCodec::decode_row_id(&value))
                 .collect::<Result<Vec<_>>>()?;
+            if index.unique && rowids.len() > 1 {
+                return Err(HematiteError::CorruptedData(format!(
+                    "UNIQUE index '{}' contains duplicate entries for table '{}'",
+                    index.name, table.name
+                )));
+            }
             if !rowids.contains(&row.row_id) {
                 return Err(HematiteError::CorruptedData(format!(
                     "Secondary index '{}' is missing rowid {} for table '{}'",

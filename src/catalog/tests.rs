@@ -1486,6 +1486,7 @@ mod catalog_new_tests {
             name: "idx_users_email".to_string(),
             column_indices: vec![1],
             root_page_id: 42u32.into(),
+            unique: false,
         })?;
 
         let bytes = table.to_bytes()?;
@@ -1519,6 +1520,7 @@ mod catalog_new_tests {
                     name: "idx_users_email".to_string(),
                     column_indices: vec![1],
                     root_page_id: 55u32.into(),
+                    unique: false,
                 },
             )?;
             catalog.flush()?;
@@ -1583,6 +1585,7 @@ mod catalog_new_tests {
                 name: "idx_users_email".to_string(),
                 column_indices: vec![1],
                 root_page_id: table_root_id,
+                unique: false,
             },
         )?;
 
@@ -1616,6 +1619,7 @@ mod catalog_new_tests {
                 name: "idx_users_email".to_string(),
                 column_indices: vec![1],
                 root_page_id: secondary_index_root_id,
+                unique: false,
             },
         )?;
 

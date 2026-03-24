@@ -208,6 +208,7 @@ pub struct CreateIndexStatement {
     pub index_name: String,
     pub table: String,
     pub columns: Vec<String>,
+    pub unique: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -239,6 +240,7 @@ pub struct ColumnDefinition {
     pub data_type: DataType,
     pub nullable: bool,
     pub primary_key: bool,
+    pub unique: bool,
     pub default_value: Option<Value>,
 }
 
@@ -1163,6 +1165,11 @@ impl AlterStatement {
                 if column.primary_key {
                     return Err(HematiteError::ParseError(
                         "ALTER TABLE ADD COLUMN cannot add a PRIMARY KEY column".to_string(),
+                    ));
+                }
+                if column.unique {
+                    return Err(HematiteError::ParseError(
+                        "ALTER TABLE ADD COLUMN does not support UNIQUE columns; add a UNIQUE index separately".to_string(),
                     ));
                 }
                 if !column.nullable && column.default_value.is_none() {

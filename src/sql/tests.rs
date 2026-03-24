@@ -253,6 +253,47 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_create_table_unique_column_rejects_duplicate_insert_and_update() -> Result<()> {
+        let db = TestDbFile::new("_test_create_table_unique_column");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT UNIQUE, name TEXT);")?;
+        conn.execute("INSERT INTO users (id, email, name) VALUES (1, 'a@example.com', 'alice');")?;
+        conn.execute("INSERT INTO users (id, email, name) VALUES (2, 'b@example.com', 'bob');")?;
+
+        let insert_err = conn
+            .execute("INSERT INTO users (id, email, name) VALUES (3, 'a@example.com', 'cara');")
+            .unwrap_err();
+        assert!(insert_err.to_string().contains("UNIQUE index"));
+
+        let update_err = conn
+            .execute("UPDATE users SET email = 'a@example.com' WHERE id = 2;")
+            .unwrap_err();
+        assert!(update_err.to_string().contains("UNIQUE index"));
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_create_unique_index_rejects_duplicate_existing_rows() -> Result<()> {
+        let db = TestDbFile::new("_test_create_unique_index_rejects_duplicate_existing_rows");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT);")?;
+        conn.execute("INSERT INTO users (id, email) VALUES (1, 'a@example.com');")?;
+        conn.execute("INSERT INTO users (id, email) VALUES (2, 'a@example.com');")?;
+
+        let err = conn
+            .execute("CREATE UNIQUE INDEX idx_users_email ON users (email);")
+            .unwrap_err();
+        assert!(err.to_string().contains("Duplicate value"));
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_writer_transaction_blocks_second_writer_connection() -> Result<()> {
         let db = TestDbFile::new("_test_writer_transaction_blocks_second_writer");
         let mut conn1 = Connection::new(db.path())?;
