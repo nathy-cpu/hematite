@@ -575,6 +575,31 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_select_distinct_deduplicates_rows() -> Result<()> {
+        let db = TestDbFile::new("_test_select_distinct_deduplicates_rows");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (1, 'Alice');")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (2, 'Alice');")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (3, 'Bob');")?;
+
+        let result = conn.execute("SELECT DISTINCT name FROM test ORDER BY name ASC;")?;
+
+        assert_eq!(result.columns, vec!["name"]);
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![crate::catalog::Value::Text("Alice".to_string())],
+                vec![crate::catalog::Value::Text("Bob".to_string())],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_limit_applies_after_order_by() -> Result<()> {
         let db = TestDbFile::new("_test_limit_applies_after_order_by");
         let mut conn = Connection::new(db.path())?;

@@ -273,6 +273,20 @@ impl SelectExecutor {
         }
     }
 
+    fn apply_select_window(&self, rows: &mut Vec<Vec<Value>>) {
+        if let Some(offset) = self.statement.offset {
+            if offset >= rows.len() {
+                rows.clear();
+                return;
+            }
+            rows.drain(0..offset);
+        }
+
+        if let Some(limit) = self.statement.limit {
+            rows.truncate(limit);
+        }
+    }
+
     fn evaluate_aggregate(
         &self,
         ctx: &ExecutionContext,
@@ -636,23 +650,6 @@ impl QueryExecutor for SelectExecutor {
             });
         }
 
-        if let Some(limit) = self.statement.limit {
-            if let Some(offset) = self.statement.offset {
-                if offset >= filtered_rows.len() {
-                    filtered_rows.clear();
-                } else {
-                    filtered_rows.drain(0..offset);
-                }
-            }
-            filtered_rows.truncate(limit);
-        } else if let Some(offset) = self.statement.offset {
-            if offset >= filtered_rows.len() {
-                filtered_rows.clear();
-            } else {
-                filtered_rows.drain(0..offset);
-            }
-        }
-
         if self
             .statement
             .columns
@@ -662,10 +659,12 @@ impl QueryExecutor for SelectExecutor {
             let aggregate_value = self
                 .evaluate_aggregate(ctx, &filtered_rows)?
                 .unwrap_or(Value::Null);
+            let mut rows = vec![vec![aggregate_value]];
+            self.apply_select_window(&mut rows);
             return Ok(QueryResult {
-                affected_rows: 1,
+                affected_rows: rows.len(),
                 columns: self.get_column_names(ctx),
-                rows: vec![vec![aggregate_value]],
+                rows,
             });
         }
 
@@ -673,6 +672,18 @@ impl QueryExecutor for SelectExecutor {
         for row in filtered_rows {
             projected_rows.push(self.project_row(ctx, &row)?);
         }
+
+        if self.statement.distinct {
+            let mut distinct_rows = Vec::new();
+            for row in projected_rows {
+                if !distinct_rows.contains(&row) {
+                    distinct_rows.push(row);
+                }
+            }
+            projected_rows = distinct_rows;
+        }
+
+        self.apply_select_window(&mut projected_rows);
 
         Ok(QueryResult {
             affected_rows: projected_rows.len(),
@@ -951,6 +962,7 @@ impl QueryExecutor for UpdateExecutor {
 
         let select_executor = SelectExecutor::new(
             SelectStatement {
+                distinct: false,
                 columns: vec![SelectItem::Wildcard],
                 column_aliases: vec![None],
                 from: TableReference::Table(self.statement.table.clone(), None),
@@ -1180,6 +1192,7 @@ impl QueryExecutor for DeleteExecutor {
 
         let select_executor = SelectExecutor::new(
             SelectStatement {
+                distinct: false,
                 columns: vec![SelectItem::Wildcard],
                 column_aliases: vec![None],
                 from: TableReference::Table(self.statement.table.clone(), None),

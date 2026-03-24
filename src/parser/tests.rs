@@ -27,6 +27,7 @@ mod ast_tests {
         catalog.create_table("users".to_string(), columns)?;
 
         let select = SelectStatement {
+            distinct: false,
             columns: vec![SelectItem::Column("id".to_string())],
             column_aliases: vec![None],
             from: TableReference::Table("users".to_string(), None),
@@ -53,6 +54,7 @@ mod ast_tests {
         catalog.create_table("users".to_string(), columns).unwrap();
 
         let select = SelectStatement {
+            distinct: false,
             columns: vec![SelectItem::Column("invalid".to_string())],
             column_aliases: vec![None],
             from: TableReference::Table("users".to_string(), None),
@@ -78,6 +80,7 @@ mod ast_tests {
         catalog.create_table("users".to_string(), columns).unwrap();
 
         let select = SelectStatement {
+            distinct: false,
             columns: vec![SelectItem::Wildcard],
             column_aliases: vec![None],
             from: TableReference::Table("users".to_string(), None),
@@ -111,6 +114,24 @@ mod lexer_tests {
             Token::Asterisk,
             Token::From,
             Token::Identifier("users".to_string()),
+        ];
+
+        assert_eq!(lexer.get_tokens(), &expected);
+        Ok(())
+    }
+
+    #[test]
+    fn test_distinct_statement() -> Result<()> {
+        let mut lexer = Lexer::new("SELECT DISTINCT name FROM users;".to_string());
+        lexer.tokenize()?;
+
+        let expected = vec![
+            Token::Select,
+            Token::Distinct,
+            Token::Identifier("name".to_string()),
+            Token::From,
+            Token::Identifier("users".to_string()),
+            Token::Semicolon,
         ];
 
         assert_eq!(lexer.get_tokens(), &expected);
@@ -553,6 +574,23 @@ mod parser_tests {
                 if let Some(where_clause) = select.where_clause {
                     assert_eq!(where_clause.conditions.len(), 1);
                 }
+            }
+            _ => panic!("Expected SELECT statement"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_distinct() -> Result<()> {
+        let mut lexer = Lexer::new("SELECT DISTINCT name FROM users;".to_string());
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let statement = parser.parse()?;
+        match statement {
+            Statement::Select(select) => {
+                assert!(select.distinct);
+                assert_eq!(select.columns.len(), 1);
+                assert!(matches!(&select.columns[0], SelectItem::Column(name) if name == "name"));
             }
             _ => panic!("Expected SELECT statement"),
         }

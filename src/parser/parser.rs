@@ -81,6 +81,12 @@ impl Parser {
 
     fn parse_select(&mut self) -> Result<Statement> {
         self.consume_token(&Token::Select)?;
+        let distinct = if matches!(self.peek_token(), Ok(Token::Distinct)) {
+            self.consume_token(&Token::Distinct)?;
+            true
+        } else {
+            false
+        };
 
         let (columns, column_aliases) = self.parse_select_columns()?;
 
@@ -115,6 +121,7 @@ impl Parser {
         self.consume_token(&Token::Semicolon)?;
 
         Ok(Statement::Select(SelectStatement {
+            distinct,
             columns,
             column_aliases,
             from,

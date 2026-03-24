@@ -242,6 +242,7 @@ impl QueryPlanner {
             table_name: analysis.table_name.clone(),
             access_path,
             projection,
+            distinct: statement.distinct,
             has_filter: statement.where_clause.is_some(),
             order_by_columns: statement
                 .order_by
@@ -304,6 +305,7 @@ impl QueryPlanner {
         })?;
 
         let synthetic_select = SelectStatement {
+            distinct: false,
             columns: vec![SelectItem::Wildcard],
             column_aliases: vec![None],
             from: TableReference::Table(table_name.clone(), None),

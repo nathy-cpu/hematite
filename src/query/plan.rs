@@ -76,6 +76,7 @@ pub struct SelectPlanNode {
     pub table_name: String,
     pub access_path: SelectAccessPath,
     pub projection: SelectProjection,
+    pub distinct: bool,
     pub has_filter: bool,
     pub order_by_columns: Vec<String>,
     pub limit: Option<usize>,

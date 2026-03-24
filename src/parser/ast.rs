@@ -21,6 +21,7 @@ pub enum Statement {
 
 #[derive(Debug, Clone)]
 pub struct SelectStatement {
+    pub distinct: bool,
     pub columns: Vec<SelectItem>,
     pub column_aliases: Vec<Option<String>>,
     pub from: TableReference,
@@ -256,6 +257,7 @@ impl Statement {
             Statement::Commit => Ok(Statement::Commit),
             Statement::Rollback => Ok(Statement::Rollback),
             Statement::Select(select) => Ok(Statement::Select(SelectStatement {
+                distinct: select.distinct,
                 columns: select.columns.clone(),
                 column_aliases: select.column_aliases.clone(),
                 from: select.from.clone(),
@@ -485,6 +487,11 @@ impl SelectStatement {
             .columns
             .iter()
             .any(|item| matches!(item, SelectItem::CountAll | SelectItem::Aggregate { .. }));
+        if self.distinct && has_aggregate {
+            return Err(HematiteError::ParseError(
+                "DISTINCT cannot be combined with aggregate select items yet".to_string(),
+            ));
+        }
         if has_aggregate && self.columns.len() > 1 {
             return Err(HematiteError::ParseError(
                 "Aggregate select items cannot be combined with other select items yet".to_string(),
