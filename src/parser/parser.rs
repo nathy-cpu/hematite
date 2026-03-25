@@ -338,6 +338,16 @@ impl Parser {
                 let alias = self.parse_optional_alias()?;
                 Ok(TableReference::Table(table_name, alias))
             }
+            Token::LeftParen => {
+                self.consume_token(&Token::LeftParen)?;
+                let subquery = self.parse_select_statement(false)?;
+                self.consume_token(&Token::RightParen)?;
+                let alias = self.parse_required_alias("derived table")?;
+                Ok(TableReference::Derived {
+                    subquery: Box::new(subquery),
+                    alias,
+                })
+            }
             _ => Err(HematiteError::ParseError(format!(
                 "Expected table name, found: {:?}",
                 self.peek_token()?
@@ -977,6 +987,11 @@ impl Parser {
             Ok(Token::Identifier(_)) => Ok(Some(self.parse_identifier()?)),
             _ => Ok(None),
         }
+    }
+
+    fn parse_required_alias(&mut self, subject: &str) -> Result<String> {
+        self.parse_optional_alias()?
+            .ok_or_else(|| HematiteError::ParseError(format!("{} must have an alias", subject)))
     }
 
     fn parse_column_list(&mut self) -> Result<Vec<String>> {

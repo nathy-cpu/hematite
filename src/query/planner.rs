@@ -279,17 +279,13 @@ impl QueryPlanner {
             HematiteError::ParseError("SELECT requires at least one table source".to_string())
         })?;
 
-        if bindings.len() == 1 {
+        if bindings.len() == 1 && !contains_non_table_source(&statement.from) {
             return self.analyze_table_access(&primary.table_name, &statement.where_clause);
         }
 
-        let table = self
-            .catalog
-            .get_table_by_name(&primary.table_name)
-            .ok_or_else(|| {
-                HematiteError::ParseError(format!("Table '{}' not found", primary.table_name))
-            })?;
-        let estimated_rows =
+        let estimated_rows = if contains_non_table_source(&statement.from) {
+            self.estimate_complex_source_rows(&statement.from)
+        } else {
             bindings
                 .iter()
                 .try_fold(1usize, |product, binding| -> Result<usize> {
@@ -303,12 +299,18 @@ impl QueryPlanner {
                             ))
                         })?;
                     Ok(product.saturating_mul(self.estimate_table_rows(table).max(1)))
-                })?;
+                })?
+        };
 
         Ok(SelectAnalysis {
             table_name: primary.table_name.clone(),
             source_count: bindings.len(),
-            table_id: table.id,
+            has_complex_source: contains_non_table_source(&statement.from),
+            table_id: self
+                .catalog
+                .get_table_by_name(&primary.table_name)
+                .map(|table| table.id)
+                .unwrap_or_else(|| crate::catalog::TableId::new(0)),
             rowid_lookup: None,
             estimated_rows,
             usable_indexes: Vec::new(),
@@ -338,6 +340,7 @@ impl QueryPlanner {
         Ok(SelectAnalysis {
             table_name,
             source_count: 1,
+            has_complex_source: false,
             table_id: table.id,
             rowid_lookup,
             estimated_rows: self.estimate_table_rows(table),
@@ -347,7 +350,7 @@ impl QueryPlanner {
     }
 
     fn choose_access_path(&self, analysis: &SelectAnalysis) -> SelectAccessPath {
-        if analysis.source_count > 1 {
+        if analysis.has_complex_source || analysis.source_count > 1 {
             SelectAccessPath::JoinScan
         } else if analysis.rowid_lookup.is_some() {
             SelectAccessPath::RowIdLookup
@@ -511,6 +514,21 @@ impl QueryPlanner {
             .unwrap_or(1000)
     }
 
+    fn estimate_complex_source_rows(&self, from: &TableReference) -> usize {
+        match from {
+            TableReference::Table(table_name, _) => self
+                .catalog
+                .get_table_by_name(table_name)
+                .map(|table| self.estimate_table_rows(table))
+                .unwrap_or(1000),
+            TableReference::Derived { .. } => 1000,
+            TableReference::CrossJoin(left, right)
+            | TableReference::InnerJoin { left, right, .. } => self
+                .estimate_complex_source_rows(left)
+                .saturating_mul(self.estimate_complex_source_rows(right).max(1)),
+        }
+    }
+
     fn estimate_select_cost(&self, analysis: &SelectAnalysis) -> f64 {
         let access_path = self.choose_access_path(analysis);
         let mut cost = self.estimate_locator_cost(analysis, &access_path)
@@ -606,5 +624,18 @@ fn synthetic_table_select(table_name: &str, where_clause: Option<WhereClause>) -
         limit: None,
         offset: None,
         set_operation: None,
+    }
+}
+
+fn contains_non_table_source(from: &TableReference) -> bool {
+    match from {
+        TableReference::Table(_, _) => false,
+        TableReference::Derived { .. } => true,
+        TableReference::CrossJoin(left, right) => {
+            contains_non_table_source(left) || contains_non_table_source(right)
+        }
+        TableReference::InnerJoin { left, right, .. } => {
+            contains_non_table_source(left) || contains_non_table_source(right)
+        }
     }
 }

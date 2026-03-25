@@ -607,6 +607,7 @@ mod optimizer_tests {
         let analysis = SelectAnalysis {
             table_name: "users".to_string(),
             source_count: 1,
+            has_complex_source: false,
             table_id: crate::catalog::TableId::new(1),
             rowid_lookup: None,
             estimated_rows: 1000,

@@ -71,6 +71,10 @@ pub enum AggregateFunction {
 #[derive(Debug, Clone)]
 pub enum TableReference {
     Table(String, Option<String>),
+    Derived {
+        subquery: Box<SelectStatement>,
+        alias: String,
+    },
     CrossJoin(Box<TableReference>, Box<TableReference>),
     InnerJoin {
         left: Box<TableReference>,
@@ -83,6 +87,14 @@ pub enum TableReference {
 pub struct TableBinding {
     pub table_name: String,
     pub alias: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct SourceBinding {
+    source_name: String,
+    alias: Option<String>,
+    columns: Vec<String>,
+    has_hidden_rowid: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -724,6 +736,10 @@ impl SelectStatement {
                 table_name: table_name.clone(),
                 alias: alias.clone(),
             }),
+            TableReference::Derived { alias, .. } => bindings.push(TableBinding {
+                table_name: alias.clone(),
+                alias: None,
+            }),
             TableReference::CrossJoin(left, right) => {
                 Self::collect_table_bindings_into(left, bindings);
                 Self::collect_table_bindings_into(right, bindings);
@@ -735,15 +751,67 @@ impl SelectStatement {
         }
     }
 
-    fn lookup_binding<'a>(
+    fn collect_source_bindings(
+        catalog: &crate::catalog::Schema,
+        from: &TableReference,
+    ) -> Result<Vec<SourceBinding>> {
+        let mut bindings = Vec::new();
+        Self::collect_source_bindings_into(catalog, from, &mut bindings)?;
+        Ok(bindings)
+    }
+
+    fn collect_source_bindings_into(
+        catalog: &crate::catalog::Schema,
+        from: &TableReference,
+        bindings: &mut Vec<SourceBinding>,
+    ) -> Result<()> {
+        match from {
+            TableReference::Table(table_name, alias) => {
+                let table = catalog.get_table_by_name(table_name).ok_or_else(|| {
+                    HematiteError::ParseError(format!("Table '{}' does not exist", table_name))
+                })?;
+                bindings.push(SourceBinding {
+                    source_name: table_name.clone(),
+                    alias: alias.clone(),
+                    columns: table
+                        .columns
+                        .iter()
+                        .map(|column| column.name.clone())
+                        .collect(),
+                    has_hidden_rowid: true,
+                });
+                Ok(())
+            }
+            TableReference::Derived { subquery, alias } => {
+                subquery.validate(catalog)?;
+                bindings.push(SourceBinding {
+                    source_name: alias.clone(),
+                    alias: None,
+                    columns: subquery.projected_column_names(catalog)?,
+                    has_hidden_rowid: false,
+                });
+                Ok(())
+            }
+            TableReference::CrossJoin(left, right) => {
+                Self::collect_source_bindings_into(catalog, left, bindings)?;
+                Self::collect_source_bindings_into(catalog, right, bindings)
+            }
+            TableReference::InnerJoin { left, right, .. } => {
+                Self::collect_source_bindings_into(catalog, left, bindings)?;
+                Self::collect_source_bindings_into(catalog, right, bindings)
+            }
+        }
+    }
+
+    fn lookup_source_bindings<'a>(
         qualifier: Option<&str>,
-        bindings: &'a [TableBinding],
-    ) -> Result<Vec<&'a TableBinding>> {
+        bindings: &'a [SourceBinding],
+    ) -> Result<Vec<&'a SourceBinding>> {
         if let Some(qualifier) = qualifier {
-            let matches: Vec<&TableBinding> = bindings
+            let matches: Vec<&SourceBinding> = bindings
                 .iter()
                 .filter(|binding| {
-                    binding.table_name == qualifier
+                    binding.source_name == qualifier
                         || binding
                             .alias
                             .as_deref()
@@ -762,28 +830,59 @@ impl SelectStatement {
         Ok(bindings.iter().collect())
     }
 
+    fn projected_column_names(&self, catalog: &crate::catalog::Schema) -> Result<Vec<String>> {
+        let mut names = Vec::with_capacity(self.columns.len());
+        for (index, item) in self.columns.iter().enumerate() {
+            if let Some(alias) = self
+                .column_aliases
+                .get(index)
+                .and_then(|alias| alias.clone())
+            {
+                names.push(alias);
+                continue;
+            }
+
+            match item {
+                SelectItem::Wildcard => {
+                    return Err(HematiteError::ParseError(
+                        "Wildcard projections are not supported in derived tables or CTEs"
+                            .to_string(),
+                    ))
+                }
+                SelectItem::Column(name) => {
+                    Self::validate_column_reference(name, catalog, &self.from)?;
+                    names.push(Self::column_reference_name(name).to_string());
+                }
+                SelectItem::CountAll => names.push("COUNT(*)".to_string()),
+                SelectItem::Aggregate { function, column } => {
+                    names.push(format!("{:?}({})", function, column))
+                }
+                SelectItem::Expression(_) => {
+                    return Err(HematiteError::ParseError(
+                        "Expression projections in derived tables or CTEs require aliases"
+                            .to_string(),
+                    ))
+                }
+            }
+        }
+        Ok(names)
+    }
+
     pub(crate) fn validate_column_reference(
         name: &str,
         catalog: &crate::catalog::Schema,
         from: &TableReference,
     ) -> Result<()> {
         let (qualifier, column_name) = Self::split_column_reference(name);
-        let bindings = Self::collect_table_bindings(from);
-        let candidate_bindings = Self::lookup_binding(qualifier, &bindings)?;
+        let bindings = Self::collect_source_bindings(catalog, from)?;
+        let candidate_bindings = Self::lookup_source_bindings(qualifier, &bindings)?;
         let mut matched_tables = Vec::new();
 
         for binding in candidate_bindings {
-            let table = catalog
-                .get_table_by_name(&binding.table_name)
-                .ok_or_else(|| {
-                    HematiteError::ParseError(format!(
-                        "Table '{}' does not exist",
-                        binding.table_name
-                    ))
-                })?;
-            if table.get_column_by_name(column_name).is_some() || Self::is_hidden_rowid(column_name)
+            if binding.columns.iter().any(|column| column == column_name)
+                || (binding.has_hidden_rowid && Self::is_hidden_rowid(column_name))
             {
-                matched_tables.push(binding);
+                matched_tables.push(binding.source_name.clone());
             }
         }
 
@@ -820,19 +919,11 @@ impl SelectStatement {
             }
         }
 
-        let bindings = Self::collect_table_bindings(&self.from);
+        let bindings = Self::collect_source_bindings(catalog, &self.from)?;
         if bindings.is_empty() {
             return Err(HematiteError::ParseError(
                 "SELECT requires at least one table source".to_string(),
             ));
-        }
-        for binding in &bindings {
-            if catalog.get_table_by_name(&binding.table_name).is_none() {
-                return Err(HematiteError::ParseError(format!(
-                    "Table '{}' does not exist",
-                    binding.table_name
-                )));
-            }
         }
         self.validate_table_reference(catalog, &self.from)?;
 
@@ -937,6 +1028,11 @@ impl SelectStatement {
     ) -> Result<()> {
         match from {
             TableReference::Table(_, _) => Ok(()),
+            TableReference::Derived { subquery, .. } => {
+                subquery.validate(catalog)?;
+                let _ = subquery.projected_column_names(catalog)?;
+                Ok(())
+            }
             TableReference::CrossJoin(left, right) => {
                 self.validate_table_reference(catalog, left)?;
                 self.validate_table_reference(catalog, right)

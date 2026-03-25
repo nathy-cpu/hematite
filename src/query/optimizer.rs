@@ -18,16 +18,17 @@ impl QueryOptimizer {
         let mut optimized_plan = plan;
 
         if let Some(analysis) = optimized_plan.select_analysis.clone() {
-            // Sanity-check that the analyzed table still exists in the catalog snapshot used by the planner.
-            let _table = self
-                .catalog
-                .get_table_by_name(&analysis.table_name)
-                .ok_or_else(|| {
-                    crate::error::HematiteError::ParseError(format!(
-                        "Table '{}' not found during optimization",
-                        analysis.table_name
-                    ))
-                })?;
+            if !analysis.has_complex_source {
+                let _table = self
+                    .catalog
+                    .get_table_by_name(&analysis.table_name)
+                    .ok_or_else(|| {
+                        crate::error::HematiteError::ParseError(format!(
+                            "Table '{}' not found during optimization",
+                            analysis.table_name
+                        ))
+                    })?;
+            }
 
             let optimizations = self.optimize_select(&analysis)?;
             let reduction = optimizations.estimated_cost_reduction.clamp(0.0, 0.9);

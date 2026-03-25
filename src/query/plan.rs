@@ -163,6 +163,7 @@ pub struct DropIndexPlanNode {
 pub struct SelectAnalysis {
     pub table_name: String,
     pub source_count: usize,
+    pub has_complex_source: bool,
     pub table_id: crate::catalog::TableId,
     pub rowid_lookup: Option<u64>,
     pub estimated_rows: usize,

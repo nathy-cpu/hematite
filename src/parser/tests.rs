@@ -1584,4 +1584,30 @@ mod parser_tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_parse_select_with_derived_table() -> Result<()> {
+        let mut lexer =
+            Lexer::new("SELECT p.user_id FROM (SELECT user_id FROM posts) AS p;".to_string());
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let statement = parser.parse()?;
+
+        match statement {
+            Statement::Select(select) => match select.from {
+                TableReference::Derived { subquery, alias } => {
+                    assert_eq!(alias, "p");
+                    assert_eq!(subquery.columns.len(), 1);
+                    assert!(matches!(
+                        &subquery.columns[0],
+                        SelectItem::Column(name) if name == "user_id"
+                    ));
+                }
+                _ => panic!("Expected derived table source"),
+            },
+            _ => panic!("Expected SELECT statement"),
+        }
+
+        Ok(())
+    }
 }

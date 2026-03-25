@@ -67,7 +67,8 @@ pub struct SelectExecutor {
 
 #[derive(Debug, Clone)]
 struct ResolvedSource {
-    table: Table,
+    name: String,
+    columns: Vec<String>,
     alias: Option<String>,
     offset: usize,
 }
@@ -95,12 +96,17 @@ impl SelectExecutor {
                 .clone();
             sources.push(ResolvedSource {
                 offset,
-                table,
+                name: table.name.clone(),
+                columns: table
+                    .columns
+                    .iter()
+                    .map(|column| column.name.clone())
+                    .collect(),
                 alias: binding.alias,
             });
             offset += sources
                 .last()
-                .map(|source| source.table.columns.len())
+                .map(|source| source.columns.len())
                 .unwrap_or(0);
         }
 
@@ -117,7 +123,7 @@ impl SelectExecutor {
 
         for source in sources {
             if let Some(qualifier) = qualifier {
-                if qualifier != source.table.name
+                if qualifier != source.name
                     && source
                         .alias
                         .as_deref()
@@ -127,7 +133,11 @@ impl SelectExecutor {
                 }
             }
 
-            if let Some(index) = source.table.get_column_index(column_name) {
+            if let Some(index) = source
+                .columns
+                .iter()
+                .position(|column| column == column_name)
+            {
                 matches.push(source.offset + index);
             }
         }
@@ -468,8 +478,8 @@ impl SelectExecutor {
             match item {
                 SelectItem::Wildcard => {
                     for source in sources {
-                        for col in &source.table.columns {
-                            columns.push(col.name.clone());
+                        for column in &source.columns {
+                            columns.push(column.clone());
                         }
                     }
                 }
@@ -528,18 +538,35 @@ impl SelectExecutor {
                 })?;
                 Ok((
                     vec![ResolvedSource {
-                        table: table.clone(),
+                        name: table.name.clone(),
+                        columns: table
+                            .columns
+                            .iter()
+                            .map(|column| column.name.clone())
+                            .collect(),
                         alias: alias.clone(),
                         offset: 0,
                     }],
                     ctx.engine.read_from_table(table_name)?,
                 ))
             }
+            TableReference::Derived { subquery, alias } => {
+                let result = self.execute_subquery(ctx, subquery)?;
+                Ok((
+                    vec![ResolvedSource {
+                        name: alias.clone(),
+                        columns: result.columns.clone(),
+                        alias: None,
+                        offset: 0,
+                    }],
+                    result.rows,
+                ))
+            }
             TableReference::CrossJoin(left, right) => {
                 let (left_sources, left_rows) = self.materialize_reference(ctx, left)?;
                 let left_width = left_sources
                     .iter()
-                    .map(|source| source.table.columns.len())
+                    .map(|source| source.columns.len())
                     .sum::<usize>();
                 let (right_sources, right_rows) = self.materialize_reference(ctx, right)?;
                 let mut rows = Vec::new();
@@ -559,7 +586,7 @@ impl SelectExecutor {
                 let (left_sources, left_rows) = self.materialize_reference(ctx, left)?;
                 let left_width = left_sources
                     .iter()
-                    .map(|source| source.table.columns.len())
+                    .map(|source| source.columns.len())
                     .sum::<usize>();
                 let (right_sources, right_rows) = self.materialize_reference(ctx, right)?;
                 let shifted_right_sources = self.shifted_sources(right_sources, left_width);
@@ -1325,56 +1352,75 @@ impl QueryExecutor for SelectExecutor {
             return Ok(left_result);
         }
 
-        let sources = self.resolve_sources(ctx)?;
-        let table_name = sources
-            .first()
-            .map(|source| source.table.name.clone())
-            .ok_or_else(|| {
-                HematiteError::ParseError("SELECT requires at least one table source".to_string())
-            })?;
-        let table = &sources[0].table;
-
-        let all_rows = match self.access_path {
-            SelectAccessPath::JoinScan => self.materialize_reference(ctx, &self.statement.from)?.1,
-            SelectAccessPath::RowIdLookup => {
-                let rowid = self.extract_rowid_lookup().ok_or_else(|| {
-                    HematiteError::InternalError(
-                        "Planner selected rowid lookup without a matching predicate".to_string(),
-                    )
-                })?;
-                ctx.engine
-                    .lookup_row_by_rowid(&table_name, rowid)?
-                    .map(|row| vec![row.values])
-                    .unwrap_or_default()
+        let direct_table = match &self.statement.from {
+            TableReference::Table(table_name, _) => {
+                ctx.catalog.get_table_by_name(table_name).cloned()
             }
-            SelectAccessPath::PrimaryKeyLookup => {
-                let primary_key_values =
-                    self.extract_primary_key_lookup(table).ok_or_else(|| {
-                        HematiteError::InternalError(
+            _ => None,
+        };
+
+        let (sources, all_rows) = match (
+            &self.access_path,
+            &self.statement.from,
+            direct_table.as_ref(),
+        ) {
+            (SelectAccessPath::JoinScan, _, _) => {
+                self.materialize_reference(ctx, &self.statement.from)?
+            }
+            (_, TableReference::Derived { .. }, _) => {
+                self.materialize_reference(ctx, &self.statement.from)?
+            }
+            (_, TableReference::CrossJoin(_, _), _) => {
+                self.materialize_reference(ctx, &self.statement.from)?
+            }
+            (_, TableReference::InnerJoin { .. }, _) => {
+                self.materialize_reference(ctx, &self.statement.from)?
+            }
+            (_, TableReference::Table(table_name, _), Some(table)) => {
+                let sources = self.resolve_sources(ctx)?;
+                let rows = match self.access_path {
+                    SelectAccessPath::RowIdLookup => {
+                        let rowid = self.extract_rowid_lookup().ok_or_else(|| {
+                            HematiteError::InternalError(
+                                "Planner selected rowid lookup without a matching predicate"
+                                    .to_string(),
+                            )
+                        })?;
+                        ctx.engine
+                            .lookup_row_by_rowid(&table_name, rowid)?
+                            .map(|row| vec![row.values])
+                            .unwrap_or_default()
+                    }
+                    SelectAccessPath::PrimaryKeyLookup => {
+                        let primary_key_values =
+                            self.extract_primary_key_lookup(table).ok_or_else(|| {
+                                HematiteError::InternalError(
                             "Planner selected primary-key lookup without a matching predicate"
                                 .to_string(),
                         )
-                    })?;
-                let encoded_key = ctx.engine.encode_primary_key(&primary_key_values)?;
-                let mut index_cursor = ctx.engine.open_primary_key_cursor(table)?;
-                let rowid = index_cursor
-                    .seek_key(&encoded_key)
-                    .then(|| index_cursor.current().map(|entry| entry.row_id))
-                    .flatten();
-                match rowid {
-                    Some(rowid) => {
-                        let mut table_cursor = ctx.engine.open_table_cursor(&table_name)?;
-                        table_cursor
-                            .seek_rowid(rowid)
-                            .then(|| table_cursor.current().map(|row| vec![row.values.clone()]))
-                            .flatten()
-                            .unwrap_or_default()
+                            })?;
+                        let encoded_key = ctx.engine.encode_primary_key(&primary_key_values)?;
+                        let mut index_cursor = ctx.engine.open_primary_key_cursor(table)?;
+                        let rowid = index_cursor
+                            .seek_key(&encoded_key)
+                            .then(|| index_cursor.current().map(|entry| entry.row_id))
+                            .flatten();
+                        match rowid {
+                            Some(rowid) => {
+                                let mut table_cursor = ctx.engine.open_table_cursor(&table_name)?;
+                                table_cursor
+                                    .seek_rowid(rowid)
+                                    .then(|| {
+                                        table_cursor.current().map(|row| vec![row.values.clone()])
+                                    })
+                                    .flatten()
+                                    .unwrap_or_default()
+                            }
+                            None => Vec::new(),
+                        }
                     }
-                    None => Vec::new(),
-                }
-            }
-            SelectAccessPath::SecondaryIndexLookup(ref index_name) => {
-                let key_values = self
+                    SelectAccessPath::SecondaryIndexLookup(ref index_name) => {
+                        let key_values = self
                     .extract_secondary_index_lookup(table, index_name)
                     .ok_or_else(|| {
                         HematiteError::InternalError(format!(
@@ -1382,33 +1428,44 @@ impl QueryExecutor for SelectExecutor {
                             index_name
                         ))
                     })?;
-                let encoded_key = ctx.engine.encode_secondary_index_key(&key_values)?;
-                let mut index_cursor = ctx.engine.open_secondary_index_cursor(table, index_name)?;
-                let mut table_cursor = ctx.engine.open_table_cursor(&table_name)?;
-                let mut rows = Vec::new();
+                        let encoded_key = ctx.engine.encode_secondary_index_key(&key_values)?;
+                        let mut index_cursor =
+                            ctx.engine.open_secondary_index_cursor(table, index_name)?;
+                        let mut table_cursor = ctx.engine.open_table_cursor(&table_name)?;
+                        let mut rows = Vec::new();
 
-                if index_cursor.seek_key(&encoded_key) {
-                    loop {
-                        let Some(entry) = index_cursor.current() else {
-                            break;
-                        };
-                        if entry.key.as_slice() != encoded_key.as_slice() {
-                            break;
-                        }
-                        if table_cursor.seek_rowid(entry.row_id) {
-                            if let Some(row) = table_cursor.current() {
-                                rows.push(row.values.clone());
+                        if index_cursor.seek_key(&encoded_key) {
+                            loop {
+                                let Some(entry) = index_cursor.current() else {
+                                    break;
+                                };
+                                if entry.key.as_slice() != encoded_key.as_slice() {
+                                    break;
+                                }
+                                if table_cursor.seek_rowid(entry.row_id) {
+                                    if let Some(row) = table_cursor.current() {
+                                        rows.push(row.values.clone());
+                                    }
+                                }
+                                if !index_cursor.next() {
+                                    break;
+                                }
                             }
                         }
-                        if !index_cursor.next() {
-                            break;
-                        }
-                    }
-                }
 
-                rows
+                        rows
+                    }
+                    SelectAccessPath::FullTableScan => ctx.engine.read_from_table(table_name)?,
+                    SelectAccessPath::JoinScan => unreachable!(),
+                };
+                (sources, rows)
             }
-            SelectAccessPath::FullTableScan => ctx.engine.read_from_table(&table_name)?,
+            _ => {
+                return Err(HematiteError::InternalError(
+                    "Planner selected a direct table access path for a non-table source"
+                        .to_string(),
+                ))
+            }
         };
 
         let mut filtered_rows = Vec::new();
