@@ -247,6 +247,7 @@ pub struct DeleteStatement {
 pub struct CreateStatement {
     pub table: String,
     pub columns: Vec<ColumnDefinition>,
+    pub constraints: Vec<TableConstraint>,
 }
 
 #[derive(Debug, Clone)]
@@ -277,6 +278,7 @@ pub struct AlterStatement {
 #[derive(Debug, Clone)]
 pub enum AlterOperation {
     RenameTo(String),
+    RenameColumn { old_name: String, new_name: String },
     AddColumn(ColumnDefinition),
 }
 
@@ -288,6 +290,28 @@ pub struct ColumnDefinition {
     pub primary_key: bool,
     pub unique: bool,
     pub default_value: Option<Value>,
+    pub check_constraint: Option<CheckConstraintDefinition>,
+    pub references: Option<ForeignKeyDefinition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckConstraintDefinition {
+    pub name: Option<String>,
+    pub expression_sql: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignKeyDefinition {
+    pub name: Option<String>,
+    pub column: String,
+    pub referenced_table: String,
+    pub referenced_column: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TableConstraint {
+    Check(CheckConstraintDefinition),
+    ForeignKey(ForeignKeyDefinition),
 }
 
 impl Statement {
@@ -1446,6 +1470,71 @@ impl CreateStatement {
             ));
         }
 
+        for column in &self.columns {
+            if let Some(foreign_key) = &column.references {
+                self.validate_foreign_key(catalog, foreign_key)?;
+            }
+        }
+        for constraint in &self.constraints {
+            match constraint {
+                TableConstraint::Check(_) => {}
+                TableConstraint::ForeignKey(foreign_key) => {
+                    self.validate_foreign_key(catalog, foreign_key)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_foreign_key(
+        &self,
+        catalog: &crate::catalog::Schema,
+        foreign_key: &ForeignKeyDefinition,
+    ) -> Result<()> {
+        if !self
+            .columns
+            .iter()
+            .any(|column| column.name == foreign_key.column)
+        {
+            return Err(HematiteError::ParseError(format!(
+                "Foreign key column '{}' does not exist in table '{}'",
+                foreign_key.column, self.table
+            )));
+        }
+
+        let referenced_table = catalog
+            .get_table_by_name(&foreign_key.referenced_table)
+            .ok_or_else(|| {
+                HematiteError::ParseError(format!(
+                    "Referenced table '{}' does not exist",
+                    foreign_key.referenced_table
+                ))
+            })?;
+        let referenced_column_index = referenced_table
+            .get_column_index(&foreign_key.referenced_column)
+            .ok_or_else(|| {
+                HematiteError::ParseError(format!(
+                    "Referenced column '{}.{}' does not exist",
+                    foreign_key.referenced_table, foreign_key.referenced_column
+                ))
+            })?;
+        let references_primary_key = referenced_table
+            .primary_key_columns
+            .contains(&referenced_column_index);
+        let references_unique_index = referenced_table.secondary_indexes.iter().any(|index| {
+            index.unique
+                && index.column_indices.len() == 1
+                && index.column_indices[0] == referenced_column_index
+        });
+
+        if !references_primary_key && !references_unique_index {
+            return Err(HematiteError::ParseError(format!(
+                "Foreign key '{}.{}' must reference a PRIMARY KEY or single-column UNIQUE index",
+                foreign_key.referenced_table, foreign_key.referenced_column
+            )));
+        }
+
         Ok(())
     }
 }
@@ -1496,6 +1585,28 @@ impl AlterStatement {
                     )));
                 }
             }
+            AlterOperation::RenameColumn { old_name, new_name } => {
+                let table = catalog.get_table_by_name(&self.table).ok_or_else(|| {
+                    HematiteError::ParseError(format!("Table '{}' does not exist", self.table))
+                })?;
+                if old_name == new_name {
+                    return Err(HematiteError::ParseError(
+                        "ALTER TABLE RENAME COLUMN requires a different column name".to_string(),
+                    ));
+                }
+                if table.get_column_by_name(old_name).is_none() {
+                    return Err(HematiteError::ParseError(format!(
+                        "Column '{}' does not exist in table '{}'",
+                        old_name, self.table
+                    )));
+                }
+                if table.get_column_by_name(new_name).is_some() {
+                    return Err(HematiteError::ParseError(format!(
+                        "Column '{}' already exists in table '{}'",
+                        new_name, self.table
+                    )));
+                }
+            }
             AlterOperation::AddColumn(column) => {
                 let table = catalog.get_table_by_name(&self.table).ok_or_else(|| {
                     HematiteError::ParseError(format!("Table '{}' does not exist", self.table))
@@ -1541,6 +1652,163 @@ impl AlterStatement {
         }
 
         Ok(())
+    }
+}
+
+impl Condition {
+    pub fn to_sql(&self) -> String {
+        match self {
+            Condition::Comparison {
+                left,
+                operator,
+                right,
+            } => format!("{} {} {}", left.to_sql(), operator.to_sql(), right.to_sql()),
+            Condition::InList {
+                expr,
+                values,
+                is_not,
+            } => format!(
+                "{} {}IN ({})",
+                expr.to_sql(),
+                if *is_not { "NOT " } else { "" },
+                values
+                    .iter()
+                    .map(Expression::to_sql)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Condition::InSubquery { expr, is_not, .. } => format!(
+                "{} {}IN (<subquery>)",
+                expr.to_sql(),
+                if *is_not { "NOT " } else { "" }
+            ),
+            Condition::Between {
+                expr,
+                lower,
+                upper,
+                is_not,
+            } => format!(
+                "{} {}BETWEEN {} AND {}",
+                expr.to_sql(),
+                if *is_not { "NOT " } else { "" },
+                lower.to_sql(),
+                upper.to_sql()
+            ),
+            Condition::Like {
+                expr,
+                pattern,
+                is_not,
+            } => format!(
+                "{} {}LIKE {}",
+                expr.to_sql(),
+                if *is_not { "NOT " } else { "" },
+                pattern.to_sql()
+            ),
+            Condition::Exists { is_not, .. } => {
+                format!("{}EXISTS (<subquery>)", if *is_not { "NOT " } else { "" })
+            }
+            Condition::NullCheck { expr, is_not } => format!(
+                "{} IS {}NULL",
+                expr.to_sql(),
+                if *is_not { "NOT " } else { "" }
+            ),
+            Condition::Not(inner) => format!("NOT ({})", inner.to_sql()),
+            Condition::Logical {
+                left,
+                operator,
+                right,
+            } => format!(
+                "({}) {} ({})",
+                left.to_sql(),
+                operator.to_sql(),
+                right.to_sql()
+            ),
+        }
+    }
+}
+
+impl Expression {
+    pub fn to_sql(&self) -> String {
+        match self {
+            Expression::Column(name) => name.clone(),
+            Expression::Literal(value) => match value {
+                Value::Integer(i) => i.to_string(),
+                Value::Text(s) => format!("'{}'", s.replace('\'', "''")),
+                Value::Boolean(true) => "TRUE".to_string(),
+                Value::Boolean(false) => "FALSE".to_string(),
+                Value::Float(f) => f.to_string(),
+                Value::Null => "NULL".to_string(),
+            },
+            Expression::Parameter(index) => format!("?{}", index + 1),
+            Expression::AggregateCall { function, target } => {
+                format!("{}({})", function.to_sql(), target.to_sql())
+            }
+            Expression::UnaryMinus(expr) => format!("-{}", expr.to_sql()),
+            Expression::Binary {
+                left,
+                operator,
+                right,
+            } => format!(
+                "({} {} {})",
+                left.to_sql(),
+                operator.to_sql(),
+                right.to_sql()
+            ),
+        }
+    }
+}
+
+impl AggregateFunction {
+    fn to_sql(self) -> &'static str {
+        match self {
+            AggregateFunction::Count => "COUNT",
+            AggregateFunction::Sum => "SUM",
+            AggregateFunction::Avg => "AVG",
+            AggregateFunction::Min => "MIN",
+            AggregateFunction::Max => "MAX",
+        }
+    }
+}
+
+impl AggregateTarget {
+    fn to_sql(&self) -> String {
+        match self {
+            AggregateTarget::All => "*".to_string(),
+            AggregateTarget::Column(column) => column.clone(),
+        }
+    }
+}
+
+impl ComparisonOperator {
+    fn to_sql(&self) -> &'static str {
+        match self {
+            ComparisonOperator::Equal => "=",
+            ComparisonOperator::NotEqual => "!=",
+            ComparisonOperator::LessThan => "<",
+            ComparisonOperator::LessThanOrEqual => "<=",
+            ComparisonOperator::GreaterThan => ">",
+            ComparisonOperator::GreaterThanOrEqual => ">=",
+        }
+    }
+}
+
+impl LogicalOperator {
+    fn to_sql(&self) -> &'static str {
+        match self {
+            LogicalOperator::And => "AND",
+            LogicalOperator::Or => "OR",
+        }
+    }
+}
+
+impl ArithmeticOperator {
+    fn to_sql(&self) -> &'static str {
+        match self {
+            ArithmeticOperator::Add => "+",
+            ArithmeticOperator::Subtract => "-",
+            ArithmeticOperator::Multiply => "*",
+            ArithmeticOperator::Divide => "/",
+        }
     }
 }
 

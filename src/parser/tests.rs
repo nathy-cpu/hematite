@@ -1216,7 +1216,43 @@ mod parser_tests {
             create.columns[3].default_value,
             Some(crate::catalog::Value::Text("x".to_string()))
         );
+        assert!(create.constraints.is_empty());
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_create_with_check_and_foreign_key_constraints() -> Result<()> {
+        let create = parse_create(
+            "CREATE TABLE posts (id INT PRIMARY KEY, user_id INT REFERENCES users(id), title TEXT CHECK (title != ''), CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id), CHECK (id > 0));",
+        )?;
+        assert_eq!(create.columns.len(), 3);
+        assert_eq!(create.constraints.len(), 2);
+        assert_eq!(
+            create.columns[1].references,
+            Some(ForeignKeyDefinition {
+                name: None,
+                column: "user_id".to_string(),
+                referenced_table: "users".to_string(),
+                referenced_column: "id".to_string(),
+            })
+        );
+        assert_eq!(
+            create.columns[2].check_constraint,
+            Some(CheckConstraintDefinition {
+                name: None,
+                expression_sql: "title != ''".to_string(),
+            })
+        );
+        assert!(matches!(
+            &create.constraints[0],
+            TableConstraint::ForeignKey(ForeignKeyDefinition { name: Some(name), column, referenced_table, referenced_column })
+                if name == "fk_user" && column == "user_id" && referenced_table == "users" && referenced_column == "id"
+        ));
+        assert!(matches!(
+            &create.constraints[1],
+            TableConstraint::Check(CheckConstraintDefinition { expression_sql, .. }) if expression_sql == "id > 0"
+        ));
         Ok(())
     }
 
@@ -1233,6 +1269,18 @@ mod parser_tests {
     }
 
     #[test]
+    fn test_parse_alter_table_rename_column() -> Result<()> {
+        let alter = parse_alter("ALTER TABLE users RENAME COLUMN name TO full_name;")?;
+        assert_eq!(alter.table, "users");
+        assert!(matches!(
+            alter.operation,
+            AlterOperation::RenameColumn { ref old_name, ref new_name }
+                if old_name == "name" && new_name == "full_name"
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_alter_table_add_column() -> Result<()> {
         let alter = parse_alter("ALTER TABLE users ADD COLUMN active BOOL NOT NULL DEFAULT TRUE;")?;
         assert_eq!(alter.table, "users");
@@ -1245,6 +1293,8 @@ mod parser_tests {
                 primary_key: false,
                 unique: false,
                 default_value: Some(crate::catalog::Value::Boolean(true)),
+                check_constraint: None,
+                references: None,
             }) if name == "active"
         ));
 

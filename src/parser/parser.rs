@@ -914,12 +914,16 @@ impl Parser {
 
                 self.consume_token(&Token::LeftParen)?;
 
-                let columns = self.parse_column_definitions()?;
+                let (columns, constraints) = self.parse_table_definition_items()?;
 
                 self.consume_token(&Token::RightParen)?;
                 self.consume_token(&Token::Semicolon)?;
 
-                Ok(Statement::Create(CreateStatement { table, columns }))
+                Ok(Statement::Create(CreateStatement {
+                    table,
+                    columns,
+                    constraints,
+                }))
             }
             Token::Index => {
                 self.consume_token(&Token::Index)?;
@@ -980,13 +984,19 @@ impl Parser {
         match self.peek_token()? {
             Token::Rename => {
                 self.consume_token(&Token::Rename)?;
-                self.consume_token(&Token::To)?;
-                let new_name = self.parse_identifier()?;
+                let operation = if matches!(self.peek_token(), Ok(Token::Column)) {
+                    self.consume_token(&Token::Column)?;
+                    let old_name = self.parse_identifier()?;
+                    self.consume_token(&Token::To)?;
+                    let new_name = self.parse_identifier()?;
+                    AlterOperation::RenameColumn { old_name, new_name }
+                } else {
+                    self.consume_token(&Token::To)?;
+                    let new_name = self.parse_identifier()?;
+                    AlterOperation::RenameTo(new_name)
+                };
                 self.consume_token(&Token::Semicolon)?;
-                Ok(Statement::Alter(AlterStatement {
-                    table,
-                    operation: AlterOperation::RenameTo(new_name),
-                }))
+                Ok(Statement::Alter(AlterStatement { table, operation }))
             }
             Token::Add => {
                 self.consume_token(&Token::Add)?;
@@ -1129,11 +1139,25 @@ impl Parser {
         Ok(value_lists)
     }
 
-    fn parse_column_definitions(&mut self) -> Result<Vec<ColumnDefinition>> {
+    fn parse_table_definition_items(
+        &mut self,
+    ) -> Result<(Vec<ColumnDefinition>, Vec<TableConstraint>)> {
         let mut columns = Vec::new();
+        let mut constraints = Vec::new();
 
         loop {
-            columns.push(self.parse_column_definition()?);
+            match self.peek_token()? {
+                Token::Constraint | Token::Check | Token::Foreign => {
+                    constraints.push(self.parse_table_constraint()?);
+                }
+                Token::Identifier(_) => columns.push(self.parse_column_definition()?),
+                token => {
+                    return Err(HematiteError::ParseError(format!(
+                        "Expected column definition or table constraint, found: {:?}",
+                        token
+                    )))
+                }
+            }
 
             if self.peek_token()? == Token::Comma {
                 self.consume_token(&Token::Comma)?;
@@ -1143,7 +1167,7 @@ impl Parser {
             }
         }
 
-        Ok(columns)
+        Ok((columns, constraints))
     }
 
     fn parse_column_definition(&mut self) -> Result<ColumnDefinition> {
@@ -1155,6 +1179,8 @@ impl Parser {
         let mut primary_key = false;
         let mut unique = false;
         let mut default_value = None;
+        let mut check_constraint = None;
+        let mut references = None;
 
         while let Ok(token) = self.peek_token() {
             match token {
@@ -1179,6 +1205,18 @@ impl Parser {
                     self.consume_token(&Token::Default)?;
                     default_value = Some(self.parse_default_value()?);
                 }
+                Token::Constraint | Token::Check => {
+                    let constraint_name = self.parse_optional_constraint_name()?;
+                    self.consume_token(&Token::Check)?;
+                    let condition = self.parse_parenthesized_condition()?;
+                    check_constraint = Some(CheckConstraintDefinition {
+                        name: constraint_name,
+                        expression_sql: condition.to_sql(),
+                    });
+                }
+                Token::References => {
+                    references = Some(self.parse_column_foreign_key(None, &name)?);
+                }
                 _ => break,
             }
         }
@@ -1190,6 +1228,89 @@ impl Parser {
             primary_key,
             unique,
             default_value,
+            check_constraint,
+            references,
+        })
+    }
+
+    fn parse_table_constraint(&mut self) -> Result<TableConstraint> {
+        let constraint_name = self.parse_optional_constraint_name()?;
+        match self.peek_token()? {
+            Token::Check => {
+                self.consume_token(&Token::Check)?;
+                let condition = self.parse_parenthesized_condition()?;
+                Ok(TableConstraint::Check(CheckConstraintDefinition {
+                    name: constraint_name,
+                    expression_sql: condition.to_sql(),
+                }))
+            }
+            Token::Foreign => Ok(TableConstraint::ForeignKey(
+                self.parse_table_foreign_key(constraint_name)?,
+            )),
+            token => Err(HematiteError::ParseError(format!(
+                "Expected CHECK or FOREIGN KEY constraint, found: {:?}",
+                token
+            ))),
+        }
+    }
+
+    fn parse_optional_constraint_name(&mut self) -> Result<Option<String>> {
+        if matches!(self.peek_token(), Ok(Token::Constraint)) {
+            self.consume_token(&Token::Constraint)?;
+            return Ok(Some(self.parse_identifier()?));
+        }
+        Ok(None)
+    }
+
+    fn parse_parenthesized_condition(&mut self) -> Result<Condition> {
+        self.consume_token(&Token::LeftParen)?;
+        let condition = self.parse_or_condition()?;
+        self.consume_token(&Token::RightParen)?;
+        Ok(condition)
+    }
+
+    fn parse_table_foreign_key(&mut self, name: Option<String>) -> Result<ForeignKeyDefinition> {
+        self.consume_token(&Token::Foreign)?;
+        self.consume_token(&Token::Key)?;
+        self.consume_token(&Token::LeftParen)?;
+        let column = self.parse_identifier()?;
+        if matches!(self.peek_token(), Ok(Token::Comma)) {
+            return Err(HematiteError::ParseError(
+                "Multi-column foreign keys are not supported".to_string(),
+            ));
+        }
+        self.consume_token(&Token::RightParen)?;
+        self.parse_foreign_key_reference(name, column)
+    }
+
+    fn parse_column_foreign_key(
+        &mut self,
+        name: Option<String>,
+        column: &str,
+    ) -> Result<ForeignKeyDefinition> {
+        self.parse_foreign_key_reference(name, column.to_string())
+    }
+
+    fn parse_foreign_key_reference(
+        &mut self,
+        name: Option<String>,
+        column: String,
+    ) -> Result<ForeignKeyDefinition> {
+        self.consume_token(&Token::References)?;
+        let referenced_table = self.parse_identifier()?;
+        self.consume_token(&Token::LeftParen)?;
+        let referenced_column = self.parse_identifier()?;
+        if matches!(self.peek_token(), Ok(Token::Comma)) {
+            return Err(HematiteError::ParseError(
+                "Multi-column foreign keys are not supported".to_string(),
+            ));
+        }
+        self.consume_token(&Token::RightParen)?;
+        Ok(ForeignKeyDefinition {
+            name,
+            column,
+            referenced_table,
+            referenced_column,
         })
     }
 

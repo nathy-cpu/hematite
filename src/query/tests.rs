@@ -565,7 +565,10 @@ mod executor_tests {
                 primary_key: true,
                 unique: false,
                 default_value: None,
+                check_constraint: None,
+                references: None,
             }],
+            constraints: Vec::new(),
         };
 
         let mut executor = CreateExecutor::new(statement);
@@ -1182,7 +1185,10 @@ mod planner_tests {
                 primary_key: true,
                 unique: false,
                 default_value: None,
+                check_constraint: None,
+                references: None,
             }],
+            constraints: Vec::new(),
         };
 
         let plan = planner.plan(Statement::Create(statement))?;

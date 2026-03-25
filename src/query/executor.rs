@@ -2293,6 +2293,11 @@ impl QueryExecutor for AlterExecutor {
                 ctx.engine
                     .rename_table_runtime_metadata(&self.statement.table, new_name)?;
             }
+            AlterOperation::RenameColumn { .. } => {
+                return Err(HematiteError::ParseError(
+                    "ALTER TABLE RENAME COLUMN is not implemented yet".to_string(),
+                ));
+            }
             AlterOperation::AddColumn(column_def) => {
                 let table = ctx
                     .catalog
