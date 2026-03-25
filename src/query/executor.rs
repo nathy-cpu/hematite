@@ -1769,6 +1769,7 @@ impl QueryExecutor for InsertExecutor {
 
         for value_row in &self.statement.values {
             let row_values = self.build_row(&table, value_row)?;
+            validate_check_constraints(ctx, &table, &row_values)?;
             self.ensure_primary_key_is_unique(ctx, &table, &[], &row_values)?;
             self.ensure_unique_secondary_indexes_are_unique(ctx, &table, &row_values)?;
             write_stored_row(
@@ -1938,6 +1939,7 @@ impl QueryExecutor for UpdateExecutor {
             table
                 .validate_row(&updated_row)
                 .map_err(|err| HematiteError::ParseError(err.to_string()))?;
+            validate_check_constraints(ctx, &table, &updated_row)?;
             updated_rows_data.push(StoredRow {
                 row_id: stored_row.row_id,
                 values: updated_row,
@@ -2538,6 +2540,40 @@ fn coerce_column_value(column: &Column, value: Value) -> Result<Value> {
             column.name, column.data_type, value
         ))),
     }
+}
+
+fn validate_check_constraints(
+    ctx: &mut ExecutionContext<'_>,
+    table: &Table,
+    row: &[Value],
+) -> Result<()> {
+    if table.check_constraints.is_empty() {
+        return Ok(());
+    }
+
+    let constraint_executor = SelectExecutor::new(
+        locator_select_statement(&table.name, None),
+        SelectAccessPath::FullTableScan,
+    );
+    let sources = constraint_executor.resolve_sources(ctx)?;
+
+    for constraint in &table.check_constraints {
+        let condition =
+            crate::parser::parser::parse_condition_fragment(&constraint.expression_sql)?;
+        let result = constraint_executor.evaluate_condition(ctx, &sources, &condition, row)?;
+        if result == Some(false) {
+            let constraint_name = constraint
+                .name
+                .as_deref()
+                .unwrap_or(constraint.expression_sql.as_str());
+            return Err(HematiteError::ParseError(format!(
+                "CHECK constraint '{}' failed for table '{}'",
+                constraint_name, table.name
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 fn remove_stored_row(

@@ -20,7 +20,7 @@
 
 use crate::error::{HematiteError, Result};
 use crate::parser::ast::*;
-use crate::parser::lexer::Token;
+use crate::parser::lexer::{Lexer, Token};
 
 pub struct Parser {
     tokens: Vec<Token>,
@@ -1406,4 +1406,17 @@ impl Parser {
             )))
         }
     }
+}
+
+pub fn parse_condition_fragment(sql: &str) -> Result<Condition> {
+    let mut lexer = Lexer::new(sql.to_string());
+    lexer.tokenize()?;
+    let mut parser = Parser::new(lexer.get_tokens().to_vec());
+    let condition = parser.parse_or_condition()?;
+    if parser.position != parser.tokens.len() {
+        return Err(HematiteError::ParseError(
+            "Unexpected trailing tokens in CHECK constraint".to_string(),
+        ));
+    }
+    Ok(condition)
 }

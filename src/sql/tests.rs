@@ -223,6 +223,39 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_check_constraint_rejects_invalid_insert() -> Result<()> {
+        let db = TestDbFile::new("_test_check_constraint_rejects_invalid_insert");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute(
+            "CREATE TABLE test (id INTEGER PRIMARY KEY, score INTEGER, CHECK (score >= 0));",
+        )?;
+
+        let result = conn.execute("INSERT INTO test (id, score) VALUES (1, -1);");
+        assert!(result.is_err());
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_check_constraint_rejects_invalid_update() -> Result<()> {
+        let db = TestDbFile::new("_test_check_constraint_rejects_invalid_update");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute(
+            "CREATE TABLE test (id INTEGER PRIMARY KEY, score INTEGER, CHECK (score >= 0));",
+        )?;
+        conn.execute("INSERT INTO test (id, score) VALUES (1, 1);")?;
+
+        let result = conn.execute("UPDATE test SET score = -1 WHERE id = 1;");
+        assert!(result.is_err());
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_alter_table_add_column_preserves_existing_rows() -> Result<()> {
         let db = TestDbFile::new("_test_alter_table_add_column_preserves_existing_rows");
         let mut conn = Connection::new(db.path())?;
