@@ -74,6 +74,14 @@ impl Connection {
         })
     }
 
+    fn parse_statement(sql: &str) -> Result<crate::parser::ast::Statement> {
+        let mut lexer = Lexer::new(sql.to_string());
+        lexer.tokenize()?;
+
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        parser.parse()
+    }
+
     pub(crate) fn execute_statement(
         &mut self,
         statement: crate::parser::ast::Statement,
@@ -118,6 +126,54 @@ impl Connection {
         Ok(result)
     }
 
+    fn begin_implicit_mutation(
+        &mut self,
+        explicit_transaction: bool,
+    ) -> Result<Option<crate::catalog::catalog::CatalogSnapshot>> {
+        if explicit_transaction {
+            return Ok(None);
+        }
+
+        let mut catalog_guard = self.lock_catalog()?;
+        let snapshot = catalog_guard.snapshot();
+        catalog_guard.begin_transaction()?;
+        Ok(Some(snapshot))
+    }
+
+    fn restore_implicit_mutation(
+        &mut self,
+        snapshot: Option<crate::catalog::catalog::CatalogSnapshot>,
+    ) -> Result<()> {
+        if let Some(snapshot) = snapshot {
+            let mut catalog_guard = self.lock_catalog()?;
+            let _ = catalog_guard.rollback_transaction();
+            catalog_guard.restore_snapshot(snapshot);
+        }
+        Ok(())
+    }
+
+    fn commit_implicit_mutation(
+        &mut self,
+        explicit_transaction: bool,
+        snapshot: Option<crate::catalog::catalog::CatalogSnapshot>,
+    ) -> Result<()> {
+        if explicit_transaction {
+            return Ok(());
+        }
+
+        let mut catalog_guard = self.lock_catalog()?;
+        match catalog_guard.commit_transaction() {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                let _ = catalog_guard.rollback_transaction();
+                if let Some(snapshot) = snapshot {
+                    catalog_guard.restore_snapshot(snapshot);
+                }
+                Err(err)
+            }
+        }
+    }
+
     fn execute_mutating_statement(
         &mut self,
         statement: crate::parser::ast::Statement,
@@ -125,15 +181,7 @@ impl Connection {
         let explicit_transaction = self.transaction.is_some();
         let persists_schema = statement.mutates_schema();
         let (schema, mut executor) = self.plan_executor(statement)?;
-
-        let mut implicit_snapshot = if explicit_transaction {
-            None
-        } else {
-            let mut catalog_guard = self.lock_catalog()?;
-            let snapshot = catalog_guard.snapshot();
-            catalog_guard.begin_transaction()?;
-            Some(snapshot)
-        };
+        let mut implicit_snapshot = self.begin_implicit_mutation(explicit_transaction)?;
 
         let execution_result = {
             let mut catalog_guard = self.lock_catalog()?;
@@ -149,30 +197,22 @@ impl Connection {
                 if persists_schema {
                     let mut catalog_guard = self.lock_catalog()?;
                     if let Err(err) = catalog_guard.replace_schema(updated_schema) {
-                        Self::rollback_implicit_snapshot(
-                            &mut catalog_guard,
-                            implicit_snapshot.take(),
-                        );
+                        drop(catalog_guard);
+                        self.restore_implicit_mutation(implicit_snapshot.take())?;
                         return Err(err);
                     }
                 }
 
-                if !explicit_transaction {
-                    let mut catalog_guard = self.lock_catalog()?;
-                    if let Err(err) = catalog_guard.commit_transaction() {
-                        Self::rollback_implicit_snapshot(
-                            &mut catalog_guard,
-                            implicit_snapshot.take(),
-                        );
-                        return Err(err);
-                    }
+                if let Err(err) =
+                    self.commit_implicit_mutation(explicit_transaction, implicit_snapshot.take())
+                {
+                    return Err(err);
                 }
 
                 Ok(result)
             }
             Err(err) => {
-                let mut catalog_guard = self.lock_catalog()?;
-                Self::rollback_implicit_snapshot(&mut catalog_guard, implicit_snapshot.take());
+                self.restore_implicit_mutation(implicit_snapshot.take())?;
                 Err(err)
             }
         }
@@ -194,16 +234,6 @@ impl Connection {
         let table_row_counts =
             catalog_guard.with_engine(|engine| Ok(Self::collect_table_row_counts(engine)))?;
         Ok((schema, table_row_counts))
-    }
-
-    fn rollback_implicit_snapshot(
-        catalog_guard: &mut Catalog,
-        snapshot: Option<crate::catalog::catalog::CatalogSnapshot>,
-    ) {
-        if let Some(snapshot) = snapshot {
-            let _ = catalog_guard.rollback_transaction();
-            catalog_guard.restore_snapshot(snapshot);
-        }
     }
 
     fn collect_table_row_counts(engine: &CatalogEngine) -> HashMap<String, usize> {
@@ -240,12 +270,7 @@ impl Connection {
     }
 
     pub fn execute(&mut self, sql: &str) -> Result<QueryResult> {
-        let mut lexer = Lexer::new(sql.to_string());
-        lexer.tokenize()?;
-
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-        self.execute_statement(statement)
+        self.execute_statement(Self::parse_statement(sql)?)
     }
 
     pub fn execute_query(&mut self, sql: &str) -> Result<QueryResult> {
@@ -253,11 +278,7 @@ impl Connection {
     }
 
     pub fn prepare(&self, sql: &str) -> Result<PreparedStatement> {
-        let mut lexer = Lexer::new(sql.to_string());
-        lexer.tokenize()?;
-
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
+        let statement = Self::parse_statement(sql)?;
         let parameter_count = statement.parameter_count();
 
         Ok(PreparedStatement {
@@ -285,7 +306,6 @@ impl Connection {
         let snapshot = catalog_guard.snapshot();
         catalog_guard.begin_transaction()?;
         drop(catalog_guard);
-
         self.transaction = Some(ConnectionTransaction { snapshot });
         Ok(())
     }
@@ -432,10 +452,14 @@ impl Default for Database {
 }
 
 impl Connection {
+    fn take_active_transaction(&mut self, action: &str) -> Result<ConnectionTransaction> {
+        self.transaction.take().ok_or_else(|| {
+            HematiteError::InternalError(format!("No active transaction to {}", action))
+        })
+    }
+
     fn commit_active_transaction(&mut self) -> Result<()> {
-        let state = self.transaction.take().ok_or_else(|| {
-            HematiteError::InternalError("No active transaction to commit".to_string())
-        })?;
+        let state = self.take_active_transaction("commit")?;
         let mut catalog_guard = self.lock_catalog()?;
         match catalog_guard.commit_transaction() {
             Ok(()) => Ok(()),
@@ -448,9 +472,7 @@ impl Connection {
     }
 
     fn rollback_active_transaction(&mut self) -> Result<()> {
-        let state = self.transaction.take().ok_or_else(|| {
-            HematiteError::InternalError("No active transaction to roll back".to_string())
-        })?;
+        let state = self.take_active_transaction("roll back")?;
         let mut catalog_guard = self.lock_catalog()?;
         catalog_guard.rollback_transaction()?;
         catalog_guard.restore_snapshot(state.snapshot);
