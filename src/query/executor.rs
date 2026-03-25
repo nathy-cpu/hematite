@@ -81,6 +81,18 @@ impl ResolvedSource {
 }
 
 #[derive(Debug, Clone)]
+enum NamedSourceKind {
+    BaseTable,
+    Cte(SelectStatement),
+}
+
+#[derive(Debug, Clone)]
+struct NamedSource {
+    source: ResolvedSource,
+    kind: NamedSourceKind,
+}
+
+#[derive(Debug, Clone)]
 struct GroupedRow {
     projected: Vec<Value>,
     source_rows: Vec<Vec<Value>>,
@@ -525,18 +537,34 @@ impl SelectExecutor {
         alias: Option<String>,
         offset: usize,
     ) -> Result<ResolvedSource> {
+        Ok(self.named_source(ctx, table_name, alias, offset)?.source)
+    }
+
+    fn named_source(
+        &self,
+        ctx: &ExecutionContext,
+        table_name: &str,
+        alias: Option<String>,
+        offset: usize,
+    ) -> Result<NamedSource> {
         if let Some(cte) = self.statement.lookup_cte(table_name) {
-            Ok(ResolvedSource {
-                name: table_name.to_string(),
-                columns: self.query_output_columns(&cte.query),
-                alias,
-                offset,
-            })
-        } else {
-            let table = ctx.catalog.get_table_by_name(table_name).ok_or_else(|| {
-                HematiteError::ParseError(format!("Table '{}' not found", table_name))
-            })?;
-            Ok(ResolvedSource {
+            return Ok(NamedSource {
+                source: ResolvedSource {
+                    name: table_name.to_string(),
+                    columns: self.query_output_columns(&cte.query),
+                    alias,
+                    offset,
+                },
+                kind: NamedSourceKind::Cte((*cte.query).clone()),
+            });
+        }
+
+        let table = ctx
+            .catalog
+            .get_table_by_name(table_name)
+            .ok_or_else(|| table_not_found_parse_error(table_name))?;
+        Ok(NamedSource {
+            source: ResolvedSource {
                 name: table.name.clone(),
                 columns: table
                     .columns
@@ -545,8 +573,9 @@ impl SelectExecutor {
                     .collect(),
                 alias,
                 offset,
-            })
-        }
+            },
+            kind: NamedSourceKind::BaseTable,
+        })
     }
 
     fn materialize_named_source(
@@ -555,13 +584,12 @@ impl SelectExecutor {
         table_name: &str,
         alias: Option<String>,
     ) -> Result<(ResolvedSource, Vec<Vec<Value>>)> {
-        let source = self.resolve_named_source(ctx, table_name, alias, 0)?;
-        if let Some(cte) = self.statement.lookup_cte(table_name) {
-            let result = self.execute_subquery(ctx, &cte.query)?;
-            Ok((source, result.rows))
-        } else {
-            Ok((source, ctx.engine.read_from_table(table_name)?))
-        }
+        let named_source = self.named_source(ctx, table_name, alias, 0)?;
+        let rows = match named_source.kind {
+            NamedSourceKind::BaseTable => ctx.engine.read_from_table(table_name)?,
+            NamedSourceKind::Cte(query) => self.execute_subquery(ctx, &query)?.rows,
+        };
+        Ok((named_source.source, rows))
     }
 
     fn materialize_reference(
