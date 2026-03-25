@@ -48,7 +48,7 @@ impl Parser {
             Token::Begin => self.parse_begin(),
             Token::Commit => self.parse_commit(),
             Token::Rollback => self.parse_rollback(),
-            Token::Select => self.parse_select(),
+            Token::Select | Token::With => self.parse_select(),
             Token::Update => self.parse_update(),
             Token::Insert => self.parse_insert(),
             Token::Delete => self.parse_delete(),
@@ -81,7 +81,19 @@ impl Parser {
     }
 
     fn parse_select(&mut self) -> Result<Statement> {
-        Ok(Statement::Select(self.parse_select_statement(true)?))
+        Ok(Statement::Select(self.parse_query_statement(true)?))
+    }
+
+    fn parse_query_statement(&mut self, expect_semicolon: bool) -> Result<SelectStatement> {
+        let with_clause = if matches!(self.peek_token(), Ok(Token::With)) {
+            self.parse_with_clause()?
+        } else {
+            Vec::new()
+        };
+
+        let mut statement = self.parse_select_statement(expect_semicolon)?;
+        statement.with_clause = with_clause;
+        Ok(statement)
     }
 
     fn parse_select_statement(&mut self, expect_semicolon: bool) -> Result<SelectStatement> {
@@ -157,6 +169,7 @@ impl Parser {
         }
 
         Ok(SelectStatement {
+            with_clause: Vec::new(),
             distinct,
             columns,
             column_aliases,
@@ -169,6 +182,32 @@ impl Parser {
             offset,
             set_operation,
         })
+    }
+
+    fn parse_with_clause(&mut self) -> Result<Vec<CommonTableExpression>> {
+        self.consume_token(&Token::With)?;
+        let mut ctes = Vec::new();
+
+        loop {
+            let name = self.parse_identifier()?;
+            self.consume_token(&Token::As)?;
+            self.consume_token(&Token::LeftParen)?;
+            let query = self.parse_query_statement(false)?;
+            self.consume_token(&Token::RightParen)?;
+            ctes.push(CommonTableExpression {
+                name,
+                query: Box::new(query),
+            });
+
+            if matches!(self.peek_token(), Ok(Token::Comma)) {
+                self.consume_token(&Token::Comma)?;
+                continue;
+            }
+
+            break;
+        }
+
+        Ok(ctes)
     }
 
     fn parse_select_columns(&mut self) -> Result<(Vec<SelectItem>, Vec<Option<String>>)> {
@@ -340,7 +379,7 @@ impl Parser {
             }
             Token::LeftParen => {
                 self.consume_token(&Token::LeftParen)?;
-                let subquery = self.parse_select_statement(false)?;
+                let subquery = self.parse_query_statement(false)?;
                 self.consume_token(&Token::RightParen)?;
                 let alias = self.parse_required_alias("derived table")?;
                 Ok(TableReference::Derived {
@@ -559,8 +598,8 @@ impl Parser {
 
     fn parse_in_list_condition(&mut self, expr: Expression, is_not: bool) -> Result<Condition> {
         self.consume_token(&Token::LeftParen)?;
-        if matches!(self.peek_token(), Ok(Token::Select)) {
-            let subquery = self.parse_select_statement(false)?;
+        if matches!(self.peek_token(), Ok(Token::Select | Token::With)) {
+            let subquery = self.parse_query_statement(false)?;
             self.consume_token(&Token::RightParen)?;
             return Ok(Condition::InSubquery {
                 expr,
@@ -596,7 +635,7 @@ impl Parser {
 
     fn parse_exists_condition(&mut self, is_not: bool) -> Result<Condition> {
         self.consume_token(&Token::LeftParen)?;
-        let subquery = self.parse_select_statement(false)?;
+        let subquery = self.parse_query_statement(false)?;
         self.consume_token(&Token::RightParen)?;
         Ok(Condition::Exists {
             subquery: Box::new(subquery),

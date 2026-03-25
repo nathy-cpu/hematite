@@ -1028,6 +1028,33 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_select_from_cte() -> Result<()> {
+        let db = TestDbFile::new("_test_select_from_cte");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE posts (id INTEGER PRIMARY KEY, user_id INTEGER, title TEXT);")?;
+        conn.execute("INSERT INTO posts (id, user_id, title) VALUES (10, 1, 'First');")?;
+        conn.execute("INSERT INTO posts (id, user_id, title) VALUES (11, 2, 'Second');")?;
+
+        let result = conn.execute(
+            "WITH post_users AS (SELECT user_id FROM posts) \
+             SELECT post_users.user_id FROM post_users ORDER BY post_users.user_id ASC;",
+        )?;
+
+        assert_eq!(result.columns, vec!["user_id"]);
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![crate::catalog::Value::Integer(1)],
+                vec![crate::catalog::Value::Integer(2)],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_where_between() -> Result<()> {
         let db = TestDbFile::new("_test_where_between");
         let mut conn = Connection::new(db.path())?;

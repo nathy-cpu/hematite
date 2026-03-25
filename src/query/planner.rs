@@ -279,12 +279,12 @@ impl QueryPlanner {
             HematiteError::ParseError("SELECT requires at least one table source".to_string())
         })?;
 
-        if bindings.len() == 1 && !contains_non_table_source(&statement.from) {
+        if bindings.len() == 1 && !contains_non_table_source(statement, &statement.from) {
             return self.analyze_table_access(&primary.table_name, &statement.where_clause);
         }
 
-        let estimated_rows = if contains_non_table_source(&statement.from) {
-            self.estimate_complex_source_rows(&statement.from)
+        let estimated_rows = if contains_non_table_source(statement, &statement.from) {
+            self.estimate_complex_source_rows(statement, &statement.from)
         } else {
             bindings
                 .iter()
@@ -305,7 +305,7 @@ impl QueryPlanner {
         Ok(SelectAnalysis {
             table_name: primary.table_name.clone(),
             source_count: bindings.len(),
-            has_complex_source: contains_non_table_source(&statement.from),
+            has_complex_source: contains_non_table_source(statement, &statement.from),
             table_id: self
                 .catalog
                 .get_table_by_name(&primary.table_name)
@@ -514,18 +514,31 @@ impl QueryPlanner {
             .unwrap_or(1000)
     }
 
-    fn estimate_complex_source_rows(&self, from: &TableReference) -> usize {
+    fn estimate_complex_source_rows(
+        &self,
+        statement: &SelectStatement,
+        from: &TableReference,
+    ) -> usize {
         match from {
-            TableReference::Table(table_name, _) => self
-                .catalog
-                .get_table_by_name(table_name)
-                .map(|table| self.estimate_table_rows(table))
-                .unwrap_or(1000),
+            TableReference::Table(table_name, _) => {
+                if statement
+                    .with_clause
+                    .iter()
+                    .any(|cte| cte.name.eq_ignore_ascii_case(table_name))
+                {
+                    1000
+                } else {
+                    self.catalog
+                        .get_table_by_name(table_name)
+                        .map(|table| self.estimate_table_rows(table))
+                        .unwrap_or(1000)
+                }
+            }
             TableReference::Derived { .. } => 1000,
             TableReference::CrossJoin(left, right)
             | TableReference::InnerJoin { left, right, .. } => self
-                .estimate_complex_source_rows(left)
-                .saturating_mul(self.estimate_complex_source_rows(right).max(1)),
+                .estimate_complex_source_rows(statement, left)
+                .saturating_mul(self.estimate_complex_source_rows(statement, right).max(1)),
         }
     }
 
@@ -613,6 +626,7 @@ impl QueryPlanner {
 
 fn synthetic_table_select(table_name: &str, where_clause: Option<WhereClause>) -> SelectStatement {
     SelectStatement {
+        with_clause: Vec::new(),
         distinct: false,
         columns: vec![SelectItem::Wildcard],
         column_aliases: vec![None],
@@ -627,15 +641,18 @@ fn synthetic_table_select(table_name: &str, where_clause: Option<WhereClause>) -
     }
 }
 
-fn contains_non_table_source(from: &TableReference) -> bool {
+fn contains_non_table_source(statement: &SelectStatement, from: &TableReference) -> bool {
     match from {
-        TableReference::Table(_, _) => false,
+        TableReference::Table(table_name, _) => statement
+            .with_clause
+            .iter()
+            .any(|cte| cte.name.eq_ignore_ascii_case(table_name)),
         TableReference::Derived { .. } => true,
         TableReference::CrossJoin(left, right) => {
-            contains_non_table_source(left) || contains_non_table_source(right)
+            contains_non_table_source(statement, left) || contains_non_table_source(statement, right)
         }
         TableReference::InnerJoin { left, right, .. } => {
-            contains_non_table_source(left) || contains_non_table_source(right)
+            contains_non_table_source(statement, left) || contains_non_table_source(statement, right)
         }
     }
 }

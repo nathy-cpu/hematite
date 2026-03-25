@@ -50,6 +50,7 @@ mod executor_tests {
         let mut ctx = ExecutionContext::for_mutation(&catalog, &mut storage);
 
         let statement = SelectStatement {
+            with_clause: Vec::new(),
             distinct: false,
             columns: vec![SelectItem::Column("id".to_string())],
             column_aliases: vec![None],
@@ -154,6 +155,7 @@ mod executor_tests {
 
         let mut ctx = ExecutionContext::for_read(&catalog, &mut storage);
         let statement = SelectStatement {
+            with_clause: Vec::new(),
             distinct: false,
             columns: vec![SelectItem::Column("id".to_string())],
             column_aliases: vec![None],
@@ -244,6 +246,7 @@ mod executor_tests {
 
         let mut ctx = ExecutionContext::for_read(&catalog, &mut storage);
         let statement = SelectStatement {
+            with_clause: Vec::new(),
             distinct: false,
             columns: vec![SelectItem::Column("name".to_string())],
             column_aliases: vec![None],
@@ -307,6 +310,7 @@ mod executor_tests {
 
         let mut ctx = ExecutionContext::for_read(&catalog, &mut storage);
         let statement = SelectStatement {
+            with_clause: Vec::new(),
             distinct: false,
             columns: vec![SelectItem::Column("id".to_string())],
             column_aliases: vec![None],
@@ -654,6 +658,7 @@ mod planner_tests {
         let planner = QueryPlanner::new(catalog);
 
         let statement = SelectStatement {
+            with_clause: Vec::new(),
             distinct: false,
             columns: vec![SelectItem::Column("id".to_string())],
             column_aliases: vec![None],
@@ -729,6 +734,7 @@ mod planner_tests {
         let planner = QueryPlanner::new(catalog);
 
         let statement = SelectStatement {
+            with_clause: Vec::new(),
             distinct: false,
             columns: vec![SelectItem::Column("id".to_string())],
             column_aliases: vec![None],
@@ -802,6 +808,7 @@ mod planner_tests {
 
         let planner = QueryPlanner::new(catalog);
         let statement = SelectStatement {
+            with_clause: Vec::new(),
             distinct: false,
             columns: vec![SelectItem::Column("u.name".to_string())],
             column_aliases: vec![None],
@@ -958,6 +965,7 @@ mod planner_tests {
         let planner = QueryPlanner::new(catalog).with_table_row_counts(row_counts);
 
         let full_scan = planner.plan(Statement::Select(SelectStatement {
+            with_clause: Vec::new(),
             distinct: false,
             columns: vec![SelectItem::Column("name".to_string())],
             column_aliases: vec![None],
@@ -971,6 +979,7 @@ mod planner_tests {
             set_operation: None,
         }))?;
         let rowid_lookup = planner.plan(Statement::Select(SelectStatement {
+            with_clause: Vec::new(),
             distinct: false,
             columns: vec![SelectItem::Column("name".to_string())],
             column_aliases: vec![None],
@@ -1031,6 +1040,7 @@ mod planner_tests {
 
         let planner = QueryPlanner::new(catalog);
         let statement = SelectStatement {
+            with_clause: Vec::new(),
             distinct: false,
             columns: vec![SelectItem::Column("id".to_string())],
             column_aliases: vec![None],
@@ -1087,6 +1097,7 @@ mod planner_tests {
             .with_table_row_counts(std::collections::HashMap::from([("users".to_string(), 12)]));
 
         let statement = SelectStatement {
+            with_clause: Vec::new(),
             distinct: false,
             columns: vec![SelectItem::Column("id".to_string())],
             column_aliases: vec![None],

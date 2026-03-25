@@ -27,6 +27,7 @@ mod ast_tests {
         catalog.create_table("users".to_string(), columns)?;
 
         let select = SelectStatement {
+            with_clause: Vec::new(),
             distinct: false,
             columns: vec![SelectItem::Column("id".to_string())],
             column_aliases: vec![None],
@@ -57,6 +58,7 @@ mod ast_tests {
         catalog.create_table("users".to_string(), columns).unwrap();
 
         let select = SelectStatement {
+            with_clause: Vec::new(),
             distinct: false,
             columns: vec![SelectItem::Column("invalid".to_string())],
             column_aliases: vec![None],
@@ -86,6 +88,7 @@ mod ast_tests {
         catalog.create_table("users".to_string(), columns).unwrap();
 
         let select = SelectStatement {
+            with_clause: Vec::new(),
             distinct: false,
             columns: vec![SelectItem::Wildcard],
             column_aliases: vec![None],
@@ -128,6 +131,7 @@ mod ast_tests {
         catalog.create_table("users".to_string(), columns).unwrap();
 
         let select = SelectStatement {
+            with_clause: Vec::new(),
             distinct: false,
             columns: vec![
                 SelectItem::Column("id".to_string()),
@@ -187,6 +191,7 @@ mod ast_tests {
         )?;
 
         let ambiguous = SelectStatement {
+            with_clause: Vec::new(),
             distinct: false,
             columns: vec![SelectItem::Column("id".to_string())],
             column_aliases: vec![None],
@@ -1605,6 +1610,31 @@ mod parser_tests {
                 }
                 _ => panic!("Expected derived table source"),
             },
+            _ => panic!("Expected SELECT statement"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_select_with_cte() -> Result<()> {
+        let mut lexer = Lexer::new(
+            "WITH recent_posts AS (SELECT user_id FROM posts) SELECT recent_posts.user_id FROM recent_posts;"
+                .to_string(),
+        );
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let statement = parser.parse()?;
+
+        match statement {
+            Statement::Select(select) => {
+                assert_eq!(select.with_clause.len(), 1);
+                assert_eq!(select.with_clause[0].name, "recent_posts");
+                assert!(matches!(
+                    select.from,
+                    TableReference::Table(name, None) if name == "recent_posts"
+                ));
+            }
             _ => panic!("Expected SELECT statement"),
         }
 

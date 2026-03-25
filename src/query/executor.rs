@@ -87,23 +87,35 @@ impl SelectExecutor {
         let mut offset = 0usize;
 
         for binding in bindings {
-            let table = ctx
-                .catalog
-                .get_table_by_name(&binding.table_name)
-                .ok_or_else(|| {
-                    HematiteError::ParseError(format!("Table '{}' not found", binding.table_name))
-                })?
-                .clone();
-            sources.push(ResolvedSource {
-                offset,
-                name: table.name.clone(),
-                columns: table
-                    .columns
-                    .iter()
-                    .map(|column| column.name.clone())
-                    .collect(),
-                alias: binding.alias,
-            });
+            if let Some(cte) = self.lookup_cte(&binding.table_name) {
+                sources.push(ResolvedSource {
+                    offset,
+                    name: binding.table_name.clone(),
+                    columns: self.projected_columns_for_query(&cte.query),
+                    alias: binding.alias,
+                });
+            } else {
+                let table = ctx
+                    .catalog
+                    .get_table_by_name(&binding.table_name)
+                    .ok_or_else(|| {
+                        HematiteError::ParseError(format!(
+                            "Table '{}' not found",
+                            binding.table_name
+                        ))
+                    })?
+                    .clone();
+                sources.push(ResolvedSource {
+                    offset,
+                    name: table.name.clone(),
+                    columns: table
+                        .columns
+                        .iter()
+                        .map(|column| column.name.clone())
+                        .collect(),
+                    alias: binding.alias,
+                });
+            }
             offset += sources
                 .last()
                 .map(|source| source.columns.len())
@@ -111,6 +123,46 @@ impl SelectExecutor {
         }
 
         Ok(sources)
+    }
+
+    fn lookup_cte(&self, name: &str) -> Option<&CommonTableExpression> {
+        self.statement
+            .with_clause
+            .iter()
+            .find(|cte| cte.name.eq_ignore_ascii_case(name))
+    }
+
+    fn projected_columns_for_query(&self, query: &SelectStatement) -> Vec<String> {
+        query
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                query
+                    .column_aliases
+                    .get(index)
+                    .and_then(|alias| alias.clone())
+                    .unwrap_or_else(|| match item {
+                        SelectItem::Wildcard => "*".to_string(),
+                        SelectItem::Column(name) => {
+                            SelectStatement::column_reference_name(name).to_string()
+                        }
+                        SelectItem::Expression(_) => format!("expr{}", index + 1),
+                        SelectItem::CountAll => "COUNT(*)".to_string(),
+                        SelectItem::Aggregate { function, column } => format!(
+                            "{}({})",
+                            match function {
+                                AggregateFunction::Count => "COUNT",
+                                AggregateFunction::Sum => "SUM",
+                                AggregateFunction::Avg => "AVG",
+                                AggregateFunction::Min => "MIN",
+                                AggregateFunction::Max => "MAX",
+                            },
+                            column
+                        ),
+                    })
+            })
+            .collect()
     }
 
     fn resolve_column_index(
@@ -533,22 +585,35 @@ impl SelectExecutor {
     ) -> Result<(Vec<ResolvedSource>, Vec<Vec<Value>>)> {
         match from {
             TableReference::Table(table_name, alias) => {
-                let table = ctx.catalog.get_table_by_name(table_name).ok_or_else(|| {
-                    HematiteError::ParseError(format!("Table '{}' not found", table_name))
-                })?;
-                Ok((
-                    vec![ResolvedSource {
-                        name: table.name.clone(),
-                        columns: table
-                            .columns
-                            .iter()
-                            .map(|column| column.name.clone())
-                            .collect(),
-                        alias: alias.clone(),
-                        offset: 0,
-                    }],
-                    ctx.engine.read_from_table(table_name)?,
-                ))
+                if let Some(cte) = self.lookup_cte(table_name) {
+                    let result = self.execute_subquery(ctx, &cte.query)?;
+                    Ok((
+                        vec![ResolvedSource {
+                            name: table_name.clone(),
+                            columns: result.columns.clone(),
+                            alias: alias.clone(),
+                            offset: 0,
+                        }],
+                        result.rows,
+                    ))
+                } else {
+                    let table = ctx.catalog.get_table_by_name(table_name).ok_or_else(|| {
+                        HematiteError::ParseError(format!("Table '{}' not found", table_name))
+                    })?;
+                    Ok((
+                        vec![ResolvedSource {
+                            name: table.name.clone(),
+                            columns: table
+                                .columns
+                                .iter()
+                                .map(|column| column.name.clone())
+                                .collect(),
+                            alias: alias.clone(),
+                            offset: 0,
+                        }],
+                        ctx.engine.read_from_table(table_name)?,
+                    ))
+                }
             }
             TableReference::Derived { subquery, alias } => {
                 let result = self.execute_subquery(ctx, subquery)?;
@@ -1353,7 +1418,7 @@ impl QueryExecutor for SelectExecutor {
         }
 
         let direct_table = match &self.statement.from {
-            TableReference::Table(table_name, _) => {
+            TableReference::Table(table_name, _) if self.lookup_cte(table_name).is_none() => {
                 ctx.catalog.get_table_by_name(table_name).cloned()
             }
             _ => None,
@@ -2479,6 +2544,7 @@ fn locator_select_statement(
     where_clause: Option<WhereClause>,
 ) -> SelectStatement {
     SelectStatement {
+        with_clause: Vec::new(),
         distinct: false,
         columns: vec![SelectItem::Wildcard],
         column_aliases: vec![None],

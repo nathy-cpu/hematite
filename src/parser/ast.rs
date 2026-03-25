@@ -22,6 +22,7 @@ pub enum Statement {
 
 #[derive(Debug, Clone)]
 pub struct SelectStatement {
+    pub with_clause: Vec<CommonTableExpression>,
     pub distinct: bool,
     pub columns: Vec<SelectItem>,
     pub column_aliases: Vec<Option<String>>,
@@ -33,6 +34,12 @@ pub struct SelectStatement {
     pub limit: Option<usize>,
     pub offset: Option<usize>,
     pub set_operation: Option<SetOperation>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CommonTableExpression {
+    pub name: String,
+    pub query: Box<SelectStatement>,
 }
 
 #[derive(Debug, Clone)]
@@ -373,6 +380,20 @@ impl Statement {
             Statement::Commit => Ok(Statement::Commit),
             Statement::Rollback => Ok(Statement::Rollback),
             Statement::Select(select) => Ok(Statement::Select(SelectStatement {
+                with_clause: select
+                    .with_clause
+                    .iter()
+                    .map(|cte| {
+                        Ok(CommonTableExpression {
+                            name: cte.name.clone(),
+                            query: Box::new(
+                                Statement::Select((*cte.query).clone())
+                                    .bind_parameters(parameters)?
+                                    .into_select()?,
+                            ),
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?,
                 distinct: select.distinct,
                 columns: select
                     .columns
@@ -688,12 +709,32 @@ impl Expression {
 }
 
 impl SelectStatement {
+    fn single_table_scope(table_name: &str) -> Self {
+        Self {
+            with_clause: Vec::new(),
+            distinct: false,
+            columns: Vec::new(),
+            column_aliases: Vec::new(),
+            from: TableReference::Table(table_name.to_string(), None),
+            where_clause: None,
+            group_by: Vec::new(),
+            having_clause: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            set_operation: None,
+        }
+    }
+
     fn visit_parameters<F>(&self, f: &mut F)
     where
         F: FnMut(usize),
     {
         for item in &self.columns {
             item.visit_parameters(f);
+        }
+        for cte in &self.with_clause {
+            cte.query.visit_parameters(f);
         }
         if let Some(where_clause) = &self.where_clause {
             where_clause.visit_parameters(f);
@@ -711,6 +752,12 @@ impl SelectStatement {
 
     fn is_hidden_rowid(name: &str) -> bool {
         name.eq_ignore_ascii_case("rowid")
+    }
+
+    fn lookup_cte<'a>(&'a self, name: &str) -> Option<&'a CommonTableExpression> {
+        self.with_clause
+            .iter()
+            .find(|cte| cte.name.eq_ignore_ascii_case(name))
     }
 
     pub(crate) fn split_column_reference(name: &str) -> (Option<&str>, &str) {
@@ -752,35 +799,48 @@ impl SelectStatement {
     }
 
     fn collect_source_bindings(
+        &self,
         catalog: &crate::catalog::Schema,
         from: &TableReference,
     ) -> Result<Vec<SourceBinding>> {
         let mut bindings = Vec::new();
-        Self::collect_source_bindings_into(catalog, from, &mut bindings)?;
+        self.collect_source_bindings_into(catalog, from, &mut bindings)?;
         Ok(bindings)
     }
 
     fn collect_source_bindings_into(
+        &self,
         catalog: &crate::catalog::Schema,
         from: &TableReference,
         bindings: &mut Vec<SourceBinding>,
     ) -> Result<()> {
         match from {
             TableReference::Table(table_name, alias) => {
-                let table = catalog.get_table_by_name(table_name).ok_or_else(|| {
-                    HematiteError::ParseError(format!("Table '{}' does not exist", table_name))
-                })?;
-                bindings.push(SourceBinding {
-                    source_name: table_name.clone(),
-                    alias: alias.clone(),
-                    columns: table
-                        .columns
-                        .iter()
-                        .map(|column| column.name.clone())
-                        .collect(),
-                    has_hidden_rowid: true,
-                });
-                Ok(())
+                if let Some(cte) = self.lookup_cte(table_name) {
+                    cte.query.validate(catalog)?;
+                    bindings.push(SourceBinding {
+                        source_name: table_name.clone(),
+                        alias: alias.clone(),
+                        columns: cte.query.projected_column_names(catalog)?,
+                        has_hidden_rowid: false,
+                    });
+                    Ok(())
+                } else {
+                    let table = catalog.get_table_by_name(table_name).ok_or_else(|| {
+                        HematiteError::ParseError(format!("Table '{}' does not exist", table_name))
+                    })?;
+                    bindings.push(SourceBinding {
+                        source_name: table_name.clone(),
+                        alias: alias.clone(),
+                        columns: table
+                            .columns
+                            .iter()
+                            .map(|column| column.name.clone())
+                            .collect(),
+                        has_hidden_rowid: true,
+                    });
+                    Ok(())
+                }
             }
             TableReference::Derived { subquery, alias } => {
                 subquery.validate(catalog)?;
@@ -793,12 +853,12 @@ impl SelectStatement {
                 Ok(())
             }
             TableReference::CrossJoin(left, right) => {
-                Self::collect_source_bindings_into(catalog, left, bindings)?;
-                Self::collect_source_bindings_into(catalog, right, bindings)
+                self.collect_source_bindings_into(catalog, left, bindings)?;
+                self.collect_source_bindings_into(catalog, right, bindings)
             }
             TableReference::InnerJoin { left, right, .. } => {
-                Self::collect_source_bindings_into(catalog, left, bindings)?;
-                Self::collect_source_bindings_into(catalog, right, bindings)
+                self.collect_source_bindings_into(catalog, left, bindings)?;
+                self.collect_source_bindings_into(catalog, right, bindings)
             }
         }
     }
@@ -850,7 +910,7 @@ impl SelectStatement {
                     ))
                 }
                 SelectItem::Column(name) => {
-                    Self::validate_column_reference(name, catalog, &self.from)?;
+                    self.validate_column_reference(name, catalog, &self.from)?;
                     names.push(Self::column_reference_name(name).to_string());
                 }
                 SelectItem::CountAll => names.push("COUNT(*)".to_string()),
@@ -869,12 +929,13 @@ impl SelectStatement {
     }
 
     pub(crate) fn validate_column_reference(
+        &self,
         name: &str,
         catalog: &crate::catalog::Schema,
         from: &TableReference,
     ) -> Result<()> {
         let (qualifier, column_name) = Self::split_column_reference(name);
-        let bindings = Self::collect_source_bindings(catalog, from)?;
+        let bindings = self.collect_source_bindings(catalog, from)?;
         let candidate_bindings = Self::lookup_source_bindings(qualifier, &bindings)?;
         let mut matched_tables = Vec::new();
 
@@ -919,7 +980,11 @@ impl SelectStatement {
             }
         }
 
-        let bindings = Self::collect_source_bindings(catalog, &self.from)?;
+        for cte in &self.with_clause {
+            cte.query.validate(catalog)?;
+        }
+
+        let bindings = self.collect_source_bindings(catalog, &self.from)?;
         if bindings.is_empty() {
             return Err(HematiteError::ParseError(
                 "SELECT requires at least one table source".to_string(),
@@ -946,13 +1011,13 @@ impl SelectStatement {
         for item in &self.columns {
             match item {
                 SelectItem::Column(name) => {
-                    Self::validate_column_reference(name, catalog, &self.from)?
+                    self.validate_column_reference(name, catalog, &self.from)?
                 }
                 SelectItem::Expression(expr) => {
-                    Self::validate_expression(expr, catalog, &self.from)?;
+                    self.validate_expression(expr, catalog, &self.from)?;
                 }
                 SelectItem::Aggregate { column, .. } => {
-                    Self::validate_column_reference(column, catalog, &self.from)?;
+                    self.validate_column_reference(column, catalog, &self.from)?;
                 }
                 SelectItem::Wildcard | SelectItem::CountAll => {} // Always valid
             }
@@ -960,12 +1025,12 @@ impl SelectStatement {
 
         if let Some(where_clause) = &self.where_clause {
             for condition in &where_clause.conditions {
-                Self::validate_condition(condition, catalog, &self.from)?;
+                self.validate_condition(condition, catalog, &self.from)?;
             }
         }
 
         for expr in &self.group_by {
-            Self::validate_expression(expr, catalog, &self.from)?;
+            self.validate_expression(expr, catalog, &self.from)?;
         }
 
         if !self.group_by.is_empty() {
@@ -1015,7 +1080,7 @@ impl SelectStatement {
         }
 
         for item in &self.order_by {
-            Self::validate_column_reference(&item.column, catalog, &self.from)?;
+            self.validate_column_reference(&item.column, catalog, &self.from)?;
         }
 
         Ok(())
@@ -1040,29 +1105,30 @@ impl SelectStatement {
             TableReference::InnerJoin { left, right, on } => {
                 self.validate_table_reference(catalog, left)?;
                 self.validate_table_reference(catalog, right)?;
-                Self::validate_condition(on, catalog, from)
+                self.validate_condition(on, catalog, from)
             }
         }
     }
 
     fn validate_condition(
+        &self,
         condition: &Condition,
         catalog: &crate::catalog::Schema,
         from: &TableReference,
     ) -> Result<()> {
         match condition {
             Condition::Comparison { left, right, .. } => {
-                Self::validate_expression(left, catalog, from)?;
-                Self::validate_expression(right, catalog, from)?;
+                self.validate_expression(left, catalog, from)?;
+                self.validate_expression(right, catalog, from)?;
             }
             Condition::InList { expr, values, .. } => {
-                Self::validate_expression(expr, catalog, from)?;
+                self.validate_expression(expr, catalog, from)?;
                 for value in values {
-                    Self::validate_expression(value, catalog, from)?;
+                    self.validate_expression(value, catalog, from)?;
                 }
             }
             Condition::InSubquery { expr, subquery, .. } => {
-                Self::validate_expression(expr, catalog, from)?;
+                self.validate_expression(expr, catalog, from)?;
                 subquery.validate(catalog)?;
                 if subquery.columns.len() != 1 {
                     return Err(HematiteError::ParseError(
@@ -1073,26 +1139,26 @@ impl SelectStatement {
             Condition::Between {
                 expr, lower, upper, ..
             } => {
-                Self::validate_expression(expr, catalog, from)?;
-                Self::validate_expression(lower, catalog, from)?;
-                Self::validate_expression(upper, catalog, from)?;
+                self.validate_expression(expr, catalog, from)?;
+                self.validate_expression(lower, catalog, from)?;
+                self.validate_expression(upper, catalog, from)?;
             }
             Condition::Like { expr, pattern, .. } => {
-                Self::validate_expression(expr, catalog, from)?;
-                Self::validate_expression(pattern, catalog, from)?;
+                self.validate_expression(expr, catalog, from)?;
+                self.validate_expression(pattern, catalog, from)?;
             }
             Condition::Exists { subquery, .. } => {
                 subquery.validate(catalog)?;
             }
             Condition::NullCheck { expr, .. } => {
-                Self::validate_expression(expr, catalog, from)?;
+                self.validate_expression(expr, catalog, from)?;
             }
             Condition::Not(condition) => {
-                Self::validate_condition(condition, catalog, from)?;
+                self.validate_condition(condition, catalog, from)?;
             }
             Condition::Logical { left, right, .. } => {
-                Self::validate_condition(left, catalog, from)?;
-                Self::validate_condition(right, catalog, from)?;
+                self.validate_condition(left, catalog, from)?;
+                self.validate_condition(right, catalog, from)?;
             }
         }
 
@@ -1100,21 +1166,22 @@ impl SelectStatement {
     }
 
     fn validate_expression(
+        &self,
         expr: &Expression,
         catalog: &crate::catalog::Schema,
         from: &TableReference,
     ) -> Result<()> {
         match expr {
-            Expression::Column(name) => Self::validate_column_reference(name, catalog, from)?,
+            Expression::Column(name) => self.validate_column_reference(name, catalog, from)?,
             Expression::AggregateCall { target, .. } => {
                 if let AggregateTarget::Column(name) = target {
-                    Self::validate_column_reference(name, catalog, from)?;
+                    self.validate_column_reference(name, catalog, from)?;
                 }
             }
-            Expression::UnaryMinus(expr) => Self::validate_expression(expr, catalog, from)?,
+            Expression::UnaryMinus(expr) => self.validate_expression(expr, catalog, from)?,
             Expression::Binary { left, right, .. } => {
-                Self::validate_expression(left, catalog, from)?;
-                Self::validate_expression(right, catalog, from)?;
+                self.validate_expression(left, catalog, from)?;
+                self.validate_expression(right, catalog, from)?;
             }
             Expression::Literal(_) | Expression::Parameter(_) => {}
         }
@@ -1257,6 +1324,7 @@ impl UpdateStatement {
         }
 
         let mut seen_columns = std::collections::HashSet::new();
+        let scope = SelectStatement::single_table_scope(&self.table);
         for assignment in &self.assignments {
             if !seen_columns.insert(&assignment.column) {
                 return Err(HematiteError::ParseError(format!(
@@ -1272,20 +1340,12 @@ impl UpdateStatement {
                 )));
             }
 
-            SelectStatement::validate_expression(
-                &assignment.value,
-                catalog,
-                &TableReference::Table(self.table.clone(), None),
-            )?;
+            scope.validate_expression(&assignment.value, catalog, &scope.from)?;
         }
 
         if let Some(where_clause) = &self.where_clause {
             for condition in &where_clause.conditions {
-                SelectStatement::validate_condition(
-                    condition,
-                    catalog,
-                    &TableReference::Table(self.table.clone(), None),
-                )?;
+                scope.validate_condition(condition, catalog, &scope.from)?;
             }
         }
 
@@ -1331,14 +1391,11 @@ impl DeleteStatement {
         let _table = catalog.get_table_by_name(&self.table).ok_or_else(|| {
             HematiteError::ParseError(format!("Table '{}' does not exist", self.table))
         })?;
+        let scope = SelectStatement::single_table_scope(&self.table);
 
         if let Some(where_clause) = &self.where_clause {
             for condition in &where_clause.conditions {
-                SelectStatement::validate_condition(
-                    condition,
-                    catalog,
-                    &TableReference::Table(self.table.clone(), None),
-                )?;
+                scope.validate_condition(condition, catalog, &scope.from)?;
             }
         }
 
