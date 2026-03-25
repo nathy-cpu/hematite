@@ -580,6 +580,119 @@ mod executor_tests {
         storage.flush()?;
         Ok(())
     }
+
+    #[test]
+    fn test_create_executor_persists_constraints() -> Result<()> {
+        let mut catalog = Schema::new();
+        catalog.create_table(
+            "parents".to_string(),
+            vec![crate::catalog::Column::new(
+                crate::catalog::ColumnId::new(1),
+                "id".to_string(),
+                DataType::Integer,
+            )
+            .primary_key(true)],
+        )?;
+
+        let db = TestDbFile::new("_test_create_executor_constraints");
+        let mut storage = CatalogEngine::new(db.path())?;
+        let mut ctx = ExecutionContext::for_mutation(&catalog, &mut storage);
+
+        let statement = CreateStatement {
+            table: "children".to_string(),
+            columns: vec![
+                ColumnDefinition {
+                    name: "id".to_string(),
+                    data_type: DataType::Integer,
+                    nullable: false,
+                    primary_key: true,
+                    unique: false,
+                    default_value: None,
+                    check_constraint: None,
+                    references: None,
+                },
+                ColumnDefinition {
+                    name: "parent_id".to_string(),
+                    data_type: DataType::Integer,
+                    nullable: true,
+                    primary_key: false,
+                    unique: false,
+                    default_value: None,
+                    check_constraint: None,
+                    references: Some(ForeignKeyDefinition {
+                        name: None,
+                        column: "parent_id".to_string(),
+                        referenced_table: "parents".to_string(),
+                        referenced_column: "id".to_string(),
+                    }),
+                },
+            ],
+            constraints: vec![TableConstraint::Check(CheckConstraintDefinition {
+                name: Some("id_positive".to_string()),
+                expression_sql: "id > 0".to_string(),
+            })],
+        };
+
+        let mut executor = CreateExecutor::new(statement);
+        executor.execute(&mut ctx)?;
+
+        let table = ctx
+            .catalog
+            .get_table_by_name("children")
+            .expect("children table should exist");
+        assert_eq!(table.check_constraints.len(), 1);
+        assert_eq!(table.foreign_keys.len(), 1);
+        storage.flush()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_alter_executor_rename_column() -> Result<()> {
+        let mut catalog = Schema::new();
+        let table_id = catalog.create_table(
+            "users".to_string(),
+            vec![
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(1),
+                    "id".to_string(),
+                    DataType::Integer,
+                )
+                .primary_key(true),
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(2),
+                    "name".to_string(),
+                    DataType::Text,
+                ),
+            ],
+        )?;
+
+        let db = TestDbFile::new("_test_alter_executor_rename_column");
+        let mut storage = CatalogEngine::new(db.path())?;
+        let table_root = storage.create_table("users")?;
+        let pk_root = storage.create_empty_btree()?;
+        catalog.set_table_storage_roots(table_id, table_root, pk_root)?;
+
+        let mut ctx = ExecutionContext::for_mutation(&catalog, &mut storage);
+        let statement = AlterStatement {
+            table: "users".to_string(),
+            operation: AlterOperation::RenameColumn {
+                old_name: "name".to_string(),
+                new_name: "full_name".to_string(),
+            },
+        };
+
+        let mut executor = AlterExecutor::new(statement);
+        executor.execute(&mut ctx)?;
+
+        let table = ctx
+            .catalog
+            .get_table_by_name("users")
+            .expect("users table should exist");
+        assert!(table.get_column_by_name("name").is_none());
+        assert!(table.get_column_by_name("full_name").is_some());
+        storage.flush()?;
+        Ok(())
+    }
 }
 
 mod optimizer_tests {

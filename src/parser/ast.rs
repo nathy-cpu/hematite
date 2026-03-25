@@ -1606,6 +1606,29 @@ impl AlterStatement {
                         new_name, self.table
                     )));
                 }
+                if !table.check_constraints.is_empty() {
+                    return Err(HematiteError::ParseError(
+                        "ALTER TABLE RENAME COLUMN is not supported for tables with CHECK constraints".to_string(),
+                    ));
+                }
+                for (_, table_name) in catalog.list_tables() {
+                    let referencing_table =
+                        catalog.get_table_by_name(&table_name).ok_or_else(|| {
+                            HematiteError::ParseError(format!(
+                                "Table '{}' does not exist",
+                                table_name
+                            ))
+                        })?;
+                    if referencing_table.foreign_keys.iter().any(|foreign_key| {
+                        foreign_key.referenced_table == self.table
+                            && foreign_key.referenced_column == *old_name
+                    }) {
+                        return Err(HematiteError::ParseError(format!(
+                            "ALTER TABLE RENAME COLUMN is not supported while foreign key references '{}.{}' exist",
+                            self.table, old_name
+                        )));
+                    }
+                }
             }
             AlterOperation::AddColumn(column) => {
                 let table = catalog.get_table_by_name(&self.table).ok_or_else(|| {
@@ -1630,6 +1653,17 @@ impl AlterStatement {
                 if !column.nullable && column.default_value.is_none() {
                     return Err(HematiteError::ParseError(
                         "ALTER TABLE ADD COLUMN requires the new column to be nullable or have a DEFAULT value".to_string(),
+                    ));
+                }
+                if column.check_constraint.is_some() {
+                    return Err(HematiteError::ParseError(
+                        "ALTER TABLE ADD COLUMN does not support CHECK constraints".to_string(),
+                    ));
+                }
+                if column.references.is_some() {
+                    return Err(HematiteError::ParseError(
+                        "ALTER TABLE ADD COLUMN does not support FOREIGN KEY constraints"
+                            .to_string(),
                     ));
                 }
                 if let Some(default_value) = &column.default_value {

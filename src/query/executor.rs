@@ -19,6 +19,7 @@
 //! This layer should stay storage-agnostic at the page level. If a change here requires knowledge
 //! of B-tree node layout or pager internals, the boundary below catalog has started to leak.
 
+use crate::catalog::table::{CheckConstraint, ForeignKeyConstraint};
 use crate::catalog::StoredRow;
 use crate::catalog::{Column, DataType, Table, Value};
 use crate::error::{HematiteError, Result};
@@ -2177,6 +2178,68 @@ impl CreateExecutor {
             })
             .collect()
     }
+
+    fn check_constraints(&self) -> Vec<CheckConstraint> {
+        let mut constraints = self
+            .statement
+            .columns
+            .iter()
+            .filter_map(|column| column.check_constraint.as_ref())
+            .map(|constraint| CheckConstraint {
+                name: constraint.name.clone(),
+                expression_sql: constraint.expression_sql.clone(),
+            })
+            .collect::<Vec<_>>();
+
+        constraints.extend(self.statement.constraints.iter().filter_map(|constraint| {
+            match constraint {
+                TableConstraint::Check(constraint) => Some(CheckConstraint {
+                    name: constraint.name.clone(),
+                    expression_sql: constraint.expression_sql.clone(),
+                }),
+                TableConstraint::ForeignKey(_) => None,
+            }
+        }));
+
+        constraints
+    }
+
+    fn foreign_keys(&self, table: &Table) -> Result<Vec<ForeignKeyConstraint>> {
+        let mut foreign_keys = self
+            .statement
+            .columns
+            .iter()
+            .filter_map(|column| column.references.as_ref())
+            .map(|foreign_key| self.convert_foreign_key(table, foreign_key))
+            .collect::<Result<Vec<_>>>()?;
+
+        for constraint in &self.statement.constraints {
+            if let TableConstraint::ForeignKey(foreign_key) = constraint {
+                foreign_keys.push(self.convert_foreign_key(table, foreign_key)?);
+            }
+        }
+
+        Ok(foreign_keys)
+    }
+
+    fn convert_foreign_key(
+        &self,
+        table: &Table,
+        foreign_key: &ForeignKeyDefinition,
+    ) -> Result<ForeignKeyConstraint> {
+        let column_index = table.get_column_index(&foreign_key.column).ok_or_else(|| {
+            HematiteError::ParseError(format!(
+                "Foreign key column '{}' does not exist in table '{}'",
+                foreign_key.column, table.name
+            ))
+        })?;
+        Ok(ForeignKeyConstraint {
+            name: foreign_key.name.clone(),
+            column_index,
+            referenced_table: foreign_key.referenced_table.clone(),
+            referenced_column: foreign_key.referenced_column.clone(),
+        })
+    }
 }
 
 impl QueryExecutor for CreateExecutor {
@@ -2216,6 +2279,12 @@ impl QueryExecutor for CreateExecutor {
                     unique: true,
                 },
             )?;
+        }
+        for constraint in self.check_constraints() {
+            ctx.catalog.add_check_constraint(table.id, constraint)?;
+        }
+        for foreign_key in self.foreign_keys(&table)? {
+            ctx.catalog.add_foreign_key(table.id, foreign_key)?;
         }
 
         Ok(QueryResult {
@@ -2293,10 +2362,18 @@ impl QueryExecutor for AlterExecutor {
                 ctx.engine
                     .rename_table_runtime_metadata(&self.statement.table, new_name)?;
             }
-            AlterOperation::RenameColumn { .. } => {
-                return Err(HematiteError::ParseError(
-                    "ALTER TABLE RENAME COLUMN is not implemented yet".to_string(),
-                ));
+            AlterOperation::RenameColumn { old_name, new_name } => {
+                let table = ctx
+                    .catalog
+                    .get_table_by_name(&self.statement.table)
+                    .ok_or_else(|| {
+                        HematiteError::ParseError(format!(
+                            "Table '{}' not found",
+                            self.statement.table
+                        ))
+                    })?;
+                ctx.catalog
+                    .rename_column(table.id, old_name, new_name.clone())?;
             }
             AlterOperation::AddColumn(column_def) => {
                 let table = ctx
