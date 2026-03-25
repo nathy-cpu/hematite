@@ -783,348 +783,295 @@ mod parser_tests {
     use crate::parser::lexer::*;
     use crate::parser::parser::*;
 
-    #[test]
-    fn test_parse_simple_select() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT * FROM users;".to_string());
+    fn parse_statement(sql: &str) -> Result<Statement> {
+        let mut lexer = Lexer::new(sql.to_string());
         lexer.tokenize()?;
         let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-        match statement {
-            Statement::Select(select) => {
-                assert_eq!(select.columns.len(), 1);
-                assert!(matches!(select.columns[0], SelectItem::Wildcard));
-                assert!(
-                    matches!(select.from, TableReference::Table(name, None) if name == "users")
-                );
-                assert!(select.where_clause.is_none());
-                assert!(select.order_by.is_empty());
-                assert!(select.limit.is_none());
-            }
-            _ => panic!("Expected SELECT statement"),
+        parser.parse()
+    }
+
+    fn parse_select(sql: &str) -> Result<SelectStatement> {
+        match parse_statement(sql)? {
+            Statement::Select(select) => Ok(select),
+            other => Err(crate::error::HematiteError::InternalError(format!(
+                "Expected SELECT statement, found {:?}",
+                other
+            ))),
         }
+    }
+
+    fn parse_insert(sql: &str) -> Result<InsertStatement> {
+        match parse_statement(sql)? {
+            Statement::Insert(insert) => Ok(insert),
+            other => Err(crate::error::HematiteError::InternalError(format!(
+                "Expected INSERT statement, found {:?}",
+                other
+            ))),
+        }
+    }
+
+    fn parse_update(sql: &str) -> Result<UpdateStatement> {
+        match parse_statement(sql)? {
+            Statement::Update(update) => Ok(update),
+            other => Err(crate::error::HematiteError::InternalError(format!(
+                "Expected UPDATE statement, found {:?}",
+                other
+            ))),
+        }
+    }
+
+    fn parse_delete(sql: &str) -> Result<DeleteStatement> {
+        match parse_statement(sql)? {
+            Statement::Delete(delete) => Ok(delete),
+            other => Err(crate::error::HematiteError::InternalError(format!(
+                "Expected DELETE statement, found {:?}",
+                other
+            ))),
+        }
+    }
+
+    fn parse_create(sql: &str) -> Result<CreateStatement> {
+        match parse_statement(sql)? {
+            Statement::Create(create) => Ok(create),
+            other => Err(crate::error::HematiteError::InternalError(format!(
+                "Expected CREATE statement, found {:?}",
+                other
+            ))),
+        }
+    }
+
+    fn parse_alter(sql: &str) -> Result<AlterStatement> {
+        match parse_statement(sql)? {
+            Statement::Alter(alter) => Ok(alter),
+            other => Err(crate::error::HematiteError::InternalError(format!(
+                "Expected ALTER statement, found {:?}",
+                other
+            ))),
+        }
+    }
+
+    fn parse_create_index(sql: &str) -> Result<CreateIndexStatement> {
+        match parse_statement(sql)? {
+            Statement::CreateIndex(create_index) => Ok(create_index),
+            other => Err(crate::error::HematiteError::InternalError(format!(
+                "Expected CREATE INDEX statement, found {:?}",
+                other
+            ))),
+        }
+    }
+
+    fn parse_drop_index(sql: &str) -> Result<DropIndexStatement> {
+        match parse_statement(sql)? {
+            Statement::DropIndex(drop_index) => Ok(drop_index),
+            other => Err(crate::error::HematiteError::InternalError(format!(
+                "Expected DROP INDEX statement, found {:?}",
+                other
+            ))),
+        }
+    }
+
+    #[test]
+    fn test_parse_simple_select() -> Result<()> {
+        let select = parse_select("SELECT * FROM users;")?;
+        assert_eq!(select.columns.len(), 1);
+        assert!(matches!(select.columns[0], SelectItem::Wildcard));
+        assert!(matches!(select.from, TableReference::Table(name, None) if name == "users"));
+        assert!(select.where_clause.is_none());
+        assert!(select.order_by.is_empty());
+        assert!(select.limit.is_none());
         Ok(())
     }
 
     #[test]
     fn test_parse_select_with_where() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT id FROM users WHERE id = 1;".to_string());
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-        match statement {
-            Statement::Select(select) => {
-                assert!(select.where_clause.is_some());
-                assert!(select.order_by.is_empty());
-                assert!(select.limit.is_none());
-                if let Some(where_clause) = select.where_clause {
-                    assert_eq!(where_clause.conditions.len(), 1);
-                }
-            }
-            _ => panic!("Expected SELECT statement"),
-        }
+        let select = parse_select("SELECT id FROM users WHERE id = 1;")?;
+        assert!(select.where_clause.is_some());
+        assert!(select.order_by.is_empty());
+        assert!(select.limit.is_none());
+        assert_eq!(
+            select.where_clause.as_ref().map(|w| w.conditions.len()),
+            Some(1)
+        );
         Ok(())
     }
 
     #[test]
     fn test_parse_distinct() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT DISTINCT name FROM users;".to_string());
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-        match statement {
-            Statement::Select(select) => {
-                assert!(select.distinct);
-                assert_eq!(select.columns.len(), 1);
-                assert!(matches!(&select.columns[0], SelectItem::Column(name) if name == "name"));
-            }
-            _ => panic!("Expected SELECT statement"),
-        }
+        let select = parse_select("SELECT DISTINCT name FROM users;")?;
+        assert!(select.distinct);
+        assert_eq!(select.columns.len(), 1);
+        assert!(matches!(&select.columns[0], SelectItem::Column(name) if name == "name"));
         Ok(())
     }
 
     #[test]
     fn test_parse_in_condition() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT id FROM users WHERE id IN (1, 2);".to_string());
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-
-        match statement {
-            Statement::Select(select) => {
-                let where_clause = select.where_clause.expect("missing WHERE clause");
-                assert_eq!(where_clause.conditions.len(), 1);
-                assert!(matches!(
-                    &where_clause.conditions[0],
-                    Condition::InList { is_not: false, values, .. } if values.len() == 2
-                ));
-            }
-            _ => panic!("Expected SELECT statement"),
-        }
+        let select = parse_select("SELECT id FROM users WHERE id IN (1, 2);")?;
+        let where_clause = select.where_clause.expect("missing WHERE clause");
+        assert_eq!(where_clause.conditions.len(), 1);
+        assert!(matches!(
+            &where_clause.conditions[0],
+            Condition::InList { is_not: false, values, .. } if values.len() == 2
+        ));
         Ok(())
     }
 
     #[test]
     fn test_parse_between_condition() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT id FROM users WHERE id BETWEEN 1 AND 3;".to_string());
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-
-        match statement {
-            Statement::Select(select) => {
-                let where_clause = select.where_clause.expect("missing WHERE clause");
-                assert_eq!(where_clause.conditions.len(), 1);
-                assert!(matches!(
-                    &where_clause.conditions[0],
-                    Condition::Between { is_not: false, .. }
-                ));
-            }
-            _ => panic!("Expected SELECT statement"),
-        }
+        let select = parse_select("SELECT id FROM users WHERE id BETWEEN 1 AND 3;")?;
+        let where_clause = select.where_clause.expect("missing WHERE clause");
+        assert_eq!(where_clause.conditions.len(), 1);
+        assert!(matches!(
+            &where_clause.conditions[0],
+            Condition::Between { is_not: false, .. }
+        ));
         Ok(())
     }
 
     #[test]
     fn test_parse_like_condition() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT name FROM users WHERE name LIKE 'A%';".to_string());
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-
-        match statement {
-            Statement::Select(select) => {
-                let where_clause = select.where_clause.expect("missing WHERE clause");
-                assert_eq!(where_clause.conditions.len(), 1);
-                assert!(matches!(
-                    &where_clause.conditions[0],
-                    Condition::Like { is_not: false, .. }
-                ));
-            }
-            _ => panic!("Expected SELECT statement"),
-        }
+        let select = parse_select("SELECT name FROM users WHERE name LIKE 'A%';")?;
+        let where_clause = select.where_clause.expect("missing WHERE clause");
+        assert_eq!(where_clause.conditions.len(), 1);
+        assert!(matches!(
+            &where_clause.conditions[0],
+            Condition::Like { is_not: false, .. }
+        ));
         Ok(())
     }
 
     #[test]
     fn test_parse_not_condition() -> Result<()> {
-        let mut lexer =
-            Lexer::new("SELECT id FROM users WHERE NOT (id = 1 OR id = 2);".to_string());
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-
-        match statement {
-            Statement::Select(select) => {
-                let where_clause = select.where_clause.expect("missing WHERE clause");
-                assert_eq!(where_clause.conditions.len(), 1);
-                assert!(matches!(&where_clause.conditions[0], Condition::Not(_)));
-            }
-            _ => panic!("Expected SELECT statement"),
-        }
+        let select = parse_select("SELECT id FROM users WHERE NOT (id = 1 OR id = 2);")?;
+        let where_clause = select.where_clause.expect("missing WHERE clause");
+        assert_eq!(where_clause.conditions.len(), 1);
+        assert!(matches!(&where_clause.conditions[0], Condition::Not(_)));
         Ok(())
     }
 
     #[test]
     fn test_parse_arithmetic_expression() -> Result<()> {
-        let mut lexer =
-            Lexer::new("SELECT id + 1 AS next_id FROM users WHERE -id < 0;".to_string());
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-
-        match statement {
-            Statement::Select(select) => {
-                assert!(matches!(
-                    &select.columns[0],
-                    SelectItem::Expression(Expression::Binary {
-                        operator: ArithmeticOperator::Add,
-                        ..
-                    })
-                ));
-                assert_eq!(select.column_aliases[0].as_deref(), Some("next_id"));
-                let where_clause = select.where_clause.expect("missing WHERE clause");
-                assert!(matches!(
-                    &where_clause.conditions[0],
-                    Condition::Comparison {
-                        left: Expression::UnaryMinus(_),
-                        ..
-                    }
-                ));
+        let select = parse_select("SELECT id + 1 AS next_id FROM users WHERE -id < 0;")?;
+        assert!(matches!(
+            &select.columns[0],
+            SelectItem::Expression(Expression::Binary {
+                operator: ArithmeticOperator::Add,
+                ..
+            })
+        ));
+        assert_eq!(select.column_aliases[0].as_deref(), Some("next_id"));
+        let where_clause = select.where_clause.expect("missing WHERE clause");
+        assert!(matches!(
+            &where_clause.conditions[0],
+            Condition::Comparison {
+                left: Expression::UnaryMinus(_),
+                ..
             }
-            _ => panic!("Expected SELECT statement"),
-        }
+        ));
         Ok(())
     }
 
     #[test]
     fn test_parse_order_by() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT id FROM users ORDER BY name DESC, id ASC;".to_string());
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-        match statement {
-            Statement::Select(select) => {
-                assert_eq!(select.order_by.len(), 2);
-                assert_eq!(select.order_by[0].column, "name");
-                assert_eq!(select.order_by[0].direction, SortDirection::Desc);
-                assert_eq!(select.order_by[1].column, "id");
-                assert_eq!(select.order_by[1].direction, SortDirection::Asc);
-            }
-            _ => panic!("Expected SELECT statement"),
-        }
+        let select = parse_select("SELECT id FROM users ORDER BY name DESC, id ASC;")?;
+        assert_eq!(select.order_by.len(), 2);
+        assert_eq!(select.order_by[0].column, "name");
+        assert_eq!(select.order_by[0].direction, SortDirection::Desc);
+        assert_eq!(select.order_by[1].column, "id");
+        assert_eq!(select.order_by[1].direction, SortDirection::Asc);
         Ok(())
     }
 
     #[test]
     fn test_parse_limit() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT id FROM users ORDER BY name DESC LIMIT 5;".to_string());
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-        match statement {
-            Statement::Select(select) => {
-                assert_eq!(select.order_by.len(), 1);
-                assert_eq!(select.limit, Some(5));
-            }
-            _ => panic!("Expected SELECT statement"),
-        }
+        let select = parse_select("SELECT id FROM users ORDER BY name DESC LIMIT 5;")?;
+        assert_eq!(select.order_by.len(), 1);
+        assert_eq!(select.limit, Some(5));
         Ok(())
     }
 
     #[test]
     fn test_parse_offset() -> Result<()> {
-        let mut lexer =
-            Lexer::new("SELECT id FROM users ORDER BY name DESC LIMIT 5 OFFSET 2;".to_string());
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-        match statement {
-            Statement::Select(select) => {
-                assert_eq!(select.order_by.len(), 1);
-                assert_eq!(select.limit, Some(5));
-                assert_eq!(select.offset, Some(2));
-            }
-            _ => panic!("Expected SELECT statement"),
-        }
+        let select = parse_select("SELECT id FROM users ORDER BY name DESC LIMIT 5 OFFSET 2;")?;
+        assert_eq!(select.order_by.len(), 1);
+        assert_eq!(select.limit, Some(5));
+        assert_eq!(select.offset, Some(2));
         Ok(())
     }
 
     #[test]
     fn test_parse_count() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT COUNT(*) FROM users;".to_string());
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-        match statement {
-            Statement::Select(select) => {
-                assert_eq!(select.columns.len(), 1);
-                assert!(matches!(select.columns[0], SelectItem::CountAll));
-            }
-            _ => panic!("Expected SELECT statement"),
-        }
+        let select = parse_select("SELECT COUNT(*) FROM users;")?;
+        assert_eq!(select.columns.len(), 1);
+        assert!(matches!(select.columns[0], SelectItem::CountAll));
         Ok(())
     }
 
     #[test]
     fn test_parse_aggregate() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT MAX(score) FROM users;".to_string());
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-        match statement {
-            Statement::Select(select) => {
-                assert_eq!(select.columns.len(), 1);
-                assert!(matches!(
-                    select.columns[0],
-                    SelectItem::Aggregate {
-                        function: AggregateFunction::Max,
-                        ref column,
-                    } if column == "score"
-                ));
-            }
-            _ => panic!("Expected SELECT statement"),
-        }
+        let select = parse_select("SELECT MAX(score) FROM users;")?;
+        assert_eq!(select.columns.len(), 1);
+        assert!(matches!(
+            select.columns[0],
+            SelectItem::Aggregate {
+                function: AggregateFunction::Max,
+                ref column,
+            } if column == "score"
+        ));
         Ok(())
     }
 
     #[test]
     fn test_parse_count_column() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT COUNT(score) FROM users;".to_string());
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-        match statement {
-            Statement::Select(select) => {
-                assert!(matches!(
-                    select.columns[0],
-                    SelectItem::Aggregate {
-                        function: AggregateFunction::Count,
-                        ref column,
-                    } if column == "score"
-                ));
-            }
-            _ => panic!("Expected SELECT statement"),
-        }
+        let select = parse_select("SELECT COUNT(score) FROM users;")?;
+        assert!(matches!(
+            select.columns[0],
+            SelectItem::Aggregate {
+                function: AggregateFunction::Count,
+                ref column,
+            } if column == "score"
+        ));
         Ok(())
     }
 
     #[test]
     fn test_parse_group_by_having() -> Result<()> {
-        let mut lexer = Lexer::new(
-            "SELECT name, COUNT(id) AS total_count FROM users GROUP BY name HAVING total_count > 1;"
-                .to_string(),
-        );
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-        match statement {
-            Statement::Select(select) => {
-                assert_eq!(select.group_by.len(), 1);
-                assert!(matches!(
-                    &select.group_by[0],
-                    Expression::Column(name) if name == "name"
-                ));
-                assert!(select.having_clause.is_some());
-                assert_eq!(select.column_aliases[1].as_deref(), Some("total_count"));
-            }
-            _ => panic!("Expected SELECT statement"),
-        }
+        let select = parse_select(
+            "SELECT name, COUNT(id) AS total_count FROM users GROUP BY name HAVING total_count > 1;",
+        )?;
+        assert_eq!(select.group_by.len(), 1);
+        assert!(matches!(
+            &select.group_by[0],
+            Expression::Column(name) if name == "name"
+        ));
+        assert!(select.having_clause.is_some());
+        assert_eq!(select.column_aliases[1].as_deref(), Some("total_count"));
         Ok(())
     }
 
     #[test]
     fn test_parse_where_operator_precedence() -> Result<()> {
-        let mut lexer = Lexer::new(
-            "SELECT id FROM users WHERE id = 1 OR id = 2 AND active = TRUE;".to_string(),
-        );
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
+        let select =
+            parse_select("SELECT id FROM users WHERE id = 1 OR id = 2 AND active = TRUE;")?;
+        let where_clause = select.where_clause.expect("missing WHERE clause");
+        assert_eq!(where_clause.conditions.len(), 1);
 
-        match statement {
-            Statement::Select(select) => {
-                let where_clause = select.where_clause.unwrap();
-                assert_eq!(where_clause.conditions.len(), 1);
-
-                match &where_clause.conditions[0] {
+        match &where_clause.conditions[0] {
+            Condition::Logical {
+                left,
+                operator: LogicalOperator::Or,
+                right,
+            } => {
+                assert!(matches!(**left, Condition::Comparison { .. }));
+                assert!(matches!(
+                    **right,
                     Condition::Logical {
-                        left,
-                        operator: LogicalOperator::Or,
-                        right,
-                    } => {
-                        assert!(matches!(**left, Condition::Comparison { .. }));
-                        assert!(matches!(
-                            **right,
-                            Condition::Logical {
-                                operator: LogicalOperator::And,
-                                ..
-                            }
-                        ));
+                        operator: LogicalOperator::And,
+                        ..
                     }
-                    _ => panic!("Expected OR condition at the root"),
-                }
+                ));
             }
-            _ => panic!("Expected SELECT statement"),
+            other => panic!("Expected OR condition at the root, found {:?}", other),
         }
 
         Ok(())
@@ -1132,56 +1079,36 @@ mod parser_tests {
 
     #[test]
     fn test_parse_parameterized_insert() -> Result<()> {
-        let mut lexer = Lexer::new("INSERT INTO users (id, name) VALUES (?, ?);".to_string());
-        lexer.tokenize()?;
-
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-
-        match statement {
-            Statement::Insert(insert) => {
-                assert!(matches!(insert.values[0][0], Expression::Parameter(0)));
-                assert!(matches!(insert.values[0][1], Expression::Parameter(1)));
-            }
-            _ => panic!("Expected INSERT statement"),
-        }
+        let insert = parse_insert("INSERT INTO users (id, name) VALUES (?, ?);")?;
+        assert!(matches!(insert.values[0][0], Expression::Parameter(0)));
+        assert!(matches!(insert.values[0][1], Expression::Parameter(1)));
 
         Ok(())
     }
 
     #[test]
     fn test_parse_where_parentheses() -> Result<()> {
-        let mut lexer = Lexer::new(
-            "SELECT id FROM users WHERE (id = 1 OR id = 2) AND active = TRUE;".to_string(),
-        );
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
+        let select =
+            parse_select("SELECT id FROM users WHERE (id = 1 OR id = 2) AND active = TRUE;")?;
+        let where_clause = select.where_clause.expect("missing WHERE clause");
+        assert_eq!(where_clause.conditions.len(), 1);
 
-        match statement {
-            Statement::Select(select) => {
-                let where_clause = select.where_clause.unwrap();
-                assert_eq!(where_clause.conditions.len(), 1);
-
-                match &where_clause.conditions[0] {
+        match &where_clause.conditions[0] {
+            Condition::Logical {
+                left,
+                operator: LogicalOperator::And,
+                right,
+            } => {
+                assert!(matches!(
+                    **left,
                     Condition::Logical {
-                        left,
-                        operator: LogicalOperator::And,
-                        right,
-                    } => {
-                        assert!(matches!(
-                            **left,
-                            Condition::Logical {
-                                operator: LogicalOperator::Or,
-                                ..
-                            }
-                        ));
-                        assert!(matches!(**right, Condition::Comparison { .. }));
+                        operator: LogicalOperator::Or,
+                        ..
                     }
-                    _ => panic!("Expected AND condition at the root"),
-                }
+                ));
+                assert!(matches!(**right, Condition::Comparison { .. }));
             }
-            _ => panic!("Expected SELECT statement"),
+            other => panic!("Expected AND condition at the root, found {:?}", other),
         }
 
         Ok(())
@@ -1189,231 +1116,137 @@ mod parser_tests {
 
     #[test]
     fn test_parse_insert() -> Result<()> {
-        let mut lexer = Lexer::new("INSERT INTO users (id, name) VALUES (1, 'John');".to_string());
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-        match statement {
-            Statement::Insert(insert) => {
-                assert_eq!(insert.table, "users");
-                assert_eq!(insert.columns, vec!["id", "name"]);
-                assert_eq!(insert.values.len(), 1);
-                assert_eq!(insert.values[0].len(), 2);
-            }
-            _ => panic!("Expected INSERT statement"),
-        }
+        let insert = parse_insert("INSERT INTO users (id, name) VALUES (1, 'John');")?;
+        assert_eq!(insert.table, "users");
+        assert_eq!(insert.columns, vec!["id", "name"]);
+        assert_eq!(insert.values.len(), 1);
+        assert_eq!(insert.values[0].len(), 2);
         Ok(())
     }
 
     #[test]
     fn test_parse_delete() -> Result<()> {
-        let mut lexer = Lexer::new("DELETE FROM users WHERE id = 1;".to_string());
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-        match statement {
-            Statement::Delete(delete) => {
-                assert_eq!(delete.table, "users");
-                assert!(delete.where_clause.is_some());
-            }
-            _ => panic!("Expected DELETE statement"),
-        }
+        let delete = parse_delete("DELETE FROM users WHERE id = 1;")?;
+        assert_eq!(delete.table, "users");
+        assert!(delete.where_clause.is_some());
         Ok(())
     }
 
     #[test]
     fn test_parse_update() -> Result<()> {
-        let mut lexer =
-            Lexer::new("UPDATE users SET name = 'John', active = TRUE WHERE id = 1;".to_string());
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-        match statement {
-            Statement::Update(update) => {
-                assert_eq!(update.table, "users");
-                assert_eq!(update.assignments.len(), 2);
-                assert!(update.where_clause.is_some());
-            }
-            _ => panic!("Expected UPDATE statement"),
-        }
+        let update = parse_update("UPDATE users SET name = 'John', active = TRUE WHERE id = 1;")?;
+        assert_eq!(update.table, "users");
+        assert_eq!(update.assignments.len(), 2);
+        assert!(update.where_clause.is_some());
         Ok(())
     }
 
     #[test]
     fn test_parse_is_null() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT * FROM users WHERE name IS NULL;".to_string());
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-        match statement {
-            Statement::Select(select) => {
-                let where_clause = select.where_clause.unwrap();
-                assert_eq!(where_clause.conditions.len(), 1);
-                assert!(matches!(
-                    where_clause.conditions[0],
-                    Condition::NullCheck { is_not: false, .. }
-                ));
-            }
-            _ => panic!("Expected SELECT statement"),
-        }
+        let select = parse_select("SELECT * FROM users WHERE name IS NULL;")?;
+        let where_clause = select.where_clause.expect("missing WHERE clause");
+        assert_eq!(where_clause.conditions.len(), 1);
+        assert!(matches!(
+            where_clause.conditions[0],
+            Condition::NullCheck { is_not: false, .. }
+        ));
         Ok(())
     }
 
     #[test]
     fn test_parse_drop() -> Result<()> {
-        let mut lexer = Lexer::new("DROP TABLE users;".to_string());
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-        match statement {
-            Statement::Drop(drop) => {
-                assert_eq!(drop.table, "users");
-            }
-            _ => panic!("Expected DROP statement"),
-        }
+        let statement = parse_statement("DROP TABLE users;")?;
+        let Statement::Drop(drop) = statement else {
+            panic!("Expected DROP statement");
+        };
+        assert_eq!(drop.table, "users");
         Ok(())
     }
 
     #[test]
     fn test_parse_create_with_default_literal() -> Result<()> {
-        let mut lexer = Lexer::new(
-            "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT DEFAULT 'x');".to_string(),
+        let create =
+            parse_create("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT DEFAULT 'x');")?;
+        assert_eq!(create.table, "t");
+        assert_eq!(create.columns.len(), 2);
+        assert_eq!(create.columns[1].name, "name");
+        assert_eq!(
+            create.columns[1].default_value,
+            Some(crate::catalog::types::Value::Text("x".to_string()))
         );
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-
-        match statement {
-            Statement::Create(create) => {
-                assert_eq!(create.table, "t");
-                assert_eq!(create.columns.len(), 2);
-                assert_eq!(create.columns[1].name, "name");
-                assert_eq!(
-                    create.columns[1].default_value,
-                    Some(crate::catalog::types::Value::Text("x".to_string()))
-                );
-            }
-            _ => panic!("Expected CREATE statement"),
-        }
 
         Ok(())
     }
 
     #[test]
     fn test_parse_create_and_drop_index() -> Result<()> {
-        let mut lexer =
-            Lexer::new("CREATE UNIQUE INDEX idx_users_name ON users (name);".to_string());
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-        match statement {
-            Statement::CreateIndex(create_index) => {
-                assert_eq!(create_index.index_name, "idx_users_name");
-                assert_eq!(create_index.table, "users");
-                assert_eq!(create_index.columns, vec!["name"]);
-                assert!(create_index.unique);
-            }
-            _ => panic!("Expected CREATE INDEX statement"),
-        }
+        let create_index =
+            parse_create_index("CREATE UNIQUE INDEX idx_users_name ON users (name);")?;
+        assert_eq!(create_index.index_name, "idx_users_name");
+        assert_eq!(create_index.table, "users");
+        assert_eq!(create_index.columns, vec!["name"]);
+        assert!(create_index.unique);
 
-        let mut lexer = Lexer::new("DROP INDEX idx_users_name ON users;".to_string());
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-        match statement {
-            Statement::DropIndex(drop_index) => {
-                assert_eq!(drop_index.index_name, "idx_users_name");
-                assert_eq!(drop_index.table, "users");
-            }
-            _ => panic!("Expected DROP INDEX statement"),
-        }
+        let drop_index = parse_drop_index("DROP INDEX idx_users_name ON users;")?;
+        assert_eq!(drop_index.index_name, "idx_users_name");
+        assert_eq!(drop_index.table, "users");
 
         Ok(())
     }
 
     #[test]
     fn test_parse_create_with_backticks_and_type_aliases() -> Result<()> {
-        let mut lexer = Lexer::new(
-            "CREATE TABLE `user data` (`id` INT PRIMARY KEY UNIQUE, `active` BOOL NOT NULL, `score` DOUBLE DEFAULT 1.5, `name` VARCHAR(32) DEFAULT 'x');"
-                .to_string(),
+        let create = parse_create(
+            "CREATE TABLE `user data` (`id` INT PRIMARY KEY UNIQUE, `active` BOOL NOT NULL, `score` DOUBLE DEFAULT 1.5, `name` VARCHAR(32) DEFAULT 'x');",
+        )?;
+        assert_eq!(create.table, "user data");
+        assert_eq!(create.columns.len(), 4);
+        assert_eq!(create.columns[0].name, "id");
+        assert_eq!(create.columns[0].data_type, DataType::Integer);
+        assert!(create.columns[0].unique);
+        assert_eq!(create.columns[1].data_type, DataType::Boolean);
+        assert!(!create.columns[1].nullable);
+        assert_eq!(create.columns[2].data_type, DataType::Float);
+        assert_eq!(
+            create.columns[2].default_value,
+            Some(crate::catalog::Value::Float(1.5))
         );
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-
-        match statement {
-            Statement::Create(create) => {
-                assert_eq!(create.table, "user data");
-                assert_eq!(create.columns.len(), 4);
-                assert_eq!(create.columns[0].name, "id");
-                assert_eq!(create.columns[0].data_type, DataType::Integer);
-                assert!(create.columns[0].unique);
-                assert_eq!(create.columns[1].data_type, DataType::Boolean);
-                assert!(!create.columns[1].nullable);
-                assert_eq!(create.columns[2].data_type, DataType::Float);
-                assert_eq!(
-                    create.columns[2].default_value,
-                    Some(crate::catalog::Value::Float(1.5))
-                );
-                assert_eq!(create.columns[3].data_type, DataType::Text);
-                assert_eq!(
-                    create.columns[3].default_value,
-                    Some(crate::catalog::Value::Text("x".to_string()))
-                );
-            }
-            _ => panic!("Expected CREATE statement"),
-        }
+        assert_eq!(create.columns[3].data_type, DataType::Text);
+        assert_eq!(
+            create.columns[3].default_value,
+            Some(crate::catalog::Value::Text("x".to_string()))
+        );
 
         Ok(())
     }
 
     #[test]
     fn test_parse_alter_table_rename_to() -> Result<()> {
-        let mut lexer = Lexer::new("ALTER TABLE users RENAME TO members;".to_string());
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-
-        match statement {
-            Statement::Alter(alter) => {
-                assert_eq!(alter.table, "users");
-                assert!(matches!(
-                    alter.operation,
-                    AlterOperation::RenameTo(ref new_name) if new_name == "members"
-                ));
-            }
-            _ => panic!("Expected ALTER statement"),
-        }
+        let alter = parse_alter("ALTER TABLE users RENAME TO members;")?;
+        assert_eq!(alter.table, "users");
+        assert!(matches!(
+            alter.operation,
+            AlterOperation::RenameTo(ref new_name) if new_name == "members"
+        ));
 
         Ok(())
     }
 
     #[test]
     fn test_parse_alter_table_add_column() -> Result<()> {
-        let mut lexer = Lexer::new(
-            "ALTER TABLE users ADD COLUMN active BOOL NOT NULL DEFAULT TRUE;".to_string(),
-        );
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-
-        match statement {
-            Statement::Alter(alter) => {
-                assert_eq!(alter.table, "users");
-                assert!(matches!(
-                    alter.operation,
-                    AlterOperation::AddColumn(ColumnDefinition {
-                        name,
-                        data_type: DataType::Boolean,
-                        nullable: false,
-                        primary_key: false,
-                        unique: false,
-                        default_value: Some(crate::catalog::Value::Boolean(true)),
-                    }) if name == "active"
-                ));
-            }
-            _ => panic!("Expected ALTER statement"),
-        }
+        let alter = parse_alter("ALTER TABLE users ADD COLUMN active BOOL NOT NULL DEFAULT TRUE;")?;
+        assert_eq!(alter.table, "users");
+        assert!(matches!(
+            alter.operation,
+            AlterOperation::AddColumn(ColumnDefinition {
+                name,
+                data_type: DataType::Boolean,
+                nullable: false,
+                primary_key: false,
+                unique: false,
+                default_value: Some(crate::catalog::Value::Boolean(true)),
+            }) if name == "active"
+        ));
 
         Ok(())
     }
@@ -1425,10 +1258,7 @@ mod parser_tests {
             ("COMMIT;", "commit"),
             ("ROLLBACK;", "rollback"),
         ] {
-            let mut lexer = Lexer::new(sql.to_string());
-            lexer.tokenize()?;
-            let mut parser = Parser::new(lexer.get_tokens().to_vec());
-            let statement = parser.parse()?;
+            let statement = parse_statement(sql)?;
 
             match (expected, statement) {
                 ("begin", Statement::Begin)
@@ -1443,54 +1273,37 @@ mod parser_tests {
 
     #[test]
     fn test_parse_select_with_table_and_column_aliases() -> Result<()> {
-        let mut lexer =
-            Lexer::new("SELECT u.name AS user_name FROM users AS u WHERE u.id = 1;".to_string());
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-
-        match statement {
-            Statement::Select(select) => {
-                assert_eq!(select.columns.len(), 1);
-                assert!(matches!(
-                    &select.columns[0],
-                    SelectItem::Column(name) if name == "u.name"
-                ));
-                assert_eq!(select.column_aliases, vec![Some("user_name".to_string())]);
-                assert!(matches!(
-                    select.from,
-                    TableReference::Table(name, Some(alias))
-                        if name == "users" && alias == "u"
-                ));
-            }
-            _ => panic!("Expected SELECT statement"),
-        }
+        let select = parse_select("SELECT u.name AS user_name FROM users AS u WHERE u.id = 1;")?;
+        assert_eq!(select.columns.len(), 1);
+        assert!(matches!(
+            &select.columns[0],
+            SelectItem::Column(name) if name == "u.name"
+        ));
+        assert_eq!(select.column_aliases, vec![Some("user_name".to_string())]);
+        assert!(matches!(
+            select.from,
+            TableReference::Table(name, Some(alias))
+                if name == "users" && alias == "u"
+        ));
 
         Ok(())
     }
 
     #[test]
     fn test_parse_select_with_cross_join_sources() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT u.id, p.user_id FROM users u, posts p;".to_string());
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-
-        match statement {
-            Statement::Select(select) => match select.from {
-                TableReference::CrossJoin(left, right) => {
-                    assert!(matches!(
-                        *left,
-                        TableReference::Table(name, Some(alias)) if name == "users" && alias == "u"
-                    ));
-                    assert!(matches!(
-                        *right,
-                        TableReference::Table(name, Some(alias)) if name == "posts" && alias == "p"
-                    ));
-                }
-                _ => panic!("Expected cross join source tree"),
-            },
-            _ => panic!("Expected SELECT statement"),
+        let select = parse_select("SELECT u.id, p.user_id FROM users u, posts p;")?;
+        match select.from {
+            TableReference::CrossJoin(left, right) => {
+                assert!(matches!(
+                    *left,
+                    TableReference::Table(name, Some(alias)) if name == "users" && alias == "u"
+                ));
+                assert!(matches!(
+                    *right,
+                    TableReference::Table(name, Some(alias)) if name == "posts" && alias == "p"
+                ));
+            }
+            other => panic!("Expected cross join source tree, found {:?}", other),
         }
 
         Ok(())
@@ -1498,37 +1311,29 @@ mod parser_tests {
 
     #[test]
     fn test_parse_select_with_inner_join() -> Result<()> {
-        let mut lexer = Lexer::new(
-            "SELECT u.name, p.title FROM users u INNER JOIN posts p ON u.id = p.user_id;"
-                .to_string(),
-        );
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-
-        match statement {
-            Statement::Select(select) => match select.from {
-                TableReference::InnerJoin { left, right, on } => {
-                    assert!(matches!(
-                        *left,
-                        TableReference::Table(name, Some(alias)) if name == "users" && alias == "u"
-                    ));
-                    assert!(matches!(
-                        *right,
-                        TableReference::Table(name, Some(alias)) if name == "posts" && alias == "p"
-                    ));
-                    assert!(matches!(
-                        on,
-                        Condition::Comparison {
-                            left: Expression::Column(left),
-                            operator: ComparisonOperator::Equal,
-                            right: Expression::Column(right),
-                        } if left == "u.id" && right == "p.user_id"
-                    ));
-                }
-                _ => panic!("Expected inner join source tree"),
-            },
-            _ => panic!("Expected SELECT statement"),
+        let select = parse_select(
+            "SELECT u.name, p.title FROM users u INNER JOIN posts p ON u.id = p.user_id;",
+        )?;
+        match select.from {
+            TableReference::InnerJoin { left, right, on } => {
+                assert!(matches!(
+                    *left,
+                    TableReference::Table(name, Some(alias)) if name == "users" && alias == "u"
+                ));
+                assert!(matches!(
+                    *right,
+                    TableReference::Table(name, Some(alias)) if name == "posts" && alias == "p"
+                ));
+                assert!(matches!(
+                    on,
+                    Condition::Comparison {
+                        left: Expression::Column(left),
+                        operator: ComparisonOperator::Equal,
+                        right: Expression::Column(right),
+                    } if left == "u.id" && right == "p.user_id"
+                ));
+            }
+            other => panic!("Expected inner join source tree, found {:?}", other),
         }
 
         Ok(())
@@ -1536,81 +1341,53 @@ mod parser_tests {
 
     #[test]
     fn test_parse_select_with_subquery_predicates() -> Result<()> {
-        let mut lexer = Lexer::new(
-            "SELECT id FROM users WHERE id IN (SELECT user_id FROM posts) OR EXISTS (SELECT id FROM posts);"
-                .to_string(),
+        let select = parse_select(
+            "SELECT id FROM users WHERE id IN (SELECT user_id FROM posts) OR EXISTS (SELECT id FROM posts);",
+        )?;
+        assert_eq!(
+            select.where_clause.as_ref().map(|w| w.conditions.len()),
+            Some(1)
         );
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-
-        match statement {
-            Statement::Select(select) => {
-                assert_eq!(
-                    select.where_clause.as_ref().map(|w| w.conditions.len()),
-                    Some(1)
-                );
-                assert!(matches!(
-                    &select.where_clause.as_ref().unwrap().conditions[0],
-                    Condition::Logical { left, operator: LogicalOperator::Or, right }
-                    if matches!(
-                        &**left,
-                        Condition::InSubquery { is_not: false, .. }
-                    ) && matches!(
-                        &**right,
-                        Condition::Exists { is_not: false, .. }
-                    )
-                ));
-            }
-            _ => panic!("Expected SELECT statement"),
-        }
+        assert!(matches!(
+            &select.where_clause.as_ref().expect("missing WHERE clause").conditions[0],
+            Condition::Logical { left, operator: LogicalOperator::Or, right }
+            if matches!(
+                &**left,
+                Condition::InSubquery { is_not: false, .. }
+            ) && matches!(
+                &**right,
+                Condition::Exists { is_not: false, .. }
+            )
+        ));
 
         Ok(())
     }
 
     #[test]
     fn test_parse_select_with_union() -> Result<()> {
-        let mut lexer =
-            Lexer::new("SELECT id FROM users UNION ALL SELECT user_id FROM posts;".to_string());
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-
-        match statement {
-            Statement::Select(select) => {
-                let set_operation = select
-                    .set_operation
-                    .expect("expected set operation on parsed union");
-                assert_eq!(set_operation.operator, SetOperator::UnionAll);
-                assert!(matches!(*set_operation.right, SelectStatement { .. }));
-            }
-            _ => panic!("Expected SELECT statement"),
-        }
+        let select = parse_select("SELECT id FROM users UNION ALL SELECT user_id FROM posts;")?;
+        let set_operation = select
+            .set_operation
+            .expect("expected set operation on parsed union");
+        assert_eq!(set_operation.operator, SetOperator::UnionAll);
+        assert!(matches!(*set_operation.right, SelectStatement { .. }));
 
         Ok(())
     }
 
     #[test]
     fn test_parse_select_with_derived_table() -> Result<()> {
-        let mut lexer =
-            Lexer::new("SELECT p.user_id FROM (SELECT user_id FROM posts) AS p;".to_string());
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-
-        match statement {
-            Statement::Select(select) => match select.from {
-                TableReference::Derived { subquery, alias } => {
-                    assert_eq!(alias, "p");
-                    assert_eq!(subquery.columns.len(), 1);
-                    assert!(matches!(
-                        &subquery.columns[0],
-                        SelectItem::Column(name) if name == "user_id"
-                    ));
-                }
-                _ => panic!("Expected derived table source"),
-            },
-            _ => panic!("Expected SELECT statement"),
+        let select = parse_select("SELECT p.user_id FROM (SELECT user_id FROM posts) AS p;")?;
+        match select.from {
+            TableReference::Derived { subquery, alias } => {
+                assert_eq!(alias, "p");
+                assert_eq!(subquery.columns.len(), 1);
+                assert!(matches!(
+                    &subquery.columns[0],
+                    SelectItem::Column(name) if name == "user_id"
+                ));
+            }
+            other => panic!("Expected derived table source, found {:?}", other),
         }
 
         Ok(())
@@ -1618,62 +1395,44 @@ mod parser_tests {
 
     #[test]
     fn test_parse_select_with_cte() -> Result<()> {
-        let mut lexer = Lexer::new(
-            "WITH recent_posts AS (SELECT user_id FROM posts) SELECT recent_posts.user_id FROM recent_posts;"
-                .to_string(),
-        );
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-
-        match statement {
-            Statement::Select(select) => {
-                assert_eq!(select.with_clause.len(), 1);
-                assert_eq!(select.with_clause[0].name, "recent_posts");
-                assert!(matches!(
-                    select.from,
-                    TableReference::Table(name, None) if name == "recent_posts"
-                ));
-            }
-            _ => panic!("Expected SELECT statement"),
-        }
+        let select = parse_select(
+            "WITH recent_posts AS (SELECT user_id FROM posts) SELECT recent_posts.user_id FROM recent_posts;",
+        )?;
+        assert_eq!(select.with_clause.len(), 1);
+        assert_eq!(select.with_clause[0].name, "recent_posts");
+        assert!(matches!(
+            select.from,
+            TableReference::Table(name, None) if name == "recent_posts"
+        ));
 
         Ok(())
     }
 
     #[test]
     fn test_parse_select_with_left_join() -> Result<()> {
-        let mut lexer = Lexer::new(
-            "SELECT u.name, p.title FROM users u LEFT JOIN posts p ON u.id = p.user_id;"
-                .to_string(),
-        );
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
-        let statement = parser.parse()?;
-
-        match statement {
-            Statement::Select(select) => match select.from {
-                TableReference::LeftJoin { left, right, on } => {
-                    assert!(matches!(
-                        *left,
-                        TableReference::Table(name, Some(alias)) if name == "users" && alias == "u"
-                    ));
-                    assert!(matches!(
-                        *right,
-                        TableReference::Table(name, Some(alias)) if name == "posts" && alias == "p"
-                    ));
-                    assert!(matches!(
-                        on,
-                        Condition::Comparison {
-                            left: Expression::Column(left),
-                            operator: ComparisonOperator::Equal,
-                            right: Expression::Column(right),
-                        } if left == "u.id" && right == "p.user_id"
-                    ));
-                }
-                _ => panic!("Expected left join source tree"),
-            },
-            _ => panic!("Expected SELECT statement"),
+        let select = parse_select(
+            "SELECT u.name, p.title FROM users u LEFT JOIN posts p ON u.id = p.user_id;",
+        )?;
+        match select.from {
+            TableReference::LeftJoin { left, right, on } => {
+                assert!(matches!(
+                    *left,
+                    TableReference::Table(name, Some(alias)) if name == "users" && alias == "u"
+                ));
+                assert!(matches!(
+                    *right,
+                    TableReference::Table(name, Some(alias)) if name == "posts" && alias == "p"
+                ));
+                assert!(matches!(
+                    on,
+                    Condition::Comparison {
+                        left: Expression::Column(left),
+                        operator: ComparisonOperator::Equal,
+                        right: Expression::Column(right),
+                    } if left == "u.id" && right == "p.user_id"
+                ));
+            }
+            other => panic!("Expected left join source tree, found {:?}", other),
         }
 
         Ok(())
