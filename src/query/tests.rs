@@ -635,6 +635,41 @@ mod planner_tests {
     use crate::query::planner::*;
     use std::collections::HashMap;
 
+    fn expect_select_node(plan: &QueryPlan) -> &SelectPlanNode {
+        match &plan.node {
+            PlanNode::Select(node) => node,
+            other => panic!("expected select plan node, got {:?}", other),
+        }
+    }
+
+    fn expect_delete_node(plan: &QueryPlan) -> &DeletePlanNode {
+        match &plan.node {
+            PlanNode::Delete(node) => node,
+            other => panic!("expected delete plan node, got {:?}", other),
+        }
+    }
+
+    fn expect_update_node(plan: &QueryPlan) -> &UpdatePlanNode {
+        match &plan.node {
+            PlanNode::Update(node) => node,
+            other => panic!("expected update plan node, got {:?}", other),
+        }
+    }
+
+    fn expect_insert_node(plan: &QueryPlan) -> &InsertPlanNode {
+        match &plan.node {
+            PlanNode::Insert(node) => node,
+            other => panic!("expected insert plan node, got {:?}", other),
+        }
+    }
+
+    fn expect_create_node(plan: &QueryPlan) -> &CreatePlanNode {
+        match &plan.node {
+            PlanNode::Create(node) => node,
+            other => panic!("expected create plan node, got {:?}", other),
+        }
+    }
+
     #[test]
     fn test_query_planner_select() -> Result<()> {
         let mut catalog = Schema::new();
@@ -681,18 +716,14 @@ mod planner_tests {
         let plan = planner.plan(Statement::Select(statement))?;
 
         assert!(plan.estimated_cost > 0.0);
-        match &plan.node {
-            PlanNode::Select(node) => {
-                assert_eq!(node.table_name, "users");
-                assert_eq!(node.access_path, SelectAccessPath::PrimaryKeyLookup);
-                assert_eq!(
-                    node.projection,
-                    SelectProjection::Columns(vec!["id".to_string()])
-                );
-                assert!(node.has_filter);
-            }
-            other => panic!("expected select plan node, got {:?}", other),
-        }
+        let node = expect_select_node(&plan);
+        assert_eq!(node.table_name, "users");
+        assert_eq!(node.access_path, SelectAccessPath::PrimaryKeyLookup);
+        assert_eq!(
+            node.projection,
+            SelectProjection::Columns(vec!["id".to_string()])
+        );
+        assert!(node.has_filter);
         assert!(plan.select_analysis.is_some());
         let optimizations = plan
             .optimizations
@@ -756,15 +787,11 @@ mod planner_tests {
 
         let plan = planner.plan(Statement::Select(statement))?;
 
-        match &plan.node {
-            PlanNode::Select(node) => {
-                assert_eq!(
-                    node.access_path,
-                    SelectAccessPath::SecondaryIndexLookup("idx_users_email".to_string())
-                );
-            }
-            other => panic!("expected select plan node, got {:?}", other),
-        }
+        let node = expect_select_node(&plan);
+        assert_eq!(
+            node.access_path,
+            SelectAccessPath::SecondaryIndexLookup("idx_users_email".to_string())
+        );
 
         Ok(())
     }
@@ -838,13 +865,9 @@ mod planner_tests {
 
         let plan = planner.plan(Statement::Select(statement))?;
 
-        match &plan.node {
-            PlanNode::Select(node) => {
-                assert_eq!(node.access_path, SelectAccessPath::JoinScan);
-                assert_eq!(node.source_count, 2);
-            }
-            other => panic!("expected select plan node, got {:?}", other),
-        }
+        let node = expect_select_node(&plan);
+        assert_eq!(node.access_path, SelectAccessPath::JoinScan);
+        assert_eq!(node.source_count, 2);
 
         Ok(())
     }
@@ -882,13 +905,9 @@ mod planner_tests {
 
         let plan = planner.plan(Statement::Delete(statement))?;
 
-        match &plan.node {
-            PlanNode::Delete(node) => {
-                assert!(node.has_filter);
-                assert_eq!(node.access_path, SelectAccessPath::PrimaryKeyLookup);
-            }
-            other => panic!("expected delete plan node, got {:?}", other),
-        }
+        let node = expect_delete_node(&plan);
+        assert!(node.has_filter);
+        assert_eq!(node.access_path, SelectAccessPath::PrimaryKeyLookup);
 
         Ok(())
     }
@@ -930,13 +949,9 @@ mod planner_tests {
 
         let plan = planner.plan(Statement::Update(statement))?;
 
-        match &plan.node {
-            PlanNode::Update(node) => {
-                assert!(node.has_filter);
-                assert_eq!(node.access_path, SelectAccessPath::PrimaryKeyLookup);
-            }
-            other => panic!("expected update plan node, got {:?}", other),
-        }
+        let node = expect_update_node(&plan);
+        assert!(node.has_filter);
+        assert_eq!(node.access_path, SelectAccessPath::PrimaryKeyLookup);
 
         Ok(())
     }
@@ -1061,12 +1076,8 @@ mod planner_tests {
         };
 
         let plan = planner.plan(Statement::Select(statement))?;
-        match &plan.node {
-            PlanNode::Select(node) => {
-                assert_eq!(node.access_path, SelectAccessPath::RowIdLookup);
-            }
-            other => panic!("expected select plan node, got {:?}", other),
-        }
+        let node = expect_select_node(&plan);
+        assert_eq!(node.access_path, SelectAccessPath::RowIdLookup);
         assert_eq!(
             plan.select_analysis.as_ref().and_then(|a| a.rowid_lookup),
             Some(7)
@@ -1150,13 +1161,9 @@ mod planner_tests {
 
         let plan = planner.plan(Statement::Insert(statement))?;
 
-        match &plan.node {
-            PlanNode::Insert(node) => {
-                assert_eq!(node.table_name, "users");
-                assert_eq!(node.row_count, 1);
-            }
-            other => panic!("expected insert plan node, got {:?}", other),
-        }
+        let node = expect_insert_node(&plan);
+        assert_eq!(node.table_name, "users");
+        assert_eq!(node.row_count, 1);
         assert_eq!(plan.estimated_cost, 1.0); // One row
         Ok(())
     }
@@ -1180,13 +1187,9 @@ mod planner_tests {
 
         let plan = planner.plan(Statement::Create(statement))?;
 
-        match &plan.node {
-            PlanNode::Create(node) => {
-                assert_eq!(node.table_name, "test_table");
-                assert_eq!(node.column_count, 1);
-            }
-            other => panic!("expected create plan node, got {:?}", other),
-        }
+        let node = expect_create_node(&plan);
+        assert_eq!(node.table_name, "test_table");
+        assert_eq!(node.column_count, 1);
         assert_eq!(plan.estimated_cost, 1.0); // Fixed cost for CREATE
         Ok(())
     }
