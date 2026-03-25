@@ -1207,12 +1207,8 @@ impl Parser {
                 }
                 Token::Constraint | Token::Check => {
                     let constraint_name = self.parse_optional_constraint_name()?;
-                    self.consume_token(&Token::Check)?;
-                    let condition = self.parse_parenthesized_condition()?;
-                    check_constraint = Some(CheckConstraintDefinition {
-                        name: constraint_name,
-                        expression_sql: condition.to_sql(),
-                    });
+                    check_constraint =
+                        Some(self.parse_check_constraint_definition(constraint_name)?);
                 }
                 Token::References => {
                     references = Some(self.parse_column_foreign_key(None, &name)?);
@@ -1236,14 +1232,9 @@ impl Parser {
     fn parse_table_constraint(&mut self) -> Result<TableConstraint> {
         let constraint_name = self.parse_optional_constraint_name()?;
         match self.peek_token()? {
-            Token::Check => {
-                self.consume_token(&Token::Check)?;
-                let condition = self.parse_parenthesized_condition()?;
-                Ok(TableConstraint::Check(CheckConstraintDefinition {
-                    name: constraint_name,
-                    expression_sql: condition.to_sql(),
-                }))
-            }
+            Token::Check => Ok(TableConstraint::Check(
+                self.parse_check_constraint_definition(constraint_name)?,
+            )),
             Token::Foreign => Ok(TableConstraint::ForeignKey(
                 self.parse_table_foreign_key(constraint_name)?,
             )),
@@ -1269,17 +1260,22 @@ impl Parser {
         Ok(condition)
     }
 
+    fn parse_check_constraint_definition(
+        &mut self,
+        name: Option<String>,
+    ) -> Result<CheckConstraintDefinition> {
+        self.consume_token(&Token::Check)?;
+        let condition = self.parse_parenthesized_condition()?;
+        Ok(CheckConstraintDefinition {
+            name,
+            expression_sql: condition.to_sql(),
+        })
+    }
+
     fn parse_table_foreign_key(&mut self, name: Option<String>) -> Result<ForeignKeyDefinition> {
         self.consume_token(&Token::Foreign)?;
         self.consume_token(&Token::Key)?;
-        self.consume_token(&Token::LeftParen)?;
-        let column = self.parse_identifier()?;
-        if matches!(self.peek_token(), Ok(Token::Comma)) {
-            return Err(HematiteError::ParseError(
-                "Multi-column foreign keys are not supported".to_string(),
-            ));
-        }
-        self.consume_token(&Token::RightParen)?;
+        let column = self.parse_single_column_reference()?;
         self.parse_foreign_key_reference(name, column)
     }
 
@@ -1291,6 +1287,18 @@ impl Parser {
         self.parse_foreign_key_reference(name, column.to_string())
     }
 
+    fn parse_single_column_reference(&mut self) -> Result<String> {
+        self.consume_token(&Token::LeftParen)?;
+        let column = self.parse_identifier()?;
+        if matches!(self.peek_token(), Ok(Token::Comma)) {
+            return Err(HematiteError::ParseError(
+                "Multi-column foreign keys are not supported".to_string(),
+            ));
+        }
+        self.consume_token(&Token::RightParen)?;
+        Ok(column)
+    }
+
     fn parse_foreign_key_reference(
         &mut self,
         name: Option<String>,
@@ -1298,14 +1306,7 @@ impl Parser {
     ) -> Result<ForeignKeyDefinition> {
         self.consume_token(&Token::References)?;
         let referenced_table = self.parse_identifier()?;
-        self.consume_token(&Token::LeftParen)?;
-        let referenced_column = self.parse_identifier()?;
-        if matches!(self.peek_token(), Ok(Token::Comma)) {
-            return Err(HematiteError::ParseError(
-                "Multi-column foreign keys are not supported".to_string(),
-            ));
-        }
-        self.consume_token(&Token::RightParen)?;
+        let referenced_column = self.parse_single_column_reference()?;
         Ok(ForeignKeyDefinition {
             name,
             column,
