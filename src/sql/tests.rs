@@ -223,6 +223,26 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_alter_table_rename_column() -> Result<()> {
+        let db = TestDbFile::new("_test_alter_table_rename_column");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("INSERT INTO users (id, name) VALUES (1, 'alice');")?;
+        conn.execute("ALTER TABLE users RENAME COLUMN name TO full_name;")?;
+
+        let result = conn.execute("SELECT full_name FROM users;")?;
+        assert_eq!(
+            result.rows,
+            vec![vec![crate::catalog::Value::Text("alice".to_string())]]
+        );
+        assert!(conn.execute("SELECT name FROM users;").is_err());
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_check_constraint_rejects_invalid_insert() -> Result<()> {
         let db = TestDbFile::new("_test_check_constraint_rejects_invalid_insert");
         let mut conn = Connection::new(db.path())?;
@@ -323,6 +343,53 @@ mod connection_tests {
         conn.execute("INSERT INTO children (id, parent_id) VALUES (1, 1);")?;
 
         let result = conn.execute("UPDATE parents SET id = 2 WHERE id = 1;");
+        assert!(result.is_err());
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_rename_column_rejects_table_with_check_constraints() -> Result<()> {
+        let db = TestDbFile::new("_test_rename_column_rejects_table_with_check_constraints");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, CHECK (name != ''));",
+        )?;
+
+        let result = conn.execute("ALTER TABLE users RENAME COLUMN name TO full_name;");
+        assert!(result.is_err());
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_rename_column_rejects_referenced_parent_column() -> Result<()> {
+        let db = TestDbFile::new("_test_rename_column_rejects_referenced_parent_column");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE parents (id INTEGER PRIMARY KEY);")?;
+        conn.execute(
+            "CREATE TABLE children (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parents(id));",
+        )?;
+
+        let result = conn.execute("ALTER TABLE parents RENAME COLUMN id TO parent_id;");
+        assert!(result.is_err());
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_alter_table_add_column_rejects_check_constraint() -> Result<()> {
+        let db = TestDbFile::new("_test_alter_table_add_column_rejects_check_constraint");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY);")?;
+
+        let result = conn.execute("ALTER TABLE users ADD COLUMN score INTEGER CHECK (score >= 0);");
         assert!(result.is_err());
 
         conn.close()?;
