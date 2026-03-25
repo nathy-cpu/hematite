@@ -79,6 +79,12 @@ impl ResolvedSource {
     }
 }
 
+#[derive(Debug, Clone)]
+struct GroupedRow {
+    projected: Vec<Value>,
+    source_rows: Vec<Vec<Value>>,
+}
+
 impl SelectExecutor {
     pub fn new(statement: SelectStatement, access_path: SelectAccessPath) -> Self {
         Self {
@@ -501,6 +507,16 @@ impl SelectExecutor {
         sources
     }
 
+    fn total_source_width(&self, sources: &[ResolvedSource]) -> usize {
+        sources.iter().map(ResolvedSource::width).sum()
+    }
+
+    fn combine_join_rows(&self, left_row: &[Value], right_row: &[Value]) -> Vec<Value> {
+        let mut combined = left_row.to_vec();
+        combined.extend(right_row.iter().cloned());
+        combined
+    }
+
     fn resolve_named_source(
         &self,
         ctx: &ExecutionContext,
@@ -570,17 +586,12 @@ impl SelectExecutor {
             }
             TableReference::CrossJoin(left, right) => {
                 let (left_sources, left_rows) = self.materialize_reference(ctx, left)?;
-                let left_width = left_sources
-                    .iter()
-                    .map(ResolvedSource::width)
-                    .sum::<usize>();
+                let left_width = self.total_source_width(&left_sources);
                 let (right_sources, right_rows) = self.materialize_reference(ctx, right)?;
                 let mut rows = Vec::new();
                 for left_row in &left_rows {
                     for right_row in &right_rows {
-                        let mut combined = left_row.clone();
-                        combined.extend(right_row.iter().cloned());
-                        rows.push(combined);
+                        rows.push(self.combine_join_rows(left_row, right_row));
                     }
                 }
 
@@ -590,10 +601,7 @@ impl SelectExecutor {
             }
             TableReference::InnerJoin { left, right, on } => {
                 let (left_sources, left_rows) = self.materialize_reference(ctx, left)?;
-                let left_width = left_sources
-                    .iter()
-                    .map(ResolvedSource::width)
-                    .sum::<usize>();
+                let left_width = self.total_source_width(&left_sources);
                 let (right_sources, right_rows) = self.materialize_reference(ctx, right)?;
                 let shifted_right_sources = self.shifted_sources(right_sources, left_width);
                 let mut sources = left_sources;
@@ -602,8 +610,7 @@ impl SelectExecutor {
                 let mut rows = Vec::new();
                 for left_row in &left_rows {
                     for right_row in &right_rows {
-                        let mut combined = left_row.clone();
-                        combined.extend(right_row.iter().cloned());
+                        let combined = self.combine_join_rows(left_row, right_row);
                         if self.evaluate_condition(ctx, &sources, on, &combined)? == Some(true) {
                             rows.push(combined);
                         }
@@ -614,15 +621,9 @@ impl SelectExecutor {
             }
             TableReference::LeftJoin { left, right, on } => {
                 let (left_sources, left_rows) = self.materialize_reference(ctx, left)?;
-                let left_width = left_sources
-                    .iter()
-                    .map(ResolvedSource::width)
-                    .sum::<usize>();
+                let left_width = self.total_source_width(&left_sources);
                 let (right_sources, right_rows) = self.materialize_reference(ctx, right)?;
-                let right_width = right_sources
-                    .iter()
-                    .map(ResolvedSource::width)
-                    .sum::<usize>();
+                let right_width = self.total_source_width(&right_sources);
                 let shifted_right_sources = self.shifted_sources(right_sources, left_width);
                 let mut sources = left_sources;
                 sources.extend(shifted_right_sources);
@@ -631,8 +632,7 @@ impl SelectExecutor {
                 for left_row in &left_rows {
                     let mut matched = false;
                     for right_row in &right_rows {
-                        let mut combined = left_row.clone();
-                        combined.extend(right_row.iter().cloned());
+                        let combined = self.combine_join_rows(left_row, right_row);
                         if self.evaluate_condition(ctx, &sources, on, &combined)? == Some(true) {
                             rows.push(combined);
                             matched = true;
@@ -678,6 +678,14 @@ impl SelectExecutor {
 
         if let Some(limit) = self.statement.limit {
             rows.truncate(limit);
+        }
+    }
+
+    fn build_query_result(&self, columns: Vec<String>, rows: Vec<Vec<Value>>) -> QueryResult {
+        QueryResult {
+            affected_rows: rows.len(),
+            columns,
+            rows,
         }
     }
 
@@ -1170,75 +1178,97 @@ impl SelectExecutor {
         Ok(projected)
     }
 
+    fn build_groups(
+        &self,
+        ctx: &ExecutionContext,
+        sources: &[ResolvedSource],
+        filtered_rows: &[Vec<Value>],
+    ) -> Result<Vec<Vec<Vec<Value>>>> {
+        if self.statement.group_by.is_empty() {
+            return Ok(vec![filtered_rows.to_vec()]);
+        }
+
+        let mut keyed_groups: Vec<(Vec<Value>, Vec<Vec<Value>>)> = Vec::new();
+        for row in filtered_rows {
+            let key = self
+                .statement
+                .group_by
+                .iter()
+                .map(|expr| self.evaluate_expression(ctx, sources, expr, row))
+                .collect::<Result<Vec<_>>>()?;
+
+            if let Some((_, rows)) = keyed_groups
+                .iter_mut()
+                .find(|(existing_key, _)| *existing_key == key)
+            {
+                rows.push(row.clone());
+            } else {
+                keyed_groups.push((key, vec![row.clone()]));
+            }
+        }
+
+        Ok(keyed_groups.into_iter().map(|(_, rows)| rows).collect())
+    }
+
+    fn apply_having_clause(
+        &self,
+        ctx: &mut ExecutionContext<'_>,
+        sources: &[ResolvedSource],
+        output_columns: &[String],
+        grouped_rows: Vec<GroupedRow>,
+    ) -> Result<Vec<Vec<Value>>> {
+        let Some(having_clause) = &self.statement.having_clause else {
+            return Ok(grouped_rows
+                .into_iter()
+                .map(|group| group.projected)
+                .collect::<Vec<_>>());
+        };
+
+        let mut filtered_rows = Vec::with_capacity(grouped_rows.len());
+        for grouped in grouped_rows {
+            let mut include = true;
+            for condition in &having_clause.conditions {
+                if self.evaluate_projected_condition(
+                    ctx,
+                    sources,
+                    condition,
+                    &grouped.projected,
+                    output_columns,
+                    &grouped.source_rows,
+                )? != Some(true)
+                {
+                    include = false;
+                    break;
+                }
+            }
+
+            if include {
+                filtered_rows.push(grouped.projected);
+            }
+        }
+
+        Ok(filtered_rows)
+    }
+
     fn execute_grouped(
         &self,
         ctx: &mut ExecutionContext,
         sources: &[ResolvedSource],
         filtered_rows: &[Vec<Value>],
     ) -> Result<QueryResult> {
-        let mut groups: Vec<(Vec<Value>, Vec<Vec<Value>>)> = Vec::new();
-
-        if self.statement.group_by.is_empty() {
-            groups.push((Vec::new(), filtered_rows.to_vec()));
-        } else {
-            for row in filtered_rows {
-                let key = self
-                    .statement
-                    .group_by
-                    .iter()
-                    .map(|expr| self.evaluate_expression(ctx, sources, expr, row))
-                    .collect::<Result<Vec<_>>>()?;
-
-                if let Some((_, rows)) = groups
-                    .iter_mut()
-                    .find(|(existing_key, _)| *existing_key == key)
-                {
-                    rows.push(row.clone());
-                } else {
-                    groups.push((key, vec![row.clone()]));
-                }
-            }
-        }
-
+        let groups = self.build_groups(ctx, sources, filtered_rows)?;
         let output_columns = self.get_column_names(sources);
-        let mut grouped_projected_rows = Vec::with_capacity(groups.len());
-        for (_, rows) in groups {
-            grouped_projected_rows.push((self.project_grouped_row(ctx, sources, &rows)?, rows));
+        let mut grouped_rows = Vec::with_capacity(groups.len());
+        for rows in groups {
+            grouped_rows.push(GroupedRow {
+                projected: self.project_grouped_row(ctx, sources, &rows)?,
+                source_rows: rows,
+            });
         }
 
-        if let Some(having_clause) = &self.statement.having_clause {
-            let mut filtered_projected_rows = Vec::with_capacity(grouped_projected_rows.len());
-            for (row, group_rows) in grouped_projected_rows {
-                let mut include = true;
-                for condition in &having_clause.conditions {
-                    if self.evaluate_projected_condition(
-                        ctx,
-                        sources,
-                        condition,
-                        &row,
-                        &output_columns,
-                        &group_rows,
-                    )? != Some(true)
-                    {
-                        include = false;
-                        break;
-                    }
-                }
-                if include {
-                    filtered_projected_rows.push(row);
-                }
-            }
-
-            return self.finalize_grouped_rows(output_columns, filtered_projected_rows);
-        }
-
-        self.finalize_grouped_rows(
-            output_columns,
-            grouped_projected_rows
-                .into_iter()
-                .map(|(row, _)| row)
-                .collect(),
-        )
+        let projected_rows =
+            self.apply_having_clause(ctx, sources, &output_columns, grouped_rows)?;
+        self.finalize_grouped_rows(output_columns, projected_rows)
     }
 
     fn finalize_grouped_rows(
@@ -1251,11 +1281,44 @@ impl SelectExecutor {
         self.sort_projected_rows(&output_columns, &mut projected_rows);
         self.apply_select_window(&mut projected_rows);
 
-        Ok(QueryResult {
-            affected_rows: projected_rows.len(),
-            columns: output_columns,
-            rows: projected_rows,
-        })
+        Ok(self.build_query_result(output_columns, projected_rows))
+    }
+
+    fn filter_source_rows(
+        &self,
+        ctx: &mut ExecutionContext<'_>,
+        sources: &[ResolvedSource],
+        all_rows: Vec<Vec<Value>>,
+    ) -> Result<Vec<Vec<Value>>> {
+        let skip_filter = matches!(self.access_path, SelectAccessPath::RowIdLookup);
+        let mut filtered_rows = Vec::new();
+
+        for row in all_rows {
+            let include = if skip_filter {
+                true
+            } else {
+                match &self.statement.where_clause {
+                    Some(where_clause) => {
+                        let mut all_conditions_met = true;
+                        for condition in &where_clause.conditions {
+                            if self.evaluate_condition(ctx, sources, condition, &row)? != Some(true)
+                            {
+                                all_conditions_met = false;
+                                break;
+                            }
+                        }
+                        all_conditions_met
+                    }
+                    None => true,
+                }
+            };
+
+            if include {
+                filtered_rows.push(row);
+            }
+        }
+
+        Ok(filtered_rows)
     }
 
     fn extract_primary_key_lookup(&self, table: &Table) -> Option<Vec<Value>> {
@@ -1512,32 +1575,7 @@ impl QueryExecutor for SelectExecutor {
             }
         };
 
-        let mut filtered_rows = Vec::new();
-        let skip_filter = matches!(self.access_path, SelectAccessPath::RowIdLookup);
-        for row in &all_rows {
-            let include = if skip_filter {
-                true
-            } else {
-                match &self.statement.where_clause {
-                    Some(where_clause) => {
-                        let mut all_conditions_met = true;
-                        for condition in &where_clause.conditions {
-                            if self.evaluate_condition(ctx, &sources, condition, row)? != Some(true)
-                            {
-                                all_conditions_met = false;
-                                break;
-                            }
-                        }
-                        all_conditions_met
-                    }
-                    None => true,
-                }
-            };
-
-            if include {
-                filtered_rows.push(row.clone());
-            }
-        }
+        let mut filtered_rows = self.filter_source_rows(ctx, &sources, all_rows)?;
 
         if !self.statement.order_by.is_empty() {
             filtered_rows.sort_by(|left, right| {
@@ -1572,11 +1610,7 @@ impl QueryExecutor for SelectExecutor {
 
         self.apply_select_window(&mut projected_rows);
 
-        Ok(QueryResult {
-            affected_rows: projected_rows.len(),
-            columns: self.get_column_names(&sources),
-            rows: projected_rows,
-        })
+        Ok(self.build_query_result(self.get_column_names(&sources), projected_rows))
     }
 }
 
