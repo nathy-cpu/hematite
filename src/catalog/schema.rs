@@ -2,7 +2,7 @@
 
 use super::column::Column;
 use super::ids::TableId;
-use super::table::{SecondaryIndex, Table};
+use super::table::{CheckConstraint, ForeignKeyConstraint, SecondaryIndex, Table};
 use crate::error::HematiteError;
 use crate::Result;
 use std::collections::HashMap;
@@ -156,6 +156,43 @@ impl Schema {
             .next_column_id
             .max(column.id.as_u32().saturating_add(1));
         table.add_column(column)
+    }
+
+    pub fn rename_column(
+        &mut self,
+        table_id: TableId,
+        old_name: &str,
+        new_name: String,
+    ) -> Result<()> {
+        let table = self
+            .tables
+            .get_mut(&table_id)
+            .ok_or_else(|| HematiteError::StorageError("Table not found".to_string()))?;
+        table.rename_column(old_name, new_name)
+    }
+
+    pub fn add_check_constraint(
+        &mut self,
+        table_id: TableId,
+        constraint: CheckConstraint,
+    ) -> Result<()> {
+        let table = self
+            .tables
+            .get_mut(&table_id)
+            .ok_or_else(|| HematiteError::StorageError("Table not found".to_string()))?;
+        table.add_check_constraint(constraint)
+    }
+
+    pub fn add_foreign_key(
+        &mut self,
+        table_id: TableId,
+        constraint: ForeignKeyConstraint,
+    ) -> Result<()> {
+        let table = self
+            .tables
+            .get_mut(&table_id)
+            .ok_or_else(|| HematiteError::StorageError("Table not found".to_string()))?;
+        table.add_foreign_key(constraint)
     }
 
     pub fn drop_secondary_index(&mut self, table_id: TableId, index_name: &str) -> Result<()> {

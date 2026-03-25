@@ -22,7 +22,7 @@ use crate::catalog::column::Column;
 use crate::catalog::engine::{CatalogEngine, CatalogEngineSnapshot, CatalogIntegrityReport};
 use crate::catalog::ids::TableId;
 use crate::catalog::schema::Schema;
-use crate::catalog::table::{SecondaryIndex, Table};
+use crate::catalog::table::{CheckConstraint, ForeignKeyConstraint, SecondaryIndex, Table};
 use crate::catalog::JournalMode;
 use crate::error::Result;
 use std::collections::HashMap;
@@ -178,6 +178,40 @@ impl Catalog {
 
     pub fn add_column(&mut self, table_id: TableId, column: Column) -> Result<()> {
         self.schema.add_column(table_id, column)?;
+        self.schema_dirty = true;
+        self.save_schema_to_btree()?;
+        Ok(())
+    }
+
+    pub fn rename_column(
+        &mut self,
+        table_id: TableId,
+        old_name: &str,
+        new_name: String,
+    ) -> Result<()> {
+        self.schema.rename_column(table_id, old_name, new_name)?;
+        self.schema_dirty = true;
+        self.save_schema_to_btree()?;
+        Ok(())
+    }
+
+    pub fn add_check_constraint(
+        &mut self,
+        table_id: TableId,
+        constraint: CheckConstraint,
+    ) -> Result<()> {
+        self.schema.add_check_constraint(table_id, constraint)?;
+        self.schema_dirty = true;
+        self.save_schema_to_btree()?;
+        Ok(())
+    }
+
+    pub fn add_foreign_key(
+        &mut self,
+        table_id: TableId,
+        constraint: ForeignKeyConstraint,
+    ) -> Result<()> {
+        self.schema.add_foreign_key(table_id, constraint)?;
         self.schema_dirty = true;
         self.save_schema_to_btree()?;
         Ok(())

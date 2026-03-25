@@ -15,6 +15,8 @@ pub struct Table {
     pub column_indices: HashMap<String, usize>,
     pub primary_key_columns: Vec<usize>,
     pub secondary_indexes: Vec<SecondaryIndex>,
+    pub check_constraints: Vec<CheckConstraint>,
+    pub foreign_keys: Vec<ForeignKeyConstraint>,
     pub root_page_id: u32,
     pub primary_key_index_root_page_id: u32,
 }
@@ -25,6 +27,20 @@ pub struct SecondaryIndex {
     pub column_indices: Vec<usize>,
     pub root_page_id: u32,
     pub unique: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckConstraint {
+    pub name: Option<String>,
+    pub expression_sql: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignKeyConstraint {
+    pub name: Option<String>,
+    pub column_index: usize,
+    pub referenced_table: String,
+    pub referenced_column: String,
 }
 
 impl Table {
@@ -71,6 +87,8 @@ impl Table {
             column_indices,
             primary_key_columns,
             secondary_indexes: Vec::new(),
+            check_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
             root_page_id,
             primary_key_index_root_page_id: 0,
         })
@@ -186,6 +204,67 @@ impl Table {
         Ok(())
     }
 
+    pub fn rename_column(&mut self, old_name: &str, new_name: String) -> Result<()> {
+        if self.column_indices.contains_key(&new_name) {
+            return Err(HematiteError::StorageError(format!(
+                "Column '{}' already exists in table '{}'",
+                new_name, self.name
+            )));
+        }
+
+        let index = self.get_column_index(old_name).ok_or_else(|| {
+            HematiteError::StorageError(format!(
+                "Column '{}' does not exist in table '{}'",
+                old_name, self.name
+            ))
+        })?;
+
+        self.columns[index].name = new_name.clone();
+        self.column_indices.remove(old_name);
+        self.column_indices.insert(new_name, index);
+        Ok(())
+    }
+
+    pub fn add_check_constraint(&mut self, constraint: CheckConstraint) -> Result<()> {
+        if let Some(name) = &constraint.name {
+            if self
+                .check_constraints
+                .iter()
+                .any(|existing| existing.name.as_deref() == Some(name.as_str()))
+            {
+                return Err(HematiteError::StorageError(format!(
+                    "Check constraint '{}' already exists on table '{}'",
+                    name, self.name
+                )));
+            }
+        }
+        self.check_constraints.push(constraint);
+        Ok(())
+    }
+
+    pub fn add_foreign_key(&mut self, constraint: ForeignKeyConstraint) -> Result<()> {
+        if constraint.column_index >= self.columns.len() {
+            return Err(HematiteError::StorageError(format!(
+                "Foreign key references invalid column index {}",
+                constraint.column_index
+            )));
+        }
+        if let Some(name) = &constraint.name {
+            if self
+                .foreign_keys
+                .iter()
+                .any(|existing| existing.name.as_deref() == Some(name.as_str()))
+            {
+                return Err(HematiteError::StorageError(format!(
+                    "Foreign key '{}' already exists on table '{}'",
+                    name, self.name
+                )));
+            }
+        }
+        self.foreign_keys.push(constraint);
+        Ok(())
+    }
+
     pub fn drop_secondary_index(&mut self, name: &str) -> Result<SecondaryIndex> {
         let index = self
             .secondary_indexes
@@ -242,6 +321,42 @@ impl Table {
             for &column_index in &index.column_indices {
                 buffer.extend_from_slice(&(column_index as u32).to_le_bytes());
             }
+        }
+
+        buffer.extend_from_slice(&(self.check_constraints.len() as u32).to_le_bytes());
+        for constraint in &self.check_constraints {
+            match &constraint.name {
+                Some(name) => {
+                    buffer.push(1);
+                    let bytes = name.as_bytes();
+                    buffer.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                    buffer.extend_from_slice(bytes);
+                }
+                None => buffer.push(0),
+            }
+            let expression_bytes = constraint.expression_sql.as_bytes();
+            buffer.extend_from_slice(&(expression_bytes.len() as u32).to_le_bytes());
+            buffer.extend_from_slice(expression_bytes);
+        }
+
+        buffer.extend_from_slice(&(self.foreign_keys.len() as u32).to_le_bytes());
+        for constraint in &self.foreign_keys {
+            match &constraint.name {
+                Some(name) => {
+                    buffer.push(1);
+                    let bytes = name.as_bytes();
+                    buffer.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                    buffer.extend_from_slice(bytes);
+                }
+                None => buffer.push(0),
+            }
+            buffer.extend_from_slice(&(constraint.column_index as u32).to_le_bytes());
+            let table_bytes = constraint.referenced_table.as_bytes();
+            buffer.extend_from_slice(&(table_bytes.len() as u32).to_le_bytes());
+            buffer.extend_from_slice(table_bytes);
+            let column_bytes = constraint.referenced_column.as_bytes();
+            buffer.extend_from_slice(&(column_bytes.len() as u32).to_le_bytes());
+            buffer.extend_from_slice(column_bytes);
         }
 
         Ok(())
@@ -449,6 +564,79 @@ impl Table {
             })?;
         }
 
+        if *offset == buffer.len() {
+            return Ok(table);
+        }
+
+        if *offset + 4 > buffer.len() {
+            return Err(HematiteError::CorruptedData(
+                "Invalid check constraint count".to_string(),
+            ));
+        }
+        let check_count = u32::from_le_bytes([
+            buffer[*offset],
+            buffer[*offset + 1],
+            buffer[*offset + 2],
+            buffer[*offset + 3],
+        ]) as usize;
+        *offset += 4;
+
+        for _ in 0..check_count {
+            if *offset >= buffer.len() {
+                return Err(HematiteError::CorruptedData(
+                    "Invalid check constraint metadata".to_string(),
+                ));
+            }
+            let name = if buffer[*offset] == 1 {
+                *offset += 1;
+                let len = read_len(buffer, offset, "check constraint name length")?;
+                let value = read_string(buffer, offset, len, "check constraint name")?;
+                Some(value)
+            } else {
+                *offset += 1;
+                None
+            };
+            let len = read_len(buffer, offset, "check constraint expression length")?;
+            let expression_sql = read_string(buffer, offset, len, "check constraint expression")?;
+            table.add_check_constraint(CheckConstraint {
+                name,
+                expression_sql,
+            })?;
+        }
+
+        if *offset == buffer.len() {
+            return Ok(table);
+        }
+
+        let foreign_key_count = read_len(buffer, offset, "foreign key count")?;
+        for _ in 0..foreign_key_count {
+            if *offset >= buffer.len() {
+                return Err(HematiteError::CorruptedData(
+                    "Invalid foreign key metadata".to_string(),
+                ));
+            }
+            let name = if buffer[*offset] == 1 {
+                *offset += 1;
+                let len = read_len(buffer, offset, "foreign key name length")?;
+                let value = read_string(buffer, offset, len, "foreign key name")?;
+                Some(value)
+            } else {
+                *offset += 1;
+                None
+            };
+            let column_index = read_len(buffer, offset, "foreign key column index")?;
+            let table_len = read_len(buffer, offset, "foreign key table length")?;
+            let referenced_table = read_string(buffer, offset, table_len, "foreign key table")?;
+            let column_len = read_len(buffer, offset, "foreign key column length")?;
+            let referenced_column = read_string(buffer, offset, column_len, "foreign key column")?;
+            table.add_foreign_key(ForeignKeyConstraint {
+                name,
+                column_index,
+                referenced_table,
+                referenced_column,
+            })?;
+        }
+
         Ok(table)
     }
 
@@ -464,4 +652,28 @@ impl Table {
         let mut offset = 0;
         Self::deserialize(bytes, &mut offset)
     }
+}
+
+fn read_len(buffer: &[u8], offset: &mut usize, field: &str) -> Result<usize> {
+    if *offset + 4 > buffer.len() {
+        return Err(HematiteError::CorruptedData(format!("Invalid {}", field)));
+    }
+    let value = u32::from_le_bytes([
+        buffer[*offset],
+        buffer[*offset + 1],
+        buffer[*offset + 2],
+        buffer[*offset + 3],
+    ]) as usize;
+    *offset += 4;
+    Ok(value)
+}
+
+fn read_string(buffer: &[u8], offset: &mut usize, len: usize, field: &str) -> Result<String> {
+    if *offset + len > buffer.len() {
+        return Err(HematiteError::CorruptedData(format!("Invalid {}", field)));
+    }
+    let value = String::from_utf8(buffer[*offset..*offset + len].to_vec())
+        .map_err(|_| HematiteError::CorruptedData(format!("Invalid UTF-8 in {}", field)))?;
+    *offset += len;
+    Ok(value)
 }

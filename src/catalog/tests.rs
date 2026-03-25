@@ -1074,6 +1074,36 @@ mod tests {
     }
 
     #[test]
+    fn test_table_serialization_roundtrip_with_constraints() -> Result<()> {
+        let columns = vec![
+            Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer).primary_key(true),
+            Column::new(ColumnId::new(2), "user_id".to_string(), DataType::Integer),
+            Column::new(ColumnId::new(3), "name".to_string(), DataType::Text),
+        ];
+        let mut original = Table::new(TableId::new(7), "posts".to_string(), columns, 42u32)?;
+        original.add_check_constraint(crate::catalog::table::CheckConstraint {
+            name: Some("ck_name".to_string()),
+            expression_sql: "name != ''".to_string(),
+        })?;
+        original.add_foreign_key(crate::catalog::table::ForeignKeyConstraint {
+            name: Some("fk_posts_user".to_string()),
+            column_index: 1,
+            referenced_table: "users".to_string(),
+            referenced_column: "id".to_string(),
+        })?;
+
+        let mut buffer = Vec::new();
+        original.serialize(&mut buffer)?;
+
+        let mut offset = 0;
+        let deserialized = Table::deserialize(&buffer, &mut offset)?;
+
+        assert_eq!(deserialized.check_constraints, original.check_constraints);
+        assert_eq!(deserialized.foreign_keys, original.foreign_keys);
+        Ok(())
+    }
+
+    #[test]
     fn test_table_deserialization_errors() {
         let buffer = vec![]; // Empty buffer
         let mut offset = 0;
