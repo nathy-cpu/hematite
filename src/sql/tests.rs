@@ -256,6 +256,80 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_foreign_key_rejects_missing_parent_on_insert() -> Result<()> {
+        let db = TestDbFile::new("_test_foreign_key_rejects_missing_parent_on_insert");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE parents (id INTEGER PRIMARY KEY);")?;
+        conn.execute(
+            "CREATE TABLE children (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parents(id));",
+        )?;
+
+        let result = conn.execute("INSERT INTO children (id, parent_id) VALUES (1, 99);");
+        assert!(result.is_err());
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_foreign_key_rejects_missing_parent_on_update() -> Result<()> {
+        let db = TestDbFile::new("_test_foreign_key_rejects_missing_parent_on_update");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE parents (id INTEGER PRIMARY KEY);")?;
+        conn.execute(
+            "CREATE TABLE children (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parents(id));",
+        )?;
+        conn.execute("INSERT INTO parents (id) VALUES (1);")?;
+        conn.execute("INSERT INTO children (id, parent_id) VALUES (1, 1);")?;
+
+        let result = conn.execute("UPDATE children SET parent_id = 2 WHERE id = 1;");
+        assert!(result.is_err());
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_foreign_key_restricts_parent_delete() -> Result<()> {
+        let db = TestDbFile::new("_test_foreign_key_restricts_parent_delete");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE parents (id INTEGER PRIMARY KEY);")?;
+        conn.execute(
+            "CREATE TABLE children (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parents(id));",
+        )?;
+        conn.execute("INSERT INTO parents (id) VALUES (1);")?;
+        conn.execute("INSERT INTO children (id, parent_id) VALUES (1, 1);")?;
+
+        let result = conn.execute("DELETE FROM parents WHERE id = 1;");
+        assert!(result.is_err());
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_foreign_key_restricts_parent_key_update() -> Result<()> {
+        let db = TestDbFile::new("_test_foreign_key_restricts_parent_key_update");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE parents (id INTEGER PRIMARY KEY);")?;
+        conn.execute(
+            "CREATE TABLE children (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parents(id));",
+        )?;
+        conn.execute("INSERT INTO parents (id) VALUES (1);")?;
+        conn.execute("INSERT INTO children (id, parent_id) VALUES (1, 1);")?;
+
+        let result = conn.execute("UPDATE parents SET id = 2 WHERE id = 1;");
+        assert!(result.is_err());
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_alter_table_add_column_preserves_existing_rows() -> Result<()> {
         let db = TestDbFile::new("_test_alter_table_add_column_preserves_existing_rows");
         let mut conn = Connection::new(db.path())?;
