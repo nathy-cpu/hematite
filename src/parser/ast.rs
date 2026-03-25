@@ -1550,9 +1550,7 @@ impl CreateStatement {
 
 impl DeleteStatement {
     pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
-        let _table = catalog.get_table_by_name(&self.table).ok_or_else(|| {
-            HematiteError::ParseError(format!("Table '{}' does not exist", self.table))
-        })?;
+        let _table = require_table(catalog, &self.table)?;
         let scope = SelectStatement::single_table_scope(&self.table);
 
         if let Some(where_clause) = &self.where_clause {
@@ -1567,9 +1565,7 @@ impl DeleteStatement {
 
 impl DropStatement {
     pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
-        catalog.get_table_by_name(&self.table).ok_or_else(|| {
-            HematiteError::ParseError(format!("Table '{}' does not exist", self.table))
-        })?;
+        let _table = require_table(catalog, &self.table)?;
         Ok(())
     }
 }
@@ -1654,9 +1650,7 @@ impl AlterStatement {
         &self,
         catalog: &'a crate::catalog::Schema,
     ) -> Result<&'a crate::catalog::Table> {
-        catalog.get_table_by_name(&self.table).ok_or_else(|| {
-            HematiteError::ParseError(format!("Table '{}' does not exist", self.table))
-        })
+        require_table(catalog, &self.table)
     }
 
     fn validate_rename_column(
@@ -1877,9 +1871,7 @@ impl ArithmeticOperator {
 
 impl CreateIndexStatement {
     pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
-        let table = catalog.get_table_by_name(&self.table).ok_or_else(|| {
-            HematiteError::ParseError(format!("Table '{}' does not exist", self.table))
-        })?;
+        let table = require_table(catalog, &self.table)?;
 
         if self.columns.is_empty() {
             return Err(HematiteError::ParseError(
@@ -1913,6 +1905,15 @@ impl CreateIndexStatement {
 
         Ok(())
     }
+}
+
+fn require_table<'a>(
+    catalog: &'a crate::catalog::Schema,
+    table_name: &str,
+) -> Result<&'a crate::catalog::Table> {
+    catalog
+        .get_table_by_name(table_name)
+        .ok_or_else(|| HematiteError::ParseError(format!("Table '{}' does not exist", table_name)))
 }
 
 impl DropIndexStatement {
