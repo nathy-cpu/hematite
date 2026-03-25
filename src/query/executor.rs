@@ -1759,13 +1759,7 @@ impl QueryExecutor for InsertExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext) -> Result<QueryResult> {
         self.statement.validate(&ctx.catalog)?;
 
-        let table = ctx
-            .catalog
-            .get_table_by_name(&self.statement.table)
-            .ok_or_else(|| {
-                HematiteError::ParseError(format!("Table '{}' not found", self.statement.table))
-            })?
-            .clone();
+        let table = catalog_table(ctx, &self.statement.table)?;
 
         for value_row in &self.statement.values {
             let row_values = self.build_row(&table, value_row)?;
@@ -1893,13 +1887,7 @@ impl QueryExecutor for UpdateExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext<'_>) -> Result<QueryResult> {
         self.statement.validate(&ctx.catalog)?;
 
-        let table = ctx
-            .catalog
-            .get_table_by_name(&self.statement.table)
-            .ok_or_else(|| {
-                HematiteError::ParseError(format!("Table '{}' not found", self.statement.table))
-            })?
-            .clone();
+        let table = catalog_table(ctx, &self.statement.table)?;
 
         let select_executor = SelectExecutor::new(
             locator_select_statement(&self.statement.table, self.statement.where_clause.clone()),
@@ -2103,13 +2091,7 @@ impl QueryExecutor for DeleteExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext) -> Result<QueryResult> {
         self.statement.validate(&ctx.catalog)?;
 
-        let table = ctx
-            .catalog
-            .get_table_by_name(&self.statement.table)
-            .ok_or_else(|| {
-                HematiteError::ParseError(format!("Table '{}' not found", self.statement.table))
-            })?
-            .clone();
+        let table = catalog_table(ctx, &self.statement.table)?;
 
         let select_executor = SelectExecutor::new(
             locator_select_statement(&self.statement.table, self.statement.where_clause.clone()),
@@ -2273,12 +2255,7 @@ impl QueryExecutor for CreateExecutor {
         let table = ctx
             .catalog
             .get_table_by_name(&self.statement.table)
-            .ok_or_else(|| {
-                HematiteError::InternalError(format!(
-                    "Table '{}' disappeared during CREATE TABLE execution",
-                    self.statement.table
-                ))
-            })?
+            .ok_or_else(|| table_disappeared_internal_error(&self.statement.table, "CREATE TABLE"))?
             .clone();
         let constraints = self.constraints(&table)?;
         for (index_name, column_indices) in self.unique_index_specs() {
@@ -2323,13 +2300,7 @@ impl QueryExecutor for DropExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext<'_>) -> Result<QueryResult> {
         self.statement.validate(&ctx.catalog)?;
 
-        let table = ctx
-            .catalog
-            .get_table_by_name(&self.statement.table)
-            .ok_or_else(|| {
-                HematiteError::ParseError(format!("Table '{}' not found", self.statement.table))
-            })?
-            .clone();
+        let table = catalog_table(ctx, &self.statement.table)?;
 
         ctx.engine.drop_table_with_indexes(&table)?;
         ctx.catalog
@@ -2361,44 +2332,18 @@ impl QueryExecutor for AlterExecutor {
 
         match &self.statement.operation {
             AlterOperation::RenameTo(new_name) => {
-                let table = ctx
-                    .catalog
-                    .get_table_by_name(&self.statement.table)
-                    .ok_or_else(|| {
-                        HematiteError::ParseError(format!(
-                            "Table '{}' not found",
-                            self.statement.table
-                        ))
-                    })?
-                    .clone();
+                let table = catalog_table(ctx, &self.statement.table)?;
                 ctx.catalog.rename_table(table.id, new_name.clone())?;
                 ctx.engine
                     .rename_table_runtime_metadata(&self.statement.table, new_name)?;
             }
             AlterOperation::RenameColumn { old_name, new_name } => {
-                let table = ctx
-                    .catalog
-                    .get_table_by_name(&self.statement.table)
-                    .ok_or_else(|| {
-                        HematiteError::ParseError(format!(
-                            "Table '{}' not found",
-                            self.statement.table
-                        ))
-                    })?;
+                let table = catalog_table(ctx, &self.statement.table)?;
                 ctx.catalog
                     .rename_column(table.id, old_name, new_name.clone())?;
             }
             AlterOperation::AddColumn(column_def) => {
-                let table = ctx
-                    .catalog
-                    .get_table_by_name(&self.statement.table)
-                    .ok_or_else(|| {
-                        HematiteError::ParseError(format!(
-                            "Table '{}' not found",
-                            self.statement.table
-                        ))
-                    })?
-                    .clone();
+                let table = catalog_table(ctx, &self.statement.table)?;
 
                 let column = Column::new(
                     crate::catalog::ColumnId::new(ctx.catalog.next_column_id()),
@@ -2447,13 +2392,7 @@ impl QueryExecutor for CreateIndexExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext<'_>) -> Result<QueryResult> {
         self.statement.validate(&ctx.catalog)?;
 
-        let table = ctx
-            .catalog
-            .get_table_by_name(&self.statement.table)
-            .ok_or_else(|| {
-                HematiteError::ParseError(format!("Table '{}' not found", self.statement.table))
-            })?
-            .clone();
+        let table = catalog_table(ctx, &self.statement.table)?;
 
         let column_indices = self
             .statement
@@ -2484,10 +2423,10 @@ impl QueryExecutor for CreateIndexExecutor {
             .catalog
             .get_table(table.id)
             .ok_or_else(|| {
-                HematiteError::InternalError(format!(
-                    "Table '{}' disappeared while creating index '{}'",
-                    self.statement.table, self.statement.index_name
-                ))
+                table_disappeared_internal_error(
+                    &self.statement.table,
+                    &format!("creating index '{}'", self.statement.index_name),
+                )
             })?
             .clone();
         let rows = ctx.engine.read_rows_with_ids(&self.statement.table)?;
@@ -2526,6 +2465,24 @@ fn duplicate_primary_key_parse_error(table_name: &str, key_values: &[Value]) -> 
         "Duplicate primary key for table '{}': {:?}",
         table_name, key_values
     ))
+}
+
+fn table_not_found_parse_error(table_name: &str) -> HematiteError {
+    HematiteError::ParseError(format!("Table '{}' not found", table_name))
+}
+
+fn table_disappeared_internal_error(table_name: &str, operation: &str) -> HematiteError {
+    HematiteError::InternalError(format!(
+        "Table '{}' disappeared during {}",
+        table_name, operation
+    ))
+}
+
+fn catalog_table(ctx: &ExecutionContext<'_>, table_name: &str) -> Result<Table> {
+    ctx.catalog
+        .get_table_by_name(table_name)
+        .cloned()
+        .ok_or_else(|| table_not_found_parse_error(table_name))
 }
 
 fn primary_key_values(table: &Table, row: &[Value]) -> Result<Vec<Value>> {
