@@ -1470,21 +1470,30 @@ impl CreateStatement {
             ));
         }
 
-        for column in &self.columns {
-            if let Some(foreign_key) = &column.references {
-                self.validate_foreign_key(catalog, foreign_key)?;
-            }
-        }
-        for constraint in &self.constraints {
-            match constraint {
-                TableConstraint::Check(_) => {}
-                TableConstraint::ForeignKey(foreign_key) => {
-                    self.validate_foreign_key(catalog, foreign_key)?;
-                }
-            }
+        for foreign_key in self.foreign_keys() {
+            self.validate_foreign_key(catalog, foreign_key)?;
         }
 
         Ok(())
+    }
+
+    fn foreign_keys(&self) -> Vec<&ForeignKeyDefinition> {
+        let mut foreign_keys = self
+            .columns
+            .iter()
+            .filter_map(|column| column.references.as_ref())
+            .collect::<Vec<_>>();
+
+        foreign_keys.extend(
+            self.constraints
+                .iter()
+                .filter_map(|constraint| match constraint {
+                    TableConstraint::Check(_) => None,
+                    TableConstraint::ForeignKey(foreign_key) => Some(foreign_key),
+                }),
+        );
+
+        foreign_keys
     }
 
     fn validate_foreign_key(
@@ -1567,12 +1576,9 @@ impl DropStatement {
 
 impl AlterStatement {
     pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
-        catalog.get_table_by_name(&self.table).ok_or_else(|| {
-            HematiteError::ParseError(format!("Table '{}' does not exist", self.table))
-        })?;
-
         match &self.operation {
             AlterOperation::RenameTo(new_name) => {
+                self.require_table(catalog)?;
                 if new_name == &self.table {
                     return Err(HematiteError::ParseError(
                         "ALTER TABLE RENAME TO requires a different table name".to_string(),
@@ -1586,54 +1592,10 @@ impl AlterStatement {
                 }
             }
             AlterOperation::RenameColumn { old_name, new_name } => {
-                let table = catalog.get_table_by_name(&self.table).ok_or_else(|| {
-                    HematiteError::ParseError(format!("Table '{}' does not exist", self.table))
-                })?;
-                if old_name == new_name {
-                    return Err(HematiteError::ParseError(
-                        "ALTER TABLE RENAME COLUMN requires a different column name".to_string(),
-                    ));
-                }
-                if table.get_column_by_name(old_name).is_none() {
-                    return Err(HematiteError::ParseError(format!(
-                        "Column '{}' does not exist in table '{}'",
-                        old_name, self.table
-                    )));
-                }
-                if table.get_column_by_name(new_name).is_some() {
-                    return Err(HematiteError::ParseError(format!(
-                        "Column '{}' already exists in table '{}'",
-                        new_name, self.table
-                    )));
-                }
-                if !table.check_constraints.is_empty() {
-                    return Err(HematiteError::ParseError(
-                        "ALTER TABLE RENAME COLUMN is not supported for tables with CHECK constraints".to_string(),
-                    ));
-                }
-                for (_, table_name) in catalog.list_tables() {
-                    let referencing_table =
-                        catalog.get_table_by_name(&table_name).ok_or_else(|| {
-                            HematiteError::ParseError(format!(
-                                "Table '{}' does not exist",
-                                table_name
-                            ))
-                        })?;
-                    if referencing_table.foreign_keys.iter().any(|foreign_key| {
-                        foreign_key.referenced_table == self.table
-                            && foreign_key.referenced_column == *old_name
-                    }) {
-                        return Err(HematiteError::ParseError(format!(
-                            "ALTER TABLE RENAME COLUMN is not supported while foreign key references '{}.{}' exist",
-                            self.table, old_name
-                        )));
-                    }
-                }
+                self.validate_rename_column(catalog, old_name, new_name)?;
             }
             AlterOperation::AddColumn(column) => {
-                let table = catalog.get_table_by_name(&self.table).ok_or_else(|| {
-                    HematiteError::ParseError(format!("Table '{}' does not exist", self.table))
-                })?;
+                let table = self.require_table(catalog)?;
                 if table.get_column_by_name(&column.name).is_some() {
                     return Err(HematiteError::ParseError(format!(
                         "Column '{}' already exists in table '{}'",
@@ -1686,6 +1648,73 @@ impl AlterStatement {
         }
 
         Ok(())
+    }
+
+    fn require_table<'a>(
+        &self,
+        catalog: &'a crate::catalog::Schema,
+    ) -> Result<&'a crate::catalog::Table> {
+        catalog.get_table_by_name(&self.table).ok_or_else(|| {
+            HematiteError::ParseError(format!("Table '{}' does not exist", self.table))
+        })
+    }
+
+    fn validate_rename_column(
+        &self,
+        catalog: &crate::catalog::Schema,
+        old_name: &str,
+        new_name: &str,
+    ) -> Result<()> {
+        let table = self.require_table(catalog)?;
+        if old_name == new_name {
+            return Err(HematiteError::ParseError(
+                "ALTER TABLE RENAME COLUMN requires a different column name".to_string(),
+            ));
+        }
+        if table.get_column_by_name(old_name).is_none() {
+            return Err(HematiteError::ParseError(format!(
+                "Column '{}' does not exist in table '{}'",
+                old_name, self.table
+            )));
+        }
+        if table.get_column_by_name(new_name).is_some() {
+            return Err(HematiteError::ParseError(format!(
+                "Column '{}' already exists in table '{}'",
+                new_name, self.table
+            )));
+        }
+        if !table.check_constraints.is_empty() {
+            return Err(HematiteError::ParseError(
+                "ALTER TABLE RENAME COLUMN is not supported for tables with CHECK constraints"
+                    .to_string(),
+            ));
+        }
+        if self.has_inbound_foreign_key_reference(catalog, old_name)? {
+            return Err(HematiteError::ParseError(format!(
+                "ALTER TABLE RENAME COLUMN is not supported while foreign key references '{}.{}' exist",
+                self.table, old_name
+            )));
+        }
+        Ok(())
+    }
+
+    fn has_inbound_foreign_key_reference(
+        &self,
+        catalog: &crate::catalog::Schema,
+        old_name: &str,
+    ) -> Result<bool> {
+        for (_, table_name) in catalog.list_tables() {
+            let referencing_table = catalog.get_table_by_name(&table_name).ok_or_else(|| {
+                HematiteError::ParseError(format!("Table '{}' does not exist", table_name))
+            })?;
+            if referencing_table.foreign_keys.iter().any(|foreign_key| {
+                foreign_key.referenced_table == self.table
+                    && foreign_key.referenced_column == old_name
+            }) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 
