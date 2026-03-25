@@ -1670,31 +1670,27 @@ impl InsertExecutor {
         existing_rows: &[Vec<Value>],
         candidate_row: &[Value],
     ) -> Result<()> {
-        let candidate_pk = table.get_primary_key_values(candidate_row).map_err(|err| {
-            HematiteError::ParseError(format!("Failed to extract primary key values: {}", err))
-        })?;
+        let candidate_pk = primary_key_values(table, candidate_row)?;
 
         if ctx
             .engine
             .lookup_row_by_primary_key(table, &candidate_pk)?
             .is_some()
         {
-            return Err(HematiteError::ParseError(format!(
-                "Duplicate primary key for table '{}': {:?}",
-                table.name, candidate_pk
-            )));
+            return Err(duplicate_primary_key_parse_error(
+                &table.name,
+                &candidate_pk,
+            ));
         }
 
         for existing_row in existing_rows {
-            let existing_pk = table.get_primary_key_values(existing_row).map_err(|err| {
-                HematiteError::ParseError(format!("Failed to extract primary key values: {}", err))
-            })?;
+            let existing_pk = primary_key_values(table, existing_row)?;
 
             if existing_pk == candidate_pk {
-                return Err(HematiteError::ParseError(format!(
-                    "Duplicate primary key for table '{}': {:?}",
-                    table.name, candidate_pk
-                )));
+                return Err(duplicate_primary_key_parse_error(
+                    &table.name,
+                    &candidate_pk,
+                ));
             }
         }
 
@@ -1735,27 +1731,7 @@ impl InsertExecutor {
                     HematiteError::ParseError(format!("Missing value for column '{}'", column.name))
                 })?;
                 let literal = self.evaluate_value_expression(expr)?;
-
-                match (&column.data_type, literal) {
-                    (DataType::Integer, Value::Integer(i)) => Value::Integer(i),
-                    (DataType::Text, Value::Text(s)) => Value::Text(s),
-                    (DataType::Boolean, Value::Boolean(b)) => Value::Boolean(b),
-                    (DataType::Float, Value::Float(f)) => Value::Float(f),
-                    (DataType::Float, Value::Integer(i)) => Value::Float(i as f64),
-                    (_, Value::Null) if column.nullable => Value::Null,
-                    (_, Value::Null) => {
-                        return Err(HematiteError::ParseError(format!(
-                            "Column '{}' cannot be NULL",
-                            column.name
-                        )));
-                    }
-                    (_, value) => {
-                        return Err(HematiteError::ParseError(format!(
-                            "Type mismatch: column '{}' expects {:?}, got {:?}",
-                            column.name, column.data_type, value
-                        )));
-                    }
-                }
+                coerce_column_value(column, literal)?
             } else if let Some(default_value) = &column.default_value {
                 default_value.clone()
             } else if column.nullable {
@@ -1794,31 +1770,19 @@ impl QueryExecutor for InsertExecutor {
             let row_values = self.build_row(&table, value_row)?;
             self.ensure_primary_key_is_unique(ctx, &table, &[], &row_values)?;
             self.ensure_unique_secondary_indexes_are_unique(ctx, &table, &row_values)?;
-
-            let row_id = ctx
-                .engine
-                .insert_into_table(&self.statement.table, row_values.clone())?;
-            ctx.engine.register_primary_key_row(
+            write_stored_row(
+                ctx,
+                &self.statement.table,
                 &table,
                 StoredRow {
-                    row_id,
-                    values: row_values.clone(),
+                    row_id: 0,
+                    values: row_values,
                 },
-            )?;
-            ctx.engine.register_secondary_index_row(
-                &table,
-                StoredRow {
-                    row_id,
-                    values: row_values.clone(),
-                },
+                false,
             )?;
         }
 
-        Ok(QueryResult {
-            affected_rows: self.statement.values.len(),
-            columns: vec![],
-            rows: vec![],
-        })
+        Ok(mutation_result(self.statement.values.len()))
     }
 }
 
@@ -1836,46 +1800,13 @@ impl UpdateExecutor {
         }
     }
 
-    fn coerce_assignment_value(
-        &self,
-        column: &crate::catalog::Column,
-        value: Value,
-    ) -> Result<Value> {
-        match (&column.data_type, value) {
-            (DataType::Integer, Value::Integer(i)) => Ok(Value::Integer(i)),
-            (DataType::Text, Value::Text(s)) => Ok(Value::Text(s)),
-            (DataType::Boolean, Value::Boolean(b)) => Ok(Value::Boolean(b)),
-            (DataType::Float, Value::Float(f)) => Ok(Value::Float(f)),
-            (DataType::Float, Value::Integer(i)) => Ok(Value::Float(i as f64)),
-            (_, Value::Null) if column.nullable => Ok(Value::Null),
-            (_, Value::Null) => Err(HematiteError::ParseError(format!(
-                "Column '{}' cannot be NULL",
-                column.name
-            ))),
-            (_, value) => Err(HematiteError::ParseError(format!(
-                "Type mismatch: column '{}' expects {:?}, got {:?}",
-                column.name, column.data_type, value
-            ))),
-        }
-    }
-
     fn ensure_primary_keys_unique(&self, table: &Table, rows: &[Vec<Value>]) -> Result<()> {
         for i in 0..rows.len() {
-            let left = table.get_primary_key_values(&rows[i]).map_err(|err| {
-                HematiteError::ParseError(format!("Failed to extract primary key values: {}", err))
-            })?;
+            let left = primary_key_values(table, &rows[i])?;
             for right_row in rows.iter().skip(i + 1) {
-                let right = table.get_primary_key_values(right_row).map_err(|err| {
-                    HematiteError::ParseError(format!(
-                        "Failed to extract primary key values: {}",
-                        err
-                    ))
-                })?;
+                let right = primary_key_values(table, right_row)?;
                 if left == right {
-                    return Err(HematiteError::ParseError(format!(
-                        "Duplicate primary key for table '{}': {:?}",
-                        table.name, left
-                    )));
+                    return Err(duplicate_primary_key_parse_error(&table.name, &left));
                 }
             }
         }
@@ -1898,9 +1829,7 @@ impl UpdateExecutor {
         )?;
 
         for row in updated_rows {
-            let candidate_pk = table.get_primary_key_values(&row.values).map_err(|err| {
-                HematiteError::ParseError(format!("Failed to extract primary key values: {}", err))
-            })?;
+            let candidate_pk = primary_key_values(table, &row.values)?;
             if let Some(existing_rowid) =
                 ctx.engine.lookup_primary_key_rowid(table, &candidate_pk)?
             {
@@ -1909,10 +1838,10 @@ impl UpdateExecutor {
                         .iter()
                         .any(|updated_row| updated_row.row_id == existing_rowid)
                 {
-                    return Err(HematiteError::ParseError(format!(
-                        "Duplicate primary key for table '{}': {:?}",
-                        table.name, candidate_pk
-                    )));
+                    return Err(duplicate_primary_key_parse_error(
+                        &table.name,
+                        &candidate_pk,
+                    ));
                 }
             }
         }
@@ -2002,7 +1931,7 @@ impl QueryExecutor for UpdateExecutor {
                     &assignment.value,
                     &updated_row,
                 )?;
-                updated_row[column_index] = self.coerce_assignment_value(column, value)?;
+                updated_row[column_index] = coerce_column_value(column, value)?;
             }
 
             table
@@ -2019,43 +1948,14 @@ impl QueryExecutor for UpdateExecutor {
         self.ensure_updated_unique_indexes_remain_unique(ctx, &table, &updated_rows_data)?;
 
         for original_row in &updated_rows_data {
-            if let Some(existing_row) = ctx
-                .engine
-                .lookup_row_by_rowid(&self.statement.table, original_row.row_id)?
-            {
-                ctx.engine
-                    .delete_secondary_index_row(&table, &existing_row)?;
-                let deleted_pk = ctx.engine.delete_primary_key_row(&table, &existing_row)?;
-                if !deleted_pk {
-                    return Err(HematiteError::CorruptedData(format!(
-                        "Primary-key index entry vanished during update execution for table '{}'",
-                        self.statement.table
-                    )));
-                }
-                let deleted = ctx
-                    .engine
-                    .delete_from_table_by_rowid(&self.statement.table, existing_row.row_id)?;
-                if !deleted {
-                    return Err(HematiteError::CorruptedData(format!(
-                        "Rowid {} vanished during update execution for table '{}'",
-                        existing_row.row_id, self.statement.table
-                    )));
-                }
-            }
+            remove_stored_row(ctx, &self.statement.table, &table, original_row.row_id)?;
         }
 
         for row in updated_rows_data {
-            ctx.engine
-                .insert_row_with_rowid(&self.statement.table, row.clone())?;
-            ctx.engine.register_primary_key_row(&table, row.clone())?;
-            ctx.engine.register_secondary_index_row(&table, row)?;
+            write_stored_row(ctx, &self.statement.table, &table, row, true)?;
         }
 
-        Ok(QueryResult {
-            affected_rows: updated_rows,
-            columns: Vec::new(),
-            rows: Vec::new(),
-        })
+        Ok(mutation_result(updated_rows))
     }
 }
 
@@ -2219,30 +2119,10 @@ impl QueryExecutor for DeleteExecutor {
         )?;
 
         for row in &rows_to_delete {
-            ctx.engine.delete_secondary_index_row(&table, row)?;
-            let deleted_pk = ctx.engine.delete_primary_key_row(&table, row)?;
-            if !deleted_pk {
-                return Err(HematiteError::CorruptedData(format!(
-                    "Primary-key index entry vanished during delete execution for table '{}'",
-                    self.statement.table
-                )));
-            }
-            let deleted = ctx
-                .engine
-                .delete_from_table_by_rowid(&self.statement.table, row.row_id)?;
-            if !deleted {
-                return Err(HematiteError::CorruptedData(format!(
-                    "Rowid {} vanished during delete execution for table '{}'",
-                    row.row_id, self.statement.table
-                )));
-            }
+            remove_stored_row(ctx, &self.statement.table, &table, row.row_id)?;
         }
 
-        Ok(QueryResult {
-            affected_rows: rows_to_delete.len(),
-            columns: Vec::new(),
-            rows: Vec::new(),
-        })
+        Ok(mutation_result(rows_to_delete.len()))
     }
 }
 
@@ -2536,6 +2416,102 @@ fn secondary_index_key_values(
         .iter()
         .map(|&column_index| row_values[column_index].clone())
         .collect()
+}
+
+fn mutation_result(affected_rows: usize) -> QueryResult {
+    QueryResult {
+        affected_rows,
+        columns: Vec::new(),
+        rows: Vec::new(),
+    }
+}
+
+fn duplicate_primary_key_parse_error(table_name: &str, key_values: &[Value]) -> HematiteError {
+    HematiteError::ParseError(format!(
+        "Duplicate primary key for table '{}': {:?}",
+        table_name, key_values
+    ))
+}
+
+fn primary_key_values(table: &Table, row: &[Value]) -> Result<Vec<Value>> {
+    table.get_primary_key_values(row).map_err(|err| {
+        HematiteError::ParseError(format!("Failed to extract primary key values: {}", err))
+    })
+}
+
+fn coerce_column_value(column: &Column, value: Value) -> Result<Value> {
+    match (&column.data_type, value) {
+        (DataType::Integer, Value::Integer(i)) => Ok(Value::Integer(i)),
+        (DataType::Text, Value::Text(s)) => Ok(Value::Text(s)),
+        (DataType::Boolean, Value::Boolean(b)) => Ok(Value::Boolean(b)),
+        (DataType::Float, Value::Float(f)) => Ok(Value::Float(f)),
+        (DataType::Float, Value::Integer(i)) => Ok(Value::Float(i as f64)),
+        (_, Value::Null) if column.nullable => Ok(Value::Null),
+        (_, Value::Null) => Err(HematiteError::ParseError(format!(
+            "Column '{}' cannot be NULL",
+            column.name
+        ))),
+        (_, value) => Err(HematiteError::ParseError(format!(
+            "Type mismatch: column '{}' expects {:?}, got {:?}",
+            column.name, column.data_type, value
+        ))),
+    }
+}
+
+fn remove_stored_row(
+    ctx: &mut ExecutionContext<'_>,
+    table_name: &str,
+    table: &Table,
+    row_id: u64,
+) -> Result<()> {
+    let Some(existing_row) = ctx.engine.lookup_row_by_rowid(table_name, row_id)? else {
+        return Ok(());
+    };
+
+    ctx.engine
+        .delete_secondary_index_row(table, &existing_row)?;
+    let deleted_pk = ctx.engine.delete_primary_key_row(table, &existing_row)?;
+    if !deleted_pk {
+        return Err(HematiteError::CorruptedData(format!(
+            "Primary-key index entry vanished during row removal for table '{}'",
+            table_name
+        )));
+    }
+
+    let deleted = ctx
+        .engine
+        .delete_from_table_by_rowid(table_name, existing_row.row_id)?;
+    if !deleted {
+        return Err(HematiteError::CorruptedData(format!(
+            "Rowid {} vanished during row removal for table '{}'",
+            existing_row.row_id, table_name
+        )));
+    }
+
+    Ok(())
+}
+
+fn write_stored_row(
+    ctx: &mut ExecutionContext<'_>,
+    table_name: &str,
+    table: &Table,
+    mut row: StoredRow,
+    preserve_row_id: bool,
+) -> Result<u64> {
+    let row_id = if preserve_row_id {
+        ctx.engine.insert_row_with_rowid(table_name, row.clone())?;
+        row.row_id
+    } else {
+        let allocated_row_id = ctx
+            .engine
+            .insert_into_table(table_name, row.values.clone())?;
+        row.row_id = allocated_row_id;
+        allocated_row_id
+    };
+
+    ctx.engine.register_primary_key_row(table, row.clone())?;
+    ctx.engine.register_secondary_index_row(table, row)?;
+    Ok(row_id)
 }
 
 fn apply_distinct_if_needed(distinct: bool, rows: &mut Vec<Vec<Value>>) {
