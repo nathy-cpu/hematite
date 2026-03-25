@@ -759,10 +759,18 @@ impl SelectStatement {
         name.eq_ignore_ascii_case("rowid")
     }
 
-    fn lookup_cte<'a>(&'a self, name: &str) -> Option<&'a CommonTableExpression> {
+    pub(crate) fn lookup_cte<'a>(&'a self, name: &str) -> Option<&'a CommonTableExpression> {
         self.with_clause
             .iter()
             .find(|cte| cte.name.eq_ignore_ascii_case(name))
+    }
+
+    pub(crate) fn references_cte(&self, name: &str) -> bool {
+        self.lookup_cte(name).is_some()
+    }
+
+    pub(crate) fn has_non_table_source(&self) -> bool {
+        self.from.has_non_table_source(self)
     }
 
     pub(crate) fn split_column_reference(name: &str) -> (Option<&str>, &str) {
@@ -774,6 +782,37 @@ impl SelectStatement {
 
     pub(crate) fn column_reference_name(name: &str) -> &str {
         Self::split_column_reference(name).1
+    }
+
+    pub(crate) fn default_output_name(item: &SelectItem, index: usize) -> Option<String> {
+        match item {
+            SelectItem::Wildcard => None,
+            SelectItem::Column(name) => Some(Self::column_reference_name(name).to_string()),
+            SelectItem::Expression(_) => Some(format!("expr{}", index + 1)),
+            SelectItem::CountAll => Some("COUNT(*)".to_string()),
+            SelectItem::Aggregate { function, column } => Some(format!(
+                "{}({})",
+                match function {
+                    AggregateFunction::Count => "COUNT",
+                    AggregateFunction::Sum => "SUM",
+                    AggregateFunction::Avg => "AVG",
+                    AggregateFunction::Min => "MIN",
+                    AggregateFunction::Max => "MAX",
+                },
+                column
+            )),
+        }
+    }
+
+    pub(crate) fn output_name(&self, index: usize) -> Option<String> {
+        self.column_aliases
+            .get(index)
+            .and_then(|alias| alias.clone())
+            .or_else(|| {
+                self.columns
+                    .get(index)
+                    .and_then(|item| Self::default_output_name(item, index))
+            })
     }
 
     pub(crate) fn collect_table_bindings(from: &TableReference) -> Vec<TableBinding> {
@@ -918,11 +957,14 @@ impl SelectStatement {
                 }
                 SelectItem::Column(name) => {
                     self.validate_column_reference(name, catalog, &self.from)?;
-                    names.push(Self::column_reference_name(name).to_string());
+                    if let Some(name) = Self::default_output_name(item, index) {
+                        names.push(name);
+                    }
                 }
-                SelectItem::CountAll => names.push("COUNT(*)".to_string()),
-                SelectItem::Aggregate { function, column } => {
-                    names.push(format!("{:?}({})", function, column))
+                SelectItem::CountAll | SelectItem::Aggregate { .. } => {
+                    if let Some(name) = Self::default_output_name(item, index) {
+                        names.push(name);
+                    }
                 }
                 SelectItem::Expression(_) => {
                     return Err(HematiteError::ParseError(
@@ -1259,6 +1301,20 @@ impl SelectStatement {
             Condition::Logical { left, right, .. } => {
                 Self::condition_contains_aggregate(left)
                     || Self::condition_contains_aggregate(right)
+            }
+        }
+    }
+}
+
+impl TableReference {
+    pub(crate) fn has_non_table_source(&self, statement: &SelectStatement) -> bool {
+        match self {
+            TableReference::Table(table_name, _) => statement.references_cte(table_name),
+            TableReference::Derived { .. } => true,
+            TableReference::CrossJoin(left, right)
+            | TableReference::InnerJoin { left, right, .. }
+            | TableReference::LeftJoin { left, right, .. } => {
+                left.has_non_table_source(statement) || right.has_non_table_source(statement)
             }
         }
     }

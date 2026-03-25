@@ -279,11 +279,11 @@ impl QueryPlanner {
             HematiteError::ParseError("SELECT requires at least one table source".to_string())
         })?;
 
-        if bindings.len() == 1 && !contains_non_table_source(statement, &statement.from) {
+        if bindings.len() == 1 && !statement.has_non_table_source() {
             return self.analyze_table_access(&primary.table_name, &statement.where_clause);
         }
 
-        let estimated_rows = if contains_non_table_source(statement, &statement.from) {
+        let estimated_rows = if statement.has_non_table_source() {
             self.estimate_complex_source_rows(statement, &statement.from)
         } else {
             bindings
@@ -305,7 +305,7 @@ impl QueryPlanner {
         Ok(SelectAnalysis {
             table_name: primary.table_name.clone(),
             source_count: bindings.len(),
-            has_complex_source: contains_non_table_source(statement, &statement.from),
+            has_complex_source: statement.has_non_table_source(),
             table_id: self
                 .catalog
                 .get_table_by_name(&primary.table_name)
@@ -521,11 +521,7 @@ impl QueryPlanner {
     ) -> usize {
         match from {
             TableReference::Table(table_name, _) => {
-                if statement
-                    .with_clause
-                    .iter()
-                    .any(|cte| cte.name.eq_ignore_ascii_case(table_name))
-                {
+                if statement.references_cte(table_name) {
                     1000
                 } else {
                     self.catalog
@@ -639,22 +635,5 @@ fn synthetic_table_select(table_name: &str, where_clause: Option<WhereClause>) -
         limit: None,
         offset: None,
         set_operation: None,
-    }
-}
-
-fn contains_non_table_source(statement: &SelectStatement, from: &TableReference) -> bool {
-    match from {
-        TableReference::Table(table_name, _) => statement
-            .with_clause
-            .iter()
-            .any(|cte| cte.name.eq_ignore_ascii_case(table_name)),
-        TableReference::Derived { .. } => true,
-        TableReference::CrossJoin(left, right) => {
-            contains_non_table_source(statement, left) || contains_non_table_source(statement, right)
-        }
-        TableReference::InnerJoin { left, right, .. }
-        | TableReference::LeftJoin { left, right, .. } => {
-            contains_non_table_source(statement, left) || contains_non_table_source(statement, right)
-        }
     }
 }

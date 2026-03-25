@@ -73,6 +73,12 @@ struct ResolvedSource {
     offset: usize,
 }
 
+impl ResolvedSource {
+    fn width(&self) -> usize {
+        self.columns.len()
+    }
+}
+
 impl SelectExecutor {
     pub fn new(statement: SelectStatement, access_path: SelectAccessPath) -> Self {
         Self {
@@ -87,81 +93,24 @@ impl SelectExecutor {
         let mut offset = 0usize;
 
         for binding in bindings {
-            if let Some(cte) = self.lookup_cte(&binding.table_name) {
-                sources.push(ResolvedSource {
-                    offset,
-                    name: binding.table_name.clone(),
-                    columns: self.projected_columns_for_query(&cte.query),
-                    alias: binding.alias,
-                });
-            } else {
-                let table = ctx
-                    .catalog
-                    .get_table_by_name(&binding.table_name)
-                    .ok_or_else(|| {
-                        HematiteError::ParseError(format!(
-                            "Table '{}' not found",
-                            binding.table_name
-                        ))
-                    })?
-                    .clone();
-                sources.push(ResolvedSource {
-                    offset,
-                    name: table.name.clone(),
-                    columns: table
-                        .columns
-                        .iter()
-                        .map(|column| column.name.clone())
-                        .collect(),
-                    alias: binding.alias,
-                });
-            }
-            offset += sources
-                .last()
-                .map(|source| source.columns.len())
-                .unwrap_or(0);
+            sources.push(self.resolve_named_source(
+                ctx,
+                &binding.table_name,
+                binding.alias,
+                offset,
+            )?);
+            offset += sources.last().map(ResolvedSource::width).unwrap_or(0);
         }
 
         Ok(sources)
     }
 
-    fn lookup_cte(&self, name: &str) -> Option<&CommonTableExpression> {
-        self.statement
-            .with_clause
-            .iter()
-            .find(|cte| cte.name.eq_ignore_ascii_case(name))
-    }
-
-    fn projected_columns_for_query(&self, query: &SelectStatement) -> Vec<String> {
+    fn query_output_columns(&self, query: &SelectStatement) -> Vec<String> {
         query
             .columns
             .iter()
             .enumerate()
-            .map(|(index, item)| {
-                query
-                    .column_aliases
-                    .get(index)
-                    .and_then(|alias| alias.clone())
-                    .unwrap_or_else(|| match item {
-                        SelectItem::Wildcard => "*".to_string(),
-                        SelectItem::Column(name) => {
-                            SelectStatement::column_reference_name(name).to_string()
-                        }
-                        SelectItem::Expression(_) => format!("expr{}", index + 1),
-                        SelectItem::CountAll => "COUNT(*)".to_string(),
-                        SelectItem::Aggregate { function, column } => format!(
-                            "{}({})",
-                            match function {
-                                AggregateFunction::Count => "COUNT",
-                                AggregateFunction::Sum => "SUM",
-                                AggregateFunction::Avg => "AVG",
-                                AggregateFunction::Min => "MIN",
-                                AggregateFunction::Max => "MAX",
-                            },
-                            column
-                        ),
-                    })
-            })
+            .map(|(index, _)| query.output_name(index).unwrap_or_else(|| "*".to_string()))
             .collect()
     }
 
@@ -522,11 +471,6 @@ impl SelectExecutor {
         let mut columns = Vec::new();
 
         for (index, item) in self.statement.columns.iter().enumerate() {
-            let alias = self
-                .statement
-                .column_aliases
-                .get(index)
-                .and_then(|alias| alias.clone());
             match item {
                 SelectItem::Wildcard => {
                     for source in sources {
@@ -535,31 +479,10 @@ impl SelectExecutor {
                         }
                     }
                 }
-                SelectItem::Column(name) => {
-                    columns.push(alias.unwrap_or_else(|| {
-                        SelectStatement::column_reference_name(name).to_string()
-                    }))
-                }
-                SelectItem::Expression(_) => {
-                    columns.push(alias.unwrap_or_else(|| format!("expr{}", index + 1)))
-                }
-                SelectItem::CountAll => {
-                    columns.push(alias.unwrap_or_else(|| "COUNT(*)".to_string()))
-                }
-                SelectItem::Aggregate { function, column } => {
-                    columns.push(alias.unwrap_or_else(|| {
-                        format!(
-                            "{}({})",
-                            match function {
-                                AggregateFunction::Count => "COUNT",
-                                AggregateFunction::Sum => "SUM",
-                                AggregateFunction::Avg => "AVG",
-                                AggregateFunction::Min => "MIN",
-                                AggregateFunction::Max => "MAX",
-                            },
-                            column
-                        )
-                    }))
+                _ => {
+                    if let Some(name) = self.statement.output_name(index) {
+                        columns.push(name);
+                    }
                 }
             }
         }
@@ -578,43 +501,61 @@ impl SelectExecutor {
         sources
     }
 
+    fn resolve_named_source(
+        &self,
+        ctx: &ExecutionContext,
+        table_name: &str,
+        alias: Option<String>,
+        offset: usize,
+    ) -> Result<ResolvedSource> {
+        if let Some(cte) = self.statement.lookup_cte(table_name) {
+            Ok(ResolvedSource {
+                name: table_name.to_string(),
+                columns: self.query_output_columns(&cte.query),
+                alias,
+                offset,
+            })
+        } else {
+            let table = ctx.catalog.get_table_by_name(table_name).ok_or_else(|| {
+                HematiteError::ParseError(format!("Table '{}' not found", table_name))
+            })?;
+            Ok(ResolvedSource {
+                name: table.name.clone(),
+                columns: table
+                    .columns
+                    .iter()
+                    .map(|column| column.name.clone())
+                    .collect(),
+                alias,
+                offset,
+            })
+        }
+    }
+
+    fn materialize_named_source(
+        &self,
+        ctx: &mut ExecutionContext,
+        table_name: &str,
+        alias: Option<String>,
+    ) -> Result<(ResolvedSource, Vec<Vec<Value>>)> {
+        let source = self.resolve_named_source(ctx, table_name, alias, 0)?;
+        if let Some(cte) = self.statement.lookup_cte(table_name) {
+            let result = self.execute_subquery(ctx, &cte.query)?;
+            Ok((source, result.rows))
+        } else {
+            Ok((source, ctx.engine.read_from_table(table_name)?))
+        }
+    }
+
     fn materialize_reference(
         &self,
         ctx: &mut ExecutionContext,
         from: &TableReference,
     ) -> Result<(Vec<ResolvedSource>, Vec<Vec<Value>>)> {
         match from {
-            TableReference::Table(table_name, alias) => {
-                if let Some(cte) = self.lookup_cte(table_name) {
-                    let result = self.execute_subquery(ctx, &cte.query)?;
-                    Ok((
-                        vec![ResolvedSource {
-                            name: table_name.clone(),
-                            columns: result.columns.clone(),
-                            alias: alias.clone(),
-                            offset: 0,
-                        }],
-                        result.rows,
-                    ))
-                } else {
-                    let table = ctx.catalog.get_table_by_name(table_name).ok_or_else(|| {
-                        HematiteError::ParseError(format!("Table '{}' not found", table_name))
-                    })?;
-                    Ok((
-                        vec![ResolvedSource {
-                            name: table.name.clone(),
-                            columns: table
-                                .columns
-                                .iter()
-                                .map(|column| column.name.clone())
-                                .collect(),
-                            alias: alias.clone(),
-                            offset: 0,
-                        }],
-                        ctx.engine.read_from_table(table_name)?,
-                    ))
-                }
-            }
+            TableReference::Table(table_name, alias) => self
+                .materialize_named_source(ctx, table_name, alias.clone())
+                .map(|(source, rows)| (vec![source], rows)),
             TableReference::Derived { subquery, alias } => {
                 let result = self.execute_subquery(ctx, subquery)?;
                 Ok((
@@ -631,7 +572,7 @@ impl SelectExecutor {
                 let (left_sources, left_rows) = self.materialize_reference(ctx, left)?;
                 let left_width = left_sources
                     .iter()
-                    .map(|source| source.columns.len())
+                    .map(ResolvedSource::width)
                     .sum::<usize>();
                 let (right_sources, right_rows) = self.materialize_reference(ctx, right)?;
                 let mut rows = Vec::new();
@@ -651,7 +592,7 @@ impl SelectExecutor {
                 let (left_sources, left_rows) = self.materialize_reference(ctx, left)?;
                 let left_width = left_sources
                     .iter()
-                    .map(|source| source.columns.len())
+                    .map(ResolvedSource::width)
                     .sum::<usize>();
                 let (right_sources, right_rows) = self.materialize_reference(ctx, right)?;
                 let shifted_right_sources = self.shifted_sources(right_sources, left_width);
@@ -675,12 +616,12 @@ impl SelectExecutor {
                 let (left_sources, left_rows) = self.materialize_reference(ctx, left)?;
                 let left_width = left_sources
                     .iter()
-                    .map(|source| source.columns.len())
+                    .map(ResolvedSource::width)
                     .sum::<usize>();
                 let (right_sources, right_rows) = self.materialize_reference(ctx, right)?;
                 let right_width = right_sources
                     .iter()
-                    .map(|source| source.columns.len())
+                    .map(ResolvedSource::width)
                     .sum::<usize>();
                 let shifted_right_sources = self.shifted_sources(right_sources, left_width);
                 let mut sources = left_sources;
@@ -1454,7 +1395,9 @@ impl QueryExecutor for SelectExecutor {
         }
 
         let direct_table = match &self.statement.from {
-            TableReference::Table(table_name, _) if self.lookup_cte(table_name).is_none() => {
+            TableReference::Table(table_name, _)
+                if self.statement.lookup_cte(table_name).is_none() =>
+            {
                 ctx.catalog.get_table_by_name(table_name).cloned()
             }
             _ => None,
@@ -1474,8 +1417,7 @@ impl QueryExecutor for SelectExecutor {
             (_, TableReference::CrossJoin(_, _), _) => {
                 self.materialize_reference(ctx, &self.statement.from)?
             }
-            (_, TableReference::InnerJoin { .. }, _)
-            | (_, TableReference::LeftJoin { .. }, _) => {
+            (_, TableReference::InnerJoin { .. }, _) | (_, TableReference::LeftJoin { .. }, _) => {
                 self.materialize_reference(ctx, &self.statement.from)?
             }
             (_, TableReference::Table(table_name, _), Some(table)) => {
