@@ -363,6 +363,21 @@ impl Parser {
                         on,
                     };
                 }
+                Token::Left => {
+                    self.consume_token(&Token::Left)?;
+                    if matches!(self.peek_token(), Ok(Token::Outer)) {
+                        self.consume_token(&Token::Outer)?;
+                    }
+                    self.consume_token(&Token::Join)?;
+                    let right = self.parse_table_reference()?;
+                    self.consume_token(&Token::On)?;
+                    let on = self.parse_or_condition()?;
+                    from = TableReference::LeftJoin {
+                        left: Box::new(from),
+                        right: Box::new(right),
+                        on,
+                    };
+                }
                 _ => break,
             }
         }

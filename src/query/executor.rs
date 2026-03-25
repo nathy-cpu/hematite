@@ -671,6 +671,42 @@ impl SelectExecutor {
 
                 Ok((sources, rows))
             }
+            TableReference::LeftJoin { left, right, on } => {
+                let (left_sources, left_rows) = self.materialize_reference(ctx, left)?;
+                let left_width = left_sources
+                    .iter()
+                    .map(|source| source.columns.len())
+                    .sum::<usize>();
+                let (right_sources, right_rows) = self.materialize_reference(ctx, right)?;
+                let right_width = right_sources
+                    .iter()
+                    .map(|source| source.columns.len())
+                    .sum::<usize>();
+                let shifted_right_sources = self.shifted_sources(right_sources, left_width);
+                let mut sources = left_sources;
+                sources.extend(shifted_right_sources);
+
+                let mut rows = Vec::new();
+                for left_row in &left_rows {
+                    let mut matched = false;
+                    for right_row in &right_rows {
+                        let mut combined = left_row.clone();
+                        combined.extend(right_row.iter().cloned());
+                        if self.evaluate_condition(ctx, &sources, on, &combined)? == Some(true) {
+                            rows.push(combined);
+                            matched = true;
+                        }
+                    }
+
+                    if !matched {
+                        let mut combined = left_row.clone();
+                        combined.extend(std::iter::repeat_n(Value::Null, right_width));
+                        rows.push(combined);
+                    }
+                }
+
+                Ok((sources, rows))
+            }
         }
     }
 
@@ -1438,7 +1474,8 @@ impl QueryExecutor for SelectExecutor {
             (_, TableReference::CrossJoin(_, _), _) => {
                 self.materialize_reference(ctx, &self.statement.from)?
             }
-            (_, TableReference::InnerJoin { .. }, _) => {
+            (_, TableReference::InnerJoin { .. }, _)
+            | (_, TableReference::LeftJoin { .. }, _) => {
                 self.materialize_reference(ctx, &self.statement.from)?
             }
             (_, TableReference::Table(table_name, _), Some(table)) => {

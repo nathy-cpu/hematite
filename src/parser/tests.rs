@@ -1640,4 +1640,42 @@ mod parser_tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_parse_select_with_left_join() -> Result<()> {
+        let mut lexer = Lexer::new(
+            "SELECT u.name, p.title FROM users u LEFT JOIN posts p ON u.id = p.user_id;"
+                .to_string(),
+        );
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let statement = parser.parse()?;
+
+        match statement {
+            Statement::Select(select) => match select.from {
+                TableReference::LeftJoin { left, right, on } => {
+                    assert!(matches!(
+                        *left,
+                        TableReference::Table(name, Some(alias)) if name == "users" && alias == "u"
+                    ));
+                    assert!(matches!(
+                        *right,
+                        TableReference::Table(name, Some(alias)) if name == "posts" && alias == "p"
+                    ));
+                    assert!(matches!(
+                        on,
+                        Condition::Comparison {
+                            left: Expression::Column(left),
+                            operator: ComparisonOperator::Equal,
+                            right: Expression::Column(right),
+                        } if left == "u.id" && right == "p.user_id"
+                    ));
+                }
+                _ => panic!("Expected left join source tree"),
+            },
+            _ => panic!("Expected SELECT statement"),
+        }
+
+        Ok(())
+    }
 }

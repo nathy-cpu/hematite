@@ -536,7 +536,8 @@ impl QueryPlanner {
             }
             TableReference::Derived { .. } => 1000,
             TableReference::CrossJoin(left, right)
-            | TableReference::InnerJoin { left, right, .. } => self
+            | TableReference::InnerJoin { left, right, .. }
+            | TableReference::LeftJoin { left, right, .. } => self
                 .estimate_complex_source_rows(statement, left)
                 .saturating_mul(self.estimate_complex_source_rows(statement, right).max(1)),
         }
@@ -651,7 +652,8 @@ fn contains_non_table_source(statement: &SelectStatement, from: &TableReference)
         TableReference::CrossJoin(left, right) => {
             contains_non_table_source(statement, left) || contains_non_table_source(statement, right)
         }
-        TableReference::InnerJoin { left, right, .. } => {
+        TableReference::InnerJoin { left, right, .. }
+        | TableReference::LeftJoin { left, right, .. } => {
             contains_non_table_source(statement, left) || contains_non_table_source(statement, right)
         }
     }

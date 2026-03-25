@@ -88,6 +88,11 @@ pub enum TableReference {
         right: Box<TableReference>,
         on: Condition,
     },
+    LeftJoin {
+        left: Box<TableReference>,
+        right: Box<TableReference>,
+        on: Condition,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -791,7 +796,8 @@ impl SelectStatement {
                 Self::collect_table_bindings_into(left, bindings);
                 Self::collect_table_bindings_into(right, bindings);
             }
-            TableReference::InnerJoin { left, right, .. } => {
+            TableReference::InnerJoin { left, right, .. }
+            | TableReference::LeftJoin { left, right, .. } => {
                 Self::collect_table_bindings_into(left, bindings);
                 Self::collect_table_bindings_into(right, bindings);
             }
@@ -856,7 +862,8 @@ impl SelectStatement {
                 self.collect_source_bindings_into(catalog, left, bindings)?;
                 self.collect_source_bindings_into(catalog, right, bindings)
             }
-            TableReference::InnerJoin { left, right, .. } => {
+            TableReference::InnerJoin { left, right, .. }
+            | TableReference::LeftJoin { left, right, .. } => {
                 self.collect_source_bindings_into(catalog, left, bindings)?;
                 self.collect_source_bindings_into(catalog, right, bindings)
             }
@@ -1102,7 +1109,8 @@ impl SelectStatement {
                 self.validate_table_reference(catalog, left)?;
                 self.validate_table_reference(catalog, right)
             }
-            TableReference::InnerJoin { left, right, on } => {
+            TableReference::InnerJoin { left, right, on }
+            | TableReference::LeftJoin { left, right, on } => {
                 self.validate_table_reference(catalog, left)?;
                 self.validate_table_reference(catalog, right)?;
                 self.validate_condition(on, catalog, from)
