@@ -2187,47 +2187,48 @@ impl CreateExecutor {
             .collect()
     }
 
-    fn check_constraints(&self) -> Vec<CheckConstraint> {
-        let mut constraints = self
-            .statement
-            .columns
-            .iter()
-            .filter_map(|column| column.check_constraint.as_ref())
-            .map(|constraint| CheckConstraint {
-                name: constraint.name.clone(),
-                expression_sql: constraint.expression_sql.clone(),
-            })
-            .collect::<Vec<_>>();
+    fn constraints(&self, table: &Table) -> Result<CreateConstraints> {
+        let check_constraints =
+            self.statement
+                .columns
+                .iter()
+                .filter_map(|column| column.check_constraint.as_ref())
+                .map(Self::clone_check_constraint)
+                .chain(self.statement.constraints.iter().filter_map(
+                    |constraint| match constraint {
+                        TableConstraint::Check(constraint) => {
+                            Some(Self::clone_check_constraint(constraint))
+                        }
+                        TableConstraint::ForeignKey(_) => None,
+                    },
+                ))
+                .collect();
 
-        constraints.extend(self.statement.constraints.iter().filter_map(|constraint| {
-            match constraint {
-                TableConstraint::Check(constraint) => Some(CheckConstraint {
-                    name: constraint.name.clone(),
-                    expression_sql: constraint.expression_sql.clone(),
-                }),
-                TableConstraint::ForeignKey(_) => None,
-            }
-        }));
+        let foreign_keys =
+            self.statement
+                .columns
+                .iter()
+                .filter_map(|column| column.references.as_ref())
+                .chain(self.statement.constraints.iter().filter_map(
+                    |constraint| match constraint {
+                        TableConstraint::Check(_) => None,
+                        TableConstraint::ForeignKey(foreign_key) => Some(foreign_key),
+                    },
+                ))
+                .map(|foreign_key| self.convert_foreign_key(table, foreign_key))
+                .collect::<Result<Vec<_>>>()?;
 
-        constraints
+        Ok(CreateConstraints {
+            check_constraints,
+            foreign_keys,
+        })
     }
 
-    fn foreign_keys(&self, table: &Table) -> Result<Vec<ForeignKeyConstraint>> {
-        let mut foreign_keys = self
-            .statement
-            .columns
-            .iter()
-            .filter_map(|column| column.references.as_ref())
-            .map(|foreign_key| self.convert_foreign_key(table, foreign_key))
-            .collect::<Result<Vec<_>>>()?;
-
-        for constraint in &self.statement.constraints {
-            if let TableConstraint::ForeignKey(foreign_key) = constraint {
-                foreign_keys.push(self.convert_foreign_key(table, foreign_key)?);
-            }
+    fn clone_check_constraint(constraint: &CheckConstraintDefinition) -> CheckConstraint {
+        CheckConstraint {
+            name: constraint.name.clone(),
+            expression_sql: constraint.expression_sql.clone(),
         }
-
-        Ok(foreign_keys)
     }
 
     fn convert_foreign_key(
@@ -2248,6 +2249,11 @@ impl CreateExecutor {
             referenced_column: foreign_key.referenced_column.clone(),
         })
     }
+}
+
+struct CreateConstraints {
+    check_constraints: Vec<CheckConstraint>,
+    foreign_keys: Vec<ForeignKeyConstraint>,
 }
 
 impl QueryExecutor for CreateExecutor {
@@ -2276,6 +2282,7 @@ impl QueryExecutor for CreateExecutor {
                 ))
             })?
             .clone();
+        let constraints = self.constraints(&table)?;
         for (index_name, column_indices) in self.unique_index_specs() {
             let unique_index_root_page_id = ctx.engine.create_empty_btree()?;
             ctx.catalog.add_secondary_index(
@@ -2288,10 +2295,10 @@ impl QueryExecutor for CreateExecutor {
                 },
             )?;
         }
-        for constraint in self.check_constraints() {
+        for constraint in constraints.check_constraints {
             ctx.catalog.add_check_constraint(table.id, constraint)?;
         }
-        for foreign_key in self.foreign_keys(&table)? {
+        for foreign_key in constraints.foreign_keys {
             ctx.catalog.add_foreign_key(table.id, foreign_key)?;
         }
 
