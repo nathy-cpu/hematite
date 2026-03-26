@@ -2785,15 +2785,9 @@ fn parent_reference_key_changed(
     updated_row: &[Value],
 ) -> Result<bool> {
     for reference in referencing_foreign_keys(ctx, parent_table)? {
-        if row_values_for_indices(
-            original_row,
-            &reference.referenced_column_indices,
-            &parent_table.name,
-        )? != row_values_for_indices(
-            updated_row,
-            &reference.referenced_column_indices,
-            &parent_table.name,
-        )? {
+        if parent_key_for_reference(parent_table, &reference, original_row)?
+            != parent_key_for_reference(parent_table, &reference, updated_row)?
+        {
             return Ok(true);
         }
     }
@@ -2806,11 +2800,7 @@ fn apply_parent_delete_foreign_key_actions(
     row: &[Value],
 ) -> Result<()> {
     for reference in referencing_foreign_keys(ctx, parent_table)? {
-        let parent_key = row_values_for_indices(
-            row,
-            &reference.referenced_column_indices,
-            &parent_table.name,
-        )?;
+        let parent_key = parent_key_for_reference(parent_table, &reference, row)?;
         if parent_key.iter().any(Value::is_null) {
             continue;
         }
@@ -2820,41 +2810,15 @@ fn apply_parent_delete_foreign_key_actions(
             &reference,
             &parent_key,
         )?;
-        match reference.foreign_key.on_delete {
-            CatalogForeignKeyAction::Restrict => {
-                if !child_rows.is_empty() {
-                    return Err(HematiteError::ParseError(format!(
-                        "Cannot delete row in table '{}' because foreign key '{}' on table '{}' still references it",
-                        parent_table.name,
-                        foreign_key_constraint_name(&reference.foreign_key),
-                        reference.child_table.name
-                    )));
-                }
-            }
-            CatalogForeignKeyAction::Cascade => {
-                for child_row in child_rows {
-                    remove_stored_row(
-                        ctx,
-                        &reference.child_table.name,
-                        &reference.child_table,
-                        child_row.row_id,
-                    )?;
-                }
-            }
-            CatalogForeignKeyAction::SetNull => {
-                for mut child_row in child_rows {
-                    for &column_index in &reference.foreign_key.column_indices {
-                        child_row.values[column_index] = Value::Null;
-                    }
-                    persist_foreign_key_child_update(
-                        ctx,
-                        &reference.child_table,
-                        &reference.foreign_key,
-                        child_row,
-                    )?;
-                }
-            }
-        }
+        execute_parent_foreign_key_action(
+            ctx,
+            parent_table,
+            &reference,
+            child_rows,
+            reference.foreign_key.on_delete,
+            "delete",
+            None,
+        )?;
     }
 
     Ok(())
@@ -2867,16 +2831,8 @@ fn apply_parent_update_foreign_key_actions(
     updated_row: &[Value],
 ) -> Result<()> {
     for reference in referencing_foreign_keys(ctx, parent_table)? {
-        let old_parent_key = row_values_for_indices(
-            original_row,
-            &reference.referenced_column_indices,
-            &parent_table.name,
-        )?;
-        let new_parent_key = row_values_for_indices(
-            updated_row,
-            &reference.referenced_column_indices,
-            &parent_table.name,
-        )?;
+        let old_parent_key = parent_key_for_reference(parent_table, &reference, original_row)?;
+        let new_parent_key = parent_key_for_reference(parent_table, &reference, updated_row)?;
         if old_parent_key == new_parent_key || old_parent_key.iter().any(Value::is_null) {
             continue;
         }
@@ -2887,46 +2843,15 @@ fn apply_parent_update_foreign_key_actions(
             &reference,
             &old_parent_key,
         )?;
-        match reference.foreign_key.on_update {
-            CatalogForeignKeyAction::Restrict => {
-                if !child_rows.is_empty() {
-                    return Err(HematiteError::ParseError(format!(
-                        "Cannot update row in table '{}' because foreign key '{}' on table '{}' still references it",
-                        parent_table.name,
-                        foreign_key_constraint_name(&reference.foreign_key),
-                        reference.child_table.name
-                    )));
-                }
-            }
-            CatalogForeignKeyAction::Cascade => {
-                for mut child_row in child_rows {
-                    for (position, &column_index) in
-                        reference.foreign_key.column_indices.iter().enumerate()
-                    {
-                        child_row.values[column_index] = new_parent_key[position].clone();
-                    }
-                    persist_foreign_key_child_update(
-                        ctx,
-                        &reference.child_table,
-                        &reference.foreign_key,
-                        child_row,
-                    )?;
-                }
-            }
-            CatalogForeignKeyAction::SetNull => {
-                for mut child_row in child_rows {
-                    for &column_index in &reference.foreign_key.column_indices {
-                        child_row.values[column_index] = Value::Null;
-                    }
-                    persist_foreign_key_child_update(
-                        ctx,
-                        &reference.child_table,
-                        &reference.foreign_key,
-                        child_row,
-                    )?;
-                }
-            }
-        }
+        execute_parent_foreign_key_action(
+            ctx,
+            parent_table,
+            &reference,
+            child_rows,
+            reference.foreign_key.on_update,
+            "update",
+            Some(&new_parent_key),
+        )?;
     }
     Ok(())
 }
@@ -2942,6 +2867,72 @@ struct ReferencingForeignKey {
     child_table: Table,
     foreign_key: ForeignKeyConstraint,
     referenced_column_indices: Vec<usize>,
+}
+
+fn parent_key_for_reference(
+    parent_table: &Table,
+    reference: &ReferencingForeignKey,
+    row: &[Value],
+) -> Result<Vec<Value>> {
+    row_values_for_indices(
+        row,
+        &reference.referenced_column_indices,
+        &parent_table.name,
+    )
+}
+
+fn execute_parent_foreign_key_action(
+    ctx: &mut ExecutionContext<'_>,
+    parent_table: &Table,
+    reference: &ReferencingForeignKey,
+    child_rows: Vec<StoredRow>,
+    action: CatalogForeignKeyAction,
+    operation: &str,
+    replacement_key: Option<&[Value]>,
+) -> Result<()> {
+    match action {
+        CatalogForeignKeyAction::Restrict => {
+            if !child_rows.is_empty() {
+                return Err(HematiteError::ParseError(format!(
+                    "Cannot {} row in table '{}' because foreign key '{}' on table '{}' still references it",
+                    operation,
+                    parent_table.name,
+                    foreign_key_constraint_name(&reference.foreign_key),
+                    reference.child_table.name
+                )));
+            }
+        }
+        CatalogForeignKeyAction::Cascade => {
+            if let Some(replacement_key) = replacement_key {
+                cascade_child_foreign_key_updates(
+                    ctx,
+                    &reference.child_table,
+                    &reference.foreign_key,
+                    child_rows,
+                    replacement_key,
+                )?;
+            } else {
+                for child_row in child_rows {
+                    remove_stored_row(
+                        ctx,
+                        &reference.child_table.name,
+                        &reference.child_table,
+                        child_row.row_id,
+                    )?;
+                }
+            }
+        }
+        CatalogForeignKeyAction::SetNull => {
+            set_null_child_foreign_key_updates(
+                ctx,
+                &reference.child_table,
+                &reference.foreign_key,
+                child_rows,
+            )?;
+        }
+    }
+
+    Ok(())
 }
 
 fn row_values_for_indices(
@@ -2983,6 +2974,37 @@ fn child_rows_referencing_parent_key(
         }
     }
     Ok(matches)
+}
+
+fn cascade_child_foreign_key_updates(
+    ctx: &mut ExecutionContext<'_>,
+    table: &Table,
+    foreign_key: &ForeignKeyConstraint,
+    child_rows: Vec<StoredRow>,
+    replacement_key: &[Value],
+) -> Result<()> {
+    for mut child_row in child_rows {
+        for (position, &column_index) in foreign_key.column_indices.iter().enumerate() {
+            child_row.values[column_index] = replacement_key[position].clone();
+        }
+        persist_foreign_key_child_update(ctx, table, foreign_key, child_row)?;
+    }
+    Ok(())
+}
+
+fn set_null_child_foreign_key_updates(
+    ctx: &mut ExecutionContext<'_>,
+    table: &Table,
+    foreign_key: &ForeignKeyConstraint,
+    child_rows: Vec<StoredRow>,
+) -> Result<()> {
+    for mut child_row in child_rows {
+        for &column_index in &foreign_key.column_indices {
+            child_row.values[column_index] = Value::Null;
+        }
+        persist_foreign_key_child_update(ctx, table, foreign_key, child_row)?;
+    }
+    Ok(())
 }
 
 fn persist_foreign_key_child_update(
