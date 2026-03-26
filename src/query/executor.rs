@@ -68,6 +68,7 @@ pub fn build_executor(program: ExecutionProgram) -> Box<dyn QueryExecutor> {
 pub struct SelectExecutor {
     pub statement: SelectStatement,
     pub access_path: SelectAccessPath,
+    outer_scopes: Vec<CorrelatedScope>,
 }
 
 #[derive(Debug, Clone)]
@@ -102,6 +103,12 @@ struct GroupedRow {
     source_rows: Vec<Vec<Value>>,
 }
 
+#[derive(Debug, Clone)]
+struct CorrelatedScope {
+    sources: Vec<ResolvedSource>,
+    row: Vec<Value>,
+}
+
 type SubqueryCache = HashMap<usize, QueryResult>;
 
 impl SelectExecutor {
@@ -109,7 +116,16 @@ impl SelectExecutor {
         Self {
             statement,
             access_path,
+            outer_scopes: Vec::new(),
         }
+    }
+
+    fn with_outer_scope(mut self, sources: &[ResolvedSource], row: &[Value]) -> Self {
+        self.outer_scopes.push(CorrelatedScope {
+            sources: sources.to_vec(),
+            row: row.to_vec(),
+        });
+        self
     }
 
     fn resolve_sources(&self, ctx: &ExecutionContext) -> Result<Vec<ResolvedSource>> {
@@ -178,6 +194,32 @@ impl SelectExecutor {
         }
     }
 
+    fn resolve_column_value(
+        &self,
+        sources: &[ResolvedSource],
+        column_reference: &str,
+        row: &[Value],
+    ) -> Result<Value> {
+        if let Some(index) = self.resolve_column_index(sources, column_reference)? {
+            return row.get(index).cloned().ok_or_else(|| {
+                HematiteError::ParseError(format!("Column '{}' not found", column_reference))
+            });
+        }
+
+        for scope in self.outer_scopes.iter().rev() {
+            if let Some(index) = self.resolve_column_index(&scope.sources, column_reference)? {
+                return scope.row.get(index).cloned().ok_or_else(|| {
+                    HematiteError::ParseError(format!("Column '{}' not found", column_reference))
+                });
+            }
+        }
+
+        Err(HematiteError::ParseError(format!(
+            "Column '{}' not found",
+            column_reference
+        )))
+    }
+
     fn evaluate_expression(
         &self,
         ctx: &mut ExecutionContext<'_>,
@@ -196,12 +238,9 @@ impl SelectExecutor {
                 "Aggregate expressions can only be evaluated in grouped query contexts".to_string(),
             )),
             Expression::ScalarSubquery(subquery) => {
-                self.execute_scalar_subquery_cached(ctx, cache, subquery)
+                self.execute_scalar_subquery_cached(ctx, cache, subquery, Some(sources), Some(row))
             }
-            Expression::Column(name) => self
-                .resolve_column_index(sources, name)?
-                .and_then(|index| row.get(index).cloned())
-                .ok_or_else(|| HematiteError::ParseError(format!("Column '{}' not found", name))),
+            Expression::Column(name) => self.resolve_column_value(sources, name, row),
             Expression::UnaryMinus(expr) => match self
                 .evaluate_expression(ctx, cache, sources, expr, row)?
             {
@@ -344,12 +383,210 @@ impl SelectExecutor {
         &self,
         ctx: &mut ExecutionContext<'_>,
         subquery: &SelectStatement,
+        current_sources: Option<&[ResolvedSource]>,
+        current_row: Option<&[Value]>,
     ) -> Result<QueryResult> {
+        let effective_subquery = if let (Some(sources), Some(row)) = (current_sources, current_row) {
+            self.bind_correlated_subquery(ctx, subquery, sources, row)?
+        } else {
+            subquery.clone()
+        };
         let planner = QueryPlanner::new(ctx.catalog.clone())
             .with_table_row_counts(current_table_row_counts(ctx.engine));
-        let plan = planner.plan(Statement::Select(subquery.clone()))?;
-        let mut executor = plan.into_executor();
-        executor.execute(ctx)
+        let plan = planner.plan(Statement::Select(effective_subquery))?;
+        match plan.program {
+            ExecutionProgram::Select {
+                statement,
+                access_path,
+            } => {
+                let mut executor = SelectExecutor::new(statement, access_path);
+                executor.outer_scopes = self.outer_scopes.clone();
+                if let (Some(sources), Some(row)) = (current_sources, current_row) {
+                    executor = executor.with_outer_scope(sources, row);
+                }
+                executor.execute(ctx)
+            }
+            _ => Err(HematiteError::InternalError(
+                "Expected SELECT execution program for subquery".to_string(),
+            )),
+        }
+    }
+
+    fn bind_correlated_subquery(
+        &self,
+        ctx: &ExecutionContext<'_>,
+        subquery: &SelectStatement,
+        current_sources: &[ResolvedSource],
+        current_row: &[Value],
+    ) -> Result<SelectStatement> {
+        let mut bound = subquery.clone();
+        let mut scopes = self.outer_scopes.clone();
+        scopes.push(CorrelatedScope {
+            sources: current_sources.to_vec(),
+            row: current_row.to_vec(),
+        });
+        self.bind_select_outer_references(ctx, &mut bound, &scopes)?;
+        Ok(bound)
+    }
+
+    fn bind_select_outer_references(
+        &self,
+        ctx: &ExecutionContext<'_>,
+        statement: &mut SelectStatement,
+        scopes: &[CorrelatedScope],
+    ) -> Result<()> {
+        let local_from = statement.from.clone();
+        for item in &mut statement.columns {
+            match item {
+                SelectItem::Expression(expr) => {
+                    self.bind_expression_outer_references(ctx, &local_from, expr, scopes)?
+                }
+                SelectItem::Wildcard
+                | SelectItem::Column(_)
+                | SelectItem::CountAll
+                | SelectItem::Aggregate { .. } => {}
+            }
+        }
+
+        if let Some(where_clause) = &mut statement.where_clause {
+            for condition in &mut where_clause.conditions {
+                self.bind_condition_outer_references(ctx, &local_from, condition, scopes)?;
+            }
+        }
+
+        for expr in &mut statement.group_by {
+            self.bind_expression_outer_references(ctx, &local_from, expr, scopes)?;
+        }
+
+        if let Some(having_clause) = &mut statement.having_clause {
+            for condition in &mut having_clause.conditions {
+                self.bind_condition_outer_references(ctx, &local_from, condition, scopes)?;
+            }
+        }
+
+        for cte in &mut statement.with_clause {
+            self.bind_select_outer_references(ctx, &mut cte.query, scopes)?;
+        }
+
+        if let Some(set_operation) = &mut statement.set_operation {
+            self.bind_select_outer_references(ctx, &mut set_operation.right, scopes)?;
+        }
+
+        Ok(())
+    }
+
+    fn bind_condition_outer_references(
+        &self,
+        ctx: &ExecutionContext<'_>,
+        from: &TableReference,
+        condition: &mut Condition,
+        scopes: &[CorrelatedScope],
+    ) -> Result<()> {
+        match condition {
+            Condition::Comparison { left, right, .. } => {
+                self.bind_expression_outer_references(ctx, from, left, scopes)?;
+                self.bind_expression_outer_references(ctx, from, right, scopes)?;
+            }
+            Condition::InList { expr, values, .. } => {
+                self.bind_expression_outer_references(ctx, from, expr, scopes)?;
+                for value in values {
+                    self.bind_expression_outer_references(ctx, from, value, scopes)?;
+                }
+            }
+            Condition::InSubquery { expr, subquery, .. } => {
+                self.bind_expression_outer_references(ctx, from, expr, scopes)?;
+                self.bind_select_outer_references(ctx, subquery, scopes)?;
+            }
+            Condition::Between {
+                expr, lower, upper, ..
+            } => {
+                self.bind_expression_outer_references(ctx, from, expr, scopes)?;
+                self.bind_expression_outer_references(ctx, from, lower, scopes)?;
+                self.bind_expression_outer_references(ctx, from, upper, scopes)?;
+            }
+            Condition::Like { expr, pattern, .. } => {
+                self.bind_expression_outer_references(ctx, from, expr, scopes)?;
+                self.bind_expression_outer_references(ctx, from, pattern, scopes)?;
+            }
+            Condition::Exists { subquery, .. } => {
+                self.bind_select_outer_references(ctx, subquery, scopes)?;
+            }
+            Condition::NullCheck { expr, .. } => {
+                self.bind_expression_outer_references(ctx, from, expr, scopes)?;
+            }
+            Condition::Not(inner) => {
+                self.bind_condition_outer_references(ctx, from, inner, scopes)?;
+            }
+            Condition::Logical { left, right, .. } => {
+                self.bind_condition_outer_references(ctx, from, left, scopes)?;
+                self.bind_condition_outer_references(ctx, from, right, scopes)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn bind_expression_outer_references(
+        &self,
+        ctx: &ExecutionContext<'_>,
+        from: &TableReference,
+        expr: &mut Expression,
+        scopes: &[CorrelatedScope],
+    ) -> Result<()> {
+        match expr {
+            Expression::Column(name) => {
+                let local_scope = SelectStatement {
+                    with_clause: Vec::new(),
+                    distinct: false,
+                    columns: Vec::new(),
+                    column_aliases: Vec::new(),
+                    from: from.clone(),
+                    where_clause: None,
+                    group_by: Vec::new(),
+                    having_clause: None,
+                    order_by: Vec::new(),
+                    limit: None,
+                    offset: None,
+                    set_operation: None,
+                };
+                if local_scope
+                    .validate_column_reference(name, &ctx.catalog, from)
+                    .is_ok()
+                {
+                    return Ok(());
+                }
+                if let Some(value) = self.lookup_outer_scope_value(scopes, name)? {
+                    *expr = Expression::Literal(value);
+                }
+            }
+            Expression::ScalarSubquery(subquery) => {
+                self.bind_select_outer_references(ctx, subquery, scopes)?;
+            }
+            Expression::UnaryMinus(inner) => {
+                self.bind_expression_outer_references(ctx, from, inner, scopes)?;
+            }
+            Expression::Binary { left, right, .. } => {
+                self.bind_expression_outer_references(ctx, from, left, scopes)?;
+                self.bind_expression_outer_references(ctx, from, right, scopes)?;
+            }
+            Expression::AggregateCall { .. } | Expression::Literal(_) | Expression::Parameter(_) => {}
+        }
+
+        Ok(())
+    }
+
+    fn lookup_outer_scope_value(
+        &self,
+        scopes: &[CorrelatedScope],
+        column_reference: &str,
+    ) -> Result<Option<Value>> {
+        for scope in scopes.iter().rev() {
+            if let Some(index) = self.resolve_column_index(&scope.sources, column_reference)? {
+                return Ok(scope.row.get(index).cloned());
+            }
+        }
+
+        Ok(None)
     }
 
     fn execute_subquery_cached(
@@ -357,13 +594,19 @@ impl SelectExecutor {
         ctx: &mut ExecutionContext<'_>,
         cache: &mut SubqueryCache,
         subquery: &SelectStatement,
+        current_sources: Option<&[ResolvedSource]>,
+        current_row: Option<&[Value]>,
     ) -> Result<QueryResult> {
+        if current_sources.is_some() && current_row.is_some() {
+            return self.execute_subquery(ctx, subquery, current_sources, current_row);
+        }
+
         let key = subquery as *const SelectStatement as usize;
         if let Some(result) = cache.get(&key) {
             return Ok(result.clone());
         }
 
-        let result = self.execute_subquery(ctx, subquery)?;
+        let result = self.execute_subquery(ctx, subquery, None, None)?;
         cache.insert(key, result.clone());
         Ok(result)
     }
@@ -373,8 +616,11 @@ impl SelectExecutor {
         ctx: &mut ExecutionContext<'_>,
         cache: &mut SubqueryCache,
         subquery: &SelectStatement,
+        current_sources: Option<&[ResolvedSource]>,
+        current_row: Option<&[Value]>,
     ) -> Result<Value> {
-        let result = self.execute_subquery_cached(ctx, cache, subquery)?;
+        let result =
+            self.execute_subquery_cached(ctx, cache, subquery, current_sources, current_row)?;
         if result.rows.len() > 1 {
             return Err(HematiteError::ParseError(
                 "Scalar subquery returned more than one row".to_string(),
@@ -424,7 +670,13 @@ impl SelectExecutor {
                 is_not,
             } => {
                 let probe = self.evaluate_expression(ctx, cache, sources, expr, row)?;
-                let subquery_result = self.execute_subquery_cached(ctx, cache, subquery)?;
+                let subquery_result = self.execute_subquery_cached(
+                    ctx,
+                    cache,
+                    subquery,
+                    Some(sources),
+                    Some(row),
+                )?;
                 let candidates = subquery_result
                     .rows
                     .into_iter()
@@ -477,7 +729,13 @@ impl SelectExecutor {
                 }
             }
             Condition::Exists { subquery, is_not } => {
-                let subquery_result = self.execute_subquery_cached(ctx, cache, subquery)?;
+                let subquery_result = self.execute_subquery_cached(
+                    ctx,
+                    cache,
+                    subquery,
+                    Some(sources),
+                    Some(row),
+                )?;
                 let exists = !subquery_result.rows.is_empty();
                 Ok(Some(if *is_not { !exists } else { exists }))
             }
@@ -737,7 +995,7 @@ impl SelectExecutor {
         let named_source = self.named_source(ctx, table_name, alias, 0)?;
         let rows = match named_source.kind {
             NamedSourceKind::BaseTable => ctx.engine.read_from_table(table_name)?,
-            NamedSourceKind::Cte(query) => self.execute_subquery(ctx, &query)?.rows,
+            NamedSourceKind::Cte(query) => self.execute_subquery(ctx, &query, None, None)?.rows,
         };
         Ok((named_source.source, rows))
     }
@@ -752,7 +1010,7 @@ impl SelectExecutor {
                 .materialize_named_source(ctx, table_name, alias.clone())
                 .map(|(source, rows)| (vec![source], rows)),
             TableReference::Derived { subquery, alias } => {
-                let result = self.execute_subquery(ctx, subquery)?;
+                let result = self.execute_subquery(ctx, subquery, None, None)?;
                 Ok((
                     vec![ResolvedSource {
                         name: alias.clone(),
@@ -1116,7 +1374,13 @@ impl SelectExecutor {
                 index + 1
             ))),
             Expression::ScalarSubquery(subquery) => {
-                self.execute_scalar_subquery_cached(ctx, cache, subquery)
+                self.execute_scalar_subquery_cached(
+                    ctx,
+                    cache,
+                    subquery,
+                    Some(sources),
+                    Some(row),
+                )
             }
             Expression::AggregateCall { function, target } => self
                 .evaluate_aggregate_value(sources, *function, target, group_rows)?
@@ -1274,7 +1538,13 @@ impl SelectExecutor {
                     output_columns,
                     group_rows,
                 )?;
-                let subquery_result = self.execute_subquery_cached(ctx, cache, subquery)?;
+                let subquery_result = self.execute_subquery_cached(
+                    ctx,
+                    cache,
+                    subquery,
+                    Some(sources),
+                    Some(row),
+                )?;
                 let candidates = subquery_result
                     .rows
                     .into_iter()
@@ -1367,7 +1637,13 @@ impl SelectExecutor {
                 }
             }
             Condition::Exists { subquery, is_not } => {
-                let subquery_result = self.execute_subquery_cached(ctx, cache, subquery)?;
+                let subquery_result = self.execute_subquery_cached(
+                    ctx,
+                    cache,
+                    subquery,
+                    Some(sources),
+                    Some(row),
+                )?;
                 let exists = !subquery_result.rows.is_empty();
                 Ok(Some(if *is_not { !exists } else { exists }))
             }
@@ -1434,9 +1710,7 @@ impl SelectExecutor {
         sources: &[ResolvedSource],
         group_rows: &[Vec<Value>],
     ) -> Result<Vec<Value>> {
-        let representative = group_rows.first().ok_or_else(|| {
-            HematiteError::InternalError("Cannot project an empty aggregate group".to_string())
-        })?;
+        let representative = group_rows.first().map(Vec::as_slice).unwrap_or(&[]);
         let mut projected = Vec::new();
 
         for item in &self.statement.columns {
@@ -1478,6 +1752,9 @@ impl SelectExecutor {
         filtered_rows: &[Vec<Value>],
     ) -> Result<Vec<Vec<Vec<Value>>>> {
         if self.statement.group_by.is_empty() {
+            if filtered_rows.is_empty() && self.has_aggregate_projection() {
+                return Ok(vec![Vec::new()]);
+            }
             return Ok(vec![filtered_rows.to_vec()]);
         }
 
@@ -1792,8 +2069,13 @@ impl QueryExecutor for SelectExecutor {
             left_statement.set_operation = None;
             let mut left_executor = SelectExecutor::new(left_statement, self.access_path.clone());
             let mut left_result = left_executor.execute(ctx)?;
-            let right_result =
-                self.execute_subquery_cached(ctx, &mut subquery_cache, &set_operation.right)?;
+            let right_result = self.execute_subquery_cached(
+                ctx,
+                &mut subquery_cache,
+                &set_operation.right,
+                None,
+                None,
+            )?;
 
             left_result.rows = apply_set_operation(
                 set_operation.operator,

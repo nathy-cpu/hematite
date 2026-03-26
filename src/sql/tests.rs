@@ -1694,6 +1694,85 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_select_with_correlated_subquery_predicates() -> Result<()> {
+        let db = TestDbFile::new("_test_select_with_correlated_subquery_predicates");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("CREATE TABLE posts (id INTEGER PRIMARY KEY, user_id INTEGER);")?;
+        conn.execute("INSERT INTO users (id, name) VALUES (1, 'alice');")?;
+        conn.execute("INSERT INTO users (id, name) VALUES (2, 'bob');")?;
+        conn.execute("INSERT INTO users (id, name) VALUES (3, 'cara');")?;
+        conn.execute("INSERT INTO posts (id, user_id) VALUES (10, 1);")?;
+        conn.execute("INSERT INTO posts (id, user_id) VALUES (11, 1);")?;
+        conn.execute("INSERT INTO posts (id, user_id) VALUES (12, 3);")?;
+
+        let exists = conn.execute(
+            "SELECT u.id FROM users AS u WHERE EXISTS (SELECT p.user_id FROM posts AS p WHERE p.user_id = u.id) ORDER BY u.id ASC;",
+        )?;
+        assert_eq!(
+            exists.rows,
+            vec![
+                vec![crate::catalog::Value::Integer(1)],
+                vec![crate::catalog::Value::Integer(3)],
+            ]
+        );
+
+        let in_result = conn.execute(
+            "SELECT u.id FROM users AS u WHERE u.id IN (SELECT p.user_id FROM posts AS p WHERE p.user_id = u.id) ORDER BY u.id ASC;",
+        )?;
+        assert_eq!(
+            in_result.rows,
+            vec![
+                vec![crate::catalog::Value::Integer(1)],
+                vec![crate::catalog::Value::Integer(3)],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_select_with_correlated_scalar_subquery_expression() -> Result<()> {
+        let db = TestDbFile::new("_test_select_with_correlated_scalar_subquery_expression");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("CREATE TABLE posts (id INTEGER PRIMARY KEY, user_id INTEGER);")?;
+        conn.execute("INSERT INTO users (id, name) VALUES (1, 'alice');")?;
+        conn.execute("INSERT INTO users (id, name) VALUES (2, 'bob');")?;
+        conn.execute("INSERT INTO users (id, name) VALUES (3, 'cara');")?;
+        conn.execute("INSERT INTO posts (id, user_id) VALUES (10, 1);")?;
+        conn.execute("INSERT INTO posts (id, user_id) VALUES (11, 1);")?;
+        conn.execute("INSERT INTO posts (id, user_id) VALUES (12, 3);")?;
+
+        let projected = conn.execute(
+            "SELECT u.id, (SELECT COUNT(*) FROM posts AS p WHERE p.user_id = u.id) AS post_count FROM users AS u ORDER BY u.id ASC;",
+        )?;
+        assert_eq!(
+            projected.rows,
+            vec![
+                vec![
+                    crate::catalog::Value::Integer(1),
+                    crate::catalog::Value::Integer(2),
+                ],
+                vec![
+                    crate::catalog::Value::Integer(2),
+                    crate::catalog::Value::Integer(0),
+                ],
+                vec![
+                    crate::catalog::Value::Integer(3),
+                    crate::catalog::Value::Integer(1),
+                ],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_select_from_derived_table() -> Result<()> {
         let db = TestDbFile::new("_test_select_from_derived_table");
         let mut conn = Connection::new(db.path())?;

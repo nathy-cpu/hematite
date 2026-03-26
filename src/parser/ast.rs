@@ -994,33 +994,6 @@ impl SelectStatement {
         }
     }
 
-    fn lookup_source_bindings<'a>(
-        qualifier: Option<&str>,
-        bindings: &'a [SourceBinding],
-    ) -> Result<Vec<&'a SourceBinding>> {
-        if let Some(qualifier) = qualifier {
-            let matches: Vec<&SourceBinding> = bindings
-                .iter()
-                .filter(|binding| {
-                    binding.source_name == qualifier
-                        || binding
-                            .alias
-                            .as_deref()
-                            .is_some_and(|alias| alias == qualifier)
-                })
-                .collect();
-            if matches.is_empty() {
-                return Err(HematiteError::ParseError(format!(
-                    "Unknown table or alias '{}'",
-                    qualifier
-                )));
-            }
-            return Ok(matches);
-        }
-
-        Ok(bindings.iter().collect())
-    }
-
     fn projected_column_names(&self, catalog: &crate::catalog::Schema) -> Result<Vec<String>> {
         let mut names = Vec::with_capacity(self.columns.len());
         for (index, item) in self.columns.iter().enumerate() {
@@ -1068,20 +1041,33 @@ impl SelectStatement {
         catalog: &crate::catalog::Schema,
         from: &TableReference,
     ) -> Result<()> {
-        let (qualifier, column_name) = Self::split_column_reference(name);
-        let bindings = self.collect_source_bindings(catalog, from)?;
-        let candidate_bindings = Self::lookup_source_bindings(qualifier, &bindings)?;
-        let mut matched_tables = Vec::new();
+        self.validate_column_reference_with_outer(name, catalog, from, &[])
+    }
 
-        for binding in candidate_bindings {
-            if binding.columns.iter().any(|column| column == column_name)
-                || (binding.has_hidden_rowid && Self::is_hidden_rowid(column_name))
-            {
-                matched_tables.push(binding.source_name.clone());
-            }
+    fn validate_column_reference_with_outer(
+        &self,
+        name: &str,
+        catalog: &crate::catalog::Schema,
+        from: &TableReference,
+        outer_bindings: &[SourceBinding],
+    ) -> Result<()> {
+        let (qualifier, column_name) = Self::split_column_reference(name);
+        let local_bindings = self.collect_source_bindings(catalog, from)?;
+        let local_matches =
+            Self::collect_matching_source_names(qualifier, column_name, &local_bindings)?;
+        if !local_matches.is_empty() {
+            return match local_matches.len() {
+                1 => Ok(()),
+                _ => Err(HematiteError::ParseError(format!(
+                    "Column reference '{}' is ambiguous",
+                    name
+                ))),
+            };
         }
 
-        match matched_tables.len() {
+        let outer_matches =
+            Self::collect_matching_source_names(qualifier, column_name, outer_bindings)?;
+        match outer_matches.len() {
             0 => {
                 if let Some(qualifier) = qualifier {
                     Err(HematiteError::ParseError(format!(
@@ -1103,9 +1089,62 @@ impl SelectStatement {
         }
     }
 
+    fn collect_matching_source_names(
+        qualifier: Option<&str>,
+        column_name: &str,
+        bindings: &[SourceBinding],
+    ) -> Result<Vec<String>> {
+        let candidate_bindings: Vec<&SourceBinding> = if let Some(qualifier) = qualifier {
+            bindings
+                .iter()
+                .filter(|binding| {
+                    binding.source_name == qualifier
+                        || binding
+                            .alias
+                            .as_deref()
+                            .is_some_and(|alias| alias == qualifier)
+                })
+                .collect()
+        } else {
+            bindings.iter().collect()
+        };
+        let mut matched_tables = Vec::new();
+
+        for binding in candidate_bindings {
+            if binding.columns.iter().any(|column| column == column_name)
+                || (binding.has_hidden_rowid && Self::is_hidden_rowid(column_name))
+            {
+                matched_tables.push(binding.source_name.clone());
+            }
+        }
+
+        Ok(matched_tables)
+    }
+
+    fn combined_outer_bindings(
+        &self,
+        catalog: &crate::catalog::Schema,
+        from: &TableReference,
+        outer_bindings: &[SourceBinding],
+    ) -> Result<Vec<SourceBinding>> {
+        let mut bindings = self.collect_source_bindings(catalog, from)?;
+        bindings.extend(outer_bindings.iter().cloned());
+        Ok(bindings)
+    }
+
     pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
+        self.validate_with_outer_bindings(catalog, &[])
+    }
+
+    fn validate_with_outer_bindings(
+        &self,
+        catalog: &crate::catalog::Schema,
+        outer_bindings: &[SourceBinding],
+    ) -> Result<()> {
         if let Some(set_operation) = &self.set_operation {
-            set_operation.right.validate(catalog)?;
+            set_operation
+                .right
+                .validate_with_outer_bindings(catalog, outer_bindings)?;
             if self.columns.len() != set_operation.right.columns.len() {
                 return Err(HematiteError::ParseError(
                     "Set operations require both queries to project the same number of columns"
@@ -1124,7 +1163,7 @@ impl SelectStatement {
                 "SELECT requires at least one table source".to_string(),
             ));
         }
-        self.validate_table_reference(catalog, &self.from)?;
+        self.validate_table_reference(catalog, &self.from, outer_bindings)?;
 
         let has_aggregate = self.columns.iter().any(|item| match item {
             SelectItem::CountAll | SelectItem::Aggregate { .. } => true,
@@ -1145,13 +1184,23 @@ impl SelectStatement {
         for item in &self.columns {
             match item {
                 SelectItem::Column(name) => {
-                    self.validate_column_reference(name, catalog, &self.from)?
+                    self.validate_column_reference_with_outer(
+                        name,
+                        catalog,
+                        &self.from,
+                        outer_bindings,
+                    )?
                 }
                 SelectItem::Expression(expr) => {
-                    self.validate_expression(expr, catalog, &self.from)?;
+                    self.validate_expression(expr, catalog, &self.from, outer_bindings)?;
                 }
                 SelectItem::Aggregate { column, .. } => {
-                    self.validate_column_reference(column, catalog, &self.from)?;
+                    self.validate_column_reference_with_outer(
+                        column,
+                        catalog,
+                        &self.from,
+                        outer_bindings,
+                    )?;
                 }
                 SelectItem::Wildcard | SelectItem::CountAll => {} // Always valid
             }
@@ -1159,12 +1208,12 @@ impl SelectStatement {
 
         if let Some(where_clause) = &self.where_clause {
             for condition in &where_clause.conditions {
-                self.validate_condition(condition, catalog, &self.from)?;
+                self.validate_condition(condition, catalog, &self.from, outer_bindings)?;
             }
         }
 
         for expr in &self.group_by {
-            self.validate_expression(expr, catalog, &self.from)?;
+            self.validate_expression(expr, catalog, &self.from, outer_bindings)?;
         }
 
         if !self.group_by.is_empty() {
@@ -1214,7 +1263,12 @@ impl SelectStatement {
         }
 
         for item in &self.order_by {
-            self.validate_column_reference(&item.column, catalog, &self.from)?;
+            self.validate_column_reference_with_outer(
+                &item.column,
+                catalog,
+                &self.from,
+                outer_bindings,
+            )?;
         }
 
         Ok(())
@@ -1224,6 +1278,7 @@ impl SelectStatement {
         &self,
         catalog: &crate::catalog::Schema,
         from: &TableReference,
+        outer_bindings: &[SourceBinding],
     ) -> Result<()> {
         match from {
             TableReference::Table(_, _) => Ok(()),
@@ -1233,16 +1288,16 @@ impl SelectStatement {
                 Ok(())
             }
             TableReference::CrossJoin(left, right) => {
-                self.validate_table_reference(catalog, left)?;
-                self.validate_table_reference(catalog, right)
+                self.validate_table_reference(catalog, left, outer_bindings)?;
+                self.validate_table_reference(catalog, right, outer_bindings)
             }
             TableReference::InnerJoin { left, right, on }
             | TableReference::LeftJoin { left, right, on }
             | TableReference::RightJoin { left, right, on }
             | TableReference::FullOuterJoin { left, right, on } => {
-                self.validate_table_reference(catalog, left)?;
-                self.validate_table_reference(catalog, right)?;
-                self.validate_condition(on, catalog, from)
+                self.validate_table_reference(catalog, left, outer_bindings)?;
+                self.validate_table_reference(catalog, right, outer_bindings)?;
+                self.validate_condition(on, catalog, from, outer_bindings)
             }
         }
     }
@@ -1252,21 +1307,25 @@ impl SelectStatement {
         condition: &Condition,
         catalog: &crate::catalog::Schema,
         from: &TableReference,
+        outer_bindings: &[SourceBinding],
     ) -> Result<()> {
         match condition {
             Condition::Comparison { left, right, .. } => {
-                self.validate_expression(left, catalog, from)?;
-                self.validate_expression(right, catalog, from)?;
+                self.validate_expression(left, catalog, from, outer_bindings)?;
+                self.validate_expression(right, catalog, from, outer_bindings)?;
             }
             Condition::InList { expr, values, .. } => {
-                self.validate_expression(expr, catalog, from)?;
+                self.validate_expression(expr, catalog, from, outer_bindings)?;
                 for value in values {
-                    self.validate_expression(value, catalog, from)?;
+                    self.validate_expression(value, catalog, from, outer_bindings)?;
                 }
             }
             Condition::InSubquery { expr, subquery, .. } => {
-                self.validate_expression(expr, catalog, from)?;
-                subquery.validate(catalog)?;
+                self.validate_expression(expr, catalog, from, outer_bindings)?;
+                subquery.validate_with_outer_bindings(
+                    catalog,
+                    &self.combined_outer_bindings(catalog, from, outer_bindings)?,
+                )?;
                 if subquery.columns.len() != 1 {
                     return Err(HematiteError::ParseError(
                         "Subquery predicates require exactly one selected column".to_string(),
@@ -1276,26 +1335,29 @@ impl SelectStatement {
             Condition::Between {
                 expr, lower, upper, ..
             } => {
-                self.validate_expression(expr, catalog, from)?;
-                self.validate_expression(lower, catalog, from)?;
-                self.validate_expression(upper, catalog, from)?;
+                self.validate_expression(expr, catalog, from, outer_bindings)?;
+                self.validate_expression(lower, catalog, from, outer_bindings)?;
+                self.validate_expression(upper, catalog, from, outer_bindings)?;
             }
             Condition::Like { expr, pattern, .. } => {
-                self.validate_expression(expr, catalog, from)?;
-                self.validate_expression(pattern, catalog, from)?;
+                self.validate_expression(expr, catalog, from, outer_bindings)?;
+                self.validate_expression(pattern, catalog, from, outer_bindings)?;
             }
             Condition::Exists { subquery, .. } => {
-                subquery.validate(catalog)?;
+                subquery.validate_with_outer_bindings(
+                    catalog,
+                    &self.combined_outer_bindings(catalog, from, outer_bindings)?,
+                )?;
             }
             Condition::NullCheck { expr, .. } => {
-                self.validate_expression(expr, catalog, from)?;
+                self.validate_expression(expr, catalog, from, outer_bindings)?;
             }
             Condition::Not(condition) => {
-                self.validate_condition(condition, catalog, from)?;
+                self.validate_condition(condition, catalog, from, outer_bindings)?;
             }
             Condition::Logical { left, right, .. } => {
-                self.validate_condition(left, catalog, from)?;
-                self.validate_condition(right, catalog, from)?;
+                self.validate_condition(left, catalog, from, outer_bindings)?;
+                self.validate_condition(right, catalog, from, outer_bindings)?;
             }
         }
 
@@ -1307,11 +1369,17 @@ impl SelectStatement {
         expr: &Expression,
         catalog: &crate::catalog::Schema,
         from: &TableReference,
+        outer_bindings: &[SourceBinding],
     ) -> Result<()> {
         match expr {
-            Expression::Column(name) => self.validate_column_reference(name, catalog, from)?,
+            Expression::Column(name) => {
+                self.validate_column_reference_with_outer(name, catalog, from, outer_bindings)?
+            }
             Expression::ScalarSubquery(subquery) => {
-                subquery.validate(catalog)?;
+                subquery.validate_with_outer_bindings(
+                    catalog,
+                    &self.combined_outer_bindings(catalog, from, outer_bindings)?,
+                )?;
                 if subquery.columns.len() != 1 {
                     return Err(HematiteError::ParseError(
                         "Scalar subqueries require exactly one selected column".to_string(),
@@ -1320,13 +1388,15 @@ impl SelectStatement {
             }
             Expression::AggregateCall { target, .. } => {
                 if let AggregateTarget::Column(name) = target {
-                    self.validate_column_reference(name, catalog, from)?;
+                    self.validate_column_reference_with_outer(name, catalog, from, outer_bindings)?;
                 }
             }
-            Expression::UnaryMinus(expr) => self.validate_expression(expr, catalog, from)?,
+            Expression::UnaryMinus(expr) => {
+                self.validate_expression(expr, catalog, from, outer_bindings)?
+            }
             Expression::Binary { left, right, .. } => {
-                self.validate_expression(left, catalog, from)?;
-                self.validate_expression(right, catalog, from)?;
+                self.validate_expression(left, catalog, from, outer_bindings)?;
+                self.validate_expression(right, catalog, from, outer_bindings)?;
             }
             Expression::Literal(_) | Expression::Parameter(_) => {}
         }
@@ -1499,12 +1569,12 @@ impl UpdateStatement {
                 )));
             }
 
-            scope.validate_expression(&assignment.value, catalog, &scope.from)?;
+            scope.validate_expression(&assignment.value, catalog, &scope.from, &[])?;
         }
 
         if let Some(where_clause) = &self.where_clause {
             for condition in &where_clause.conditions {
-                scope.validate_condition(condition, catalog, &scope.from)?;
+                scope.validate_condition(condition, catalog, &scope.from, &[])?;
             }
         }
 
@@ -1723,7 +1793,7 @@ impl DeleteStatement {
 
         if let Some(where_clause) = &self.where_clause {
             for condition in &where_clause.conditions {
-                scope.validate_condition(condition, catalog, &scope.from)?;
+                scope.validate_condition(condition, catalog, &scope.from, &[])?;
             }
         }
 
