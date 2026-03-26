@@ -1372,24 +1372,15 @@ impl SelectExecutor {
 
         let mut filtered_rows = Vec::with_capacity(grouped_rows.len());
         for grouped in grouped_rows {
-            let mut include = true;
-            for condition in &having_clause.conditions {
-                if self.evaluate_projected_condition(
-                    ctx,
-                    cache,
-                    sources,
-                    condition,
-                    &grouped.projected,
-                    output_columns,
-                    &grouped.source_rows,
-                )? != Some(true)
-                {
-                    include = false;
-                    break;
-                }
-            }
-
-            if include {
+            if self.projected_conditions_match(
+                ctx,
+                cache,
+                sources,
+                &having_clause.conditions,
+                &grouped.projected,
+                output_columns,
+                &grouped.source_rows,
+            )? {
                 filtered_rows.push(grouped.projected);
             }
         }
@@ -1448,16 +1439,7 @@ impl SelectExecutor {
             } else {
                 match &self.statement.where_clause {
                     Some(where_clause) => {
-                        let mut all_conditions_met = true;
-                        for condition in &where_clause.conditions {
-                            if self.evaluate_condition(ctx, cache, sources, condition, &row)?
-                                != Some(true)
-                            {
-                                all_conditions_met = false;
-                                break;
-                            }
-                        }
-                        all_conditions_met
+                        self.conditions_match(ctx, cache, sources, &where_clause.conditions, &row)?
                     }
                     None => true,
                 }
@@ -1469,6 +1451,49 @@ impl SelectExecutor {
         }
 
         Ok(filtered_rows)
+    }
+
+    fn conditions_match(
+        &self,
+        ctx: &mut ExecutionContext<'_>,
+        cache: &mut SubqueryCache,
+        sources: &[ResolvedSource],
+        conditions: &[Condition],
+        row: &[Value],
+    ) -> Result<bool> {
+        for condition in conditions {
+            if self.evaluate_condition(ctx, cache, sources, condition, row)? != Some(true) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn projected_conditions_match(
+        &self,
+        ctx: &mut ExecutionContext<'_>,
+        cache: &mut SubqueryCache,
+        sources: &[ResolvedSource],
+        conditions: &[Condition],
+        row: &[Value],
+        output_columns: &[String],
+        group_rows: &[Vec<Value>],
+    ) -> Result<bool> {
+        for condition in conditions {
+            if self.evaluate_projected_condition(
+                ctx,
+                cache,
+                sources,
+                condition,
+                row,
+                output_columns,
+                group_rows,
+            )? != Some(true)
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     fn extract_primary_key_lookup(&self, table: &Table) -> Option<Vec<Value>> {
@@ -2156,30 +2181,20 @@ fn locate_rows_for_access_path(
     let mut table_cursor = ctx.engine.open_table_cursor(table_name)?;
     let mut rows = Vec::new();
     let mut subquery_cache = SubqueryCache::new();
+    let sources = select_executor.resolve_sources(ctx)?;
 
     for rowid in rowids {
         if table_cursor.seek_rowid(rowid) {
             if let Some(row) = table_cursor.current() {
                 let row = row.clone();
                 let include = match &select_executor.statement.where_clause {
-                    Some(where_clause) => {
-                        let mut matches_where = true;
-                        let sources = select_executor.resolve_sources(ctx)?;
-                        for condition in &where_clause.conditions {
-                            if select_executor.evaluate_condition(
-                                ctx,
-                                &mut subquery_cache,
-                                &sources,
-                                condition,
-                                &row.values,
-                            )? != Some(true)
-                            {
-                                matches_where = false;
-                                break;
-                            }
-                        }
-                        matches_where
-                    }
+                    Some(where_clause) => select_executor.conditions_match(
+                        ctx,
+                        &mut subquery_cache,
+                        &sources,
+                        &where_clause.conditions,
+                        &row.values,
+                    )?,
                     None => true,
                 };
 
