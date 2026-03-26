@@ -248,6 +248,7 @@ pub struct CreateStatement {
     pub table: String,
     pub columns: Vec<ColumnDefinition>,
     pub constraints: Vec<TableConstraint>,
+    pub if_not_exists: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -256,17 +257,20 @@ pub struct CreateIndexStatement {
     pub table: String,
     pub columns: Vec<String>,
     pub unique: bool,
+    pub if_not_exists: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct DropStatement {
     pub table: String,
+    pub if_exists: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct DropIndexStatement {
     pub index_name: String,
     pub table: String,
+    pub if_exists: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1445,6 +1449,9 @@ impl CreateStatement {
     pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
         // Validate table doesn't already exist
         if catalog.get_table_by_name(&self.table).is_some() {
+            if self.if_not_exists {
+                return Ok(());
+            }
             return Err(HematiteError::ParseError(format!(
                 "Table '{}' already exists",
                 self.table
@@ -1565,6 +1572,9 @@ impl DeleteStatement {
 
 impl DropStatement {
     pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
+        if self.if_exists && catalog.get_table_by_name(&self.table).is_none() {
+            return Ok(());
+        }
         let _table = require_table(catalog, &self.table)?;
         Ok(())
     }
@@ -1897,6 +1907,9 @@ impl CreateIndexStatement {
         }
 
         if table.get_secondary_index(&self.index_name).is_some() {
+            if self.if_not_exists {
+                return Ok(());
+            }
             return Err(HematiteError::ParseError(format!(
                 "Index '{}' already exists on table '{}'",
                 self.index_name, self.table
@@ -1918,11 +1931,15 @@ fn require_table<'a>(
 
 impl DropIndexStatement {
     pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
-        let table = catalog.get_table_by_name(&self.table).ok_or_else(|| {
-            HematiteError::ParseError(format!("Table '{}' does not exist", self.table))
-        })?;
+        if self.if_exists && catalog.get_table_by_name(&self.table).is_none() {
+            return Ok(());
+        }
+        let table = require_table(catalog, &self.table)?;
 
         if table.get_secondary_index(&self.index_name).is_none() {
+            if self.if_exists {
+                return Ok(());
+            }
             return Err(HematiteError::ParseError(format!(
                 "Index '{}' does not exist on table '{}'",
                 self.index_name, self.table

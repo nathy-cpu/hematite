@@ -757,6 +757,22 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_if_exists_modifiers_are_noops() -> Result<()> {
+        let db = TestDbFile::new("_test_if_exists_modifiers_are_noops");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_users_name ON users (name);")?;
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_users_name ON users (name);")?;
+        conn.execute("DROP INDEX IF EXISTS missing_idx ON users;")?;
+        conn.execute("DROP TABLE IF EXISTS missing_table;")?;
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_where_null_comparisons_filter_out_rows() -> Result<()> {
         let db = TestDbFile::new("_test_where_null_comparisons_filter_out_rows");
         let mut conn = Connection::new(db.path())?;

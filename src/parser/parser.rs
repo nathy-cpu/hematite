@@ -909,6 +909,7 @@ impl Parser {
                     ));
                 }
                 self.consume_token(&Token::Table)?;
+                let if_not_exists = self.parse_if_not_exists_clause()?;
 
                 let table = self.parse_identifier()?;
 
@@ -923,10 +924,12 @@ impl Parser {
                     table,
                     columns,
                     constraints,
+                    if_not_exists,
                 }))
             }
             Token::Index => {
                 self.consume_token(&Token::Index)?;
+                let if_not_exists = self.parse_if_not_exists_clause()?;
                 let index_name = self.parse_identifier()?;
                 self.consume_token(&Token::On)?;
                 let table = self.parse_identifier()?;
@@ -940,6 +943,7 @@ impl Parser {
                     table,
                     columns,
                     unique,
+                    if_not_exists,
                 }))
             }
             token => Err(HematiteError::ParseError(format!(
@@ -954,12 +958,14 @@ impl Parser {
         match self.peek_token()? {
             Token::Table => {
                 self.consume_token(&Token::Table)?;
+                let if_exists = self.parse_if_exists_clause()?;
                 let table = self.parse_identifier()?;
                 self.consume_token(&Token::Semicolon)?;
-                Ok(Statement::Drop(DropStatement { table }))
+                Ok(Statement::Drop(DropStatement { table, if_exists }))
             }
             Token::Index => {
                 self.consume_token(&Token::Index)?;
+                let if_exists = self.parse_if_exists_clause()?;
                 let index_name = self.parse_identifier()?;
                 self.consume_token(&Token::On)?;
                 let table = self.parse_identifier()?;
@@ -967,6 +973,7 @@ impl Parser {
                 Ok(Statement::DropIndex(DropIndexStatement {
                     index_name,
                     table,
+                    if_exists,
                 }))
             }
             token => Err(HematiteError::ParseError(format!(
@@ -1051,6 +1058,25 @@ impl Parser {
             Ok(Token::Identifier(_)) => Ok(Some(self.parse_identifier()?)),
             _ => Ok(None),
         }
+    }
+
+    fn parse_if_not_exists_clause(&mut self) -> Result<bool> {
+        if matches!(self.peek_token(), Ok(Token::If)) {
+            self.consume_token(&Token::If)?;
+            self.consume_token(&Token::Not)?;
+            self.consume_token(&Token::Exists)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn parse_if_exists_clause(&mut self) -> Result<bool> {
+        if matches!(self.peek_token(), Ok(Token::If)) {
+            self.consume_token(&Token::If)?;
+            self.consume_token(&Token::Exists)?;
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     fn parse_required_alias(&mut self, subject: &str) -> Result<String> {

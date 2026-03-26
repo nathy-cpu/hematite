@@ -569,6 +569,7 @@ mod executor_tests {
                 references: None,
             }],
             constraints: Vec::new(),
+            if_not_exists: false,
         };
 
         let mut executor = CreateExecutor::new(statement);
@@ -631,6 +632,7 @@ mod executor_tests {
                 name: Some("id_positive".to_string()),
                 expression_sql: "id > 0".to_string(),
             })],
+            if_not_exists: false,
         };
 
         let mut executor = CreateExecutor::new(statement);
@@ -1302,6 +1304,7 @@ mod planner_tests {
                 references: None,
             }],
             constraints: Vec::new(),
+            if_not_exists: false,
         };
 
         let plan = planner.plan(Statement::Create(statement))?;

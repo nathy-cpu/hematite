@@ -2267,6 +2267,14 @@ struct CreateConstraints {
 impl QueryExecutor for CreateExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext) -> Result<QueryResult> {
         self.statement.validate(&ctx.catalog)?;
+        if self.statement.if_not_exists
+            && ctx
+                .catalog
+                .get_table_by_name(&self.statement.table)
+                .is_some()
+        {
+            return Ok(mutation_result(0));
+        }
 
         let columns = self.convert_column_definitions()?;
 
@@ -2327,6 +2335,14 @@ impl DropExecutor {
 impl QueryExecutor for DropExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext<'_>) -> Result<QueryResult> {
         self.statement.validate(&ctx.catalog)?;
+        if self.statement.if_exists
+            && ctx
+                .catalog
+                .get_table_by_name(&self.statement.table)
+                .is_none()
+        {
+            return Ok(mutation_result(0));
+        }
 
         let table = catalog_table(ctx, &self.statement.table)?;
 
@@ -2419,6 +2435,16 @@ impl CreateIndexExecutor {
 impl QueryExecutor for CreateIndexExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext<'_>) -> Result<QueryResult> {
         self.statement.validate(&ctx.catalog)?;
+        if self.statement.if_not_exists {
+            if let Some(table) = ctx.catalog.get_table_by_name(&self.statement.table) {
+                if table
+                    .get_secondary_index(&self.statement.index_name)
+                    .is_some()
+                {
+                    return Ok(mutation_result(0));
+                }
+            }
+        }
 
         let table = catalog_table(ctx, &self.statement.table)?;
 
@@ -2971,6 +2997,17 @@ impl DropIndexExecutor {
 impl QueryExecutor for DropIndexExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext<'_>) -> Result<QueryResult> {
         self.statement.validate(&ctx.catalog)?;
+        if self.statement.if_exists {
+            let Some(table) = ctx.catalog.get_table_by_name(&self.statement.table) else {
+                return Ok(mutation_result(0));
+            };
+            if table
+                .get_secondary_index(&self.statement.index_name)
+                .is_none()
+            {
+                return Ok(mutation_result(0));
+            }
+        }
 
         let table = ctx
             .catalog

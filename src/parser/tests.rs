@@ -1195,6 +1195,29 @@ mod parser_tests {
     }
 
     #[test]
+    fn test_parse_if_exists_modifiers() -> Result<()> {
+        let create = parse_create("CREATE TABLE IF NOT EXISTS users (id INT PRIMARY KEY);")?;
+        assert!(create.if_not_exists);
+
+        let create_index =
+            parse_create_index("CREATE INDEX IF NOT EXISTS idx_users_id ON users (id);")?;
+        assert!(create_index.if_not_exists);
+
+        let drop_table = parse_statement("DROP TABLE IF EXISTS users;")?;
+        assert!(matches!(
+            drop_table,
+            Statement::Drop(DropStatement {
+                if_exists: true,
+                ..
+            })
+        ));
+
+        let drop_index = parse_drop_index("DROP INDEX IF EXISTS idx_users_id ON users;")?;
+        assert!(drop_index.if_exists);
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_create_with_backticks_and_type_aliases() -> Result<()> {
         let create = parse_create(
             "CREATE TABLE `user data` (`id` INT PRIMARY KEY UNIQUE, `active` BOOL NOT NULL, `score` DOUBLE DEFAULT 1.5, `name` VARCHAR(32) DEFAULT 'x');",
