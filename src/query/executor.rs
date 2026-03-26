@@ -1645,10 +1645,11 @@ impl QueryExecutor for SelectExecutor {
             let right_result =
                 self.execute_subquery_cached(ctx, &mut subquery_cache, &set_operation.right)?;
 
-            left_result.rows.extend(right_result.rows);
-            if set_operation.operator == SetOperator::Union {
-                apply_distinct_if_needed(true, &mut left_result.rows);
-            }
+            left_result.rows = apply_set_operation(
+                set_operation.operator,
+                left_result.rows,
+                right_result.rows,
+            );
             left_result.affected_rows = left_result.rows.len();
             return Ok(left_result);
         }
@@ -2740,6 +2741,42 @@ fn current_table_row_counts(engine: &crate::catalog::CatalogEngine) -> HashMap<S
         .iter()
         .map(|(name, metadata)| (name.clone(), metadata.row_count as usize))
         .collect()
+}
+
+fn apply_set_operation(
+    operator: SetOperator,
+    mut left_rows: Vec<Vec<Value>>,
+    right_rows: Vec<Vec<Value>>,
+) -> Vec<Vec<Value>> {
+    match operator {
+        SetOperator::UnionAll => {
+            left_rows.extend(right_rows);
+            left_rows
+        }
+        SetOperator::Union => {
+            left_rows.extend(right_rows);
+            apply_distinct_if_needed(true, &mut left_rows);
+            left_rows
+        }
+        SetOperator::Intersect => {
+            apply_distinct_if_needed(true, &mut left_rows);
+            let mut distinct_right = right_rows;
+            apply_distinct_if_needed(true, &mut distinct_right);
+            left_rows
+                .into_iter()
+                .filter(|row| distinct_right.contains(row))
+                .collect()
+        }
+        SetOperator::Except => {
+            apply_distinct_if_needed(true, &mut left_rows);
+            let mut distinct_right = right_rows;
+            apply_distinct_if_needed(true, &mut distinct_right);
+            left_rows
+                .into_iter()
+                .filter(|row| !distinct_right.contains(row))
+                .collect()
+        }
+    }
 }
 
 fn primary_key_values(table: &Table, row: &[Value]) -> Result<Vec<Value>> {

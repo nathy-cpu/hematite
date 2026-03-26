@@ -149,13 +149,34 @@ impl Parser {
             None
         };
 
-        let set_operation = if matches!(self.peek_token(), Ok(Token::Union)) {
-            self.consume_token(&Token::Union)?;
-            let operator = if matches!(self.peek_token(), Ok(Token::All)) {
-                self.consume_token(&Token::All)?;
-                SetOperator::UnionAll
-            } else {
-                SetOperator::Union
+        let set_operation = if matches!(
+            self.peek_token(),
+            Ok(Token::Union | Token::Intersect | Token::Except)
+        ) {
+            let operator = match self.peek_token()? {
+                Token::Union => {
+                    self.consume_token(&Token::Union)?;
+                    if matches!(self.peek_token(), Ok(Token::All)) {
+                        self.consume_token(&Token::All)?;
+                        SetOperator::UnionAll
+                    } else {
+                        SetOperator::Union
+                    }
+                }
+                Token::Intersect => {
+                    self.consume_token(&Token::Intersect)?;
+                    SetOperator::Intersect
+                }
+                Token::Except => {
+                    self.consume_token(&Token::Except)?;
+                    SetOperator::Except
+                }
+                token => {
+                    return Err(HematiteError::ParseError(format!(
+                        "Expected set operation, found: {:?}",
+                        token
+                    )))
+                }
             };
 
             Some(SetOperation {

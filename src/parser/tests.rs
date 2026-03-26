@@ -1618,6 +1618,32 @@ mod parser_tests {
     }
 
     #[test]
+    fn test_parse_select_with_intersect_and_except() -> Result<()> {
+        let intersect =
+            parse_select("SELECT id FROM users INTERSECT SELECT user_id FROM posts;")?;
+        assert_eq!(
+            intersect
+                .set_operation
+                .as_ref()
+                .expect("expected intersect")
+                .operator,
+            SetOperator::Intersect
+        );
+
+        let except = parse_select("SELECT id FROM users EXCEPT SELECT user_id FROM posts;")?;
+        assert_eq!(
+            except
+                .set_operation
+                .as_ref()
+                .expect("expected except")
+                .operator,
+            SetOperator::Except
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_select_with_derived_table() -> Result<()> {
         let select = parse_select("SELECT p.user_id FROM (SELECT user_id FROM posts) AS p;")?;
         match select.from {

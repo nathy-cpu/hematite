@@ -52,6 +52,8 @@ pub struct SetOperation {
 pub enum SetOperator {
     Union,
     UnionAll,
+    Intersect,
+    Except,
 }
 
 #[derive(Debug, Clone)]
