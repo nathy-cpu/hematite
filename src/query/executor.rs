@@ -341,7 +341,8 @@ impl SelectExecutor {
         ctx: &mut ExecutionContext<'_>,
         subquery: &SelectStatement,
     ) -> Result<QueryResult> {
-        let planner = QueryPlanner::new(ctx.catalog.clone());
+        let planner = QueryPlanner::new(ctx.catalog.clone())
+            .with_table_row_counts(current_table_row_counts(ctx.engine));
         let plan = planner.plan(Statement::Select(subquery.clone()))?;
         let mut executor = plan.into_executor();
         executor.execute(ctx)
@@ -2658,6 +2659,14 @@ fn catalog_table(ctx: &ExecutionContext<'_>, table_name: &str) -> Result<Table> 
         .get_table_by_name(table_name)
         .cloned()
         .ok_or_else(|| table_not_found_parse_error(table_name))
+}
+
+fn current_table_row_counts(engine: &crate::catalog::CatalogEngine) -> HashMap<String, usize> {
+    engine
+        .get_table_metadata()
+        .iter()
+        .map(|(name, metadata)| (name.clone(), metadata.row_count as usize))
+        .collect()
 }
 
 fn primary_key_values(table: &Table, row: &[Value]) -> Result<Vec<Value>> {
