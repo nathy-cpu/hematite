@@ -1461,6 +1461,104 @@ impl SelectExecutor {
             _ => None,
         }
     }
+
+    fn uses_materialized_reference(&self) -> bool {
+        matches!(
+            (&self.access_path, &self.statement.from),
+            (SelectAccessPath::JoinScan, _)
+                | (_, TableReference::Derived { .. })
+                | (_, TableReference::CrossJoin(_, _))
+                | (_, TableReference::InnerJoin { .. })
+                | (_, TableReference::LeftJoin { .. })
+        )
+    }
+
+    fn materialize_table_access_rows(
+        &self,
+        ctx: &mut ExecutionContext,
+        table_name: &str,
+        table: &Table,
+    ) -> Result<Vec<Vec<Value>>> {
+        match self.access_path {
+            SelectAccessPath::RowIdLookup => {
+                let rowid = self.extract_rowid_lookup().ok_or_else(|| {
+                    HematiteError::InternalError(
+                        "Planner selected rowid lookup without a matching predicate".to_string(),
+                    )
+                })?;
+                Ok(ctx
+                    .engine
+                    .lookup_row_by_rowid(table_name, rowid)?
+                    .map(|row| vec![row.values])
+                    .unwrap_or_default())
+            }
+            SelectAccessPath::PrimaryKeyLookup => {
+                let primary_key_values =
+                    self.extract_primary_key_lookup(table).ok_or_else(|| {
+                        HematiteError::InternalError(
+                            "Planner selected primary-key lookup without a matching predicate"
+                                .to_string(),
+                        )
+                    })?;
+                let encoded_key = ctx.engine.encode_primary_key(&primary_key_values)?;
+                let mut index_cursor = ctx.engine.open_primary_key_cursor(table)?;
+                let rowid = index_cursor
+                    .seek_key(&encoded_key)
+                    .then(|| index_cursor.current().map(|entry| entry.row_id))
+                    .flatten();
+                match rowid {
+                    Some(rowid) => {
+                        let mut table_cursor = ctx.engine.open_table_cursor(table_name)?;
+                        Ok(table_cursor
+                            .seek_rowid(rowid)
+                            .then(|| table_cursor.current().map(|row| vec![row.values.clone()]))
+                            .flatten()
+                            .unwrap_or_default())
+                    }
+                    None => Ok(Vec::new()),
+                }
+            }
+            SelectAccessPath::SecondaryIndexLookup(ref index_name) => {
+                let key_values = self
+                    .extract_secondary_index_lookup(table, index_name)
+                    .ok_or_else(|| {
+                        HematiteError::InternalError(format!(
+                            "Planner selected secondary index lookup '{}' without a matching predicate",
+                            index_name
+                        ))
+                    })?;
+                let encoded_key = ctx.engine.encode_secondary_index_key(&key_values)?;
+                let mut index_cursor = ctx.engine.open_secondary_index_cursor(table, index_name)?;
+                let mut table_cursor = ctx.engine.open_table_cursor(table_name)?;
+                let mut rows = Vec::new();
+
+                if index_cursor.seek_key(&encoded_key) {
+                    loop {
+                        let Some(entry) = index_cursor.current() else {
+                            break;
+                        };
+                        if entry.key.as_slice() != encoded_key.as_slice() {
+                            break;
+                        }
+                        if table_cursor.seek_rowid(entry.row_id) {
+                            if let Some(row) = table_cursor.current() {
+                                rows.push(row.values.clone());
+                            }
+                        }
+                        if !index_cursor.next() {
+                            break;
+                        }
+                    }
+                }
+
+                Ok(rows)
+            }
+            SelectAccessPath::FullTableScan => ctx.engine.read_from_table(table_name),
+            SelectAccessPath::JoinScan => Err(HematiteError::InternalError(
+                "Planner selected join scan for direct table access".to_string(),
+            )),
+        }
+    }
 }
 
 impl QueryExecutor for SelectExecutor {
@@ -1491,113 +1589,18 @@ impl QueryExecutor for SelectExecutor {
             _ => None,
         };
 
-        let (sources, all_rows) = match (
-            &self.access_path,
-            &self.statement.from,
-            direct_table.as_ref(),
-        ) {
-            (SelectAccessPath::JoinScan, _, _) => {
-                self.materialize_reference(ctx, &self.statement.from)?
-            }
-            (_, TableReference::Derived { .. }, _) => {
-                self.materialize_reference(ctx, &self.statement.from)?
-            }
-            (_, TableReference::CrossJoin(_, _), _) => {
-                self.materialize_reference(ctx, &self.statement.from)?
-            }
-            (_, TableReference::InnerJoin { .. }, _) | (_, TableReference::LeftJoin { .. }, _) => {
-                self.materialize_reference(ctx, &self.statement.from)?
-            }
-            (_, TableReference::Table(table_name, _), Some(table)) => {
-                let sources = self.resolve_sources(ctx)?;
-                let rows = match self.access_path {
-                    SelectAccessPath::RowIdLookup => {
-                        let rowid = self.extract_rowid_lookup().ok_or_else(|| {
-                            HematiteError::InternalError(
-                                "Planner selected rowid lookup without a matching predicate"
-                                    .to_string(),
-                            )
-                        })?;
-                        ctx.engine
-                            .lookup_row_by_rowid(&table_name, rowid)?
-                            .map(|row| vec![row.values])
-                            .unwrap_or_default()
-                    }
-                    SelectAccessPath::PrimaryKeyLookup => {
-                        let primary_key_values =
-                            self.extract_primary_key_lookup(table).ok_or_else(|| {
-                                HematiteError::InternalError(
-                            "Planner selected primary-key lookup without a matching predicate"
-                                .to_string(),
-                        )
-                            })?;
-                        let encoded_key = ctx.engine.encode_primary_key(&primary_key_values)?;
-                        let mut index_cursor = ctx.engine.open_primary_key_cursor(table)?;
-                        let rowid = index_cursor
-                            .seek_key(&encoded_key)
-                            .then(|| index_cursor.current().map(|entry| entry.row_id))
-                            .flatten();
-                        match rowid {
-                            Some(rowid) => {
-                                let mut table_cursor = ctx.engine.open_table_cursor(&table_name)?;
-                                table_cursor
-                                    .seek_rowid(rowid)
-                                    .then(|| {
-                                        table_cursor.current().map(|row| vec![row.values.clone()])
-                                    })
-                                    .flatten()
-                                    .unwrap_or_default()
-                            }
-                            None => Vec::new(),
-                        }
-                    }
-                    SelectAccessPath::SecondaryIndexLookup(ref index_name) => {
-                        let key_values = self
-                    .extract_secondary_index_lookup(table, index_name)
-                    .ok_or_else(|| {
-                        HematiteError::InternalError(format!(
-                            "Planner selected secondary index lookup '{}' without a matching predicate",
-                            index_name
-                        ))
-                    })?;
-                        let encoded_key = ctx.engine.encode_secondary_index_key(&key_values)?;
-                        let mut index_cursor =
-                            ctx.engine.open_secondary_index_cursor(table, index_name)?;
-                        let mut table_cursor = ctx.engine.open_table_cursor(&table_name)?;
-                        let mut rows = Vec::new();
-
-                        if index_cursor.seek_key(&encoded_key) {
-                            loop {
-                                let Some(entry) = index_cursor.current() else {
-                                    break;
-                                };
-                                if entry.key.as_slice() != encoded_key.as_slice() {
-                                    break;
-                                }
-                                if table_cursor.seek_rowid(entry.row_id) {
-                                    if let Some(row) = table_cursor.current() {
-                                        rows.push(row.values.clone());
-                                    }
-                                }
-                                if !index_cursor.next() {
-                                    break;
-                                }
-                            }
-                        }
-
-                        rows
-                    }
-                    SelectAccessPath::FullTableScan => ctx.engine.read_from_table(table_name)?,
-                    SelectAccessPath::JoinScan => unreachable!(),
-                };
-                (sources, rows)
-            }
-            _ => {
-                return Err(HematiteError::InternalError(
-                    "Planner selected a direct table access path for a non-table source"
-                        .to_string(),
-                ))
-            }
+        let (sources, all_rows) = if self.uses_materialized_reference() {
+            self.materialize_reference(ctx, &self.statement.from)?
+        } else if let (TableReference::Table(table_name, _), Some(table)) =
+            (&self.statement.from, direct_table.as_ref())
+        {
+            let sources = self.resolve_sources(ctx)?;
+            let rows = self.materialize_table_access_rows(ctx, table_name, table)?;
+            (sources, rows)
+        } else {
+            return Err(HematiteError::InternalError(
+                "Planner selected a direct table access path for a non-table source".to_string(),
+            ));
         };
 
         let mut filtered_rows = self.filter_source_rows(ctx, &sources, all_rows)?;
