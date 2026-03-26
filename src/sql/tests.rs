@@ -1753,6 +1753,40 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_mysql_create_table_options_are_accepted() -> Result<()> {
+        let db = TestDbFile::new("_test_mysql_create_table_options_are_accepted");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute(
+            "CREATE TABLE users (id INT PRIMARY KEY, name TEXT) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;",
+        )?;
+        conn.execute("INSERT INTO users (id, name) VALUES (1, 'Alice');")?;
+        let result = conn.execute("SELECT name FROM users WHERE id = 1;")?;
+        assert_eq!(
+            result.rows,
+            vec![vec![crate::catalog::Value::Text("Alice".to_string())]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_mysql_create_key_syntax_is_accepted() -> Result<()> {
+        let db = TestDbFile::new("_test_mysql_create_key_syntax_is_accepted");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INT PRIMARY KEY, email TEXT);")?;
+        conn.execute("CREATE UNIQUE KEY idx_users_email USING BTREE ON users (email);")?;
+        conn.execute("INSERT INTO users (id, email) VALUES (1, 'a@example.com');")?;
+        let duplicate = conn.execute("INSERT INTO users (id, email) VALUES (2, 'a@example.com');");
+        assert!(duplicate.is_err());
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_count_all_returns_single_row() -> Result<()> {
         let db = TestDbFile::new("_test_count_all_returns_single_row");
         let mut conn = Connection::new(db.path())?;

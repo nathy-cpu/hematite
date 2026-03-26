@@ -1223,6 +1223,27 @@ mod parser_tests {
     }
 
     #[test]
+    fn test_parse_create_key_with_using_clause() -> Result<()> {
+        let create_index =
+            parse_create_index("CREATE UNIQUE KEY idx_users_name USING BTREE ON users (name);")?;
+        assert_eq!(create_index.index_name, "idx_users_name");
+        assert_eq!(create_index.table, "users");
+        assert_eq!(create_index.columns, vec!["name"]);
+        assert!(create_index.unique);
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_create_table_with_ignored_mysql_options() -> Result<()> {
+        let create = parse_create(
+            "CREATE TABLE users (id INT PRIMARY KEY) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin AUTO_INCREMENT=10;",
+        )?;
+        assert_eq!(create.table, "users");
+        assert_eq!(create.columns.len(), 1);
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_if_exists_modifiers() -> Result<()> {
         let create = parse_create("CREATE TABLE IF NOT EXISTS users (id INT PRIMARY KEY);")?;
         assert!(create.if_not_exists);

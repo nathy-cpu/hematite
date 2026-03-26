@@ -949,6 +949,7 @@ impl Parser {
                 let (columns, constraints) = self.parse_table_definition_items()?;
 
                 self.consume_token(&Token::RightParen)?;
+                self.consume_ignored_create_table_options()?;
                 self.consume_token(&Token::Semicolon)?;
 
                 Ok(Statement::Create(CreateStatement {
@@ -958,15 +959,21 @@ impl Parser {
                     if_not_exists,
                 }))
             }
-            Token::Index => {
-                self.consume_token(&Token::Index)?;
+            Token::Index | Token::Key => {
+                if matches!(self.peek_token(), Ok(Token::Index)) {
+                    self.consume_token(&Token::Index)?;
+                } else {
+                    self.consume_token(&Token::Key)?;
+                }
                 let if_not_exists = self.parse_if_not_exists_clause()?;
                 let index_name = self.parse_identifier()?;
+                self.consume_optional_index_type_clause()?;
                 self.consume_token(&Token::On)?;
                 let table = self.parse_identifier()?;
                 self.consume_token(&Token::LeftParen)?;
                 let columns = self.parse_column_list()?;
                 self.consume_token(&Token::RightParen)?;
+                self.consume_optional_index_type_clause()?;
                 self.consume_token(&Token::Semicolon)?;
 
                 Ok(Statement::CreateIndex(CreateIndexStatement {
@@ -978,7 +985,7 @@ impl Parser {
                 }))
             }
             token => Err(HematiteError::ParseError(format!(
-                "Expected TABLE or INDEX after CREATE, found: {:?}",
+                "Expected TABLE, INDEX, or KEY after CREATE, found: {:?}",
                 token
             ))),
         }
@@ -1113,6 +1120,115 @@ impl Parser {
     fn parse_required_alias(&mut self, subject: &str) -> Result<String> {
         self.parse_optional_alias()?
             .ok_or_else(|| HematiteError::ParseError(format!("{} must have an alias", subject)))
+    }
+
+    fn peek_identifier_keyword(&self, keyword: &str) -> bool {
+        matches!(
+            self.peek_token(),
+            Ok(Token::Identifier(name)) if name.eq_ignore_ascii_case(keyword)
+        )
+    }
+
+    fn consume_identifier_keyword(&mut self, keyword: &str) -> Result<()> {
+        match self.peek_token()? {
+            Token::Identifier(name) if name.eq_ignore_ascii_case(keyword) => {
+                self.consume_token(&Token::Identifier(name.clone()))
+            }
+            token => Err(HematiteError::ParseError(format!(
+                "Expected {}, found: {:?}",
+                keyword, token
+            ))),
+        }
+    }
+
+    fn consume_optional_equals(&mut self) -> Result<()> {
+        if matches!(self.peek_token(), Ok(Token::Equal)) {
+            self.consume_token(&Token::Equal)?;
+        }
+        Ok(())
+    }
+
+    fn consume_optional_index_type_clause(&mut self) -> Result<()> {
+        if !self.peek_identifier_keyword("USING") {
+            return Ok(());
+        }
+        self.consume_identifier_keyword("USING")?;
+        match self.peek_token()? {
+            Token::Identifier(name)
+                if name.eq_ignore_ascii_case("BTREE") || name.eq_ignore_ascii_case("HASH") =>
+            {
+                self.consume_token(&Token::Identifier(name.clone()))?;
+                Ok(())
+            }
+            token => Err(HematiteError::ParseError(format!(
+                "Expected BTREE or HASH after USING, found: {:?}",
+                token
+            ))),
+        }
+    }
+
+    fn consume_ignored_create_table_options(&mut self) -> Result<()> {
+        loop {
+            if self.peek_identifier_keyword("ENGINE") {
+                self.consume_identifier_keyword("ENGINE")?;
+                self.consume_optional_equals()?;
+                self.parse_identifier()?;
+                continue;
+            }
+
+            if matches!(self.peek_token(), Ok(Token::AutoIncrement)) {
+                self.consume_token(&Token::AutoIncrement)?;
+                self.consume_optional_equals()?;
+                self.consume_positive_integer_literal("AUTO_INCREMENT")?;
+                continue;
+            }
+
+            if matches!(self.peek_token(), Ok(Token::Default)) {
+                self.consume_token(&Token::Default)?;
+                if self.peek_identifier_keyword("CHARSET") {
+                    self.consume_identifier_keyword("CHARSET")?;
+                    self.consume_optional_equals()?;
+                    self.parse_identifier()?;
+                    continue;
+                }
+                if self.peek_identifier_keyword("CHARACTER") {
+                    self.consume_identifier_keyword("CHARACTER")?;
+                    self.consume_identifier_keyword("SET")?;
+                    self.consume_optional_equals()?;
+                    self.parse_identifier()?;
+                    continue;
+                }
+                return Err(HematiteError::ParseError(
+                    "Unsupported DEFAULT table option".to_string(),
+                ));
+            }
+
+            if self.peek_identifier_keyword("CHARACTER") {
+                self.consume_identifier_keyword("CHARACTER")?;
+                self.consume_identifier_keyword("SET")?;
+                self.consume_optional_equals()?;
+                self.parse_identifier()?;
+                continue;
+            }
+
+            if self.peek_identifier_keyword("CHARSET") {
+                self.consume_identifier_keyword("CHARSET")?;
+                self.consume_optional_equals()?;
+                self.parse_identifier()?;
+                continue;
+            }
+
+            if self.peek_identifier_keyword("COLLATE") {
+                self.consume_identifier_keyword("COLLATE")?;
+                self.consume_optional_equals()?;
+                self.parse_identifier()?;
+                continue;
+            }
+
+            break;
+        }
+
+        Ok(())
     }
 
     fn parse_column_list(&mut self) -> Result<Vec<String>> {
