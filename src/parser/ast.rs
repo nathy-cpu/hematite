@@ -1687,42 +1687,56 @@ impl AlterStatement {
                 new_name, self.table
             )));
         }
-        if !table.check_constraints.is_empty() {
-            return Err(HematiteError::ParseError(
-                "ALTER TABLE RENAME COLUMN is not supported for tables with CHECK constraints"
-                    .to_string(),
-            ));
-        }
-        if self.has_inbound_foreign_key_reference(catalog, old_name)? {
-            return Err(HematiteError::ParseError(format!(
-                "ALTER TABLE RENAME COLUMN is not supported while foreign key references '{}.{}' exist",
-                self.table, old_name
-            )));
-        }
         Ok(())
-    }
-
-    fn has_inbound_foreign_key_reference(
-        &self,
-        catalog: &crate::catalog::Schema,
-        old_name: &str,
-    ) -> Result<bool> {
-        for (_, table_name) in catalog.list_tables() {
-            let referencing_table = catalog.get_table_by_name(&table_name).ok_or_else(|| {
-                HematiteError::ParseError(format!("Table '{}' does not exist", table_name))
-            })?;
-            if referencing_table.foreign_keys.iter().any(|foreign_key| {
-                foreign_key.referenced_table == self.table
-                    && foreign_key.referenced_column == old_name
-            }) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
     }
 }
 
 impl Condition {
+    pub(crate) fn rename_column_references(
+        &mut self,
+        old_name: &str,
+        new_name: &str,
+        table_name: Option<&str>,
+    ) {
+        match self {
+            Condition::Comparison { left, right, .. } => {
+                left.rename_column_references(old_name, new_name, table_name);
+                right.rename_column_references(old_name, new_name, table_name);
+            }
+            Condition::InList { expr, values, .. } => {
+                expr.rename_column_references(old_name, new_name, table_name);
+                for value in values {
+                    value.rename_column_references(old_name, new_name, table_name);
+                }
+            }
+            Condition::InSubquery { expr, .. } => {
+                expr.rename_column_references(old_name, new_name, table_name);
+            }
+            Condition::Between {
+                expr, lower, upper, ..
+            } => {
+                expr.rename_column_references(old_name, new_name, table_name);
+                lower.rename_column_references(old_name, new_name, table_name);
+                upper.rename_column_references(old_name, new_name, table_name);
+            }
+            Condition::Like { expr, pattern, .. } => {
+                expr.rename_column_references(old_name, new_name, table_name);
+                pattern.rename_column_references(old_name, new_name, table_name);
+            }
+            Condition::Exists { .. } => {}
+            Condition::NullCheck { expr, .. } => {
+                expr.rename_column_references(old_name, new_name, table_name);
+            }
+            Condition::Not(condition) => {
+                condition.rename_column_references(old_name, new_name, table_name);
+            }
+            Condition::Logical { left, right, .. } => {
+                left.rename_column_references(old_name, new_name, table_name);
+                right.rename_column_references(old_name, new_name, table_name);
+            }
+        }
+    }
+
     pub fn to_sql(&self) -> String {
         match self {
             Condition::Comparison {
@@ -1795,6 +1809,46 @@ impl Condition {
 }
 
 impl Expression {
+    pub(crate) fn rename_column_references(
+        &mut self,
+        old_name: &str,
+        new_name: &str,
+        table_name: Option<&str>,
+    ) {
+        match self {
+            Expression::Column(name) => {
+                if name == old_name {
+                    *name = new_name.to_string();
+                } else if let Some(table_name) = table_name {
+                    let qualified = format!("{}.{}", table_name, old_name);
+                    if name == &qualified {
+                        *name = format!("{}.{}", table_name, new_name);
+                    }
+                }
+            }
+            Expression::AggregateCall { target, .. } => {
+                if let AggregateTarget::Column(name) = target {
+                    if name == old_name {
+                        *name = new_name.to_string();
+                    } else if let Some(table_name) = table_name {
+                        let qualified = format!("{}.{}", table_name, old_name);
+                        if name == &qualified {
+                            *name = format!("{}.{}", table_name, new_name);
+                        }
+                    }
+                }
+            }
+            Expression::UnaryMinus(expr) => {
+                expr.rename_column_references(old_name, new_name, table_name);
+            }
+            Expression::Binary { left, right, .. } => {
+                left.rename_column_references(old_name, new_name, table_name);
+                right.rename_column_references(old_name, new_name, table_name);
+            }
+            Expression::Literal(_) | Expression::Parameter(_) => {}
+        }
+    }
+
     pub fn to_sql(&self) -> String {
         match self {
             Expression::Column(name) => name.clone(),

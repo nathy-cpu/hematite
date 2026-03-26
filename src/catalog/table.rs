@@ -221,7 +221,33 @@ impl Table {
 
         self.columns[index].name = new_name.clone();
         self.column_indices.remove(old_name);
-        self.column_indices.insert(new_name, index);
+        self.column_indices.insert(new_name.clone(), index);
+        self.rewrite_check_constraints(old_name, &new_name)?;
+        Ok(())
+    }
+
+    pub fn rewrite_inbound_referenced_column(
+        &mut self,
+        referenced_table: &str,
+        old_name: &str,
+        new_name: &str,
+    ) {
+        for foreign_key in &mut self.foreign_keys {
+            if foreign_key.referenced_table == referenced_table
+                && foreign_key.referenced_column == old_name
+            {
+                foreign_key.referenced_column = new_name.to_string();
+            }
+        }
+    }
+
+    fn rewrite_check_constraints(&mut self, old_name: &str, new_name: &str) -> Result<()> {
+        for constraint in &mut self.check_constraints {
+            let mut condition =
+                crate::parser::parser::parse_condition_fragment(&constraint.expression_sql)?;
+            condition.rename_column_references(old_name, new_name, Some(&self.name));
+            constraint.expression_sql = condition.to_sql();
+        }
         Ok(())
     }
 

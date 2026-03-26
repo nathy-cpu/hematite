@@ -164,11 +164,23 @@ impl Schema {
         old_name: &str,
         new_name: String,
     ) -> Result<()> {
+        let table_name = self
+            .tables
+            .get(&table_id)
+            .ok_or_else(|| HematiteError::StorageError("Table not found".to_string()))?
+            .name
+            .clone();
         let table = self
             .tables
             .get_mut(&table_id)
             .ok_or_else(|| HematiteError::StorageError("Table not found".to_string()))?;
-        table.rename_column(old_name, new_name)
+        table.rename_column(old_name, new_name.clone())?;
+
+        for other_table in self.tables.values_mut() {
+            other_table.rewrite_inbound_referenced_column(&table_name, old_name, &new_name);
+        }
+
+        Ok(())
     }
 
     pub fn add_check_constraint(
