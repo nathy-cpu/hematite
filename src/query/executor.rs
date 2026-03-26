@@ -30,6 +30,7 @@ use crate::query::plan::{ExecutionProgram, QueryPlan, SelectAccessPath};
 pub use crate::query::runtime::{ExecutionContext, QueryExecutor, QueryResult};
 use crate::query::QueryPlanner;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 
 impl QueryPlan {
     pub fn into_executor(self) -> Box<dyn QueryExecutor> {
@@ -1353,47 +1354,15 @@ impl SelectExecutor {
     }
 
     fn extract_primary_key_lookup(&self, table: &Table) -> Option<Vec<Value>> {
-        if table.primary_key_count() != 1 {
-            return None;
-        }
-
-        let where_clause = self.statement.where_clause.as_ref()?;
-        if where_clause.conditions.len() != 1 {
-            return None;
-        }
-
-        match &where_clause.conditions[0] {
-            Condition::Comparison {
-                left,
-                operator: ComparisonOperator::Equal,
-                right,
-            } => match (left, right) {
-                (Expression::Column(column_name), Expression::Literal(value))
-                    if table
-                        .primary_key_columns
-                        .first()
-                        .and_then(|index| table.columns.get(*index))
-                        .is_some_and(|column| {
-                            column.name == SelectStatement::column_reference_name(column_name)
-                        }) =>
-                {
-                    Some(vec![value.clone()])
-                }
-                (Expression::Literal(value), Expression::Column(column_name))
-                    if table
-                        .primary_key_columns
-                        .first()
-                        .and_then(|index| table.columns.get(*index))
-                        .is_some_and(|column| {
-                            column.name == SelectStatement::column_reference_name(column_name)
-                        }) =>
-                {
-                    Some(vec![value.clone()])
-                }
-                _ => None,
-            },
-            _ => None,
-        }
+        let equalities = extract_select_literal_equalities(self.statement.where_clause.as_ref()?)?;
+        table
+            .primary_key_columns
+            .iter()
+            .map(|&index| table.columns.get(index))
+            .collect::<Option<Vec<_>>>()?
+            .into_iter()
+            .map(|column| equalities.get(column.name.as_str()).cloned())
+            .collect()
     }
 
     fn extract_secondary_index_lookup(
@@ -1402,68 +1371,21 @@ impl SelectExecutor {
         index_name: &str,
     ) -> Option<Vec<Value>> {
         let index = table.get_secondary_index(index_name)?;
-        if index.column_indices.len() != 1 {
-            return None;
-        }
-
-        let where_clause = self.statement.where_clause.as_ref()?;
-        if where_clause.conditions.len() != 1 {
-            return None;
-        }
-
-        let indexed_column = table.columns.get(index.column_indices[0])?;
-        match &where_clause.conditions[0] {
-            Condition::Comparison {
-                left,
-                operator: ComparisonOperator::Equal,
-                right,
-            } => match (left, right) {
-                (Expression::Column(column_name), Expression::Literal(value))
-                    if indexed_column.name
-                        == SelectStatement::column_reference_name(column_name) =>
-                {
-                    Some(vec![value.clone()])
-                }
-                (Expression::Literal(value), Expression::Column(column_name))
-                    if indexed_column.name
-                        == SelectStatement::column_reference_name(column_name) =>
-                {
-                    Some(vec![value.clone()])
-                }
-                _ => None,
-            },
-            _ => None,
-        }
+        let equalities = extract_select_literal_equalities(self.statement.where_clause.as_ref()?)?;
+        index
+            .column_indices
+            .iter()
+            .map(|&column_index| table.columns.get(column_index))
+            .collect::<Option<Vec<_>>>()?
+            .into_iter()
+            .map(|column| equalities.get(column.name.as_str()).cloned())
+            .collect()
     }
 
     fn extract_rowid_lookup(&self) -> Option<u64> {
-        let where_clause = self.statement.where_clause.as_ref()?;
-        if where_clause.conditions.len() != 1 {
-            return None;
-        }
-
-        match &where_clause.conditions[0] {
-            Condition::Comparison {
-                left,
-                operator: ComparisonOperator::Equal,
-                right,
-            } => match (left, right) {
-                (Expression::Column(column_name), Expression::Literal(Value::Integer(v)))
-                    if SelectStatement::column_reference_name(column_name)
-                        .eq_ignore_ascii_case("rowid")
-                        && *v >= 0 =>
-                {
-                    Some(*v as u64)
-                }
-                (Expression::Literal(Value::Integer(v)), Expression::Column(column_name))
-                    if SelectStatement::column_reference_name(column_name)
-                        .eq_ignore_ascii_case("rowid")
-                        && *v >= 0 =>
-                {
-                    Some(*v as u64)
-                }
-                _ => None,
-            },
+        let equalities = extract_select_literal_equalities(self.statement.where_clause.as_ref()?)?;
+        match equalities.get("rowid") {
+            Some(Value::Integer(v)) if v >= &0 => Some(*v as u64),
             _ => None,
         }
     }
@@ -3121,6 +3043,55 @@ fn apply_distinct_if_needed(distinct: bool, rows: &mut Vec<Vec<Value>>) {
         }
     }
     *rows = distinct_rows;
+}
+
+fn extract_select_literal_equalities(where_clause: &WhereClause) -> Option<HashMap<String, Value>> {
+    let mut equalities = HashMap::new();
+    for condition in &where_clause.conditions {
+        collect_select_literal_equalities(condition, &mut equalities)?;
+    }
+    Some(equalities)
+}
+
+fn collect_select_literal_equalities(
+    condition: &Condition,
+    equalities: &mut HashMap<String, Value>,
+) -> Option<()> {
+    match condition {
+        Condition::Comparison {
+            left,
+            operator: ComparisonOperator::Equal,
+            right,
+        } => {
+            let (column_name, value) = match (left, right) {
+                (Expression::Column(column_name), Expression::Literal(value)) => (
+                    SelectStatement::column_reference_name(column_name),
+                    value.clone(),
+                ),
+                (Expression::Literal(value), Expression::Column(column_name)) => (
+                    SelectStatement::column_reference_name(column_name),
+                    value.clone(),
+                ),
+                _ => return None,
+            };
+            match equalities.get(column_name) {
+                Some(existing) if existing != &value => None,
+                _ => {
+                    equalities.insert(column_name.to_string(), value);
+                    Some(())
+                }
+            }
+        }
+        Condition::Logical {
+            left,
+            operator: LogicalOperator::And,
+            right,
+        } => {
+            collect_select_literal_equalities(left, equalities)?;
+            collect_select_literal_equalities(right, equalities)
+        }
+        _ => None,
+    }
 }
 
 fn locator_select_statement(

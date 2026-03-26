@@ -648,6 +648,50 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_composite_primary_key_lookup_uses_conjunctive_predicates() -> Result<()> {
+        let db = TestDbFile::new("_test_composite_primary_key_lookup");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute(
+            "CREATE TABLE edges (src INTEGER PRIMARY KEY, dst INTEGER PRIMARY KEY, weight INTEGER);",
+        )?;
+        conn.execute("INSERT INTO edges (src, dst, weight) VALUES (1, 2, 7);")?;
+        conn.execute("INSERT INTO edges (src, dst, weight) VALUES (1, 3, 9);")?;
+
+        let result = conn.execute("SELECT weight FROM edges WHERE src = 1 AND dst = 2;")?;
+        assert_eq!(result.rows, vec![vec![crate::catalog::Value::Integer(7)]]);
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_composite_unique_index_lookup_uses_conjunctive_predicates() -> Result<()> {
+        let db = TestDbFile::new("_test_composite_unique_index_lookup");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute(
+            "CREATE TABLE memberships (id INTEGER PRIMARY KEY, user_id INTEGER, org_id INTEGER, role TEXT, CONSTRAINT uq_membership UNIQUE (user_id, org_id));",
+        )?;
+        conn.execute(
+            "INSERT INTO memberships (id, user_id, org_id, role) VALUES (1, 10, 20, 'owner');",
+        )?;
+        conn.execute(
+            "INSERT INTO memberships (id, user_id, org_id, role) VALUES (2, 10, 21, 'member');",
+        )?;
+
+        let result =
+            conn.execute("SELECT role FROM memberships WHERE user_id = 10 AND org_id = 20;")?;
+        assert_eq!(
+            result.rows,
+            vec![vec![crate::catalog::Value::Text("owner".to_string())]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_alter_table_add_column_requires_nullable_or_default() -> Result<()> {
         let db = TestDbFile::new("_test_alter_table_add_column_requires_nullable_or_default");
         let mut conn = Connection::new(db.path())?;

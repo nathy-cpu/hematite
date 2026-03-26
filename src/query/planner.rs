@@ -242,33 +242,9 @@ impl QueryPlanner {
     }
 
     fn extract_rowid_lookup(&self, statement: &SelectStatement) -> Option<u64> {
-        let where_clause = statement.where_clause.as_ref()?;
-        if where_clause.conditions.len() != 1 {
-            return None;
-        }
-
-        match &where_clause.conditions[0] {
-            Condition::Comparison {
-                left,
-                operator: ComparisonOperator::Equal,
-                right,
-            } => match (left, right) {
-                (Expression::Column(column_name), Expression::Literal(Value::Integer(v)))
-                    if SelectStatement::column_reference_name(column_name)
-                        .eq_ignore_ascii_case("rowid")
-                        && *v >= 0 =>
-                {
-                    Some(*v as u64)
-                }
-                (Expression::Literal(Value::Integer(v)), Expression::Column(column_name))
-                    if SelectStatement::column_reference_name(column_name)
-                        .eq_ignore_ascii_case("rowid")
-                        && *v >= 0 =>
-                {
-                    Some(*v as u64)
-                }
-                _ => None,
-            },
+        let equalities = extract_literal_equalities(statement.where_clause.as_ref()?)?;
+        match equalities.get("rowid") {
+            Some(Value::Integer(v)) if *v >= 0 => Some(*v as u64),
             _ => None,
         }
     }
@@ -382,46 +358,52 @@ impl QueryPlanner {
         table: &Table,
     ) -> Result<Vec<IndexUsage>> {
         let mut usable_indexes = Vec::new();
+        let Some(where_clause) = where_clause.as_ref() else {
+            return Ok(usable_indexes);
+        };
+        let Some(equalities) = extract_literal_equalities(where_clause) else {
+            return Ok(usable_indexes);
+        };
 
-        if let Some(where_clause) = where_clause {
-            for condition in &where_clause.conditions {
-                if let Condition::Comparison {
-                    left,
-                    operator,
-                    right,
-                } = condition
-                {
-                    // Check if this is a simple equality on an indexed column
-                    if let (Expression::Column(col_name), Expression::Literal(_)) = (left, right) {
-                        let base_name = SelectStatement::column_reference_name(col_name);
-                        if let Some(column) = table.get_column_by_name(base_name) {
-                            if column.primary_key && matches!(operator, ComparisonOperator::Equal) {
-                                usable_indexes.push(IndexUsage {
-                                    column_id: column.id,
-                                    index_type: IndexType::PrimaryKey,
-                                    index_name: None,
-                                    selectivity: 1.0, // Primary key equality is highly selective
-                                });
-                            } else if matches!(operator, ComparisonOperator::Equal) {
-                                let Some(column_index) = table.get_column_index(base_name) else {
-                                    continue;
-                                };
-                                for index in &table.secondary_indexes {
-                                    if index.column_indices.len() == 1
-                                        && index.column_indices[0] == column_index
-                                    {
-                                        usable_indexes.push(IndexUsage {
-                                            column_id: column.id,
-                                            index_type: IndexType::Secondary,
-                                            index_name: Some(index.name.clone()),
-                                            selectivity: 0.1,
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+        if table
+            .primary_key_columns
+            .iter()
+            .all(|&index| equalities.contains_key(table.columns[index].name.as_str()))
+        {
+            let first_pk = table
+                .primary_key_columns
+                .first()
+                .and_then(|&index| table.columns.get(index))
+                .ok_or_else(|| {
+                    HematiteError::InternalError(format!(
+                        "Table '{}' lost its primary key metadata during planning",
+                        table.name
+                    ))
+                })?;
+            usable_indexes.push(IndexUsage {
+                column_id: first_pk.id,
+                index_type: IndexType::PrimaryKey,
+                index_name: None,
+                selectivity: 1.0,
+            });
+        }
+
+        for index in &table.secondary_indexes {
+            if index.column_indices.iter().all(|&column_index| {
+                equalities.contains_key(table.columns[column_index].name.as_str())
+            }) {
+                let column = table.columns.get(index.column_indices[0]).ok_or_else(|| {
+                    HematiteError::InternalError(format!(
+                        "Index '{}' references an invalid column on table '{}'",
+                        index.name, table.name
+                    ))
+                })?;
+                usable_indexes.push(IndexUsage {
+                    column_id: column.id,
+                    index_type: IndexType::Secondary,
+                    index_name: Some(index.name.clone()),
+                    selectivity: if index.unique { 1.0 } else { 0.1 },
+                });
             }
         }
 
@@ -635,5 +617,54 @@ fn synthetic_table_select(table_name: &str, where_clause: Option<WhereClause>) -
         limit: None,
         offset: None,
         set_operation: None,
+    }
+}
+
+fn extract_literal_equalities(where_clause: &WhereClause) -> Option<HashMap<String, Value>> {
+    let mut equalities = HashMap::new();
+    for condition in &where_clause.conditions {
+        collect_literal_equalities(condition, &mut equalities)?;
+    }
+    Some(equalities)
+}
+
+fn collect_literal_equalities(
+    condition: &Condition,
+    equalities: &mut HashMap<String, Value>,
+) -> Option<()> {
+    match condition {
+        Condition::Comparison {
+            left,
+            operator: ComparisonOperator::Equal,
+            right,
+        } => {
+            let (column_name, value) = match (left, right) {
+                (Expression::Column(column_name), Expression::Literal(value)) => (
+                    SelectStatement::column_reference_name(column_name),
+                    value.clone(),
+                ),
+                (Expression::Literal(value), Expression::Column(column_name)) => (
+                    SelectStatement::column_reference_name(column_name),
+                    value.clone(),
+                ),
+                _ => return None,
+            };
+            match equalities.get(column_name) {
+                Some(existing) if existing != &value => None,
+                _ => {
+                    equalities.insert(column_name.to_string(), value);
+                    Some(())
+                }
+            }
+        }
+        Condition::Logical {
+            left,
+            operator: LogicalOperator::And,
+            right,
+        } => {
+            collect_literal_equalities(left, equalities)?;
+            collect_literal_equalities(right, equalities)
+        }
+        _ => None,
     }
 }

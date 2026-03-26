@@ -1077,6 +1077,141 @@ mod planner_tests {
     }
 
     #[test]
+    fn test_query_planner_select_uses_composite_primary_key_lookup() -> Result<()> {
+        let mut catalog = Schema::new();
+        catalog.create_table(
+            "edges".to_string(),
+            vec![
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(1),
+                    "src".to_string(),
+                    DataType::Integer,
+                )
+                .primary_key(true),
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(2),
+                    "dst".to_string(),
+                    DataType::Integer,
+                )
+                .primary_key(true),
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(3),
+                    "weight".to_string(),
+                    DataType::Integer,
+                ),
+            ],
+        )?;
+
+        let planner = QueryPlanner::new(catalog);
+        let statement = SelectStatement {
+            with_clause: Vec::new(),
+            distinct: false,
+            columns: vec![SelectItem::Wildcard],
+            column_aliases: vec![None],
+            from: TableReference::Table("edges".to_string(), None),
+            where_clause: Some(WhereClause {
+                conditions: vec![Condition::Logical {
+                    left: Box::new(Condition::Comparison {
+                        left: Expression::Column("src".to_string()),
+                        operator: ComparisonOperator::Equal,
+                        right: Expression::Literal(Value::Integer(1)),
+                    }),
+                    operator: LogicalOperator::And,
+                    right: Box::new(Condition::Comparison {
+                        left: Expression::Column("dst".to_string()),
+                        operator: ComparisonOperator::Equal,
+                        right: Expression::Literal(Value::Integer(2)),
+                    }),
+                }],
+            }),
+            group_by: Vec::new(),
+            having_clause: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            set_operation: None,
+        };
+
+        let plan = planner.plan(Statement::Select(statement))?;
+        let node = expect_select_node(&plan);
+        assert_eq!(node.access_path, SelectAccessPath::PrimaryKeyLookup);
+        Ok(())
+    }
+
+    #[test]
+    fn test_query_planner_select_uses_composite_unique_index_lookup() -> Result<()> {
+        let mut catalog = Schema::new();
+        let table_id = catalog.create_table(
+            "memberships".to_string(),
+            vec![
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(1),
+                    "id".to_string(),
+                    DataType::Integer,
+                )
+                .primary_key(true),
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(2),
+                    "user_id".to_string(),
+                    DataType::Integer,
+                ),
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(3),
+                    "org_id".to_string(),
+                    DataType::Integer,
+                ),
+            ],
+        )?;
+        catalog.add_secondary_index(
+            table_id,
+            crate::catalog::SecondaryIndex {
+                name: "uq_membership".to_string(),
+                column_indices: vec![1, 2],
+                root_page_id: 7,
+                unique: true,
+            },
+        )?;
+
+        let planner = QueryPlanner::new(catalog);
+        let statement = SelectStatement {
+            with_clause: Vec::new(),
+            distinct: false,
+            columns: vec![SelectItem::Wildcard],
+            column_aliases: vec![None],
+            from: TableReference::Table("memberships".to_string(), None),
+            where_clause: Some(WhereClause {
+                conditions: vec![Condition::Logical {
+                    left: Box::new(Condition::Comparison {
+                        left: Expression::Column("user_id".to_string()),
+                        operator: ComparisonOperator::Equal,
+                        right: Expression::Literal(Value::Integer(10)),
+                    }),
+                    operator: LogicalOperator::And,
+                    right: Box::new(Condition::Comparison {
+                        left: Expression::Column("org_id".to_string()),
+                        operator: ComparisonOperator::Equal,
+                        right: Expression::Literal(Value::Integer(20)),
+                    }),
+                }],
+            }),
+            group_by: Vec::new(),
+            having_clause: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            set_operation: None,
+        };
+
+        let plan = planner.plan(Statement::Select(statement))?;
+        let node = expect_select_node(&plan);
+        assert_eq!(
+            node.access_path,
+            SelectAccessPath::SecondaryIndexLookup("uq_membership".to_string())
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_query_planner_costs_favor_locator_access_paths() -> Result<()> {
         let mut catalog = Schema::new();
 
