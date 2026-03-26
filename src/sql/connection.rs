@@ -38,6 +38,51 @@ struct ConnectionTransaction {
 }
 
 #[derive(Debug)]
+struct ImplicitMutation {
+    snapshot: Option<crate::catalog::catalog::CatalogSnapshot>,
+}
+
+impl ImplicitMutation {
+    fn begin(connection: &mut Connection) -> Result<Self> {
+        if connection.transaction.is_some() {
+            return Ok(Self { snapshot: None });
+        }
+
+        let mut catalog_guard = connection.lock_catalog()?;
+        let snapshot = catalog_guard.snapshot();
+        catalog_guard.begin_transaction()?;
+        Ok(Self {
+            snapshot: Some(snapshot),
+        })
+    }
+
+    fn rollback(mut self, connection: &mut Connection) -> Result<()> {
+        if let Some(snapshot) = self.snapshot.take() {
+            let mut catalog_guard = connection.lock_catalog()?;
+            let _ = catalog_guard.rollback_transaction();
+            catalog_guard.restore_snapshot(snapshot);
+        }
+        Ok(())
+    }
+
+    fn commit(mut self, connection: &mut Connection) -> Result<()> {
+        let Some(snapshot) = self.snapshot.take() else {
+            return Ok(());
+        };
+
+        let mut catalog_guard = connection.lock_catalog()?;
+        match catalog_guard.commit_transaction() {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                let _ = catalog_guard.rollback_transaction();
+                catalog_guard.restore_snapshot(snapshot);
+                Err(err)
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct Connection {
     catalog: Arc<Mutex<Catalog>>,
     transaction: Option<ConnectionTransaction>,
@@ -126,62 +171,13 @@ impl Connection {
         Ok(result)
     }
 
-    fn begin_implicit_mutation(
-        &mut self,
-        explicit_transaction: bool,
-    ) -> Result<Option<crate::catalog::catalog::CatalogSnapshot>> {
-        if explicit_transaction {
-            return Ok(None);
-        }
-
-        let mut catalog_guard = self.lock_catalog()?;
-        let snapshot = catalog_guard.snapshot();
-        catalog_guard.begin_transaction()?;
-        Ok(Some(snapshot))
-    }
-
-    fn restore_implicit_mutation(
-        &mut self,
-        snapshot: Option<crate::catalog::catalog::CatalogSnapshot>,
-    ) -> Result<()> {
-        if let Some(snapshot) = snapshot {
-            let mut catalog_guard = self.lock_catalog()?;
-            let _ = catalog_guard.rollback_transaction();
-            catalog_guard.restore_snapshot(snapshot);
-        }
-        Ok(())
-    }
-
-    fn commit_implicit_mutation(
-        &mut self,
-        explicit_transaction: bool,
-        snapshot: Option<crate::catalog::catalog::CatalogSnapshot>,
-    ) -> Result<()> {
-        if explicit_transaction {
-            return Ok(());
-        }
-
-        let mut catalog_guard = self.lock_catalog()?;
-        match catalog_guard.commit_transaction() {
-            Ok(()) => Ok(()),
-            Err(err) => {
-                let _ = catalog_guard.rollback_transaction();
-                if let Some(snapshot) = snapshot {
-                    catalog_guard.restore_snapshot(snapshot);
-                }
-                Err(err)
-            }
-        }
-    }
-
     fn execute_mutating_statement(
         &mut self,
         statement: crate::parser::ast::Statement,
     ) -> Result<QueryResult> {
-        let explicit_transaction = self.transaction.is_some();
         let persists_schema = statement.mutates_schema();
         let (schema, mut executor) = self.plan_executor(statement)?;
-        let mut implicit_snapshot = self.begin_implicit_mutation(explicit_transaction)?;
+        let mut implicit_mutation = Some(ImplicitMutation::begin(self)?);
 
         let execution_result = {
             let mut catalog_guard = self.lock_catalog()?;
@@ -198,13 +194,18 @@ impl Connection {
                     let mut catalog_guard = self.lock_catalog()?;
                     if let Err(err) = catalog_guard.replace_schema(updated_schema) {
                         drop(catalog_guard);
-                        self.restore_implicit_mutation(implicit_snapshot.take())?;
+                        implicit_mutation
+                            .take()
+                            .expect("implicit mutation should be present")
+                            .rollback(self)?;
                         return Err(err);
                     }
                 }
 
-                if let Err(err) =
-                    self.commit_implicit_mutation(explicit_transaction, implicit_snapshot.take())
+                if let Err(err) = implicit_mutation
+                    .take()
+                    .expect("implicit mutation should be present")
+                    .commit(self)
                 {
                     return Err(err);
                 }
@@ -212,7 +213,10 @@ impl Connection {
                 Ok(result)
             }
             Err(err) => {
-                self.restore_implicit_mutation(implicit_snapshot.take())?;
+                implicit_mutation
+                    .take()
+                    .expect("implicit mutation should be present")
+                    .rollback(self)?;
                 Err(err)
             }
         }
