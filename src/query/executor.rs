@@ -31,6 +31,7 @@ use crate::query::predicate::extract_literal_equalities;
 pub use crate::query::runtime::{ExecutionContext, QueryExecutor, QueryResult};
 use crate::query::QueryPlanner;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 
 impl QueryPlan {
     pub fn into_executor(self) -> Box<dyn QueryExecutor> {
@@ -100,6 +101,8 @@ struct GroupedRow {
     projected: Vec<Value>,
     source_rows: Vec<Vec<Value>>,
 }
+
+type SubqueryCache = HashMap<usize, QueryResult>;
 
 impl SelectExecutor {
     pub fn new(statement: SelectStatement, access_path: SelectAccessPath) -> Self {
@@ -344,9 +347,26 @@ impl SelectExecutor {
         executor.execute(ctx)
     }
 
+    fn execute_subquery_cached(
+        &self,
+        ctx: &mut ExecutionContext<'_>,
+        cache: &mut SubqueryCache,
+        subquery: &SelectStatement,
+    ) -> Result<QueryResult> {
+        let key = subquery as *const SelectStatement as usize;
+        if let Some(result) = cache.get(&key) {
+            return Ok(result.clone());
+        }
+
+        let result = self.execute_subquery(ctx, subquery)?;
+        cache.insert(key, result.clone());
+        Ok(result)
+    }
+
     fn evaluate_condition(
         &self,
         ctx: &mut ExecutionContext<'_>,
+        cache: &mut SubqueryCache,
         sources: &[ResolvedSource],
         condition: &Condition,
         row: &[Value],
@@ -379,7 +399,7 @@ impl SelectExecutor {
                 is_not,
             } => {
                 let probe = self.evaluate_expression(ctx, sources, expr, row)?;
-                let subquery_result = self.execute_subquery(ctx, subquery)?;
+                let subquery_result = self.execute_subquery_cached(ctx, cache, subquery)?;
                 let candidates = subquery_result
                     .rows
                     .into_iter()
@@ -432,7 +452,7 @@ impl SelectExecutor {
                 }
             }
             Condition::Exists { subquery, is_not } => {
-                let subquery_result = self.execute_subquery(ctx, subquery)?;
+                let subquery_result = self.execute_subquery_cached(ctx, cache, subquery)?;
                 let exists = !subquery_result.rows.is_empty();
                 Ok(Some(if *is_not { !exists } else { exists }))
             }
@@ -442,15 +462,15 @@ impl SelectExecutor {
                 Ok(Some(if *is_not { !is_null } else { is_null }))
             }
             Condition::Not(condition) => Ok(self
-                .evaluate_condition(ctx, sources, condition, row)?
+                .evaluate_condition(ctx, cache, sources, condition, row)?
                 .map(|value| !value)),
             Condition::Logical {
                 left,
                 operator,
                 right,
             } => {
-                let left_result = self.evaluate_condition(ctx, sources, left, row)?;
-                let right_result = self.evaluate_condition(ctx, sources, right, row)?;
+                let left_result = self.evaluate_condition(ctx, cache, sources, left, row)?;
+                let right_result = self.evaluate_condition(ctx, cache, sources, right, row)?;
 
                 match operator {
                     LogicalOperator::And => Ok(self.logical_and(left_result, right_result)),
@@ -608,10 +628,18 @@ impl SelectExecutor {
         predicate: &Condition,
         rows: &mut Vec<Vec<Value>>,
     ) -> Result<()> {
+        let mut subquery_cache = SubqueryCache::new();
         for outer_row in outer_rows {
             for inner_row in inner_rows {
                 let combined = self.combine_join_rows(outer_row, inner_row);
-                if self.evaluate_condition(ctx, sources, predicate, &combined)? == Some(true) {
+                if self.evaluate_condition(
+                    ctx,
+                    &mut subquery_cache,
+                    sources,
+                    predicate,
+                    &combined,
+                )? == Some(true)
+                {
                     rows.push(combined);
                 }
             }
@@ -735,11 +763,19 @@ impl SelectExecutor {
                     self.materialize_join_sources(ctx, left, right)?;
 
                 let mut rows = Vec::new();
+                let mut subquery_cache = SubqueryCache::new();
                 for left_row in &left_rows {
                     let mut matched = false;
                     for right_row in &right_rows {
                         let combined = self.combine_join_rows(left_row, right_row);
-                        if self.evaluate_condition(ctx, &sources, on, &combined)? == Some(true) {
+                        if self.evaluate_condition(
+                            ctx,
+                            &mut subquery_cache,
+                            &sources,
+                            on,
+                            &combined,
+                        )? == Some(true)
+                        {
                             rows.push(combined);
                             matched = true;
                         }
@@ -1042,6 +1078,7 @@ impl SelectExecutor {
     fn evaluate_projected_condition(
         &self,
         ctx: &mut ExecutionContext<'_>,
+        cache: &mut SubqueryCache,
         sources: &[ResolvedSource],
         condition: &Condition,
         row: &[Value],
@@ -1108,7 +1145,7 @@ impl SelectExecutor {
                     output_columns,
                     group_rows,
                 )?;
-                let subquery_result = self.execute_subquery(ctx, subquery)?;
+                let subquery_result = self.execute_subquery_cached(ctx, cache, subquery)?;
                 let candidates = subquery_result
                     .rows
                     .into_iter()
@@ -1191,7 +1228,7 @@ impl SelectExecutor {
                 }
             }
             Condition::Exists { subquery, is_not } => {
-                let subquery_result = self.execute_subquery(ctx, subquery)?;
+                let subquery_result = self.execute_subquery_cached(ctx, cache, subquery)?;
                 let exists = !subquery_result.rows.is_empty();
                 Ok(Some(if *is_not { !exists } else { exists }))
             }
@@ -1209,6 +1246,7 @@ impl SelectExecutor {
             Condition::Not(condition) => Ok(self
                 .evaluate_projected_condition(
                     ctx,
+                    cache,
                     sources,
                     condition,
                     row,
@@ -1223,6 +1261,7 @@ impl SelectExecutor {
             } => {
                 let left_result = self.evaluate_projected_condition(
                     ctx,
+                    cache,
                     sources,
                     left,
                     row,
@@ -1231,6 +1270,7 @@ impl SelectExecutor {
                 )?;
                 let right_result = self.evaluate_projected_condition(
                     ctx,
+                    cache,
                     sources,
                     right,
                     row,
@@ -1317,6 +1357,7 @@ impl SelectExecutor {
     fn apply_having_clause(
         &self,
         ctx: &mut ExecutionContext<'_>,
+        cache: &mut SubqueryCache,
         sources: &[ResolvedSource],
         output_columns: &[String],
         grouped_rows: Vec<GroupedRow>,
@@ -1334,6 +1375,7 @@ impl SelectExecutor {
             for condition in &having_clause.conditions {
                 if self.evaluate_projected_condition(
                     ctx,
+                    cache,
                     sources,
                     condition,
                     &grouped.projected,
@@ -1357,6 +1399,7 @@ impl SelectExecutor {
     fn execute_grouped(
         &self,
         ctx: &mut ExecutionContext,
+        cache: &mut SubqueryCache,
         sources: &[ResolvedSource],
         filtered_rows: &[Vec<Value>],
     ) -> Result<QueryResult> {
@@ -1371,7 +1414,7 @@ impl SelectExecutor {
         }
 
         let projected_rows =
-            self.apply_having_clause(ctx, sources, &output_columns, grouped_rows)?;
+            self.apply_having_clause(ctx, cache, sources, &output_columns, grouped_rows)?;
         self.finalize_grouped_rows(output_columns, projected_rows)
     }
 
@@ -1391,6 +1434,7 @@ impl SelectExecutor {
     fn filter_source_rows(
         &self,
         ctx: &mut ExecutionContext<'_>,
+        cache: &mut SubqueryCache,
         sources: &[ResolvedSource],
         all_rows: Vec<Vec<Value>>,
     ) -> Result<Vec<Vec<Value>>> {
@@ -1405,7 +1449,8 @@ impl SelectExecutor {
                     Some(where_clause) => {
                         let mut all_conditions_met = true;
                         for condition in &where_clause.conditions {
-                            if self.evaluate_condition(ctx, sources, condition, &row)? != Some(true)
+                            if self.evaluate_condition(ctx, cache, sources, condition, &row)?
+                                != Some(true)
                             {
                                 all_conditions_met = false;
                                 break;
@@ -1566,11 +1611,13 @@ impl QueryExecutor for SelectExecutor {
         self.statement.validate(&ctx.catalog)?;
 
         if let Some(set_operation) = &self.statement.set_operation {
+            let mut subquery_cache = SubqueryCache::new();
             let mut left_statement = self.statement.clone();
             left_statement.set_operation = None;
             let mut left_executor = SelectExecutor::new(left_statement, self.access_path.clone());
             let mut left_result = left_executor.execute(ctx)?;
-            let right_result = self.execute_subquery(ctx, &set_operation.right)?;
+            let right_result =
+                self.execute_subquery_cached(ctx, &mut subquery_cache, &set_operation.right)?;
 
             left_result.rows.extend(right_result.rows);
             if set_operation.operator == SetOperator::Union {
@@ -1603,7 +1650,9 @@ impl QueryExecutor for SelectExecutor {
             ));
         };
 
-        let mut filtered_rows = self.filter_source_rows(ctx, &sources, all_rows)?;
+        let mut subquery_cache = SubqueryCache::new();
+        let mut filtered_rows =
+            self.filter_source_rows(ctx, &mut subquery_cache, &sources, all_rows)?;
 
         if !self.statement.order_by.is_empty() {
             filtered_rows.sort_by(|left, right| {
@@ -1626,7 +1675,7 @@ impl QueryExecutor for SelectExecutor {
         }
 
         if !self.statement.group_by.is_empty() || self.has_aggregate_projection() {
-            return self.execute_grouped(ctx, &sources, &filtered_rows);
+            return self.execute_grouped(ctx, &mut subquery_cache, &sources, &filtered_rows);
         }
 
         let mut projected_rows = Vec::new();
@@ -2105,6 +2154,7 @@ fn locate_rows_for_access_path(
         locate_rowids_for_access_path(ctx, table, table_name, access_path, select_executor)?;
     let mut table_cursor = ctx.engine.open_table_cursor(table_name)?;
     let mut rows = Vec::new();
+    let mut subquery_cache = SubqueryCache::new();
 
     for rowid in rowids {
         if table_cursor.seek_rowid(rowid) {
@@ -2117,6 +2167,7 @@ fn locate_rows_for_access_path(
                         for condition in &where_clause.conditions {
                             if select_executor.evaluate_condition(
                                 ctx,
+                                &mut subquery_cache,
                                 &sources,
                                 condition,
                                 &row.values,
@@ -2648,11 +2699,18 @@ fn validate_check_constraints(
         SelectAccessPath::FullTableScan,
     );
     let sources = constraint_executor.resolve_sources(ctx)?;
+    let mut subquery_cache = SubqueryCache::new();
 
     for constraint in &table.check_constraints {
         let condition =
             crate::parser::parser::parse_condition_fragment(&constraint.expression_sql)?;
-        let result = constraint_executor.evaluate_condition(ctx, &sources, &condition, row)?;
+        let result = constraint_executor.evaluate_condition(
+            ctx,
+            &mut subquery_cache,
+            &sources,
+            &condition,
+            row,
+        )?;
         if result == Some(false) {
             let constraint_name = constraint
                 .name
