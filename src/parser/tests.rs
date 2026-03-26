@@ -1000,6 +1000,15 @@ mod parser_tests {
     }
 
     #[test]
+    fn test_parse_mysql_limit_offset_count() -> Result<()> {
+        let select = parse_select("SELECT id FROM users ORDER BY name DESC LIMIT 2, 5;")?;
+        assert_eq!(select.order_by.len(), 1);
+        assert_eq!(select.limit, Some(5));
+        assert_eq!(select.offset, Some(2));
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_count() -> Result<()> {
         let select = parse_select("SELECT COUNT(*) FROM users;")?;
         assert_eq!(select.columns.len(), 1);
@@ -1117,6 +1126,16 @@ mod parser_tests {
     #[test]
     fn test_parse_insert() -> Result<()> {
         let insert = parse_insert("INSERT INTO users (id, name) VALUES (1, 'John');")?;
+        assert_eq!(insert.table, "users");
+        assert_eq!(insert.columns, vec!["id", "name"]);
+        assert_eq!(insert.values.len(), 1);
+        assert_eq!(insert.values[0].len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_insert_set() -> Result<()> {
+        let insert = parse_insert("INSERT INTO users SET id = 1, name = 'John';")?;
         assert_eq!(insert.table, "users");
         assert_eq!(insert.columns, vec!["id", "name"]);
         assert_eq!(insert.values.len(), 1);

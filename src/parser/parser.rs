@@ -135,13 +135,15 @@ impl Parser {
             Vec::new()
         };
 
-        let limit = if matches!(self.peek_token(), Ok(Token::Limit)) {
-            Some(self.parse_limit_clause()?)
+        let (limit, limit_offset) = if matches!(self.peek_token(), Ok(Token::Limit)) {
+            self.parse_limit_clause()?
         } else {
-            None
+            (None, None)
         };
 
-        let offset = if matches!(self.peek_token(), Ok(Token::Offset)) {
+        let offset = if limit_offset.is_some() {
+            limit_offset
+        } else if matches!(self.peek_token(), Ok(Token::Offset)) {
             Some(self.parse_offset_clause()?)
         } else {
             None
@@ -471,9 +473,16 @@ impl Parser {
         Ok(WhereClause { conditions })
     }
 
-    fn parse_limit_clause(&mut self) -> Result<usize> {
+    fn parse_limit_clause(&mut self) -> Result<(Option<usize>, Option<usize>)> {
         self.consume_token(&Token::Limit)?;
-        self.parse_non_negative_integer_clause("LIMIT")
+        let first = self.parse_non_negative_integer_clause("LIMIT")?;
+        if matches!(self.peek_token(), Ok(Token::Comma)) {
+            self.consume_token(&Token::Comma)?;
+            let second = self.parse_non_negative_integer_clause("LIMIT")?;
+            Ok((Some(second), Some(first)))
+        } else {
+            Ok((Some(first), None))
+        }
     }
 
     fn parse_offset_clause(&mut self) -> Result<usize> {
@@ -834,14 +843,36 @@ impl Parser {
 
         let table = self.parse_identifier()?;
 
-        self.consume_token(&Token::LeftParen)?;
-
-        let columns = self.parse_column_list()?;
-
-        self.consume_token(&Token::RightParen)?;
-        self.consume_token(&Token::Values)?;
-
-        let values = self.parse_value_lists()?;
+        let (columns, values) = match self.peek_token()? {
+            Token::LeftParen => {
+                self.consume_token(&Token::LeftParen)?;
+                let columns = self.parse_column_list()?;
+                self.consume_token(&Token::RightParen)?;
+                self.consume_token(&Token::Values)?;
+                let values = self.parse_value_lists()?;
+                (columns, values)
+            }
+            Token::Set => {
+                self.consume_token(&Token::Set)?;
+                let assignments = self.parse_update_assignments()?;
+                (
+                    assignments
+                        .iter()
+                        .map(|assignment| assignment.column.clone())
+                        .collect(),
+                    vec![assignments
+                        .into_iter()
+                        .map(|assignment| assignment.value)
+                        .collect()],
+                )
+            }
+            token => {
+                return Err(HematiteError::ParseError(format!(
+                    "Expected column list or SET after INSERT INTO table, found: {:?}",
+                    token
+                )))
+            }
+        };
 
         self.consume_token(&Token::Semicolon)?;
 

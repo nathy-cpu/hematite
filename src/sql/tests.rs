@@ -1655,6 +1655,46 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_mysql_limit_offset_count_syntax() -> Result<()> {
+        let db = TestDbFile::new("_test_mysql_limit_offset_count_syntax");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (3, 'Cara');")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (1, 'Alice');")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (2, 'Bob');")?;
+
+        let result = conn.execute("SELECT id FROM test ORDER BY id ASC LIMIT 1, 1;")?;
+        assert_eq!(result.rows, vec![vec![crate::catalog::Value::Integer(2)]]);
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_insert_set_syntax() -> Result<()> {
+        let db = TestDbFile::new("_test_insert_set_syntax");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT, active BOOLEAN);")?;
+        conn.execute("INSERT INTO test SET id = 1, name = 'Alice', active = TRUE;")?;
+
+        let result =
+            conn.execute("SELECT id, name, active FROM test WHERE id = 1 ORDER BY id ASC;")?;
+        assert_eq!(
+            result.rows,
+            vec![vec![
+                crate::catalog::Value::Integer(1),
+                crate::catalog::Value::Text("Alice".to_string()),
+                crate::catalog::Value::Boolean(true),
+            ]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_count_all_returns_single_row() -> Result<()> {
         let db = TestDbFile::new("_test_count_all_returns_single_row");
         let mut conn = Connection::new(db.path())?;
