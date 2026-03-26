@@ -1443,6 +1443,33 @@ mod parser_tests {
     }
 
     #[test]
+    fn test_parse_alter_table_set_default() -> Result<()> {
+        let alter = parse_alter("ALTER TABLE users ALTER COLUMN active SET DEFAULT TRUE;")?;
+        assert_eq!(alter.table, "users");
+        assert!(matches!(
+            alter.operation,
+            AlterOperation::AlterColumnSetDefault {
+                ref column_name,
+                default_value: crate::catalog::Value::Boolean(true),
+            } if column_name == "active"
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_alter_table_drop_default() -> Result<()> {
+        let alter = parse_alter("ALTER TABLE users ALTER COLUMN active DROP DEFAULT;")?;
+        assert_eq!(alter.table, "users");
+        assert!(matches!(
+            alter.operation,
+            AlterOperation::AlterColumnDropDefault { ref column_name } if column_name == "active"
+        ));
+
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_begin_commit_rollback() -> Result<()> {
         for (sql, expected) in [
             ("BEGIN;", "begin"),

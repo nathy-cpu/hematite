@@ -597,6 +597,51 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_alter_table_set_default_affects_future_inserts_only() -> Result<()> {
+        let db = TestDbFile::new("_test_alter_table_set_default_affects_future_inserts_only");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, active BOOLEAN);")?;
+        conn.execute("INSERT INTO users (id, active) VALUES (1, NULL);")?;
+        conn.execute("ALTER TABLE users ALTER COLUMN active SET DEFAULT TRUE;")?;
+        conn.execute("INSERT INTO users (id) VALUES (2);")?;
+
+        let result = conn.execute("SELECT id, active FROM users ORDER BY id ASC;")?;
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![
+                    crate::catalog::Value::Integer(1),
+                    crate::catalog::Value::Null,
+                ],
+                vec![
+                    crate::catalog::Value::Integer(2),
+                    crate::catalog::Value::Boolean(true),
+                ],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_alter_table_drop_default_restores_null_insert_behavior() -> Result<()> {
+        let db = TestDbFile::new("_test_alter_table_drop_default_restores_null_insert_behavior");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, active BOOLEAN DEFAULT TRUE);")?;
+        conn.execute("ALTER TABLE users ALTER COLUMN active DROP DEFAULT;")?;
+        conn.execute("INSERT INTO users (id) VALUES (1);")?;
+
+        let result = conn.execute("SELECT active FROM users WHERE id = 1;")?;
+        assert_eq!(result.rows, vec![vec![crate::catalog::Value::Null]]);
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_create_table_unique_column_rejects_duplicate_insert_and_update() -> Result<()> {
         let db = TestDbFile::new("_test_create_table_unique_column");
         let mut conn = Connection::new(db.path())?;
