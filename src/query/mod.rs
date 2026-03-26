@@ -4,6 +4,7 @@ pub mod executor;
 pub mod optimizer;
 pub mod plan;
 pub mod planner;
+pub(crate) mod predicate;
 pub mod runtime;
 
 pub use executor::*;

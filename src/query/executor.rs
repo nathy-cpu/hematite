@@ -27,10 +27,10 @@ use crate::catalog::{Column, DataType, Table, Value};
 use crate::error::{HematiteError, Result};
 use crate::parser::ast::*;
 use crate::query::plan::{ExecutionProgram, QueryPlan, SelectAccessPath};
+use crate::query::predicate::extract_literal_equalities;
 pub use crate::query::runtime::{ExecutionContext, QueryExecutor, QueryResult};
 use crate::query::QueryPlanner;
 use std::cmp::Ordering;
-use std::collections::HashMap;
 
 impl QueryPlan {
     pub fn into_executor(self) -> Box<dyn QueryExecutor> {
@@ -533,8 +533,90 @@ impl SelectExecutor {
         combined
     }
 
+    fn combine_left_row_with_nulls(&self, left_row: &[Value], right_width: usize) -> Vec<Value> {
+        let mut combined = left_row.to_vec();
+        combined.extend(std::iter::repeat_n(Value::Null, right_width));
+        combined
+    }
+
     fn join_outer_is_left(&self, left_rows: &[Vec<Value>], right_rows: &[Vec<Value>]) -> bool {
         left_rows.len() <= right_rows.len()
+    }
+
+    fn materialize_join_sources(
+        &self,
+        ctx: &mut ExecutionContext,
+        left: &TableReference,
+        right: &TableReference,
+    ) -> Result<(
+        Vec<ResolvedSource>,
+        Vec<Vec<Value>>,
+        usize,
+        Vec<Vec<Value>>,
+        usize,
+    )> {
+        let (left_sources, left_rows) = self.materialize_reference(ctx, left)?;
+        let left_width = self.total_source_width(&left_sources);
+        let (right_sources, right_rows) = self.materialize_reference(ctx, right)?;
+        let right_width = self.total_source_width(&right_sources);
+        let mut sources = left_sources;
+        sources.extend(self.shifted_sources(right_sources, left_width));
+        Ok((sources, left_rows, left_width, right_rows, right_width))
+    }
+
+    fn push_matching_join_rows(
+        &self,
+        ctx: &mut ExecutionContext,
+        sources: &[ResolvedSource],
+        left_rows: &[Vec<Value>],
+        right_rows: &[Vec<Value>],
+        on: Option<&Condition>,
+        rows: &mut Vec<Vec<Value>>,
+    ) -> Result<()> {
+        let push_matches =
+            |outer_rows: &[Vec<Value>], inner_rows: &[Vec<Value>], rows: &mut Vec<Vec<Value>>| {
+                for outer_row in outer_rows {
+                    for inner_row in inner_rows {
+                        rows.push(self.combine_join_rows(outer_row, inner_row));
+                    }
+                }
+            };
+
+        if on.is_none() {
+            if self.join_outer_is_left(left_rows, right_rows) {
+                push_matches(left_rows, right_rows, rows);
+            } else {
+                push_matches(right_rows, left_rows, rows);
+            }
+            return Ok(());
+        }
+
+        let predicate = on.expect("checked above");
+        if self.join_outer_is_left(left_rows, right_rows) {
+            self.push_join_condition_matches(ctx, sources, left_rows, right_rows, predicate, rows)
+        } else {
+            self.push_join_condition_matches(ctx, sources, right_rows, left_rows, predicate, rows)
+        }
+    }
+
+    fn push_join_condition_matches(
+        &self,
+        ctx: &mut ExecutionContext,
+        sources: &[ResolvedSource],
+        outer_rows: &[Vec<Value>],
+        inner_rows: &[Vec<Value>],
+        predicate: &Condition,
+        rows: &mut Vec<Vec<Value>>,
+    ) -> Result<()> {
+        for outer_row in outer_rows {
+            for inner_row in inner_rows {
+                let combined = self.combine_join_rows(outer_row, inner_row);
+                if self.evaluate_condition(ctx, sources, predicate, &combined)? == Some(true) {
+                    rows.push(combined);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn resolve_named_source(
@@ -621,69 +703,36 @@ impl SelectExecutor {
                 ))
             }
             TableReference::CrossJoin(left, right) => {
-                let (left_sources, left_rows) = self.materialize_reference(ctx, left)?;
-                let left_width = self.total_source_width(&left_sources);
-                let (right_sources, right_rows) = self.materialize_reference(ctx, right)?;
+                let (sources, left_rows, _, right_rows, _) =
+                    self.materialize_join_sources(ctx, left, right)?;
                 let mut rows = Vec::new();
-                if self.join_outer_is_left(&left_rows, &right_rows) {
-                    for left_row in &left_rows {
-                        for right_row in &right_rows {
-                            rows.push(self.combine_join_rows(left_row, right_row));
-                        }
-                    }
-                } else {
-                    for right_row in &right_rows {
-                        for left_row in &left_rows {
-                            rows.push(self.combine_join_rows(left_row, right_row));
-                        }
-                    }
-                }
-
-                let mut sources = left_sources;
-                sources.extend(self.shifted_sources(right_sources, left_width));
+                self.push_matching_join_rows(
+                    ctx,
+                    &sources,
+                    &left_rows,
+                    &right_rows,
+                    None,
+                    &mut rows,
+                )?;
                 Ok((sources, rows))
             }
             TableReference::InnerJoin { left, right, on } => {
-                let (left_sources, left_rows) = self.materialize_reference(ctx, left)?;
-                let left_width = self.total_source_width(&left_sources);
-                let (right_sources, right_rows) = self.materialize_reference(ctx, right)?;
-                let shifted_right_sources = self.shifted_sources(right_sources, left_width);
-                let mut sources = left_sources;
-                sources.extend(shifted_right_sources);
-
+                let (sources, left_rows, _, right_rows, _) =
+                    self.materialize_join_sources(ctx, left, right)?;
                 let mut rows = Vec::new();
-                if self.join_outer_is_left(&left_rows, &right_rows) {
-                    for left_row in &left_rows {
-                        for right_row in &right_rows {
-                            let combined = self.combine_join_rows(left_row, right_row);
-                            if self.evaluate_condition(ctx, &sources, on, &combined)? == Some(true)
-                            {
-                                rows.push(combined);
-                            }
-                        }
-                    }
-                } else {
-                    for right_row in &right_rows {
-                        for left_row in &left_rows {
-                            let combined = self.combine_join_rows(left_row, right_row);
-                            if self.evaluate_condition(ctx, &sources, on, &combined)? == Some(true)
-                            {
-                                rows.push(combined);
-                            }
-                        }
-                    }
-                }
-
+                self.push_matching_join_rows(
+                    ctx,
+                    &sources,
+                    &left_rows,
+                    &right_rows,
+                    Some(on),
+                    &mut rows,
+                )?;
                 Ok((sources, rows))
             }
             TableReference::LeftJoin { left, right, on } => {
-                let (left_sources, left_rows) = self.materialize_reference(ctx, left)?;
-                let left_width = self.total_source_width(&left_sources);
-                let (right_sources, right_rows) = self.materialize_reference(ctx, right)?;
-                let right_width = self.total_source_width(&right_sources);
-                let shifted_right_sources = self.shifted_sources(right_sources, left_width);
-                let mut sources = left_sources;
-                sources.extend(shifted_right_sources);
+                let (sources, left_rows, _, right_rows, right_width) =
+                    self.materialize_join_sources(ctx, left, right)?;
 
                 let mut rows = Vec::new();
                 for left_row in &left_rows {
@@ -697,9 +746,7 @@ impl SelectExecutor {
                     }
 
                     if !matched {
-                        let mut combined = left_row.clone();
-                        combined.extend(std::iter::repeat_n(Value::Null, right_width));
-                        rows.push(combined);
+                        rows.push(self.combine_left_row_with_nulls(left_row, right_width));
                     }
                 }
 
@@ -1379,7 +1426,7 @@ impl SelectExecutor {
     }
 
     fn extract_primary_key_lookup(&self, table: &Table) -> Option<Vec<Value>> {
-        let equalities = extract_select_literal_equalities(self.statement.where_clause.as_ref()?)?;
+        let equalities = extract_literal_equalities(self.statement.where_clause.as_ref()?)?;
         table
             .primary_key_columns
             .iter()
@@ -1396,7 +1443,7 @@ impl SelectExecutor {
         index_name: &str,
     ) -> Option<Vec<Value>> {
         let index = table.get_secondary_index(index_name)?;
-        let equalities = extract_select_literal_equalities(self.statement.where_clause.as_ref()?)?;
+        let equalities = extract_literal_equalities(self.statement.where_clause.as_ref()?)?;
         index
             .column_indices
             .iter()
@@ -1408,7 +1455,7 @@ impl SelectExecutor {
     }
 
     fn extract_rowid_lookup(&self) -> Option<u64> {
-        let equalities = extract_select_literal_equalities(self.statement.where_clause.as_ref()?)?;
+        let equalities = extract_literal_equalities(self.statement.where_clause.as_ref()?)?;
         match equalities.get("rowid") {
             Some(Value::Integer(v)) if v >= &0 => Some(*v as u64),
             _ => None,
@@ -3068,55 +3115,6 @@ fn apply_distinct_if_needed(distinct: bool, rows: &mut Vec<Vec<Value>>) {
         }
     }
     *rows = distinct_rows;
-}
-
-fn extract_select_literal_equalities(where_clause: &WhereClause) -> Option<HashMap<String, Value>> {
-    let mut equalities = HashMap::new();
-    for condition in &where_clause.conditions {
-        collect_select_literal_equalities(condition, &mut equalities)?;
-    }
-    Some(equalities)
-}
-
-fn collect_select_literal_equalities(
-    condition: &Condition,
-    equalities: &mut HashMap<String, Value>,
-) -> Option<()> {
-    match condition {
-        Condition::Comparison {
-            left,
-            operator: ComparisonOperator::Equal,
-            right,
-        } => {
-            let (column_name, value) = match (left, right) {
-                (Expression::Column(column_name), Expression::Literal(value)) => (
-                    SelectStatement::column_reference_name(column_name),
-                    value.clone(),
-                ),
-                (Expression::Literal(value), Expression::Column(column_name)) => (
-                    SelectStatement::column_reference_name(column_name),
-                    value.clone(),
-                ),
-                _ => return None,
-            };
-            match equalities.get(column_name) {
-                Some(existing) if existing != &value => None,
-                _ => {
-                    equalities.insert(column_name.to_string(), value);
-                    Some(())
-                }
-            }
-        }
-        Condition::Logical {
-            left,
-            operator: LogicalOperator::And,
-            right,
-        } => {
-            collect_select_literal_equalities(left, equalities)?;
-            collect_select_literal_equalities(right, equalities)
-        }
-        _ => None,
-    }
 }
 
 fn locator_select_statement(
