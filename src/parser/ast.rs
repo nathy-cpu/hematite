@@ -1543,12 +1543,22 @@ impl CreateStatement {
             ));
         }
 
+        self.validate_local_constraint_columns(&unique_constraint.columns, "UNIQUE constraint")?;
+
+        Ok(())
+    }
+
+    fn validate_local_constraint_columns(
+        &self,
+        columns: &[String],
+        constraint_label: &str,
+    ) -> Result<()> {
         let mut seen = std::collections::HashSet::new();
-        for column in &unique_constraint.columns {
+        for column in columns {
             if !seen.insert(column) {
                 return Err(HematiteError::ParseError(format!(
-                    "UNIQUE constraint repeats column '{}'",
-                    column
+                    "{} repeats column '{}'",
+                    constraint_label, column
                 )));
             }
             if !self
@@ -1557,8 +1567,8 @@ impl CreateStatement {
                 .any(|candidate| candidate.name == *column)
             {
                 return Err(HematiteError::ParseError(format!(
-                    "UNIQUE constraint column '{}' does not exist in table '{}'",
-                    column, self.table
+                    "{} column '{}' does not exist in table '{}'",
+                    constraint_label, column, self.table
                 )));
             }
         }
@@ -1582,18 +1592,7 @@ impl CreateStatement {
                 self.table
             )));
         }
-        for column in &foreign_key.columns {
-            if !self
-                .columns
-                .iter()
-                .any(|candidate| candidate.name == *column)
-            {
-                return Err(HematiteError::ParseError(format!(
-                    "Foreign key column '{}' does not exist in table '{}'",
-                    column, self.table
-                )));
-            }
-        }
+        self.validate_local_constraint_columns(&foreign_key.columns, "Foreign key")?;
 
         let referenced_table = catalog
             .get_table_by_name(&foreign_key.referenced_table)
@@ -1603,18 +1602,8 @@ impl CreateStatement {
                     foreign_key.referenced_table
                 ))
             })?;
-        let referenced_column_indices = foreign_key
-            .referenced_columns
-            .iter()
-            .map(|column| {
-                referenced_table.get_column_index(column).ok_or_else(|| {
-                    HematiteError::ParseError(format!(
-                        "Referenced column '{}.{}' does not exist",
-                        foreign_key.referenced_table, column
-                    ))
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let referenced_column_indices =
+            self.referenced_column_indices(referenced_table, foreign_key)?;
         let references_primary_key =
             referenced_table.primary_key_columns == referenced_column_indices;
         let references_unique_index = referenced_table
@@ -1630,6 +1619,25 @@ impl CreateStatement {
         }
 
         Ok(())
+    }
+
+    fn referenced_column_indices(
+        &self,
+        referenced_table: &crate::catalog::Table,
+        foreign_key: &ForeignKeyDefinition,
+    ) -> Result<Vec<usize>> {
+        foreign_key
+            .referenced_columns
+            .iter()
+            .map(|column| {
+                referenced_table.get_column_index(column).ok_or_else(|| {
+                    HematiteError::ParseError(format!(
+                        "Referenced column '{}.{}' does not exist",
+                        foreign_key.referenced_table, column
+                    ))
+                })
+            })
+            .collect()
     }
 }
 

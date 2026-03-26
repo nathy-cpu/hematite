@@ -1306,17 +1306,7 @@ impl Parser {
         name: Option<String>,
     ) -> Result<crate::parser::ast::UniqueConstraintDefinition> {
         self.consume_token(&Token::Unique)?;
-        self.consume_token(&Token::LeftParen)?;
-        let mut columns = Vec::new();
-        loop {
-            columns.push(self.parse_identifier()?);
-            if matches!(self.peek_token(), Ok(Token::Comma)) {
-                self.consume_token(&Token::Comma)?;
-                continue;
-            }
-            break;
-        }
-        self.consume_token(&Token::RightParen)?;
+        let columns = self.parse_column_reference_list()?;
         Ok(crate::parser::ast::UniqueConstraintDefinition { name, columns })
     }
 
