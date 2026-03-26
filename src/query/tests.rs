@@ -1212,6 +1212,87 @@ mod planner_tests {
     }
 
     #[test]
+    fn test_query_planner_prefers_more_selective_secondary_index() -> Result<()> {
+        let mut catalog = Schema::new();
+        let table_id = catalog.create_table(
+            "users".to_string(),
+            vec![
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(1),
+                    "id".to_string(),
+                    DataType::Integer,
+                )
+                .primary_key(true),
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(2),
+                    "email".to_string(),
+                    DataType::Text,
+                ),
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(3),
+                    "active".to_string(),
+                    DataType::Boolean,
+                ),
+            ],
+        )?;
+        catalog.add_secondary_index(
+            table_id,
+            crate::catalog::SecondaryIndex {
+                name: "uq_users_email".to_string(),
+                column_indices: vec![1],
+                root_page_id: 7,
+                unique: true,
+            },
+        )?;
+        catalog.add_secondary_index(
+            table_id,
+            crate::catalog::SecondaryIndex {
+                name: "idx_users_active".to_string(),
+                column_indices: vec![2],
+                root_page_id: 8,
+                unique: false,
+            },
+        )?;
+
+        let planner = QueryPlanner::new(catalog);
+        let statement = SelectStatement {
+            with_clause: Vec::new(),
+            distinct: false,
+            columns: vec![SelectItem::Wildcard],
+            column_aliases: vec![None],
+            from: TableReference::Table("users".to_string(), None),
+            where_clause: Some(WhereClause {
+                conditions: vec![
+                    Condition::Comparison {
+                        left: Expression::Column("email".to_string()),
+                        operator: ComparisonOperator::Equal,
+                        right: Expression::Literal(Value::Text("a@example.com".to_string())),
+                    },
+                    Condition::Comparison {
+                        left: Expression::Column("active".to_string()),
+                        operator: ComparisonOperator::Equal,
+                        right: Expression::Literal(Value::Boolean(true)),
+                    },
+                ],
+            }),
+            group_by: Vec::new(),
+            having_clause: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            set_operation: None,
+        };
+
+        let plan = planner.plan(Statement::Select(statement))?;
+        let node = expect_select_node(&plan);
+        assert_eq!(
+            node.access_path,
+            SelectAccessPath::SecondaryIndexLookup("uq_users_email".to_string())
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_query_planner_costs_favor_locator_access_paths() -> Result<()> {
         let mut catalog = Schema::new();
 

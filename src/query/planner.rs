@@ -327,29 +327,53 @@ impl QueryPlanner {
 
     fn choose_access_path(&self, analysis: &SelectAnalysis) -> SelectAccessPath {
         if analysis.has_complex_source || analysis.source_count > 1 {
-            SelectAccessPath::JoinScan
-        } else if analysis.rowid_lookup.is_some() {
-            SelectAccessPath::RowIdLookup
-        } else if analysis
+            return SelectAccessPath::JoinScan;
+        }
+
+        let mut best_path = SelectAccessPath::FullTableScan;
+        let mut best_cost = self.estimate_total_access_cost(analysis, &best_path);
+
+        if analysis.rowid_lookup.is_some() {
+            let candidate = SelectAccessPath::RowIdLookup;
+            let cost = self.estimate_total_access_cost(analysis, &candidate);
+            if cost < best_cost {
+                best_cost = cost;
+                best_path = candidate;
+            }
+        }
+
+        if analysis
             .usable_indexes
             .iter()
             .any(|usage| matches!(usage.index_type, IndexType::PrimaryKey))
         {
-            SelectAccessPath::PrimaryKeyLookup
-        } else if let Some(index_usage) = analysis
+            let candidate = SelectAccessPath::PrimaryKeyLookup;
+            let cost = self.estimate_total_access_cost(analysis, &candidate);
+            if cost < best_cost {
+                best_cost = cost;
+                best_path = candidate;
+            }
+        }
+
+        for index_usage in analysis
             .usable_indexes
             .iter()
-            .find(|usage| matches!(usage.index_type, IndexType::Secondary))
+            .filter(|usage| matches!(usage.index_type, IndexType::Secondary))
         {
-            SelectAccessPath::SecondaryIndexLookup(
+            let candidate = SelectAccessPath::SecondaryIndexLookup(
                 index_usage
                     .index_name
                     .clone()
                     .unwrap_or_else(|| "unnamed_secondary_index".to_string()),
-            )
-        } else {
-            SelectAccessPath::FullTableScan
+            );
+            let cost = self.estimate_total_access_cost(analysis, &candidate);
+            if cost < best_cost {
+                best_cost = cost;
+                best_path = candidate;
+            }
         }
+
+        best_path
     }
 
     fn analyze_where_clause(
@@ -384,7 +408,7 @@ impl QueryPlanner {
                 column_id: first_pk.id,
                 index_type: IndexType::PrimaryKey,
                 index_name: None,
-                selectivity: 1.0,
+                selectivity: (1.0 / self.estimate_table_rows(table).max(1) as f64).max(0.0001),
             });
         }
 
@@ -402,7 +426,13 @@ impl QueryPlanner {
                     column_id: column.id,
                     index_type: IndexType::Secondary,
                     index_name: Some(index.name.clone()),
-                    selectivity: if index.unique { 1.0 } else { 0.1 },
+                    selectivity: if index.unique {
+                        (1.0 / self.estimate_table_rows(table).max(1) as f64).max(0.0001)
+                    } else if index.column_indices.len() > 1 {
+                        0.02
+                    } else {
+                        0.1
+                    },
                 });
             }
         }
@@ -523,8 +553,7 @@ impl QueryPlanner {
 
     fn estimate_select_cost(&self, analysis: &SelectAnalysis) -> f64 {
         let access_path = self.choose_access_path(analysis);
-        let mut cost = self.estimate_locator_cost(analysis, &access_path)
-            + self.estimate_rows_touched(analysis, &access_path) * 0.5;
+        let mut cost = self.estimate_total_access_cost(analysis, &access_path);
         cost += analysis.accessed_columns.len() as f64 * 0.1;
         cost.max(1.0)
     }
@@ -600,6 +629,15 @@ impl QueryPlanner {
                     && usage.index_name.as_deref() == Some(index_name)
             })
             .map(|usage| usage.selectivity)
+    }
+
+    fn estimate_total_access_cost(
+        &self,
+        analysis: &SelectAnalysis,
+        access_path: &SelectAccessPath,
+    ) -> f64 {
+        self.estimate_locator_cost(analysis, access_path)
+            + self.estimate_rows_touched(analysis, access_path) * 0.5
     }
 }
 
