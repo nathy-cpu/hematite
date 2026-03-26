@@ -522,6 +522,37 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_table_level_multi_column_unique_rejects_duplicate_insert_and_update() -> Result<()> {
+        let db = TestDbFile::new("_test_table_level_multi_column_unique");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute(
+            "CREATE TABLE memberships (id INTEGER PRIMARY KEY, user_id INTEGER, org_id INTEGER, role TEXT, CONSTRAINT uq_membership UNIQUE (user_id, org_id));",
+        )?;
+        conn.execute(
+            "INSERT INTO memberships (id, user_id, org_id, role) VALUES (1, 10, 20, 'owner');",
+        )?;
+        conn.execute(
+            "INSERT INTO memberships (id, user_id, org_id, role) VALUES (2, 10, 21, 'member');",
+        )?;
+
+        let insert_err = conn
+            .execute(
+                "INSERT INTO memberships (id, user_id, org_id, role) VALUES (3, 10, 20, 'viewer');",
+            )
+            .unwrap_err();
+        assert!(insert_err.to_string().contains("UNIQUE index"));
+
+        let update_err = conn
+            .execute("UPDATE memberships SET org_id = 20 WHERE id = 2;")
+            .unwrap_err();
+        assert!(update_err.to_string().contains("UNIQUE index"));
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_alter_table_add_column_requires_nullable_or_default() -> Result<()> {
         let db = TestDbFile::new("_test_alter_table_add_column_requires_nullable_or_default");
         let mut conn = Connection::new(db.path())?;

@@ -313,8 +313,15 @@ pub struct ForeignKeyDefinition {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UniqueConstraintDefinition {
+    pub name: Option<String>,
+    pub columns: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TableConstraint {
     Check(CheckConstraintDefinition),
+    Unique(UniqueConstraintDefinition),
     ForeignKey(ForeignKeyDefinition),
 }
 
@@ -1477,6 +1484,10 @@ impl CreateStatement {
             ));
         }
 
+        for unique_constraint in self.unique_constraints() {
+            self.validate_unique_constraint(unique_constraint)?;
+        }
+
         for foreign_key in self.foreign_keys() {
             self.validate_foreign_key(catalog, foreign_key)?;
         }
@@ -1495,12 +1506,55 @@ impl CreateStatement {
             self.constraints
                 .iter()
                 .filter_map(|constraint| match constraint {
-                    TableConstraint::Check(_) => None,
+                    TableConstraint::Check(_) | TableConstraint::Unique(_) => None,
                     TableConstraint::ForeignKey(foreign_key) => Some(foreign_key),
                 }),
         );
 
         foreign_keys
+    }
+
+    fn unique_constraints(&self) -> Vec<&UniqueConstraintDefinition> {
+        self.constraints
+            .iter()
+            .filter_map(|constraint| match constraint {
+                TableConstraint::Unique(unique) => Some(unique),
+                TableConstraint::Check(_) | TableConstraint::ForeignKey(_) => None,
+            })
+            .collect()
+    }
+
+    fn validate_unique_constraint(
+        &self,
+        unique_constraint: &UniqueConstraintDefinition,
+    ) -> Result<()> {
+        if unique_constraint.columns.is_empty() {
+            return Err(HematiteError::ParseError(
+                "UNIQUE constraint must reference at least one column".to_string(),
+            ));
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        for column in &unique_constraint.columns {
+            if !seen.insert(column) {
+                return Err(HematiteError::ParseError(format!(
+                    "UNIQUE constraint repeats column '{}'",
+                    column
+                )));
+            }
+            if !self
+                .columns
+                .iter()
+                .any(|candidate| candidate.name == *column)
+            {
+                return Err(HematiteError::ParseError(format!(
+                    "UNIQUE constraint column '{}' does not exist in table '{}'",
+                    column, self.table
+                )));
+            }
+        }
+
+        Ok(())
     }
 
     fn validate_foreign_key(

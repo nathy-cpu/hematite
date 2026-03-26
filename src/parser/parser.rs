@@ -1261,11 +1261,14 @@ impl Parser {
             Token::Check => Ok(TableConstraint::Check(
                 self.parse_check_constraint_definition(constraint_name)?,
             )),
+            Token::Unique => Ok(TableConstraint::Unique(
+                self.parse_unique_constraint_definition(constraint_name)?,
+            )),
             Token::Foreign => Ok(TableConstraint::ForeignKey(
                 self.parse_table_foreign_key(constraint_name)?,
             )),
             token => Err(HematiteError::ParseError(format!(
-                "Expected CHECK or FOREIGN KEY constraint, found: {:?}",
+                "Expected CHECK, UNIQUE, or FOREIGN KEY constraint, found: {:?}",
                 token
             ))),
         }
@@ -1296,6 +1299,25 @@ impl Parser {
             name,
             expression_sql: condition.to_sql(),
         })
+    }
+
+    fn parse_unique_constraint_definition(
+        &mut self,
+        name: Option<String>,
+    ) -> Result<crate::parser::ast::UniqueConstraintDefinition> {
+        self.consume_token(&Token::Unique)?;
+        self.consume_token(&Token::LeftParen)?;
+        let mut columns = Vec::new();
+        loop {
+            columns.push(self.parse_identifier()?);
+            if matches!(self.peek_token(), Ok(Token::Comma)) {
+                self.consume_token(&Token::Comma)?;
+                continue;
+            }
+            break;
+        }
+        self.consume_token(&Token::RightParen)?;
+        Ok(crate::parser::ast::UniqueConstraintDefinition { name, columns })
     }
 
     fn parse_table_foreign_key(&mut self, name: Option<String>) -> Result<ForeignKeyDefinition> {

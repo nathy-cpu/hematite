@@ -1295,6 +1295,20 @@ mod parser_tests {
     }
 
     #[test]
+    fn test_parse_create_with_table_unique_constraint() -> Result<()> {
+        let create = parse_create(
+            "CREATE TABLE memberships (id INT PRIMARY KEY, user_id INT, org_id INT, CONSTRAINT uq_membership UNIQUE (user_id, org_id));",
+        )?;
+        assert!(matches!(
+            &create.constraints[0],
+            TableConstraint::Unique(UniqueConstraintDefinition { name: Some(name), columns })
+                if name == "uq_membership"
+                    && columns == &vec!["user_id".to_string(), "org_id".to_string()]
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_alter_table_rename_to() -> Result<()> {
         let alter = parse_alter("ALTER TABLE users RENAME TO members;")?;
         assert_eq!(alter.table, "users");

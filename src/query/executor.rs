@@ -2177,8 +2177,9 @@ impl CreateExecutor {
         Ok(columns)
     }
 
-    fn unique_index_specs(&self) -> Vec<(String, Vec<usize>)> {
-        self.statement
+    fn unique_index_specs(&self) -> Result<Vec<(String, Vec<usize>)>> {
+        let mut unique_indexes = self
+            .statement
             .columns
             .iter()
             .enumerate()
@@ -2192,7 +2193,41 @@ impl CreateExecutor {
                     None
                 }
             })
-            .collect()
+            .collect::<Vec<_>>();
+
+        for (position, unique) in
+            self.statement
+                .constraints
+                .iter()
+                .enumerate()
+                .filter_map(|(position, constraint)| match constraint {
+                    TableConstraint::Unique(unique) => Some((position, unique)),
+                    TableConstraint::Check(_) | TableConstraint::ForeignKey(_) => None,
+                })
+        {
+            let column_indices = unique
+                .columns
+                .iter()
+                .map(|column_name| {
+                    self.statement
+                        .columns
+                        .iter()
+                        .position(|column| column.name == *column_name)
+                        .ok_or_else(|| {
+                            HematiteError::ParseError(format!(
+                                "UNIQUE constraint column '{}' does not exist in table '{}'",
+                                column_name, self.statement.table
+                            ))
+                        })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            unique_indexes.push((
+                unique_constraint_index_name(&self.statement.table, unique, position),
+                column_indices,
+            ));
+        }
+
+        Ok(unique_indexes)
     }
 
     fn constraints(&self, table: &Table) -> Result<CreateConstraints> {
@@ -2207,7 +2242,7 @@ impl CreateExecutor {
                         TableConstraint::Check(constraint) => {
                             Some(Self::clone_check_constraint(constraint))
                         }
-                        TableConstraint::ForeignKey(_) => None,
+                        TableConstraint::Unique(_) | TableConstraint::ForeignKey(_) => None,
                     },
                 ))
                 .collect();
@@ -2219,7 +2254,7 @@ impl CreateExecutor {
                 .filter_map(|column| column.references.as_ref())
                 .chain(self.statement.constraints.iter().filter_map(
                     |constraint| match constraint {
-                        TableConstraint::Check(_) => None,
+                        TableConstraint::Check(_) | TableConstraint::Unique(_) => None,
                         TableConstraint::ForeignKey(foreign_key) => Some(foreign_key),
                     },
                 ))
@@ -2294,7 +2329,7 @@ impl QueryExecutor for CreateExecutor {
             .ok_or_else(|| table_disappeared_internal_error(&self.statement.table, "CREATE TABLE"))?
             .clone();
         let constraints = self.constraints(&table)?;
-        for (index_name, column_indices) in self.unique_index_specs() {
+        for (index_name, column_indices) in self.unique_index_specs()? {
             let unique_index_root_page_id = ctx.engine.create_empty_btree()?;
             ctx.catalog.add_secondary_index(
                 table.id,
@@ -2967,6 +3002,29 @@ fn auto_unique_index_name(table_name: &str, column_name: &str, position: usize) 
         "uq_{}_{}_{}",
         sanitize_identifier(table_name),
         sanitize_identifier(column_name),
+        position
+    )
+}
+
+fn unique_constraint_index_name(
+    table_name: &str,
+    unique: &UniqueConstraintDefinition,
+    position: usize,
+) -> String {
+    if let Some(name) = &unique.name {
+        return sanitize_identifier(name);
+    }
+
+    let column_suffix = unique
+        .columns
+        .iter()
+        .map(|column| sanitize_identifier(column))
+        .collect::<Vec<_>>()
+        .join("_");
+    format!(
+        "uq_{}_{}_{}",
+        sanitize_identifier(table_name),
+        column_suffix,
         position
     )
 }
