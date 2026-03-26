@@ -2664,11 +2664,12 @@ fn validate_foreign_keys(
         if skip_constraint == Some(foreign_key) {
             continue;
         }
-        let key_values = row_values_for_indices(row, &foreign_key.column_indices, &table.name)?;
+        let key_values = foreign_key_values_for_row(table, foreign_key, row)?;
         if key_values.iter().any(Value::is_null) {
             continue;
         }
-        if !referenced_key_exists(ctx, foreign_key, &key_values)? {
+        let referenced_target = resolve_foreign_key_target(ctx, foreign_key)?;
+        if !referenced_key_exists(ctx, &referenced_target, &key_values)? {
             return Err(HematiteError::ParseError(format!(
                 "Foreign key constraint '{}' failed on table '{}': '{}.{:?}' does not contain {:?}",
                 foreign_key_constraint_name(foreign_key),
@@ -2683,11 +2684,15 @@ fn validate_foreign_keys(
     Ok(())
 }
 
-fn referenced_key_exists(
-    ctx: &mut ExecutionContext<'_>,
+struct ResolvedForeignKeyTarget {
+    table: Table,
+    unique_index_name: Option<String>,
+}
+
+fn resolve_foreign_key_target(
+    ctx: &ExecutionContext<'_>,
     foreign_key: &ForeignKeyConstraint,
-    key_values: &[Value],
-) -> Result<bool> {
+) -> Result<ResolvedForeignKeyTarget> {
     let referenced_table = ctx
         .catalog
         .get_table_by_name(&foreign_key.referenced_table)
@@ -2711,30 +2716,53 @@ fn referenced_key_exists(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    if referenced_table.primary_key_columns == referenced_column_indices {
+    let unique_index_name = if referenced_table.primary_key_columns == referenced_column_indices {
+        None
+    } else {
+        Some(
+            referenced_table
+                .secondary_indexes
+                .iter()
+                .find(|index| index.unique && index.column_indices == referenced_column_indices)
+                .ok_or_else(|| {
+                    HematiteError::CorruptedData(format!(
+                        "Referenced columns '{}.{:?}' are no longer backed by a PRIMARY KEY or UNIQUE index",
+                        foreign_key.referenced_table, foreign_key.referenced_columns
+                    ))
+                })?
+                .name
+                .clone(),
+        )
+    };
+
+    Ok(ResolvedForeignKeyTarget {
+        table: referenced_table,
+        unique_index_name,
+    })
+}
+
+fn referenced_key_exists(
+    ctx: &mut ExecutionContext<'_>,
+    target: &ResolvedForeignKeyTarget,
+    key_values: &[Value],
+) -> Result<bool> {
+    if target.unique_index_name.is_none() {
         return Ok(ctx
             .engine
-            .lookup_row_by_primary_key(&referenced_table, key_values)?
+            .lookup_row_by_primary_key(&target.table, key_values)?
             .is_some());
     }
 
-    let unique_index = referenced_table
-        .secondary_indexes
-        .iter()
-        .find(|index| {
-            index.unique
-                && index.column_indices == referenced_column_indices
-        })
-        .ok_or_else(|| {
-            HematiteError::CorruptedData(format!(
-                "Referenced columns '{}.{:?}' are no longer backed by a PRIMARY KEY or UNIQUE index",
-                foreign_key.referenced_table, foreign_key.referenced_columns
-            ))
-        })?;
-
     Ok(!ctx
         .engine
-        .lookup_secondary_index_rowids(&referenced_table, &unique_index.name, key_values)?
+        .lookup_secondary_index_rowids(
+            &target.table,
+            target
+                .unique_index_name
+                .as_deref()
+                .expect("non-primary target must carry a unique index name"),
+            key_values,
+        )?
         .is_empty())
 }
 
@@ -2866,6 +2894,19 @@ struct ReferencingForeignKey {
     referenced_column_indices: Vec<usize>,
 }
 
+enum ChildKeyRewrite<'a> {
+    Replace(&'a [Value]),
+    SetNull,
+}
+
+fn foreign_key_values_for_row(
+    table: &Table,
+    foreign_key: &ForeignKeyConstraint,
+    row: &[Value],
+) -> Result<Vec<Value>> {
+    row_values_for_indices(row, &foreign_key.column_indices, &table.name)
+}
+
 fn parent_key_for_reference(
     parent_table: &Table,
     reference: &ReferencingForeignKey,
@@ -2901,12 +2942,12 @@ fn execute_parent_foreign_key_action(
         }
         CatalogForeignKeyAction::Cascade => {
             if let Some(replacement_key) = replacement_key {
-                cascade_child_foreign_key_updates(
+                rewrite_child_foreign_key_rows(
                     ctx,
                     &reference.child_table,
                     &reference.foreign_key,
                     child_rows,
-                    replacement_key,
+                    ChildKeyRewrite::Replace(replacement_key),
                 )?;
             } else {
                 for child_row in child_rows {
@@ -2920,11 +2961,12 @@ fn execute_parent_foreign_key_action(
             }
         }
         CatalogForeignKeyAction::SetNull => {
-            set_null_child_foreign_key_updates(
+            rewrite_child_foreign_key_rows(
                 ctx,
                 &reference.child_table,
                 &reference.foreign_key,
                 child_rows,
+                ChildKeyRewrite::SetNull,
             )?;
         }
     }
@@ -2958,11 +3000,8 @@ fn child_rows_referencing_parent_key(
 ) -> Result<Vec<StoredRow>> {
     let mut matches = Vec::new();
     for child_row in ctx.engine.read_rows_with_ids(&child_table.name)? {
-        let child_key = row_values_for_indices(
-            &child_row.values,
-            &reference.foreign_key.column_indices,
-            &child_table.name,
-        )?;
+        let child_key =
+            foreign_key_values_for_row(child_table, &reference.foreign_key, &child_row.values)?;
         if child_key.iter().any(Value::is_null) {
             continue;
         }
@@ -2973,31 +3012,25 @@ fn child_rows_referencing_parent_key(
     Ok(matches)
 }
 
-fn cascade_child_foreign_key_updates(
+fn rewrite_child_foreign_key_rows(
     ctx: &mut ExecutionContext<'_>,
     table: &Table,
     foreign_key: &ForeignKeyConstraint,
     child_rows: Vec<StoredRow>,
-    replacement_key: &[Value],
+    rewrite: ChildKeyRewrite<'_>,
 ) -> Result<()> {
     for mut child_row in child_rows {
-        for (position, &column_index) in foreign_key.column_indices.iter().enumerate() {
-            child_row.values[column_index] = replacement_key[position].clone();
-        }
-        persist_foreign_key_child_update(ctx, table, foreign_key, child_row)?;
-    }
-    Ok(())
-}
-
-fn set_null_child_foreign_key_updates(
-    ctx: &mut ExecutionContext<'_>,
-    table: &Table,
-    foreign_key: &ForeignKeyConstraint,
-    child_rows: Vec<StoredRow>,
-) -> Result<()> {
-    for mut child_row in child_rows {
-        for &column_index in &foreign_key.column_indices {
-            child_row.values[column_index] = Value::Null;
+        match rewrite {
+            ChildKeyRewrite::Replace(replacement_key) => {
+                for (position, &column_index) in foreign_key.column_indices.iter().enumerate() {
+                    child_row.values[column_index] = replacement_key[position].clone();
+                }
+            }
+            ChildKeyRewrite::SetNull => {
+                for &column_index in &foreign_key.column_indices {
+                    child_row.values[column_index] = Value::Null;
+                }
+            }
         }
         persist_foreign_key_child_update(ctx, table, foreign_key, child_row)?;
     }
