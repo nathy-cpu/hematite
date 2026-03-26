@@ -585,6 +585,13 @@ impl SelectExecutor {
         combined
     }
 
+    fn combine_nulls_with_right_row(&self, left_width: usize, right_row: &[Value]) -> Vec<Value> {
+        let mut combined = Vec::with_capacity(left_width + right_row.len());
+        combined.extend(std::iter::repeat_n(Value::Null, left_width));
+        combined.extend(right_row.iter().cloned());
+        combined
+    }
+
     fn join_outer_is_left(&self, left_rows: &[Vec<Value>], right_rows: &[Vec<Value>]) -> bool {
         left_rows.len() <= right_rows.len()
     }
@@ -809,6 +816,75 @@ impl SelectExecutor {
 
                     if !matched {
                         rows.push(self.combine_left_row_with_nulls(left_row, right_width));
+                    }
+                }
+
+                Ok((sources, rows))
+            }
+            TableReference::RightJoin { left, right, on } => {
+                let (sources, left_rows, left_width, right_rows, _) =
+                    self.materialize_join_sources(ctx, left, right)?;
+
+                let mut rows = Vec::new();
+                let mut subquery_cache = SubqueryCache::new();
+                for right_row in &right_rows {
+                    let mut matched = false;
+                    for left_row in &left_rows {
+                        let combined = self.combine_join_rows(left_row, right_row);
+                        if self.evaluate_condition(
+                            ctx,
+                            &mut subquery_cache,
+                            &sources,
+                            on,
+                            &combined,
+                        )? == Some(true)
+                        {
+                            rows.push(combined);
+                            matched = true;
+                        }
+                    }
+
+                    if !matched {
+                        rows.push(self.combine_nulls_with_right_row(left_width, right_row));
+                    }
+                }
+
+                Ok((sources, rows))
+            }
+            TableReference::FullOuterJoin { left, right, on } => {
+                let (sources, left_rows, left_width, right_rows, right_width) =
+                    self.materialize_join_sources(ctx, left, right)?;
+
+                let mut rows = Vec::new();
+                let mut matched_right = vec![false; right_rows.len()];
+                let mut subquery_cache = SubqueryCache::new();
+
+                for left_row in &left_rows {
+                    let mut matched = false;
+                    for (index, right_row) in right_rows.iter().enumerate() {
+                        let combined = self.combine_join_rows(left_row, right_row);
+                        if self.evaluate_condition(
+                            ctx,
+                            &mut subquery_cache,
+                            &sources,
+                            on,
+                            &combined,
+                        )? == Some(true)
+                        {
+                            rows.push(combined);
+                            matched = true;
+                            matched_right[index] = true;
+                        }
+                    }
+
+                    if !matched {
+                        rows.push(self.combine_left_row_with_nulls(left_row, right_width));
+                    }
+                }
+
+                for (index, right_row) in right_rows.iter().enumerate() {
+                    if !matched_right[index] {
+                        rows.push(self.combine_nulls_with_right_row(left_width, right_row));
                     }
                 }
 
@@ -1613,6 +1689,8 @@ impl SelectExecutor {
                 | (_, TableReference::CrossJoin(_, _))
                 | (_, TableReference::InnerJoin { .. })
                 | (_, TableReference::LeftJoin { .. })
+                | (_, TableReference::RightJoin { .. })
+                | (_, TableReference::FullOuterJoin { .. })
         )
     }
 

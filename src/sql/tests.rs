@@ -1781,6 +1781,77 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_select_with_right_join() -> Result<()> {
+        let db = TestDbFile::new("_test_select_with_right_join");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("CREATE TABLE posts (id INTEGER PRIMARY KEY, user_id INTEGER, title TEXT);")?;
+        conn.execute("INSERT INTO users (id, name) VALUES (1, 'Alice');")?;
+        conn.execute("INSERT INTO posts (id, user_id, title) VALUES (10, 1, 'First');")?;
+        conn.execute("INSERT INTO posts (id, user_id, title) VALUES (11, 9, 'Orphan');")?;
+
+        let result = conn.execute(
+            "SELECT u.name, p.title FROM users u RIGHT JOIN posts p ON u.id = p.user_id ORDER BY p.id ASC;",
+        )?;
+
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![
+                    crate::catalog::Value::Text("Alice".to_string()),
+                    crate::catalog::Value::Text("First".to_string()),
+                ],
+                vec![
+                    crate::catalog::Value::Null,
+                    crate::catalog::Value::Text("Orphan".to_string()),
+                ],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_select_with_full_outer_join() -> Result<()> {
+        let db = TestDbFile::new("_test_select_with_full_outer_join");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("CREATE TABLE posts (id INTEGER PRIMARY KEY, user_id INTEGER, title TEXT);")?;
+        conn.execute("INSERT INTO users (id, name) VALUES (1, 'Alice');")?;
+        conn.execute("INSERT INTO users (id, name) VALUES (2, 'Bob');")?;
+        conn.execute("INSERT INTO posts (id, user_id, title) VALUES (10, 1, 'First');")?;
+        conn.execute("INSERT INTO posts (id, user_id, title) VALUES (11, 9, 'Orphan');")?;
+
+        let result = conn.execute(
+            "SELECT u.name, p.title FROM users u FULL OUTER JOIN posts p ON u.id = p.user_id ORDER BY name ASC, title ASC;",
+        )?;
+
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![
+                    crate::catalog::Value::Null,
+                    crate::catalog::Value::Text("Orphan".to_string()),
+                ],
+                vec![
+                    crate::catalog::Value::Text("Alice".to_string()),
+                    crate::catalog::Value::Text("First".to_string()),
+                ],
+                vec![
+                    crate::catalog::Value::Text("Bob".to_string()),
+                    crate::catalog::Value::Null,
+                ],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_where_between() -> Result<()> {
         let db = TestDbFile::new("_test_where_between");
         let mut conn = Connection::new(db.path())?;

@@ -401,6 +401,36 @@ impl Parser {
                         on,
                     };
                 }
+                Token::Right => {
+                    self.consume_token(&Token::Right)?;
+                    if matches!(self.peek_token(), Ok(Token::Outer)) {
+                        self.consume_token(&Token::Outer)?;
+                    }
+                    self.consume_token(&Token::Join)?;
+                    let right = self.parse_table_reference()?;
+                    self.consume_token(&Token::On)?;
+                    let on = self.parse_or_condition()?;
+                    from = TableReference::RightJoin {
+                        left: Box::new(from),
+                        right: Box::new(right),
+                        on,
+                    };
+                }
+                Token::Full => {
+                    self.consume_token(&Token::Full)?;
+                    if matches!(self.peek_token(), Ok(Token::Outer)) {
+                        self.consume_token(&Token::Outer)?;
+                    }
+                    self.consume_token(&Token::Join)?;
+                    let right = self.parse_table_reference()?;
+                    self.consume_token(&Token::On)?;
+                    let on = self.parse_or_condition()?;
+                    from = TableReference::FullOuterJoin {
+                        left: Box::new(from),
+                        right: Box::new(right),
+                        on,
+                    };
+                }
                 _ => break,
             }
         }

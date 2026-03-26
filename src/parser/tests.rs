@@ -1715,4 +1715,19 @@ mod parser_tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_parse_select_with_right_and_full_join() -> Result<()> {
+        let right = parse_select(
+            "SELECT u.name, p.title FROM users u RIGHT JOIN posts p ON u.id = p.user_id;",
+        )?;
+        assert!(matches!(right.from, TableReference::RightJoin { .. }));
+
+        let full = parse_select(
+            "SELECT u.name, p.title FROM users u FULL OUTER JOIN posts p ON u.id = p.user_id;",
+        )?;
+        assert!(matches!(full.from, TableReference::FullOuterJoin { .. }));
+
+        Ok(())
+    }
 }

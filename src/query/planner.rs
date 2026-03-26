@@ -551,6 +551,14 @@ impl QueryPlanner {
             TableReference::LeftJoin { left, right, on } => {
                 self.estimate_join_rows(statement, left, right, Some(on), true)
             }
+            TableReference::RightJoin { left, right, on } => {
+                self.estimate_join_rows(statement, right, left, Some(on), true)
+            }
+            TableReference::FullOuterJoin { left, right, on } => {
+                let join_rows = self.estimate_join_rows(statement, left, right, Some(on), true);
+                let right_rows = self.estimate_complex_source_rows(statement, right).max(1);
+                join_rows.max(right_rows)
+            }
         }
     }
 

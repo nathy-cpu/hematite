@@ -95,6 +95,16 @@ pub enum TableReference {
         right: Box<TableReference>,
         on: Condition,
     },
+    RightJoin {
+        left: Box<TableReference>,
+        right: Box<TableReference>,
+        on: Condition,
+    },
+    FullOuterJoin {
+        left: Box<TableReference>,
+        right: Box<TableReference>,
+        on: Condition,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -907,7 +917,9 @@ impl SelectStatement {
                 Self::collect_table_bindings_into(right, bindings);
             }
             TableReference::InnerJoin { left, right, .. }
-            | TableReference::LeftJoin { left, right, .. } => {
+            | TableReference::LeftJoin { left, right, .. }
+            | TableReference::RightJoin { left, right, .. }
+            | TableReference::FullOuterJoin { left, right, .. } => {
                 Self::collect_table_bindings_into(left, bindings);
                 Self::collect_table_bindings_into(right, bindings);
             }
@@ -973,7 +985,9 @@ impl SelectStatement {
                 self.collect_source_bindings_into(catalog, right, bindings)
             }
             TableReference::InnerJoin { left, right, .. }
-            | TableReference::LeftJoin { left, right, .. } => {
+            | TableReference::LeftJoin { left, right, .. }
+            | TableReference::RightJoin { left, right, .. }
+            | TableReference::FullOuterJoin { left, right, .. } => {
                 self.collect_source_bindings_into(catalog, left, bindings)?;
                 self.collect_source_bindings_into(catalog, right, bindings)
             }
@@ -1223,7 +1237,9 @@ impl SelectStatement {
                 self.validate_table_reference(catalog, right)
             }
             TableReference::InnerJoin { left, right, on }
-            | TableReference::LeftJoin { left, right, on } => {
+            | TableReference::LeftJoin { left, right, on }
+            | TableReference::RightJoin { left, right, on }
+            | TableReference::FullOuterJoin { left, right, on } => {
                 self.validate_table_reference(catalog, left)?;
                 self.validate_table_reference(catalog, right)?;
                 self.validate_condition(on, catalog, from)
@@ -1390,7 +1406,9 @@ impl TableReference {
             TableReference::Derived { .. } => true,
             TableReference::CrossJoin(left, right)
             | TableReference::InnerJoin { left, right, .. }
-            | TableReference::LeftJoin { left, right, .. } => {
+            | TableReference::LeftJoin { left, right, .. }
+            | TableReference::RightJoin { left, right, .. }
+            | TableReference::FullOuterJoin { left, right, .. } => {
                 left.has_non_table_source(statement) || right.has_non_table_source(statement)
             }
         }
