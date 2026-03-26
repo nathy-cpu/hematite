@@ -259,7 +259,7 @@ impl QueryPlanner {
             return self.analyze_table_access(&primary.table_name, &statement.where_clause);
         }
 
-        let estimated_rows = if statement.has_non_table_source() {
+        let estimated_rows = if bindings.len() > 1 || statement.has_non_table_source() {
             self.estimate_complex_source_rows(statement, &statement.from)
         } else {
             bindings
@@ -543,11 +543,39 @@ impl QueryPlanner {
                 }
             }
             TableReference::Derived { .. } => 1000,
-            TableReference::CrossJoin(left, right)
-            | TableReference::InnerJoin { left, right, .. }
-            | TableReference::LeftJoin { left, right, .. } => self
+            TableReference::CrossJoin(left, right) => self
                 .estimate_complex_source_rows(statement, left)
                 .saturating_mul(self.estimate_complex_source_rows(statement, right).max(1)),
+            TableReference::InnerJoin { left, right, on } => {
+                self.estimate_join_rows(statement, left, right, Some(on), false)
+            }
+            TableReference::LeftJoin { left, right, on } => {
+                self.estimate_join_rows(statement, left, right, Some(on), true)
+            }
+        }
+    }
+
+    fn estimate_join_rows(
+        &self,
+        statement: &SelectStatement,
+        left: &TableReference,
+        right: &TableReference,
+        on: Option<&Condition>,
+        preserve_left_rows: bool,
+    ) -> usize {
+        let left_rows = self.estimate_complex_source_rows(statement, left).max(1);
+        let right_rows = self.estimate_complex_source_rows(statement, right).max(1);
+
+        let join_rows = if on.is_some_and(is_equality_join_condition) {
+            left_rows.max(right_rows)
+        } else {
+            left_rows.saturating_mul(right_rows)
+        };
+
+        if preserve_left_rows {
+            join_rows.max(left_rows)
+        } else {
+            join_rows
         }
     }
 
@@ -638,6 +666,22 @@ impl QueryPlanner {
     ) -> f64 {
         self.estimate_locator_cost(analysis, access_path)
             + self.estimate_rows_touched(analysis, access_path) * 0.5
+    }
+}
+
+fn is_equality_join_condition(condition: &Condition) -> bool {
+    match condition {
+        Condition::Comparison {
+            left: Expression::Column(_),
+            operator: ComparisonOperator::Equal,
+            right: Expression::Column(_),
+        } => true,
+        Condition::Logical {
+            left,
+            operator: LogicalOperator::And,
+            right,
+        } => is_equality_join_condition(left) && is_equality_join_condition(right),
+        _ => false,
     }
 }
 

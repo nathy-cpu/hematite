@@ -533,6 +533,10 @@ impl SelectExecutor {
         combined
     }
 
+    fn join_outer_is_left(&self, left_rows: &[Vec<Value>], right_rows: &[Vec<Value>]) -> bool {
+        left_rows.len() <= right_rows.len()
+    }
+
     fn resolve_named_source(
         &self,
         ctx: &ExecutionContext,
@@ -621,9 +625,17 @@ impl SelectExecutor {
                 let left_width = self.total_source_width(&left_sources);
                 let (right_sources, right_rows) = self.materialize_reference(ctx, right)?;
                 let mut rows = Vec::new();
-                for left_row in &left_rows {
+                if self.join_outer_is_left(&left_rows, &right_rows) {
+                    for left_row in &left_rows {
+                        for right_row in &right_rows {
+                            rows.push(self.combine_join_rows(left_row, right_row));
+                        }
+                    }
+                } else {
                     for right_row in &right_rows {
-                        rows.push(self.combine_join_rows(left_row, right_row));
+                        for left_row in &left_rows {
+                            rows.push(self.combine_join_rows(left_row, right_row));
+                        }
                     }
                 }
 
@@ -640,11 +652,24 @@ impl SelectExecutor {
                 sources.extend(shifted_right_sources);
 
                 let mut rows = Vec::new();
-                for left_row in &left_rows {
+                if self.join_outer_is_left(&left_rows, &right_rows) {
+                    for left_row in &left_rows {
+                        for right_row in &right_rows {
+                            let combined = self.combine_join_rows(left_row, right_row);
+                            if self.evaluate_condition(ctx, &sources, on, &combined)? == Some(true)
+                            {
+                                rows.push(combined);
+                            }
+                        }
+                    }
+                } else {
                     for right_row in &right_rows {
-                        let combined = self.combine_join_rows(left_row, right_row);
-                        if self.evaluate_condition(ctx, &sources, on, &combined)? == Some(true) {
-                            rows.push(combined);
+                        for left_row in &left_rows {
+                            let combined = self.combine_join_rows(left_row, right_row);
+                            if self.evaluate_condition(ctx, &sources, on, &combined)? == Some(true)
+                            {
+                                rows.push(combined);
+                            }
                         }
                     }
                 }

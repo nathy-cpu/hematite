@@ -1293,6 +1293,87 @@ mod planner_tests {
     }
 
     #[test]
+    fn test_query_planner_estimates_equality_join_below_cross_product() -> Result<()> {
+        let mut catalog = Schema::new();
+        catalog.create_table(
+            "users".to_string(),
+            vec![crate::catalog::Column::new(
+                crate::catalog::ColumnId::new(1),
+                "id".to_string(),
+                DataType::Integer,
+            )
+            .primary_key(true)],
+        )?;
+        catalog.create_table(
+            "posts".to_string(),
+            vec![
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(2),
+                    "id".to_string(),
+                    DataType::Integer,
+                )
+                .primary_key(true),
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(3),
+                    "user_id".to_string(),
+                    DataType::Integer,
+                ),
+            ],
+        )?;
+
+        let row_counts = std::collections::HashMap::from([
+            ("users".to_string(), 10usize),
+            ("posts".to_string(), 100usize),
+        ]);
+        let planner = QueryPlanner::new(catalog).with_table_row_counts(row_counts);
+
+        let cross_plan = planner.plan(Statement::Select(SelectStatement {
+            with_clause: Vec::new(),
+            distinct: false,
+            columns: vec![SelectItem::Wildcard],
+            column_aliases: vec![None],
+            from: TableReference::CrossJoin(
+                Box::new(TableReference::Table("users".to_string(), None)),
+                Box::new(TableReference::Table("posts".to_string(), None)),
+            ),
+            where_clause: None,
+            group_by: Vec::new(),
+            having_clause: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            set_operation: None,
+        }))?;
+
+        let join_plan = planner.plan(Statement::Select(SelectStatement {
+            with_clause: Vec::new(),
+            distinct: false,
+            columns: vec![SelectItem::Wildcard],
+            column_aliases: vec![None],
+            from: TableReference::InnerJoin {
+                left: Box::new(TableReference::Table("users".to_string(), None)),
+                right: Box::new(TableReference::Table("posts".to_string(), None)),
+                on: Condition::Comparison {
+                    left: Expression::Column("users.id".to_string()),
+                    operator: ComparisonOperator::Equal,
+                    right: Expression::Column("posts.user_id".to_string()),
+                },
+            },
+            where_clause: None,
+            group_by: Vec::new(),
+            having_clause: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            set_operation: None,
+        }))?;
+
+        assert_eq!(cross_plan.select_analysis.unwrap().estimated_rows, 1000);
+        assert_eq!(join_plan.select_analysis.unwrap().estimated_rows, 100);
+        Ok(())
+    }
+
+    #[test]
     fn test_query_planner_costs_favor_locator_access_paths() -> Result<()> {
         let mut catalog = Schema::new();
 
