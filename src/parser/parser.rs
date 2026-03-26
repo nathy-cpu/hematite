@@ -209,6 +209,12 @@ impl Parser {
 
     fn parse_with_clause(&mut self) -> Result<Vec<CommonTableExpression>> {
         self.consume_token(&Token::With)?;
+        let recursive = if matches!(self.peek_token(), Ok(Token::Recursive)) {
+            self.consume_token(&Token::Recursive)?;
+            true
+        } else {
+            false
+        };
         let mut ctes = Vec::new();
 
         loop {
@@ -219,6 +225,7 @@ impl Parser {
             self.consume_token(&Token::RightParen)?;
             ctes.push(CommonTableExpression {
                 name,
+                recursive,
                 query: Box::new(query),
             });
 

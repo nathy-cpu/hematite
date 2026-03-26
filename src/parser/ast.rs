@@ -39,6 +39,7 @@ pub struct SelectStatement {
 #[derive(Debug, Clone)]
 pub struct CommonTableExpression {
     pub name: String,
+    pub recursive: bool,
     pub query: Box<SelectStatement>,
 }
 
@@ -466,6 +467,7 @@ impl Statement {
                     .map(|cte| {
                         Ok(CommonTableExpression {
                             name: cte.name.clone(),
+                            recursive: cte.recursive,
                             query: Box::new(
                                 Statement::Select((*cte.query).clone())
                                     .bind_parameters(parameters)?
@@ -850,6 +852,36 @@ impl SelectStatement {
         self.lookup_cte(name).is_some()
     }
 
+    pub(crate) fn references_source_name(&self, name: &str) -> bool {
+        self.from.references_source_name(name)
+            || self
+                .where_clause
+                .as_ref()
+                .is_some_and(|where_clause| {
+                    where_clause
+                        .conditions
+                        .iter()
+                        .any(|condition| condition.references_source_name(name))
+                })
+            || self
+                .group_by
+                .iter()
+                .any(|expr| expr.references_source_name(name))
+            || self
+                .having_clause
+                .as_ref()
+                .is_some_and(|having_clause| {
+                    having_clause
+                        .conditions
+                        .iter()
+                        .any(|condition| condition.references_source_name(name))
+                })
+            || self
+                .set_operation
+                .as_ref()
+                .is_some_and(|set_operation| set_operation.right.references_source_name(name))
+    }
+
     pub(crate) fn has_non_table_source(&self) -> bool {
         self.from.has_non_table_source(self)
     }
@@ -1154,6 +1186,35 @@ impl SelectStatement {
         }
 
         for cte in &self.with_clause {
+            if cte.recursive {
+                let set_operation = cte.query.set_operation.as_ref().ok_or_else(|| {
+                    HematiteError::ParseError(format!(
+                        "Recursive CTE '{}' requires UNION or UNION ALL",
+                        cte.name
+                    ))
+                })?;
+                if !matches!(set_operation.operator, SetOperator::Union | SetOperator::UnionAll) {
+                    return Err(HematiteError::ParseError(format!(
+                        "Recursive CTE '{}' requires UNION or UNION ALL",
+                        cte.name
+                    )));
+                }
+
+                let mut anchor = (*cte.query).clone();
+                anchor.set_operation = None;
+                if anchor.references_source_name(&cte.name) {
+                    return Err(HematiteError::ParseError(format!(
+                        "Recursive CTE '{}' anchor term cannot reference itself",
+                        cte.name
+                    )));
+                }
+                if !set_operation.right.references_source_name(&cte.name) {
+                    return Err(HematiteError::ParseError(format!(
+                        "Recursive CTE '{}' recursive term must reference itself",
+                        cte.name
+                    )));
+                }
+            }
             cte.query.validate(catalog)?;
         }
 
@@ -1470,6 +1531,24 @@ impl SelectStatement {
 }
 
 impl TableReference {
+    pub(crate) fn references_source_name(&self, name: &str) -> bool {
+        match self {
+            TableReference::Table(table_name, _) => table_name.eq_ignore_ascii_case(name),
+            TableReference::Derived { subquery, .. } => subquery.references_source_name(name),
+            TableReference::CrossJoin(left, right) => {
+                left.references_source_name(name) || right.references_source_name(name)
+            }
+            TableReference::InnerJoin { left, right, on }
+            | TableReference::LeftJoin { left, right, on }
+            | TableReference::RightJoin { left, right, on }
+            | TableReference::FullOuterJoin { left, right, on } => {
+                left.references_source_name(name)
+                    || right.references_source_name(name)
+                    || on.references_source_name(name)
+            }
+        }
+    }
+
     pub(crate) fn has_non_table_source(&self, statement: &SelectStatement) -> bool {
         match self {
             TableReference::Table(table_name, _) => statement.references_cte(table_name),
@@ -2088,6 +2167,37 @@ impl AlterStatement {
 }
 
 impl Condition {
+    pub(crate) fn references_source_name(&self, name: &str) -> bool {
+        match self {
+            Condition::Comparison { left, right, .. } => {
+                left.references_source_name(name) || right.references_source_name(name)
+            }
+            Condition::InList { expr, values, .. } => {
+                expr.references_source_name(name)
+                    || values.iter().any(|value| value.references_source_name(name))
+            }
+            Condition::InSubquery { expr, subquery, .. } => {
+                expr.references_source_name(name) || subquery.references_source_name(name)
+            }
+            Condition::Between {
+                expr, lower, upper, ..
+            } => {
+                expr.references_source_name(name)
+                    || lower.references_source_name(name)
+                    || upper.references_source_name(name)
+            }
+            Condition::Like { expr, pattern, .. } => {
+                expr.references_source_name(name) || pattern.references_source_name(name)
+            }
+            Condition::Exists { subquery, .. } => subquery.references_source_name(name),
+            Condition::NullCheck { expr, .. } => expr.references_source_name(name),
+            Condition::Not(condition) => condition.references_source_name(name),
+            Condition::Logical { left, right, .. } => {
+                left.references_source_name(name) || right.references_source_name(name)
+            }
+        }
+    }
+
     pub(crate) fn references_column(&self, column_name: &str, table_name: Option<&str>) -> bool {
         match self {
             Condition::Comparison { left, right, .. } => {
@@ -2239,6 +2349,20 @@ impl Condition {
 }
 
 impl Expression {
+    pub(crate) fn references_source_name(&self, name: &str) -> bool {
+        match self {
+            Expression::ScalarSubquery(subquery) => subquery.references_source_name(name),
+            Expression::UnaryMinus(expr) => expr.references_source_name(name),
+            Expression::Binary { left, right, .. } => {
+                left.references_source_name(name) || right.references_source_name(name)
+            }
+            Expression::Column(_)
+            | Expression::Literal(_)
+            | Expression::Parameter(_)
+            | Expression::AggregateCall { .. } => false,
+        }
+    }
+
     pub(crate) fn references_column(&self, column_name: &str, table_name: Option<&str>) -> bool {
         match self {
             Expression::Column(name) => column_name_matches(name, column_name, table_name),

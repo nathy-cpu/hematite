@@ -1687,6 +1687,18 @@ mod parser_tests {
     }
 
     #[test]
+    fn test_parse_select_with_recursive_cte() -> Result<()> {
+        let select = parse_select(
+            "WITH RECURSIVE nums AS (SELECT n FROM seeds UNION ALL SELECT n + 1 AS n FROM nums WHERE n < 3) SELECT n FROM nums;",
+        )?;
+        assert_eq!(select.with_clause.len(), 1);
+        assert!(select.with_clause[0].recursive);
+        assert_eq!(select.with_clause[0].name, "nums");
+
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_select_with_left_join() -> Result<()> {
         let select = parse_select(
             "SELECT u.name, p.title FROM users u LEFT JOIN posts p ON u.id = p.user_id;",

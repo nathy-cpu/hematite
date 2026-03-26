@@ -1826,6 +1826,28 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_recursive_cte_requires_union_shape() -> Result<()> {
+        let db = TestDbFile::new("_test_recursive_cte_requires_union_shape");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE seeds (n INTEGER PRIMARY KEY);")?;
+        conn.execute("INSERT INTO seeds (n) VALUES (1);")?;
+
+        let err = conn
+            .execute(
+                "WITH RECURSIVE nums AS (SELECT n FROM seeds) SELECT n FROM nums;",
+            )
+            .expect_err("recursive CTE without UNION should be rejected");
+        assert!(
+            err.to_string().contains("requires UNION or UNION ALL"),
+            "unexpected error: {err}"
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_select_with_left_join() -> Result<()> {
         let db = TestDbFile::new("_test_select_with_left_join");
         let mut conn = Connection::new(db.path())?;
