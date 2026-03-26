@@ -1553,27 +1553,20 @@ impl CreateStatement {
         columns: &[String],
         constraint_label: &str,
     ) -> Result<()> {
-        let mut seen = std::collections::HashSet::new();
-        for column in columns {
-            if !seen.insert(column) {
-                return Err(HematiteError::ParseError(format!(
-                    "{} repeats column '{}'",
-                    constraint_label, column
-                )));
-            }
-            if !self
+        validate_named_columns(columns, constraint_label, |column| {
+            if self
                 .columns
                 .iter()
-                .any(|candidate| candidate.name == *column)
+                .any(|candidate| candidate.name == column)
             {
-                return Err(HematiteError::ParseError(format!(
+                Ok(())
+            } else {
+                Err(HematiteError::ParseError(format!(
                     "{} column '{}' does not exist in table '{}'",
                     constraint_label, column, self.table
-                )));
+                )))
             }
-        }
-
-        Ok(())
+        })
     }
 
     fn validate_foreign_key(
@@ -1903,25 +1896,11 @@ impl Expression {
     ) {
         match self {
             Expression::Column(name) => {
-                if name == old_name {
-                    *name = new_name.to_string();
-                } else if let Some(table_name) = table_name {
-                    let qualified = format!("{}.{}", table_name, old_name);
-                    if name == &qualified {
-                        *name = format!("{}.{}", table_name, new_name);
-                    }
-                }
+                rename_column_name(name, old_name, new_name, table_name);
             }
             Expression::AggregateCall { target, .. } => {
                 if let AggregateTarget::Column(name) = target {
-                    if name == old_name {
-                        *name = new_name.to_string();
-                    } else if let Some(table_name) = table_name {
-                        let qualified = format!("{}.{}", table_name, old_name);
-                        if name == &qualified {
-                            *name = format!("{}.{}", table_name, new_name);
-                        }
-                    }
+                    rename_column_name(name, old_name, new_name, table_name);
                 }
             }
             Expression::UnaryMinus(expr) => {
@@ -2029,22 +2008,16 @@ impl CreateIndexStatement {
             ));
         }
 
-        let mut seen = std::collections::HashSet::new();
-        for column in &self.columns {
-            if !seen.insert(column) {
-                return Err(HematiteError::ParseError(format!(
-                    "Duplicate column '{}' in CREATE INDEX",
-                    column
-                )));
-            }
-
-            if table.get_column_by_name(column).is_none() {
-                return Err(HematiteError::ParseError(format!(
+        validate_named_columns(&self.columns, "CREATE INDEX", |column| {
+            if table.get_column_by_name(column).is_some() {
+                Ok(())
+            } else {
+                Err(HematiteError::ParseError(format!(
                     "Column '{}' does not exist in table '{}'",
                     column, self.table
-                )));
+                )))
             }
-        }
+        })?;
 
         if table.get_secondary_index(&self.index_name).is_some() {
             if self.if_not_exists {
@@ -2067,6 +2040,38 @@ fn require_table<'a>(
     catalog
         .get_table_by_name(table_name)
         .ok_or_else(|| HematiteError::ParseError(format!("Table '{}' does not exist", table_name)))
+}
+
+fn validate_named_columns<F>(
+    columns: &[String],
+    constraint_label: &str,
+    mut validate_column: F,
+) -> Result<()>
+where
+    F: FnMut(&str) -> Result<()>,
+{
+    let mut seen = std::collections::HashSet::new();
+    for column in columns {
+        if !seen.insert(column) {
+            return Err(HematiteError::ParseError(format!(
+                "{} repeats column '{}'",
+                constraint_label, column
+            )));
+        }
+        validate_column(column)?;
+    }
+    Ok(())
+}
+
+fn rename_column_name(name: &mut String, old_name: &str, new_name: &str, table_name: Option<&str>) {
+    if name == old_name {
+        *name = new_name.to_string();
+    } else if let Some(table_name) = table_name {
+        let qualified = format!("{}.{}", table_name, old_name);
+        if name == &qualified {
+            *name = format!("{}.{}", table_name, new_name);
+        }
+    }
 }
 
 impl DropIndexStatement {
