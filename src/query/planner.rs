@@ -331,16 +331,21 @@ impl QueryPlanner {
             return SelectAccessPath::JoinScan;
         }
 
-        let mut best_path = SelectAccessPath::FullTableScan;
-        let mut best_cost = self.estimate_total_access_cost(analysis, &best_path);
+        self.access_path_candidates(analysis)
+            .into_iter()
+            .min_by(|left, right| {
+                self.estimate_total_access_cost(analysis, left)
+                    .partial_cmp(&self.estimate_total_access_cost(analysis, right))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap_or(SelectAccessPath::FullTableScan)
+    }
+
+    fn access_path_candidates(&self, analysis: &SelectAnalysis) -> Vec<SelectAccessPath> {
+        let mut candidates = vec![SelectAccessPath::FullTableScan];
 
         if analysis.rowid_lookup.is_some() {
-            let candidate = SelectAccessPath::RowIdLookup;
-            let cost = self.estimate_total_access_cost(analysis, &candidate);
-            if cost < best_cost {
-                best_cost = cost;
-                best_path = candidate;
-            }
+            candidates.push(SelectAccessPath::RowIdLookup);
         }
 
         if analysis
@@ -348,33 +353,25 @@ impl QueryPlanner {
             .iter()
             .any(|usage| matches!(usage.index_type, IndexType::PrimaryKey))
         {
-            let candidate = SelectAccessPath::PrimaryKeyLookup;
-            let cost = self.estimate_total_access_cost(analysis, &candidate);
-            if cost < best_cost {
-                best_cost = cost;
-                best_path = candidate;
-            }
+            candidates.push(SelectAccessPath::PrimaryKeyLookup);
         }
 
-        for index_usage in analysis
-            .usable_indexes
-            .iter()
-            .filter(|usage| matches!(usage.index_type, IndexType::Secondary))
-        {
-            let candidate = SelectAccessPath::SecondaryIndexLookup(
-                index_usage
-                    .index_name
-                    .clone()
-                    .unwrap_or_else(|| "unnamed_secondary_index".to_string()),
-            );
-            let cost = self.estimate_total_access_cost(analysis, &candidate);
-            if cost < best_cost {
-                best_cost = cost;
-                best_path = candidate;
-            }
-        }
+        candidates.extend(
+            analysis
+                .usable_indexes
+                .iter()
+                .filter(|usage| matches!(usage.index_type, IndexType::Secondary))
+                .map(|usage| {
+                    SelectAccessPath::SecondaryIndexLookup(
+                        usage
+                            .index_name
+                            .clone()
+                            .unwrap_or_else(|| "unnamed_secondary_index".to_string()),
+                    )
+                }),
+        );
 
-        best_path
+        candidates
     }
 
     fn analyze_where_clause(
