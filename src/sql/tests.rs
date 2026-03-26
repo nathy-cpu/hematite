@@ -206,6 +206,37 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_additional_mysql_type_aliases() -> Result<()> {
+        let db = TestDbFile::new("_test_additional_mysql_type_aliases");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute(
+            "CREATE TABLE metrics (id BIGINT UNSIGNED PRIMARY KEY, ratio REAL, amount DECIMAL(10, 2), code CHAR(8), tiny TINYINT, small SMALLINT, exact NUMERIC(6));",
+        )?;
+        conn.execute(
+            "INSERT INTO metrics (id, ratio, amount, code, tiny, small, exact) VALUES (1, 1.5, 2.5, 'AB', 3, 4, 5.5);",
+        )?;
+
+        let result =
+            conn.execute("SELECT id, ratio, amount, code, tiny, small, exact FROM metrics;")?;
+        assert_eq!(
+            result.rows,
+            vec![vec![
+                crate::catalog::Value::Integer(1),
+                crate::catalog::Value::Float(1.5),
+                crate::catalog::Value::Float(2.5),
+                crate::catalog::Value::Text("AB".to_string()),
+                crate::catalog::Value::Integer(3),
+                crate::catalog::Value::Integer(4),
+                crate::catalog::Value::Float(5.5),
+            ]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_alter_table_rename_to() -> Result<()> {
         let db = TestDbFile::new("_test_alter_table_rename_to");
         let mut conn = Connection::new(db.path())?;

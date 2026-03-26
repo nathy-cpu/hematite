@@ -1344,25 +1344,17 @@ impl Parser {
     fn parse_data_type(&mut self) -> Result<crate::catalog::DataType> {
         let token = self.peek_token()?;
         let data_type = match token {
-            Token::Integer | Token::Int => crate::catalog::DataType::Integer,
+            Token::Integer | Token::Int | Token::TinyInt | Token::SmallInt | Token::BigInt => {
+                crate::catalog::DataType::Integer
+            }
             Token::Text => crate::catalog::DataType::Text,
             Token::Boolean | Token::Bool => crate::catalog::DataType::Boolean,
-            Token::Float | Token::Double => crate::catalog::DataType::Float,
-            Token::Varchar => {
-                self.consume_token(&Token::Varchar)?;
-                self.consume_token(&Token::LeftParen)?;
-                match self.peek_token()? {
-                    Token::NumberLiteral(length) if length.fract() == 0.0 && length > 0.0 => {
-                        self.consume_token(&Token::NumberLiteral(length))?;
-                    }
-                    token => {
-                        return Err(HematiteError::ParseError(format!(
-                            "Expected positive integer length for VARCHAR, found: {:?}",
-                            token
-                        )))
-                    }
-                }
-                self.consume_token(&Token::RightParen)?;
+            Token::Float | Token::Double | Token::Real | Token::Decimal | Token::Numeric => {
+                crate::catalog::DataType::Float
+            }
+            Token::Varchar | Token::Char => {
+                self.consume_token(&token)?;
+                self.parse_type_length()?;
                 return Ok(crate::catalog::DataType::Text);
             }
             _ => {
@@ -1374,7 +1366,69 @@ impl Parser {
         };
 
         self.consume_token(&token)?;
+        self.consume_optional_double_precision()?;
+        self.consume_optional_unsigned()?;
+        if matches!(token, Token::Decimal | Token::Numeric) {
+            self.parse_optional_numeric_precision()?;
+        }
         Ok(data_type)
+    }
+
+    fn parse_type_length(&mut self) -> Result<()> {
+        self.consume_token(&Token::LeftParen)?;
+        match self.peek_token()? {
+            Token::NumberLiteral(length) if length.fract() == 0.0 && length > 0.0 => {
+                self.consume_token(&Token::NumberLiteral(length))?;
+            }
+            token => {
+                return Err(HematiteError::ParseError(format!(
+                    "Expected positive integer length, found: {:?}",
+                    token
+                )))
+            }
+        }
+        self.consume_token(&Token::RightParen)
+    }
+
+    fn parse_optional_numeric_precision(&mut self) -> Result<()> {
+        if !matches!(self.peek_token(), Ok(Token::LeftParen)) {
+            return Ok(());
+        }
+
+        self.consume_token(&Token::LeftParen)?;
+        self.consume_positive_integer_literal("precision")?;
+        if matches!(self.peek_token(), Ok(Token::Comma)) {
+            self.consume_token(&Token::Comma)?;
+            self.consume_positive_integer_literal("scale")?;
+        }
+        self.consume_token(&Token::RightParen)
+    }
+
+    fn consume_positive_integer_literal(&mut self, label: &str) -> Result<()> {
+        match self.peek_token()? {
+            Token::NumberLiteral(value) if value.fract() == 0.0 && value >= 0.0 => {
+                self.consume_token(&Token::NumberLiteral(value))?;
+                Ok(())
+            }
+            token => Err(HematiteError::ParseError(format!(
+                "Expected non-negative integer {} value, found: {:?}",
+                label, token
+            ))),
+        }
+    }
+
+    fn consume_optional_double_precision(&mut self) -> Result<()> {
+        if matches!(self.peek_token(), Ok(Token::Precision)) {
+            self.consume_token(&Token::Precision)?;
+        }
+        Ok(())
+    }
+
+    fn consume_optional_unsigned(&mut self) -> Result<()> {
+        if matches!(self.peek_token(), Ok(Token::Unsigned)) {
+            self.consume_token(&Token::Unsigned)?;
+        }
+        Ok(())
     }
 
     fn parse_default_value(&mut self) -> Result<crate::catalog::types::Value> {

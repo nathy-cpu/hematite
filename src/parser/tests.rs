@@ -1245,6 +1245,21 @@ mod parser_tests {
     }
 
     #[test]
+    fn test_parse_additional_mysql_type_aliases() -> Result<()> {
+        let create = parse_create(
+            "CREATE TABLE metrics (id BIGINT UNSIGNED PRIMARY KEY, ratio REAL, amount DECIMAL(10, 2), code CHAR(8), tiny TINYINT, small SMALLINT, exact NUMERIC(6));",
+        )?;
+        assert_eq!(create.columns[0].data_type, DataType::Integer);
+        assert_eq!(create.columns[1].data_type, DataType::Float);
+        assert_eq!(create.columns[2].data_type, DataType::Float);
+        assert_eq!(create.columns[3].data_type, DataType::Text);
+        assert_eq!(create.columns[4].data_type, DataType::Integer);
+        assert_eq!(create.columns[5].data_type, DataType::Integer);
+        assert_eq!(create.columns[6].data_type, DataType::Float);
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_create_with_check_and_foreign_key_constraints() -> Result<()> {
         let create = parse_create(
             "CREATE TABLE posts (id INT PRIMARY KEY, user_id INT REFERENCES users(id), title TEXT CHECK (title != ''), CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id), CHECK (id > 0));",
