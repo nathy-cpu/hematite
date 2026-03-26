@@ -597,6 +597,47 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_alter_table_drop_column_rejects_check_constraint_dependency() -> Result<()> {
+        let db = TestDbFile::new("_test_alter_table_drop_column_rejects_check_dependency");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, score INTEGER, CHECK (score >= 0));",
+        )?;
+
+        let err = conn
+            .execute("ALTER TABLE users DROP COLUMN score;")
+            .unwrap_err();
+        assert!(err.to_string().contains("CHECK constraint"));
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_alter_table_drop_column_rejects_inbound_foreign_key_dependency() -> Result<()> {
+        let db =
+            TestDbFile::new("_test_alter_table_drop_column_rejects_inbound_foreign_key_dependency");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE parents (id INTEGER PRIMARY KEY, code TEXT UNIQUE);")?;
+        conn.execute(
+            "CREATE TABLE children (id INTEGER PRIMARY KEY, parent_code TEXT, FOREIGN KEY (parent_code) REFERENCES parents(code));",
+        )?;
+
+        let err = conn
+            .execute("ALTER TABLE parents DROP COLUMN code;")
+            .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("referenced by a foreign key") || message.contains("used by an index")
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_alter_table_set_default_affects_future_inserts_only() -> Result<()> {
         let db = TestDbFile::new("_test_alter_table_set_default_affects_future_inserts_only");
         let mut conn = Connection::new(db.path())?;
@@ -619,6 +660,28 @@ mod connection_tests {
                     crate::catalog::Value::Boolean(true),
                 ],
             ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_alter_table_set_default_persists_across_reopen() -> Result<()> {
+        let db = TestDbFile::new("_test_alter_table_set_default_persists_across_reopen");
+        {
+            let mut conn = Connection::new(db.path())?;
+            conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, active BOOLEAN);")?;
+            conn.execute("ALTER TABLE users ALTER COLUMN active SET DEFAULT TRUE;")?;
+            conn.close()?;
+        }
+
+        let mut conn = Connection::new(db.path())?;
+        conn.execute("INSERT INTO users (id) VALUES (1);")?;
+        let result = conn.execute("SELECT active FROM users WHERE id = 1;")?;
+        assert_eq!(
+            result.rows,
+            vec![vec![crate::catalog::Value::Boolean(true)]]
         );
 
         conn.close()?;
@@ -671,6 +734,27 @@ mod connection_tests {
             .execute("INSERT INTO users (id, active) VALUES (2, NULL);")
             .unwrap_err();
         assert!(insert_err.to_string().contains("cannot be NULL"));
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_alter_table_set_not_null_persists_across_reopen() -> Result<()> {
+        let db = TestDbFile::new("_test_alter_table_set_not_null_persists_across_reopen");
+        {
+            let mut conn = Connection::new(db.path())?;
+            conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, active BOOLEAN);")?;
+            conn.execute("INSERT INTO users (id, active) VALUES (1, TRUE);")?;
+            conn.execute("ALTER TABLE users ALTER COLUMN active SET NOT NULL;")?;
+            conn.close()?;
+        }
+
+        let mut conn = Connection::new(db.path())?;
+        let err = conn
+            .execute("INSERT INTO users (id, active) VALUES (2, NULL);")
+            .unwrap_err();
+        assert!(err.to_string().contains("cannot be NULL"));
 
         conn.close()?;
         Ok(())
