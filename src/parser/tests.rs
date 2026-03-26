@@ -1470,6 +1470,30 @@ mod parser_tests {
     }
 
     #[test]
+    fn test_parse_alter_table_set_not_null() -> Result<()> {
+        let alter = parse_alter("ALTER TABLE users ALTER COLUMN active SET NOT NULL;")?;
+        assert_eq!(alter.table, "users");
+        assert!(matches!(
+            alter.operation,
+            AlterOperation::AlterColumnSetNotNull { ref column_name } if column_name == "active"
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_alter_table_drop_not_null() -> Result<()> {
+        let alter = parse_alter("ALTER TABLE users ALTER COLUMN active DROP NOT NULL;")?;
+        assert_eq!(alter.table, "users");
+        assert!(matches!(
+            alter.operation,
+            AlterOperation::AlterColumnDropNotNull { ref column_name } if column_name == "active"
+        ));
+
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_begin_commit_rollback() -> Result<()> {
         for (sql, expected) in [
             ("BEGIN;", "begin"),

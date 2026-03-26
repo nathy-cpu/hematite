@@ -1801,7 +1801,7 @@ impl AlterStatement {
                 self.validate_existing_column(catalog, column_name)?;
             }
             AlterOperation::AlterColumnDropNotNull { column_name } => {
-                self.validate_existing_column(catalog, column_name)?;
+                self.validate_drop_not_null(catalog, column_name)?;
             }
         }
 
@@ -1880,6 +1880,33 @@ impl AlterStatement {
             return Err(HematiteError::ParseError(format!(
                 "DEFAULT value for column '{}' is incompatible with {:?}",
                 column_name, column.data_type
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_drop_not_null(
+        &self,
+        catalog: &crate::catalog::Schema,
+        column_name: &str,
+    ) -> Result<()> {
+        let table = self.require_table(catalog)?;
+        let column = table.get_column_by_name(column_name).ok_or_else(|| {
+            HematiteError::ParseError(format!(
+                "Column '{}' does not exist in table '{}'",
+                column_name, self.table
+            ))
+        })?;
+        if column.primary_key {
+            return Err(HematiteError::ParseError(format!(
+                "Primary-key column '{}' cannot drop NOT NULL",
+                column_name
+            )));
+        }
+        if column.auto_increment {
+            return Err(HematiteError::ParseError(format!(
+                "AUTO_INCREMENT column '{}' cannot drop NOT NULL",
+                column_name
             )));
         }
         Ok(())

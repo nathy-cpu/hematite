@@ -642,6 +642,72 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_alter_table_set_not_null_rejects_existing_null_rows() -> Result<()> {
+        let db = TestDbFile::new("_test_alter_table_set_not_null_rejects_existing_null_rows");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, active BOOLEAN);")?;
+        conn.execute("INSERT INTO users (id, active) VALUES (1, NULL);")?;
+
+        let err = conn
+            .execute("ALTER TABLE users ALTER COLUMN active SET NOT NULL;")
+            .unwrap_err();
+        assert!(err.to_string().contains("existing rows contain NULL"));
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_alter_table_set_not_null_enforces_future_writes() -> Result<()> {
+        let db = TestDbFile::new("_test_alter_table_set_not_null_enforces_future_writes");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, active BOOLEAN);")?;
+        conn.execute("INSERT INTO users (id, active) VALUES (1, TRUE);")?;
+        conn.execute("ALTER TABLE users ALTER COLUMN active SET NOT NULL;")?;
+
+        let insert_err = conn
+            .execute("INSERT INTO users (id, active) VALUES (2, NULL);")
+            .unwrap_err();
+        assert!(insert_err.to_string().contains("cannot be NULL"));
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_alter_table_drop_not_null_allows_null_inserts() -> Result<()> {
+        let db = TestDbFile::new("_test_alter_table_drop_not_null_allows_null_inserts");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, active BOOLEAN NOT NULL);")?;
+        conn.execute("ALTER TABLE users ALTER COLUMN active DROP NOT NULL;")?;
+        conn.execute("INSERT INTO users (id, active) VALUES (1, NULL);")?;
+
+        let result = conn.execute("SELECT active FROM users WHERE id = 1;")?;
+        assert_eq!(result.rows, vec![vec![crate::catalog::Value::Null]]);
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_alter_table_drop_not_null_rejects_primary_key_column() -> Result<()> {
+        let db = TestDbFile::new("_test_alter_table_drop_not_null_rejects_primary_key_column");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, active BOOLEAN);")?;
+        let err = conn
+            .execute("ALTER TABLE users ALTER COLUMN id DROP NOT NULL;")
+            .unwrap_err();
+        assert!(err.to_string().contains("Primary-key column"));
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_create_table_unique_column_rejects_duplicate_insert_and_update() -> Result<()> {
         let db = TestDbFile::new("_test_create_table_unique_column");
         let mut conn = Connection::new(db.path())?;
