@@ -1234,6 +1234,7 @@ impl Parser {
 
         let mut nullable = true;
         let mut primary_key = false;
+        let mut auto_increment = false;
         let mut unique = false;
         let mut default_value = None;
         let mut check_constraint = None;
@@ -1258,6 +1259,10 @@ impl Parser {
                     self.consume_token(&Token::Unique)?;
                     unique = true;
                 }
+                Token::AutoIncrement => {
+                    self.consume_token(&Token::AutoIncrement)?;
+                    auto_increment = true;
+                }
                 Token::Default => {
                     self.consume_token(&Token::Default)?;
                     default_value = Some(self.parse_default_value()?);
@@ -1279,6 +1284,7 @@ impl Parser {
             data_type,
             nullable,
             primary_key,
+            auto_increment,
             unique,
             default_value,
             check_constraint,

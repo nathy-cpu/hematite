@@ -1695,6 +1695,64 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_auto_increment_assigns_integer_primary_keys() -> Result<()> {
+        let db = TestDbFile::new("_test_auto_increment_assigns_integer_primary_keys");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE test (id INT PRIMARY KEY AUTO_INCREMENT, name TEXT);")?;
+        conn.execute("INSERT INTO test (name) VALUES ('Alice');")?;
+        conn.execute("INSERT INTO test (id, name) VALUES (NULL, 'Bob');")?;
+
+        let result = conn.execute("SELECT id, name FROM test ORDER BY id ASC;")?;
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![
+                    crate::catalog::Value::Integer(1),
+                    crate::catalog::Value::Text("Alice".to_string()),
+                ],
+                vec![
+                    crate::catalog::Value::Integer(2),
+                    crate::catalog::Value::Text("Bob".to_string()),
+                ],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_auto_increment_persists_across_reopen() -> Result<()> {
+        let db = TestDbFile::new("_test_auto_increment_persists_across_reopen");
+        {
+            let mut conn = Connection::new(db.path())?;
+            conn.execute("CREATE TABLE test (id INT PRIMARY KEY AUTO_INCREMENT, name TEXT);")?;
+            conn.execute("INSERT INTO test (name) VALUES ('Alice');")?;
+            conn.close()?;
+        }
+
+        let mut reopened = Connection::new(db.path())?;
+        reopened.execute("INSERT INTO test (name) VALUES ('Bob');")?;
+        let result = reopened.execute("SELECT id, name FROM test ORDER BY id ASC;")?;
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![
+                    crate::catalog::Value::Integer(1),
+                    crate::catalog::Value::Text("Alice".to_string()),
+                ],
+                vec![
+                    crate::catalog::Value::Integer(2),
+                    crate::catalog::Value::Text("Bob".to_string()),
+                ],
+            ]
+        );
+        reopened.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_count_all_returns_single_row() -> Result<()> {
         let db = TestDbFile::new("_test_count_all_returns_single_row");
         let mut conn = Connection::new(db.path())?;

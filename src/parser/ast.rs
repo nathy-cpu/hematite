@@ -292,6 +292,7 @@ pub struct ColumnDefinition {
     pub data_type: DataType,
     pub nullable: bool,
     pub primary_key: bool,
+    pub auto_increment: bool,
     pub unique: bool,
     pub default_value: Option<Value>,
     pub check_constraint: Option<CheckConstraintDefinition>,
@@ -1493,6 +1494,37 @@ impl CreateStatement {
             ));
         }
 
+        let auto_increment_columns = self
+            .columns
+            .iter()
+            .filter(|column| column.auto_increment)
+            .collect::<Vec<_>>();
+        if auto_increment_columns.len() > 1 {
+            return Err(HematiteError::ParseError(
+                "Only one AUTO_INCREMENT column is allowed per table".to_string(),
+            ));
+        }
+        if let Some(column) = auto_increment_columns.first() {
+            if column.data_type != DataType::Integer {
+                return Err(HematiteError::ParseError(format!(
+                    "AUTO_INCREMENT column '{}' must use an integer type",
+                    column.name
+                )));
+            }
+            if !column.primary_key {
+                return Err(HematiteError::ParseError(format!(
+                    "AUTO_INCREMENT column '{}' must be a PRIMARY KEY",
+                    column.name
+                )));
+            }
+            if column.default_value.is_some() {
+                return Err(HematiteError::ParseError(format!(
+                    "AUTO_INCREMENT column '{}' cannot also declare a DEFAULT value",
+                    column.name
+                )));
+            }
+        }
+
         for unique_constraint in self.unique_constraints() {
             self.validate_unique_constraint(unique_constraint)?;
         }
@@ -1690,6 +1722,12 @@ impl AlterStatement {
                 if column.primary_key {
                     return Err(HematiteError::ParseError(
                         "ALTER TABLE ADD COLUMN cannot add a PRIMARY KEY column".to_string(),
+                    ));
+                }
+                if column.auto_increment {
+                    return Err(HematiteError::ParseError(
+                        "ALTER TABLE ADD COLUMN does not support AUTO_INCREMENT columns"
+                            .to_string(),
                     ));
                 }
                 if column.unique {

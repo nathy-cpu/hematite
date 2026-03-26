@@ -1745,8 +1745,24 @@ impl InsertExecutor {
         Ok(())
     }
 
-    fn build_row(&self, table: &Table, value_row: &[Expression]) -> Result<Vec<Value>> {
+    fn build_row_with_metadata(
+        &self,
+        ctx: &ExecutionContext<'_>,
+        table: &Table,
+        value_row: &[Expression],
+    ) -> Result<Vec<Value>> {
         let mut row = Vec::with_capacity(table.columns.len());
+        let next_row_id = ctx
+            .engine
+            .get_table_metadata()
+            .get(&self.statement.table)
+            .map(|metadata| metadata.next_row_id)
+            .ok_or_else(|| {
+                HematiteError::InternalError(format!(
+                    "Table metadata for '{}' disappeared during INSERT",
+                    self.statement.table
+                ))
+            })?;
 
         for column in &table.columns {
             let value = if let Some(position) = self
@@ -1759,7 +1775,13 @@ impl InsertExecutor {
                     HematiteError::ParseError(format!("Missing value for column '{}'", column.name))
                 })?;
                 let literal = self.evaluate_value_expression(expr)?;
-                coerce_column_value(column, literal)?
+                if column.auto_increment && literal.is_null() {
+                    Value::Integer(next_row_id as i32)
+                } else {
+                    coerce_column_value(column, literal)?
+                }
+            } else if column.auto_increment {
+                Value::Integer(next_row_id as i32)
             } else if let Some(default_value) = &column.default_value {
                 default_value.clone()
             } else if column.nullable {
@@ -1789,7 +1811,7 @@ impl QueryExecutor for InsertExecutor {
         let table = catalog_table(ctx, &self.statement.table)?;
 
         for value_row in &self.statement.values {
-            let row_values = self.build_row(&table, value_row)?;
+            let row_values = self.build_row_with_metadata(ctx, &table, value_row)?;
             validate_row_constraints(ctx, &table, &row_values)?;
             self.ensure_primary_key_is_unique(ctx, &table, &[], &row_values)?;
             self.ensure_unique_secondary_indexes_are_unique(ctx, &table, &row_values)?;
@@ -2168,7 +2190,8 @@ impl CreateExecutor {
                 col_def.data_type.clone(),
             )
             .nullable(col_def.nullable)
-            .primary_key(col_def.primary_key);
+            .primary_key(col_def.primary_key)
+            .auto_increment(col_def.auto_increment);
 
             if let Some(default_val) = &col_def.default_value {
                 column = column.default_value(default_val.clone());

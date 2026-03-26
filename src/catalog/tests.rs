@@ -62,6 +62,7 @@ mod tests {
             assert_eq!(orig_col.data_type, deser_col.data_type);
             assert_eq!(orig_col.nullable, deser_col.nullable);
             assert_eq!(orig_col.primary_key, deser_col.primary_key);
+            assert_eq!(orig_col.auto_increment, deser_col.auto_increment);
         }
 
         Ok(())
@@ -143,7 +144,25 @@ mod tests {
         assert_eq!(column.data_type, DataType::Integer);
         assert!(column.nullable);
         assert!(!column.primary_key);
+        assert!(!column.auto_increment);
         assert!(column.default_value.is_none());
+    }
+
+    #[test]
+    fn test_column_auto_increment_roundtrip() -> Result<()> {
+        let original = Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer)
+            .primary_key(true)
+            .auto_increment(true);
+
+        let mut buffer = Vec::new();
+        original.serialize(&mut buffer)?;
+        let mut offset = 0;
+        let deserialized = Column::deserialize(&buffer, &mut offset)?;
+
+        assert!(deserialized.primary_key);
+        assert!(deserialized.auto_increment);
+        assert!(!deserialized.nullable);
+        Ok(())
     }
 
     #[test]

@@ -10,6 +10,7 @@ pub struct Column {
     pub data_type: DataType,
     pub nullable: bool,
     pub primary_key: bool,
+    pub auto_increment: bool,
     pub default_value: Option<Value>,
 }
 
@@ -21,6 +22,7 @@ impl Column {
             data_type,
             nullable: true,
             primary_key: false,
+            auto_increment: false,
             default_value: None,
         }
     }
@@ -33,6 +35,14 @@ impl Column {
     pub fn primary_key(mut self, primary_key: bool) -> Self {
         self.primary_key = primary_key;
         if primary_key {
+            self.nullable = false;
+        }
+        self
+    }
+
+    pub fn auto_increment(mut self, auto_increment: bool) -> Self {
+        self.auto_increment = auto_increment;
+        if auto_increment {
             self.nullable = false;
         }
         self
@@ -93,13 +103,16 @@ impl Column {
             DataType::Float => 3,
         });
 
-        // Flags (1 byte): bit 0 = nullable, bit 1 = primary_key
+        // Flags (1 byte): bit 0 = nullable, bit 1 = primary_key, bit 2 = auto_increment
         let mut flags = 0;
         if self.nullable {
             flags |= 0x01;
         }
         if self.primary_key {
             flags |= 0x02;
+        }
+        if self.auto_increment {
+            flags |= 0x04;
         }
         buffer.push(flags);
 
@@ -211,6 +224,7 @@ impl Column {
         *offset += 1;
         let nullable = (flags & 0x01) != 0;
         let primary_key = (flags & 0x02) != 0;
+        let auto_increment = (flags & 0x04) != 0;
 
         // Default value
         if *offset >= buffer.len() {
@@ -316,6 +330,7 @@ impl Column {
             data_type,
             nullable,
             primary_key,
+            auto_increment,
             default_value,
         })
     }

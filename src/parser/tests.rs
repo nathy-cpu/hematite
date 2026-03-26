@@ -1198,6 +1198,15 @@ mod parser_tests {
     }
 
     #[test]
+    fn test_parse_create_with_auto_increment() -> Result<()> {
+        let create =
+            parse_create("CREATE TABLE users (id INT PRIMARY KEY AUTO_INCREMENT, name TEXT);")?;
+        assert!(create.columns[0].auto_increment);
+        assert!(create.columns[0].primary_key);
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_create_and_drop_index() -> Result<()> {
         let create_index =
             parse_create_index("CREATE UNIQUE INDEX idx_users_name ON users (name);")?;
@@ -1389,6 +1398,7 @@ mod parser_tests {
                 data_type: DataType::Boolean,
                 nullable: false,
                 primary_key: false,
+                auto_increment: false,
                 unique: false,
                 default_value: Some(crate::catalog::Value::Boolean(true)),
                 check_constraint: None,
