@@ -180,7 +180,8 @@ impl SelectExecutor {
 
     fn evaluate_expression(
         &self,
-        ctx: &ExecutionContext,
+        ctx: &mut ExecutionContext<'_>,
+        cache: &mut SubqueryCache,
         sources: &[ResolvedSource],
         expr: &Expression,
         row: &[Value],
@@ -194,12 +195,15 @@ impl SelectExecutor {
             Expression::AggregateCall { .. } => Err(HematiteError::ParseError(
                 "Aggregate expressions can only be evaluated in grouped query contexts".to_string(),
             )),
+            Expression::ScalarSubquery(subquery) => {
+                self.execute_scalar_subquery_cached(ctx, cache, subquery)
+            }
             Expression::Column(name) => self
                 .resolve_column_index(sources, name)?
                 .and_then(|index| row.get(index).cloned())
                 .ok_or_else(|| HematiteError::ParseError(format!("Column '{}' not found", name))),
             Expression::UnaryMinus(expr) => match self
-                .evaluate_expression(ctx, sources, expr, row)?
+                .evaluate_expression(ctx, cache, sources, expr, row)?
             {
                 Value::Integer(value) => value.checked_neg().map(Value::Integer).ok_or_else(|| {
                     HematiteError::ParseError(
@@ -218,8 +222,8 @@ impl SelectExecutor {
                 operator,
                 right,
             } => {
-                let left = self.evaluate_expression(ctx, sources, left, row)?;
-                let right = self.evaluate_expression(ctx, sources, right, row)?;
+                let left = self.evaluate_expression(ctx, cache, sources, left, row)?;
+                let right = self.evaluate_expression(ctx, cache, sources, right, row)?;
                 self.evaluate_arithmetic(operator, left, right)
             }
         }
@@ -364,6 +368,26 @@ impl SelectExecutor {
         Ok(result)
     }
 
+    fn execute_scalar_subquery_cached(
+        &self,
+        ctx: &mut ExecutionContext<'_>,
+        cache: &mut SubqueryCache,
+        subquery: &SelectStatement,
+    ) -> Result<Value> {
+        let result = self.execute_subquery_cached(ctx, cache, subquery)?;
+        if result.rows.len() > 1 {
+            return Err(HematiteError::ParseError(
+                "Scalar subquery returned more than one row".to_string(),
+            ));
+        }
+        Ok(result
+            .rows
+            .into_iter()
+            .next()
+            .and_then(|row| row.into_iter().next())
+            .unwrap_or(Value::Null))
+    }
+
     fn evaluate_condition(
         &self,
         ctx: &mut ExecutionContext<'_>,
@@ -378,8 +402,8 @@ impl SelectExecutor {
                 operator,
                 right,
             } => {
-                let left_val = self.evaluate_expression(ctx, sources, left, row)?;
-                let right_val = self.evaluate_expression(ctx, sources, right, row)?;
+                let left_val = self.evaluate_expression(ctx, cache, sources, left, row)?;
+                let right_val = self.evaluate_expression(ctx, cache, sources, right, row)?;
                 Ok(self.compare_values(&left_val, operator, &right_val))
             }
             Condition::InList {
@@ -387,10 +411,10 @@ impl SelectExecutor {
                 values,
                 is_not,
             } => {
-                let probe = self.evaluate_expression(ctx, sources, expr, row)?;
+                let probe = self.evaluate_expression(ctx, cache, sources, expr, row)?;
                 let candidates = values
                     .iter()
-                    .map(|value_expr| self.evaluate_expression(ctx, sources, value_expr, row))
+                    .map(|value_expr| self.evaluate_expression(ctx, cache, sources, value_expr, row))
                     .collect::<Result<Vec<_>>>()?;
                 Ok(self.evaluate_in_candidates(probe, candidates, *is_not))
             }
@@ -399,7 +423,7 @@ impl SelectExecutor {
                 subquery,
                 is_not,
             } => {
-                let probe = self.evaluate_expression(ctx, sources, expr, row)?;
+                let probe = self.evaluate_expression(ctx, cache, sources, expr, row)?;
                 let subquery_result = self.execute_subquery_cached(ctx, cache, subquery)?;
                 let candidates = subquery_result
                     .rows
@@ -414,9 +438,9 @@ impl SelectExecutor {
                 upper,
                 is_not,
             } => {
-                let value = self.evaluate_expression(ctx, sources, expr, row)?;
-                let lower_value = self.evaluate_expression(ctx, sources, lower, row)?;
-                let upper_value = self.evaluate_expression(ctx, sources, upper, row)?;
+                let value = self.evaluate_expression(ctx, cache, sources, expr, row)?;
+                let lower_value = self.evaluate_expression(ctx, cache, sources, lower, row)?;
+                let upper_value = self.evaluate_expression(ctx, cache, sources, upper, row)?;
 
                 if value.is_null() || lower_value.is_null() || upper_value.is_null() {
                     return Ok(None);
@@ -440,8 +464,8 @@ impl SelectExecutor {
                 pattern,
                 is_not,
             } => {
-                let value = self.evaluate_expression(ctx, sources, expr, row)?;
-                let pattern_value = self.evaluate_expression(ctx, sources, pattern, row)?;
+                let value = self.evaluate_expression(ctx, cache, sources, expr, row)?;
+                let pattern_value = self.evaluate_expression(ctx, cache, sources, pattern, row)?;
 
                 match (value, pattern_value) {
                     (Value::Text(text), Value::Text(pattern)) => {
@@ -458,7 +482,7 @@ impl SelectExecutor {
                 Ok(Some(if *is_not { !exists } else { exists }))
             }
             Condition::NullCheck { expr, is_not } => {
-                let value = self.evaluate_expression(ctx, sources, expr, row)?;
+                let value = self.evaluate_expression(ctx, cache, sources, expr, row)?;
                 let is_null = value.is_null();
                 Ok(Some(if *is_not { !is_null } else { is_null }))
             }
@@ -483,7 +507,8 @@ impl SelectExecutor {
 
     fn project_row(
         &self,
-        ctx: &ExecutionContext,
+        ctx: &mut ExecutionContext<'_>,
+        cache: &mut SubqueryCache,
         sources: &[ResolvedSource],
         row: &[Value],
     ) -> Result<Vec<Value>> {
@@ -500,7 +525,7 @@ impl SelectExecutor {
                     }
                 }
                 SelectItem::Expression(expr) => {
-                    projected.push(self.evaluate_expression(ctx, sources, expr, row)?);
+                    projected.push(self.evaluate_expression(ctx, cache, sources, expr, row)?);
                 }
                 SelectItem::CountAll => {}
                 SelectItem::Aggregate { .. } => {}
@@ -1000,6 +1025,8 @@ impl SelectExecutor {
 
     fn evaluate_projected_expression(
         &self,
+        ctx: &mut ExecutionContext<'_>,
+        cache: &mut SubqueryCache,
         sources: &[ResolvedSource],
         expr: &Expression,
         row: &[Value],
@@ -1012,6 +1039,9 @@ impl SelectExecutor {
                 "Unbound parameter {} reached execution",
                 index + 1
             ))),
+            Expression::ScalarSubquery(subquery) => {
+                self.execute_scalar_subquery_cached(ctx, cache, subquery)
+            }
             Expression::AggregateCall { function, target } => self
                 .evaluate_aggregate_value(sources, *function, target, group_rows)?
                 .ok_or_else(|| {
@@ -1037,6 +1067,8 @@ impl SelectExecutor {
             }
             Expression::UnaryMinus(expr) => {
                 match self.evaluate_projected_expression(
+                    ctx,
+                    cache,
                     sources,
                     expr,
                     row,
@@ -1064,8 +1096,18 @@ impl SelectExecutor {
                 right,
             } => self.evaluate_arithmetic(
                 operator,
-                self.evaluate_projected_expression(sources, left, row, output_columns, group_rows)?,
                 self.evaluate_projected_expression(
+                    ctx,
+                    cache,
+                    sources,
+                    left,
+                    row,
+                    output_columns,
+                    group_rows,
+                )?,
+                self.evaluate_projected_expression(
+                    ctx,
+                    cache,
                     sources,
                     right,
                     row,
@@ -1093,6 +1135,8 @@ impl SelectExecutor {
                 right,
             } => {
                 let left_val = self.evaluate_projected_expression(
+                    ctx,
+                    cache,
                     sources,
                     left,
                     row,
@@ -1100,6 +1144,8 @@ impl SelectExecutor {
                     group_rows,
                 )?;
                 let right_val = self.evaluate_projected_expression(
+                    ctx,
+                    cache,
                     sources,
                     right,
                     row,
@@ -1114,6 +1160,8 @@ impl SelectExecutor {
                 is_not,
             } => {
                 let probe = self.evaluate_projected_expression(
+                    ctx,
+                    cache,
                     sources,
                     expr,
                     row,
@@ -1124,6 +1172,8 @@ impl SelectExecutor {
                     .iter()
                     .map(|value_expr| {
                         self.evaluate_projected_expression(
+                            ctx,
+                            cache,
                             sources,
                             value_expr,
                             row,
@@ -1140,6 +1190,8 @@ impl SelectExecutor {
                 is_not,
             } => {
                 let probe = self.evaluate_projected_expression(
+                    ctx,
+                    cache,
                     sources,
                     expr,
                     row,
@@ -1161,6 +1213,8 @@ impl SelectExecutor {
                 is_not,
             } => {
                 let value = self.evaluate_projected_expression(
+                    ctx,
+                    cache,
                     sources,
                     expr,
                     row,
@@ -1168,6 +1222,8 @@ impl SelectExecutor {
                     group_rows,
                 )?;
                 let lower_value = self.evaluate_projected_expression(
+                    ctx,
+                    cache,
                     sources,
                     lower,
                     row,
@@ -1175,6 +1231,8 @@ impl SelectExecutor {
                     group_rows,
                 )?;
                 let upper_value = self.evaluate_projected_expression(
+                    ctx,
+                    cache,
                     sources,
                     upper,
                     row,
@@ -1205,6 +1263,8 @@ impl SelectExecutor {
                 is_not,
             } => {
                 let value = self.evaluate_projected_expression(
+                    ctx,
+                    cache,
                     sources,
                     expr,
                     row,
@@ -1212,6 +1272,8 @@ impl SelectExecutor {
                     group_rows,
                 )?;
                 let pattern_value = self.evaluate_projected_expression(
+                    ctx,
+                    cache,
                     sources,
                     pattern,
                     row,
@@ -1235,6 +1297,8 @@ impl SelectExecutor {
             }
             Condition::NullCheck { expr, is_not } => {
                 let value = self.evaluate_projected_expression(
+                    ctx,
+                    cache,
                     sources,
                     expr,
                     row,
@@ -1289,7 +1353,8 @@ impl SelectExecutor {
 
     fn project_grouped_row(
         &self,
-        ctx: &ExecutionContext,
+        ctx: &mut ExecutionContext<'_>,
+        cache: &mut SubqueryCache,
         sources: &[ResolvedSource],
         group_rows: &[Vec<Value>],
     ) -> Result<Vec<Value>> {
@@ -1309,7 +1374,13 @@ impl SelectExecutor {
                     }
                 }
                 SelectItem::Expression(expr) => {
-                    projected.push(self.evaluate_expression(ctx, sources, expr, representative)?);
+                    projected.push(self.evaluate_expression(
+                        ctx,
+                        cache,
+                        sources,
+                        expr,
+                        representative,
+                    )?);
                 }
                 SelectItem::CountAll | SelectItem::Aggregate { .. } => {
                     projected.push(
@@ -1325,7 +1396,8 @@ impl SelectExecutor {
 
     fn build_groups(
         &self,
-        ctx: &ExecutionContext,
+        ctx: &mut ExecutionContext<'_>,
+        cache: &mut SubqueryCache,
         sources: &[ResolvedSource],
         filtered_rows: &[Vec<Value>],
     ) -> Result<Vec<Vec<Vec<Value>>>> {
@@ -1339,7 +1411,7 @@ impl SelectExecutor {
                 .statement
                 .group_by
                 .iter()
-                .map(|expr| self.evaluate_expression(ctx, sources, expr, row))
+                .map(|expr| self.evaluate_expression(ctx, cache, sources, expr, row))
                 .collect::<Result<Vec<_>>>()?;
 
             if let Some((_, rows)) = keyed_groups
@@ -1395,12 +1467,12 @@ impl SelectExecutor {
         sources: &[ResolvedSource],
         filtered_rows: &[Vec<Value>],
     ) -> Result<QueryResult> {
-        let groups = self.build_groups(ctx, sources, filtered_rows)?;
+        let groups = self.build_groups(ctx, cache, sources, filtered_rows)?;
         let output_columns = self.get_column_names(sources);
         let mut grouped_rows = Vec::with_capacity(groups.len());
         for rows in groups {
             grouped_rows.push(GroupedRow {
-                projected: self.project_grouped_row(ctx, sources, &rows)?,
+                projected: self.project_grouped_row(ctx, cache, sources, &rows)?,
                 source_rows: rows,
             });
         }
@@ -1707,7 +1779,7 @@ impl QueryExecutor for SelectExecutor {
 
         let mut projected_rows = Vec::new();
         for row in filtered_rows {
-            projected_rows.push(self.project_row(ctx, &sources, &row)?);
+            projected_rows.push(self.project_row(ctx, &mut subquery_cache, &sources, &row)?);
         }
 
         apply_distinct_if_needed(self.statement.distinct, &mut projected_rows);
@@ -1735,6 +1807,9 @@ impl InsertExecutor {
                 "Unbound parameter {} reached execution",
                 index + 1
             ))),
+            Expression::ScalarSubquery(_) => Err(HematiteError::ParseError(
+                "INSERT expressions cannot use scalar subqueries".to_string(),
+            )),
             Expression::AggregateCall { .. } => Err(HematiteError::ParseError(
                 "INSERT expressions cannot use aggregate functions".to_string(),
             )),
@@ -2029,6 +2104,7 @@ impl QueryExecutor for UpdateExecutor {
         let mut updated_rows_data = Vec::with_capacity(rows_to_update.len());
         let mut updated_rows = 0usize;
         let sources = select_executor.resolve_sources(ctx)?;
+        let mut subquery_cache = SubqueryCache::new();
 
         for stored_row in rows_to_update {
             let mut updated_row = stored_row.values.clone();
@@ -2042,6 +2118,7 @@ impl QueryExecutor for UpdateExecutor {
                 let column = &table.columns[column_index];
                 let value = select_executor.evaluate_expression(
                     ctx,
+                    &mut subquery_cache,
                     &sources,
                     &assignment.value,
                     &updated_row,

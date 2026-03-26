@@ -506,6 +506,7 @@ impl QueryPlanner {
                     }
                 }
             }
+            Expression::ScalarSubquery(_) => {}
             Expression::UnaryMinus(expr) => {
                 self.collect_expression_columns(expr, table, accessed_columns);
             }

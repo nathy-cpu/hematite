@@ -1662,6 +1662,16 @@ mod parser_tests {
     }
 
     #[test]
+    fn test_parse_scalar_subquery_expression() -> Result<()> {
+        let select = parse_select("SELECT (SELECT COUNT(*) FROM posts) AS post_count FROM users;")?;
+        assert!(matches!(
+            &select.columns[0],
+            SelectItem::Expression(Expression::ScalarSubquery(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_select_with_cte() -> Result<()> {
         let select = parse_select(
             "WITH recent_posts AS (SELECT user_id FROM posts) SELECT recent_posts.user_id FROM recent_posts;",

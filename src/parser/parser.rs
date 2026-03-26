@@ -826,6 +826,11 @@ impl Parser {
             }
             Token::LeftParen => {
                 self.consume_token(&Token::LeftParen)?;
+                if matches!(self.peek_token(), Ok(Token::Select | Token::With)) {
+                    let subquery = self.parse_query_statement(false)?;
+                    self.consume_token(&Token::RightParen)?;
+                    return Ok(Expression::ScalarSubquery(Box::new(subquery)));
+                }
                 let expr = self.parse_expression()?;
                 self.consume_token(&Token::RightParen)?;
                 Ok(expr)

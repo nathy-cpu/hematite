@@ -177,6 +177,7 @@ pub enum Expression {
     Column(String),
     Literal(Value),
     Parameter(usize),
+    ScalarSubquery(Box<SelectStatement>),
     AggregateCall {
         function: AggregateFunction,
         target: AggregateTarget,
@@ -733,6 +734,7 @@ impl Expression {
     {
         match self {
             Expression::Parameter(index) => f(*index),
+            Expression::ScalarSubquery(subquery) => subquery.visit_parameters(f),
             Expression::AggregateCall { .. } => {}
             Expression::UnaryMinus(expr) => expr.visit_parameters(f),
             Expression::Binary { left, right, .. } => {
@@ -757,6 +759,11 @@ impl Expression {
                         index + 1
                     ))
                 }),
+            Expression::ScalarSubquery(subquery) => Ok(Expression::ScalarSubquery(Box::new(
+                Statement::Select((**subquery).clone())
+                    .bind_parameters(parameters)?
+                    .into_select()?,
+            ))),
             Expression::AggregateCall { function, target } => Ok(Expression::AggregateCall {
                 function: *function,
                 target: target.clone(),
@@ -1287,6 +1294,14 @@ impl SelectStatement {
     ) -> Result<()> {
         match expr {
             Expression::Column(name) => self.validate_column_reference(name, catalog, from)?,
+            Expression::ScalarSubquery(subquery) => {
+                subquery.validate(catalog)?;
+                if subquery.columns.len() != 1 {
+                    return Err(HematiteError::ParseError(
+                        "Scalar subqueries require exactly one selected column".to_string(),
+                    ));
+                }
+            }
             Expression::AggregateCall { target, .. } => {
                 if let AggregateTarget::Column(name) = target {
                     self.validate_column_reference(name, catalog, from)?;
@@ -1306,6 +1321,7 @@ impl SelectStatement {
     fn expression_contains_aggregate(expr: &Expression) -> bool {
         match expr {
             Expression::AggregateCall { .. } => true,
+            Expression::ScalarSubquery(_) => false,
             Expression::UnaryMinus(expr) => Self::expression_contains_aggregate(expr),
             Expression::Binary { left, right, .. } => {
                 Self::expression_contains_aggregate(left)
@@ -1327,15 +1343,15 @@ impl SelectStatement {
             }
             Condition::InSubquery { expr, subquery, .. } => {
                 Self::expression_contains_aggregate(expr)
-                    || subquery.columns.iter().any(|item| {
-                        matches!(item, SelectItem::CountAll | SelectItem::Aggregate { .. })
-                    })
-                    || subquery.having_clause.as_ref().is_some_and(|having| {
-                        having
-                            .conditions
-                            .iter()
-                            .any(Self::condition_contains_aggregate)
-                    })
+                    || subquery
+                        .where_clause
+                        .as_ref()
+                        .is_some_and(|where_clause| {
+                            where_clause
+                                .conditions
+                                .iter()
+                                .any(Self::condition_contains_aggregate)
+                        })
             }
             Condition::Between {
                 expr, lower, upper, ..
@@ -1348,18 +1364,15 @@ impl SelectStatement {
                 Self::expression_contains_aggregate(expr)
                     || Self::expression_contains_aggregate(pattern)
             }
-            Condition::Exists { subquery, .. } => {
-                subquery
-                    .columns
-                    .iter()
-                    .any(|item| matches!(item, SelectItem::CountAll | SelectItem::Aggregate { .. }))
-                    || subquery.having_clause.as_ref().is_some_and(|having| {
-                        having
-                            .conditions
-                            .iter()
-                            .any(Self::condition_contains_aggregate)
-                    })
-            }
+            Condition::Exists { subquery, .. } => subquery
+                .where_clause
+                .as_ref()
+                .is_some_and(|where_clause| {
+                    where_clause
+                        .conditions
+                        .iter()
+                        .any(Self::condition_contains_aggregate)
+                }),
             Condition::NullCheck { expr, .. } => Self::expression_contains_aggregate(expr),
             Condition::Not(condition) => Self::condition_contains_aggregate(condition),
             Condition::Logical { left, right, .. } => {
@@ -2141,6 +2154,7 @@ impl Expression {
     pub(crate) fn references_column(&self, column_name: &str, table_name: Option<&str>) -> bool {
         match self {
             Expression::Column(name) => column_name_matches(name, column_name, table_name),
+            Expression::ScalarSubquery(_) => false,
             Expression::AggregateCall { target, .. } => match target {
                 AggregateTarget::All => false,
                 AggregateTarget::Column(name) => column_name_matches(name, column_name, table_name),
@@ -2164,6 +2178,7 @@ impl Expression {
             Expression::Column(name) => {
                 rename_column_name(name, old_name, new_name, table_name);
             }
+            Expression::ScalarSubquery(_) => {}
             Expression::AggregateCall { target, .. } => {
                 if let AggregateTarget::Column(name) = target {
                     rename_column_name(name, old_name, new_name, table_name);
@@ -2192,6 +2207,7 @@ impl Expression {
                 Value::Null => "NULL".to_string(),
             },
             Expression::Parameter(index) => format!("?{}", index + 1),
+            Expression::ScalarSubquery(_) => "(<subquery>)".to_string(),
             Expression::AggregateCall { function, target } => {
                 format!("{}({})", function.to_sql(), target.to_sql())
             }
