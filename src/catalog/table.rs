@@ -52,6 +52,86 @@ pub enum ForeignKeyAction {
     SetNull,
 }
 
+impl ForeignKeyConstraint {
+    fn validate_for_table(&self, table_name: &str, column_count: usize) -> Result<()> {
+        if self.column_indices.is_empty() {
+            return Err(HematiteError::StorageError(
+                "Foreign key must reference at least one local column".to_string(),
+            ));
+        }
+        for &column_index in &self.column_indices {
+            if column_index >= column_count {
+                return Err(HematiteError::StorageError(format!(
+                    "Foreign key references invalid column index {}",
+                    column_index
+                )));
+            }
+        }
+        if self.column_indices.len() != self.referenced_columns.len() {
+            return Err(HematiteError::StorageError(format!(
+                "Foreign key has {} local columns but {} referenced columns",
+                self.column_indices.len(),
+                self.referenced_columns.len()
+            )));
+        }
+        if self.referenced_table.is_empty() {
+            return Err(HematiteError::StorageError(format!(
+                "Foreign key on table '{}' must reference a table name",
+                table_name
+            )));
+        }
+        Ok(())
+    }
+
+    fn serialize(&self, buffer: &mut Vec<u8>) {
+        write_optional_string(buffer, self.name.as_deref());
+        buffer.extend_from_slice(&(self.column_indices.len() as u32).to_le_bytes());
+        for &column_index in &self.column_indices {
+            buffer.extend_from_slice(&(column_index as u32).to_le_bytes());
+        }
+        write_string(buffer, &self.referenced_table);
+        buffer.extend_from_slice(&(self.referenced_columns.len() as u32).to_le_bytes());
+        for referenced_column in &self.referenced_columns {
+            write_string(buffer, referenced_column);
+        }
+        buffer.push(foreign_key_action_to_byte(self.on_delete));
+        buffer.push(foreign_key_action_to_byte(self.on_update));
+    }
+
+    fn deserialize(buffer: &[u8], offset: &mut usize) -> Result<Self> {
+        let name = read_optional_string(buffer, offset, "foreign key name")?;
+        let local_column_count = read_len(buffer, offset, "foreign key local column count")?;
+        let mut column_indices = Vec::with_capacity(local_column_count);
+        for _ in 0..local_column_count {
+            column_indices.push(read_len(buffer, offset, "foreign key column index")?);
+        }
+        let table_len = read_len(buffer, offset, "foreign key table length")?;
+        let referenced_table = read_string(buffer, offset, table_len, "foreign key table")?;
+        let referenced_column_count =
+            read_len(buffer, offset, "foreign key referenced column count")?;
+        let mut referenced_columns = Vec::with_capacity(referenced_column_count);
+        for _ in 0..referenced_column_count {
+            let column_len = read_len(buffer, offset, "foreign key column length")?;
+            referenced_columns.push(read_string(
+                buffer,
+                offset,
+                column_len,
+                "foreign key column",
+            )?);
+        }
+        let on_delete = read_foreign_key_action(buffer, offset, "foreign key ON DELETE action")?;
+        let on_update = read_foreign_key_action(buffer, offset, "foreign key ON UPDATE action")?;
+        Ok(Self {
+            name,
+            column_indices,
+            referenced_table,
+            referenced_columns,
+            on_delete,
+            on_update,
+        })
+    }
+}
+
 impl Table {
     pub fn new(
         id: TableId,
@@ -280,26 +360,7 @@ impl Table {
     }
 
     pub fn add_foreign_key(&mut self, constraint: ForeignKeyConstraint) -> Result<()> {
-        if constraint.column_indices.is_empty() {
-            return Err(HematiteError::StorageError(
-                "Foreign key must reference at least one local column".to_string(),
-            ));
-        }
-        for &column_index in &constraint.column_indices {
-            if column_index >= self.columns.len() {
-                return Err(HematiteError::StorageError(format!(
-                    "Foreign key references invalid column index {}",
-                    column_index
-                )));
-            }
-        }
-        if constraint.column_indices.len() != constraint.referenced_columns.len() {
-            return Err(HematiteError::StorageError(format!(
-                "Foreign key has {} local columns but {} referenced columns",
-                constraint.column_indices.len(),
-                constraint.referenced_columns.len()
-            )));
-        }
+        constraint.validate_for_table(&self.name, self.columns.len())?;
         if let Some(name) = &constraint.name {
             if self
                 .foreign_keys
@@ -392,30 +453,7 @@ impl Table {
 
         buffer.extend_from_slice(&(self.foreign_keys.len() as u32).to_le_bytes());
         for constraint in &self.foreign_keys {
-            match &constraint.name {
-                Some(name) => {
-                    buffer.push(1);
-                    let bytes = name.as_bytes();
-                    buffer.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-                    buffer.extend_from_slice(bytes);
-                }
-                None => buffer.push(0),
-            }
-            buffer.extend_from_slice(&(constraint.column_indices.len() as u32).to_le_bytes());
-            for &column_index in &constraint.column_indices {
-                buffer.extend_from_slice(&(column_index as u32).to_le_bytes());
-            }
-            let table_bytes = constraint.referenced_table.as_bytes();
-            buffer.extend_from_slice(&(table_bytes.len() as u32).to_le_bytes());
-            buffer.extend_from_slice(table_bytes);
-            buffer.extend_from_slice(&(constraint.referenced_columns.len() as u32).to_le_bytes());
-            for referenced_column in &constraint.referenced_columns {
-                let column_bytes = referenced_column.as_bytes();
-                buffer.extend_from_slice(&(column_bytes.len() as u32).to_le_bytes());
-                buffer.extend_from_slice(column_bytes);
-            }
-            buffer.push(foreign_key_action_to_byte(constraint.on_delete));
-            buffer.push(foreign_key_action_to_byte(constraint.on_update));
+            constraint.serialize(buffer);
         }
 
         Ok(())
@@ -669,51 +707,7 @@ impl Table {
 
         let foreign_key_count = read_len(buffer, offset, "foreign key count")?;
         for _ in 0..foreign_key_count {
-            if *offset >= buffer.len() {
-                return Err(HematiteError::CorruptedData(
-                    "Invalid foreign key metadata".to_string(),
-                ));
-            }
-            let name = if buffer[*offset] == 1 {
-                *offset += 1;
-                let len = read_len(buffer, offset, "foreign key name length")?;
-                let value = read_string(buffer, offset, len, "foreign key name")?;
-                Some(value)
-            } else {
-                *offset += 1;
-                None
-            };
-            let local_column_count = read_len(buffer, offset, "foreign key local column count")?;
-            let mut column_indices = Vec::with_capacity(local_column_count);
-            for _ in 0..local_column_count {
-                column_indices.push(read_len(buffer, offset, "foreign key column index")?);
-            }
-            let table_len = read_len(buffer, offset, "foreign key table length")?;
-            let referenced_table = read_string(buffer, offset, table_len, "foreign key table")?;
-            let referenced_column_count =
-                read_len(buffer, offset, "foreign key referenced column count")?;
-            let mut referenced_columns = Vec::with_capacity(referenced_column_count);
-            for _ in 0..referenced_column_count {
-                let column_len = read_len(buffer, offset, "foreign key column length")?;
-                referenced_columns.push(read_string(
-                    buffer,
-                    offset,
-                    column_len,
-                    "foreign key column",
-                )?);
-            }
-            let on_delete =
-                read_foreign_key_action(buffer, offset, "foreign key ON DELETE action")?;
-            let on_update =
-                read_foreign_key_action(buffer, offset, "foreign key ON UPDATE action")?;
-            table.add_foreign_key(ForeignKeyConstraint {
-                name,
-                column_indices,
-                referenced_table,
-                referenced_columns,
-                on_delete,
-                on_update,
-            })?;
+            table.add_foreign_key(ForeignKeyConstraint::deserialize(buffer, offset)?)?;
         }
 
         Ok(table)
@@ -747,6 +741,22 @@ fn read_len(buffer: &[u8], offset: &mut usize, field: &str) -> Result<usize> {
     Ok(value)
 }
 
+fn write_string(buffer: &mut Vec<u8>, value: &str) {
+    let bytes = value.as_bytes();
+    buffer.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    buffer.extend_from_slice(bytes);
+}
+
+fn write_optional_string(buffer: &mut Vec<u8>, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            buffer.push(1);
+            write_string(buffer, value);
+        }
+        None => buffer.push(0),
+    }
+}
+
 fn read_string(buffer: &[u8], offset: &mut usize, len: usize, field: &str) -> Result<String> {
     if *offset + len > buffer.len() {
         return Err(HematiteError::CorruptedData(format!("Invalid {}", field)));
@@ -755,6 +765,25 @@ fn read_string(buffer: &[u8], offset: &mut usize, len: usize, field: &str) -> Re
         .map_err(|_| HematiteError::CorruptedData(format!("Invalid UTF-8 in {}", field)))?;
     *offset += len;
     Ok(value)
+}
+
+fn read_optional_string(buffer: &[u8], offset: &mut usize, field: &str) -> Result<Option<String>> {
+    if *offset >= buffer.len() {
+        return Err(HematiteError::CorruptedData(format!("Invalid {}", field)));
+    }
+    let present = buffer[*offset];
+    *offset += 1;
+    match present {
+        0 => Ok(None),
+        1 => {
+            let len = read_len(buffer, offset, &format!("{} length", field))?;
+            read_string(buffer, offset, len, field).map(Some)
+        }
+        _ => Err(HematiteError::CorruptedData(format!(
+            "Invalid {} marker",
+            field
+        ))),
+    }
 }
 
 fn foreign_key_action_to_byte(action: ForeignKeyAction) -> u8 {
