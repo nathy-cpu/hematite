@@ -307,9 +307,11 @@ pub struct CheckConstraintDefinition {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForeignKeyDefinition {
     pub name: Option<String>,
-    pub column: String,
+    pub columns: Vec<String>,
     pub referenced_table: String,
-    pub referenced_column: String,
+    pub referenced_columns: Vec<String>,
+    pub on_delete: ForeignKeyAction,
+    pub on_update: ForeignKeyAction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -323,6 +325,13 @@ pub enum TableConstraint {
     Check(CheckConstraintDefinition),
     Unique(UniqueConstraintDefinition),
     ForeignKey(ForeignKeyDefinition),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForeignKeyAction {
+    Restrict,
+    Cascade,
+    SetNull,
 }
 
 impl Statement {
@@ -1562,15 +1571,28 @@ impl CreateStatement {
         catalog: &crate::catalog::Schema,
         foreign_key: &ForeignKeyDefinition,
     ) -> Result<()> {
-        if !self
-            .columns
-            .iter()
-            .any(|column| column.name == foreign_key.column)
-        {
+        if foreign_key.columns.is_empty() {
+            return Err(HematiteError::ParseError(
+                "Foreign key must reference at least one local column".to_string(),
+            ));
+        }
+        if foreign_key.columns.len() != foreign_key.referenced_columns.len() {
             return Err(HematiteError::ParseError(format!(
-                "Foreign key column '{}' does not exist in table '{}'",
-                foreign_key.column, self.table
+                "Foreign key on table '{}' must reference the same number of local and parent columns",
+                self.table
             )));
+        }
+        for column in &foreign_key.columns {
+            if !self
+                .columns
+                .iter()
+                .any(|candidate| candidate.name == *column)
+            {
+                return Err(HematiteError::ParseError(format!(
+                    "Foreign key column '{}' does not exist in table '{}'",
+                    column, self.table
+                )));
+            }
         }
 
         let referenced_table = catalog
@@ -1581,27 +1603,29 @@ impl CreateStatement {
                     foreign_key.referenced_table
                 ))
             })?;
-        let referenced_column_index = referenced_table
-            .get_column_index(&foreign_key.referenced_column)
-            .ok_or_else(|| {
-                HematiteError::ParseError(format!(
-                    "Referenced column '{}.{}' does not exist",
-                    foreign_key.referenced_table, foreign_key.referenced_column
-                ))
-            })?;
-        let references_primary_key = referenced_table
-            .primary_key_columns
-            .contains(&referenced_column_index);
-        let references_unique_index = referenced_table.secondary_indexes.iter().any(|index| {
-            index.unique
-                && index.column_indices.len() == 1
-                && index.column_indices[0] == referenced_column_index
-        });
+        let referenced_column_indices = foreign_key
+            .referenced_columns
+            .iter()
+            .map(|column| {
+                referenced_table.get_column_index(column).ok_or_else(|| {
+                    HematiteError::ParseError(format!(
+                        "Referenced column '{}.{}' does not exist",
+                        foreign_key.referenced_table, column
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let references_primary_key =
+            referenced_table.primary_key_columns == referenced_column_indices;
+        let references_unique_index = referenced_table
+            .secondary_indexes
+            .iter()
+            .any(|index| index.unique && index.column_indices == referenced_column_indices);
 
         if !references_primary_key && !references_unique_index {
             return Err(HematiteError::ParseError(format!(
-                "Foreign key '{}.{}' must reference a PRIMARY KEY or single-column UNIQUE index",
-                foreign_key.referenced_table, foreign_key.referenced_column
+                "Foreign key '{}.{:?}' must reference a PRIMARY KEY or UNIQUE index with the same column list",
+                foreign_key.referenced_table, foreign_key.referenced_columns
             )));
         }
 

@@ -381,6 +381,101 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_multi_column_foreign_key_rejects_missing_parent() -> Result<()> {
+        let db = TestDbFile::new("_test_multi_column_foreign_key_rejects_missing_parent");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE parents (x INTEGER PRIMARY KEY, y INTEGER PRIMARY KEY);")?;
+        conn.execute(
+            "CREATE TABLE children (id INTEGER PRIMARY KEY, parent_x INTEGER, parent_y INTEGER, FOREIGN KEY (parent_x, parent_y) REFERENCES parents(x, y));",
+        )?;
+
+        let err = conn
+            .execute("INSERT INTO children (id, parent_x, parent_y) VALUES (1, 10, 20);")
+            .unwrap_err();
+        assert!(err.to_string().contains("Foreign key constraint"));
+
+        conn.execute("INSERT INTO parents (x, y) VALUES (10, 20);")?;
+        conn.execute("INSERT INTO children (id, parent_x, parent_y) VALUES (1, 10, 20);")?;
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_multi_column_foreign_key_restricts_parent_delete() -> Result<()> {
+        let db = TestDbFile::new("_test_multi_column_foreign_key_restricts_parent_delete");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE parents (x INTEGER PRIMARY KEY, y INTEGER PRIMARY KEY);")?;
+        conn.execute(
+            "CREATE TABLE children (id INTEGER PRIMARY KEY, parent_x INTEGER, parent_y INTEGER, FOREIGN KEY (parent_x, parent_y) REFERENCES parents(x, y));",
+        )?;
+        conn.execute("INSERT INTO parents (x, y) VALUES (10, 20);")?;
+        conn.execute("INSERT INTO children (id, parent_x, parent_y) VALUES (1, 10, 20);")?;
+
+        let err = conn
+            .execute("DELETE FROM parents WHERE x = 10 AND y = 20;")
+            .unwrap_err();
+        assert!(err.to_string().contains("still references"));
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_multi_column_foreign_key_cascades_parent_update() -> Result<()> {
+        let db = TestDbFile::new("_test_multi_column_foreign_key_cascades_parent_update");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE parents (x INTEGER PRIMARY KEY, y INTEGER PRIMARY KEY);")?;
+        conn.execute(
+            "CREATE TABLE children (id INTEGER PRIMARY KEY, parent_x INTEGER, parent_y INTEGER, FOREIGN KEY (parent_x, parent_y) REFERENCES parents(x, y) ON UPDATE CASCADE);",
+        )?;
+        conn.execute("INSERT INTO parents (x, y) VALUES (10, 20);")?;
+        conn.execute("INSERT INTO children (id, parent_x, parent_y) VALUES (1, 10, 20);")?;
+
+        conn.execute("UPDATE parents SET x = 11, y = 21 WHERE x = 10 AND y = 20;")?;
+        let result = conn.execute("SELECT parent_x, parent_y FROM children WHERE id = 1;")?;
+        assert_eq!(
+            result.rows,
+            vec![vec![
+                crate::catalog::Value::Integer(11),
+                crate::catalog::Value::Integer(21),
+            ]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_multi_column_foreign_key_sets_null_on_parent_delete() -> Result<()> {
+        let db = TestDbFile::new("_test_multi_column_foreign_key_sets_null_on_parent_delete");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE parents (x INTEGER PRIMARY KEY, y INTEGER PRIMARY KEY);")?;
+        conn.execute(
+            "CREATE TABLE children (id INTEGER PRIMARY KEY, parent_x INTEGER, parent_y INTEGER, FOREIGN KEY (parent_x, parent_y) REFERENCES parents(x, y) ON DELETE SET NULL);",
+        )?;
+        conn.execute("INSERT INTO parents (x, y) VALUES (10, 20);")?;
+        conn.execute("INSERT INTO children (id, parent_x, parent_y) VALUES (1, 10, 20);")?;
+
+        conn.execute("DELETE FROM parents WHERE x = 10 AND y = 20;")?;
+        let result = conn.execute("SELECT parent_x, parent_y FROM children WHERE id = 1;")?;
+        assert_eq!(
+            result.rows,
+            vec![vec![
+                crate::catalog::Value::Null,
+                crate::catalog::Value::Null,
+            ]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_rename_column_rewrites_check_constraints() -> Result<()> {
         let db = TestDbFile::new("_test_rename_column_rewrites_check_constraints");
         let mut conn = Connection::new(db.path())?;

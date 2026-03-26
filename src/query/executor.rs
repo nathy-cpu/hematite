@@ -19,7 +19,9 @@
 //! This layer should stay storage-agnostic at the page level. If a change here requires knowledge
 //! of B-tree node layout or pager internals, the boundary below catalog has started to leak.
 
-use crate::catalog::table::{CheckConstraint, ForeignKeyConstraint};
+use crate::catalog::table::{
+    CheckConstraint, ForeignKeyAction as CatalogForeignKeyAction, ForeignKeyConstraint,
+};
 use crate::catalog::StoredRow;
 use crate::catalog::{Column, DataType, Table, Value};
 use crate::error::{HematiteError, Result};
@@ -1956,8 +1958,13 @@ impl QueryExecutor for UpdateExecutor {
                 .validate_row(&updated_row)
                 .map_err(|err| HematiteError::ParseError(err.to_string()))?;
             validate_row_constraints(ctx, &table, &updated_row)?;
-            if referenced_parent_value_changed(ctx, &table, &stored_row.values, &updated_row)? {
-                ensure_parent_row_is_unreferenced(ctx, &table, &stored_row.values, "update")?;
+            if parent_reference_key_changed(ctx, &table, &stored_row.values, &updated_row)? {
+                apply_parent_update_foreign_key_actions(
+                    ctx,
+                    &table,
+                    &stored_row.values,
+                    &updated_row,
+                )?;
             }
             updated_rows_data.push(StoredRow {
                 row_id: stored_row.row_id,
@@ -2135,7 +2142,7 @@ impl QueryExecutor for DeleteExecutor {
         )?;
 
         for row in &rows_to_delete {
-            ensure_parent_row_is_unreferenced(ctx, &table, &row.values, "delete")?;
+            apply_parent_delete_foreign_key_actions(ctx, &table, &row.values)?;
             remove_stored_row(ctx, &self.statement.table, &table, row.row_id)?;
         }
 
@@ -2279,17 +2286,25 @@ impl CreateExecutor {
         table: &Table,
         foreign_key: &ForeignKeyDefinition,
     ) -> Result<ForeignKeyConstraint> {
-        let column_index = table.get_column_index(&foreign_key.column).ok_or_else(|| {
-            HematiteError::ParseError(format!(
-                "Foreign key column '{}' does not exist in table '{}'",
-                foreign_key.column, table.name
-            ))
-        })?;
+        let column_indices = foreign_key
+            .columns
+            .iter()
+            .map(|column_name| {
+                table.get_column_index(column_name).ok_or_else(|| {
+                    HematiteError::ParseError(format!(
+                        "Foreign key column '{}' does not exist in table '{}'",
+                        column_name, table.name
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         Ok(ForeignKeyConstraint {
             name: foreign_key.name.clone(),
-            column_index,
+            column_indices,
             referenced_table: foreign_key.referenced_table.clone(),
-            referenced_column: foreign_key.referenced_column.clone(),
+            referenced_columns: foreign_key.referenced_columns.clone(),
+            on_delete: convert_foreign_key_action(foreign_key.on_delete),
+            on_update: convert_foreign_key_action(foreign_key.on_update),
         })
     }
 }
@@ -2639,32 +2654,31 @@ fn validate_row_constraints(
     row: &[Value],
 ) -> Result<()> {
     validate_check_constraints(ctx, table, row)?;
-    validate_foreign_keys(ctx, table, row)
+    validate_foreign_keys(ctx, table, row, None)
 }
 
 fn validate_foreign_keys(
     ctx: &mut ExecutionContext<'_>,
     table: &Table,
     row: &[Value],
+    skip_constraint: Option<&ForeignKeyConstraint>,
 ) -> Result<()> {
     for foreign_key in &table.foreign_keys {
-        let value = row.get(foreign_key.column_index).cloned().ok_or_else(|| {
-            HematiteError::CorruptedData(format!(
-                "Foreign key column index {} is invalid for table '{}'",
-                foreign_key.column_index, table.name
-            ))
-        })?;
-        if value.is_null() {
+        if skip_constraint == Some(foreign_key) {
             continue;
         }
-        if !referenced_value_exists(ctx, foreign_key, &value)? {
+        let key_values = row_values_for_indices(row, &foreign_key.column_indices, &table.name)?;
+        if key_values.iter().any(Value::is_null) {
+            continue;
+        }
+        if !referenced_key_exists(ctx, foreign_key, &key_values)? {
             return Err(HematiteError::ParseError(format!(
-                "Foreign key constraint '{}' failed on table '{}': '{}.{}' does not contain {:?}",
+                "Foreign key constraint '{}' failed on table '{}': '{}.{:?}' does not contain {:?}",
                 foreign_key_constraint_name(foreign_key),
                 table.name,
                 foreign_key.referenced_table,
-                foreign_key.referenced_column,
-                value
+                foreign_key.referenced_columns,
+                key_values
             )));
         }
     }
@@ -2672,10 +2686,10 @@ fn validate_foreign_keys(
     Ok(())
 }
 
-fn referenced_value_exists(
+fn referenced_key_exists(
     ctx: &mut ExecutionContext<'_>,
     foreign_key: &ForeignKeyConstraint,
-    value: &Value,
+    key_values: &[Value],
 ) -> Result<bool> {
     let referenced_table = ctx
         .catalog
@@ -2687,21 +2701,23 @@ fn referenced_value_exists(
             ))
         })?
         .clone();
-    let referenced_column_index = referenced_table
-        .get_column_index(&foreign_key.referenced_column)
-        .ok_or_else(|| {
-            HematiteError::ParseError(format!(
-                "Referenced column '{}.{}' not found",
-                foreign_key.referenced_table, foreign_key.referenced_column
-            ))
-        })?;
+    let referenced_column_indices = foreign_key
+        .referenced_columns
+        .iter()
+        .map(|column| {
+            referenced_table.get_column_index(column).ok_or_else(|| {
+                HematiteError::ParseError(format!(
+                    "Referenced column '{}.{}' not found",
+                    foreign_key.referenced_table, column
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
 
-    if referenced_table.primary_key_columns.len() == 1
-        && referenced_table.primary_key_columns[0] == referenced_column_index
-    {
+    if referenced_table.primary_key_columns == referenced_column_indices {
         return Ok(ctx
             .engine
-            .lookup_row_by_primary_key(&referenced_table, std::slice::from_ref(value))?
+            .lookup_row_by_primary_key(&referenced_table, key_values)?
             .is_some());
     }
 
@@ -2710,23 +2726,18 @@ fn referenced_value_exists(
         .iter()
         .find(|index| {
             index.unique
-                && index.column_indices.len() == 1
-                && index.column_indices[0] == referenced_column_index
+                && index.column_indices == referenced_column_indices
         })
         .ok_or_else(|| {
             HematiteError::CorruptedData(format!(
-                "Referenced column '{}.{}' is no longer backed by a PRIMARY KEY or single-column UNIQUE index",
-                foreign_key.referenced_table, foreign_key.referenced_column
+                "Referenced columns '{}.{:?}' are no longer backed by a PRIMARY KEY or UNIQUE index",
+                foreign_key.referenced_table, foreign_key.referenced_columns
             ))
         })?;
 
     Ok(!ctx
         .engine
-        .lookup_secondary_index_rowids(
-            &referenced_table,
-            &unique_index.name,
-            std::slice::from_ref(value),
-        )?
+        .lookup_secondary_index_rowids(&referenced_table, &unique_index.name, key_values)?
         .is_empty())
 }
 
@@ -2744,18 +2755,22 @@ fn referencing_foreign_keys(
             if foreign_key.referenced_table != parent_table.name {
                 continue;
             }
-            let referenced_column_index = parent_table
-                .get_column_index(&foreign_key.referenced_column)
-                .ok_or_else(|| {
-                    HematiteError::CorruptedData(format!(
-                        "Referenced column '{}.{}' is missing",
-                        foreign_key.referenced_table, foreign_key.referenced_column
-                    ))
-                })?;
+            let referenced_column_indices = foreign_key
+                .referenced_columns
+                .iter()
+                .map(|column| {
+                    parent_table.get_column_index(column).ok_or_else(|| {
+                        HematiteError::CorruptedData(format!(
+                            "Referenced column '{}.{}' is missing",
+                            foreign_key.referenced_table, column
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
             references.push(ReferencingForeignKey {
                 child_table: child_table.clone(),
                 foreign_key: foreign_key.clone(),
-                referenced_column_index,
+                referenced_column_indices,
             });
         }
     }
@@ -2763,54 +2778,81 @@ fn referencing_foreign_keys(
     Ok(references)
 }
 
-fn referenced_parent_value_changed(
+fn parent_reference_key_changed(
     ctx: &mut ExecutionContext<'_>,
     parent_table: &Table,
     original_row: &[Value],
     updated_row: &[Value],
 ) -> Result<bool> {
     for reference in referencing_foreign_keys(ctx, parent_table)? {
-        if original_row.get(reference.referenced_column_index)
-            != updated_row.get(reference.referenced_column_index)
-        {
+        if row_values_for_indices(
+            original_row,
+            &reference.referenced_column_indices,
+            &parent_table.name,
+        )? != row_values_for_indices(
+            updated_row,
+            &reference.referenced_column_indices,
+            &parent_table.name,
+        )? {
             return Ok(true);
         }
     }
     Ok(false)
 }
 
-fn ensure_parent_row_is_unreferenced(
+fn apply_parent_delete_foreign_key_actions(
     ctx: &mut ExecutionContext<'_>,
     parent_table: &Table,
     row: &[Value],
-    action: &str,
 ) -> Result<()> {
     for reference in referencing_foreign_keys(ctx, parent_table)? {
-        let Some(parent_value) = row.get(reference.referenced_column_index) else {
-            return Err(HematiteError::CorruptedData(format!(
-                "Referenced column index {} is invalid for table '{}'",
-                reference.referenced_column_index, parent_table.name
-            )));
-        };
-        if parent_value.is_null() {
+        let parent_key = row_values_for_indices(
+            row,
+            &reference.referenced_column_indices,
+            &parent_table.name,
+        )?;
+        if parent_key.iter().any(Value::is_null) {
             continue;
         }
-
-        for child_row in ctx.engine.read_rows_with_ids(&reference.child_table.name)? {
-            let Some(child_value) = child_row.values.get(reference.foreign_key.column_index) else {
-                return Err(HematiteError::CorruptedData(format!(
-                    "Foreign key column index {} is invalid for table '{}'",
-                    reference.foreign_key.column_index, reference.child_table.name
-                )));
-            };
-            if !child_value.is_null() && child_value == parent_value {
-                return Err(HematiteError::ParseError(format!(
-                    "Cannot {} row in table '{}' because foreign key '{}' on table '{}' still references it",
-                    action,
-                    parent_table.name,
-                    foreign_key_constraint_name(&reference.foreign_key),
-                    reference.child_table.name
-                )));
+        let child_rows = child_rows_referencing_parent_key(
+            ctx,
+            &reference.child_table,
+            &reference,
+            &parent_key,
+        )?;
+        match reference.foreign_key.on_delete {
+            CatalogForeignKeyAction::Restrict => {
+                if !child_rows.is_empty() {
+                    return Err(HematiteError::ParseError(format!(
+                        "Cannot delete row in table '{}' because foreign key '{}' on table '{}' still references it",
+                        parent_table.name,
+                        foreign_key_constraint_name(&reference.foreign_key),
+                        reference.child_table.name
+                    )));
+                }
+            }
+            CatalogForeignKeyAction::Cascade => {
+                for child_row in child_rows {
+                    remove_stored_row(
+                        ctx,
+                        &reference.child_table.name,
+                        &reference.child_table,
+                        child_row.row_id,
+                    )?;
+                }
+            }
+            CatalogForeignKeyAction::SetNull => {
+                for mut child_row in child_rows {
+                    for &column_index in &reference.foreign_key.column_indices {
+                        child_row.values[column_index] = Value::Null;
+                    }
+                    persist_foreign_key_child_update(
+                        ctx,
+                        &reference.child_table,
+                        &reference.foreign_key,
+                        child_row,
+                    )?;
+                }
             }
         }
     }
@@ -2818,17 +2860,175 @@ fn ensure_parent_row_is_unreferenced(
     Ok(())
 }
 
+fn apply_parent_update_foreign_key_actions(
+    ctx: &mut ExecutionContext<'_>,
+    parent_table: &Table,
+    original_row: &[Value],
+    updated_row: &[Value],
+) -> Result<()> {
+    for reference in referencing_foreign_keys(ctx, parent_table)? {
+        let old_parent_key = row_values_for_indices(
+            original_row,
+            &reference.referenced_column_indices,
+            &parent_table.name,
+        )?;
+        let new_parent_key = row_values_for_indices(
+            updated_row,
+            &reference.referenced_column_indices,
+            &parent_table.name,
+        )?;
+        if old_parent_key == new_parent_key || old_parent_key.iter().any(Value::is_null) {
+            continue;
+        }
+
+        let child_rows = child_rows_referencing_parent_key(
+            ctx,
+            &reference.child_table,
+            &reference,
+            &old_parent_key,
+        )?;
+        match reference.foreign_key.on_update {
+            CatalogForeignKeyAction::Restrict => {
+                if !child_rows.is_empty() {
+                    return Err(HematiteError::ParseError(format!(
+                        "Cannot update row in table '{}' because foreign key '{}' on table '{}' still references it",
+                        parent_table.name,
+                        foreign_key_constraint_name(&reference.foreign_key),
+                        reference.child_table.name
+                    )));
+                }
+            }
+            CatalogForeignKeyAction::Cascade => {
+                for mut child_row in child_rows {
+                    for (position, &column_index) in
+                        reference.foreign_key.column_indices.iter().enumerate()
+                    {
+                        child_row.values[column_index] = new_parent_key[position].clone();
+                    }
+                    persist_foreign_key_child_update(
+                        ctx,
+                        &reference.child_table,
+                        &reference.foreign_key,
+                        child_row,
+                    )?;
+                }
+            }
+            CatalogForeignKeyAction::SetNull => {
+                for mut child_row in child_rows {
+                    for &column_index in &reference.foreign_key.column_indices {
+                        child_row.values[column_index] = Value::Null;
+                    }
+                    persist_foreign_key_child_update(
+                        ctx,
+                        &reference.child_table,
+                        &reference.foreign_key,
+                        child_row,
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn foreign_key_constraint_name(foreign_key: &ForeignKeyConstraint) -> &str {
     foreign_key
         .name
         .as_deref()
-        .unwrap_or(foreign_key.referenced_column.as_str())
+        .unwrap_or(foreign_key.referenced_table.as_str())
 }
 
 struct ReferencingForeignKey {
     child_table: Table,
     foreign_key: ForeignKeyConstraint,
-    referenced_column_index: usize,
+    referenced_column_indices: Vec<usize>,
+}
+
+fn row_values_for_indices(
+    row: &[Value],
+    indices: &[usize],
+    table_name: &str,
+) -> Result<Vec<Value>> {
+    indices
+        .iter()
+        .map(|&index| {
+            row.get(index).cloned().ok_or_else(|| {
+                HematiteError::CorruptedData(format!(
+                    "Column index {} is invalid for table '{}'",
+                    index, table_name
+                ))
+            })
+        })
+        .collect()
+}
+
+fn child_rows_referencing_parent_key(
+    ctx: &mut ExecutionContext<'_>,
+    child_table: &Table,
+    reference: &ReferencingForeignKey,
+    parent_key: &[Value],
+) -> Result<Vec<StoredRow>> {
+    let mut matches = Vec::new();
+    for child_row in ctx.engine.read_rows_with_ids(&child_table.name)? {
+        let child_key = row_values_for_indices(
+            &child_row.values,
+            &reference.foreign_key.column_indices,
+            &child_table.name,
+        )?;
+        if child_key.iter().any(Value::is_null) {
+            continue;
+        }
+        if child_key == parent_key {
+            matches.push(child_row);
+        }
+    }
+    Ok(matches)
+}
+
+fn persist_foreign_key_child_update(
+    ctx: &mut ExecutionContext<'_>,
+    table: &Table,
+    skipped_foreign_key: &ForeignKeyConstraint,
+    row: StoredRow,
+) -> Result<()> {
+    table
+        .validate_row(&row.values)
+        .map_err(|err| HematiteError::ParseError(err.to_string()))?;
+    validate_check_constraints(ctx, table, &row.values)?;
+    validate_foreign_keys(ctx, table, &row.values, Some(skipped_foreign_key))?;
+    ensure_stored_row_uniqueness(ctx, table, &row)?;
+    remove_stored_row(ctx, &table.name, table, row.row_id)?;
+    write_stored_row(ctx, &table.name, table, row, true).map(|_| ())
+}
+
+fn ensure_stored_row_uniqueness(
+    ctx: &mut ExecutionContext<'_>,
+    table: &Table,
+    row: &StoredRow,
+) -> Result<()> {
+    let candidate_pk = primary_key_values(table, &row.values)?;
+    if let Some(existing_rowid) = ctx.engine.lookup_primary_key_rowid(table, &candidate_pk)? {
+        if existing_rowid != row.row_id {
+            return Err(duplicate_primary_key_parse_error(
+                &table.name,
+                &candidate_pk,
+            ));
+        }
+    }
+
+    for index in table.secondary_indexes.iter().filter(|index| index.unique) {
+        let key_values = secondary_index_key_values(index, &row.values);
+        if ctx
+            .engine
+            .lookup_secondary_index_rowids(table, &index.name, &key_values)?
+            .into_iter()
+            .any(|existing_rowid| existing_rowid != row.row_id)
+        {
+            return Err(unique_index_parse_error(&index.name, &table.name));
+        }
+    }
+
+    Ok(())
 }
 
 fn remove_stored_row(
@@ -2995,6 +3195,14 @@ fn unique_index_parse_error(index_name: &str, table_name: &str) -> HematiteError
         "Duplicate value for UNIQUE index '{}' on table '{}'",
         index_name, table_name
     ))
+}
+
+fn convert_foreign_key_action(action: ForeignKeyAction) -> CatalogForeignKeyAction {
+    match action {
+        ForeignKeyAction::Restrict => CatalogForeignKeyAction::Restrict,
+        ForeignKeyAction::Cascade => CatalogForeignKeyAction::Cascade,
+        ForeignKeyAction::SetNull => CatalogForeignKeyAction::SetNull,
+    }
 }
 
 fn auto_unique_index_name(table_name: &str, column_name: &str, position: usize) -> String {

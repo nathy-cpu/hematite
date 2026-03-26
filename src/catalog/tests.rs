@@ -1087,9 +1087,11 @@ mod tests {
         })?;
         original.add_foreign_key(crate::catalog::table::ForeignKeyConstraint {
             name: Some("fk_posts_user".to_string()),
-            column_index: 1,
+            column_indices: vec![1],
             referenced_table: "users".to_string(),
-            referenced_column: "id".to_string(),
+            referenced_columns: vec!["id".to_string()],
+            on_delete: crate::catalog::table::ForeignKeyAction::Restrict,
+            on_update: crate::catalog::table::ForeignKeyAction::Restrict,
         })?;
 
         let mut buffer = Vec::new();

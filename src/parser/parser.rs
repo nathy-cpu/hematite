@@ -1323,8 +1323,8 @@ impl Parser {
     fn parse_table_foreign_key(&mut self, name: Option<String>) -> Result<ForeignKeyDefinition> {
         self.consume_token(&Token::Foreign)?;
         self.consume_token(&Token::Key)?;
-        let column = self.parse_single_column_reference()?;
-        self.parse_foreign_key_reference(name, column)
+        let columns = self.parse_column_reference_list()?;
+        self.parse_foreign_key_reference(name, columns)
     }
 
     fn parse_column_foreign_key(
@@ -1332,35 +1332,89 @@ impl Parser {
         name: Option<String>,
         column: &str,
     ) -> Result<ForeignKeyDefinition> {
-        self.parse_foreign_key_reference(name, column.to_string())
+        self.parse_foreign_key_reference(name, vec![column.to_string()])
     }
 
-    fn parse_single_column_reference(&mut self) -> Result<String> {
+    fn parse_column_reference_list(&mut self) -> Result<Vec<String>> {
         self.consume_token(&Token::LeftParen)?;
-        let column = self.parse_identifier()?;
-        if matches!(self.peek_token(), Ok(Token::Comma)) {
-            return Err(HematiteError::ParseError(
-                "Multi-column foreign keys are not supported".to_string(),
-            ));
+        let mut columns = Vec::new();
+        loop {
+            columns.push(self.parse_identifier()?);
+            if matches!(self.peek_token(), Ok(Token::Comma)) {
+                self.consume_token(&Token::Comma)?;
+                continue;
+            }
+            break;
         }
         self.consume_token(&Token::RightParen)?;
-        Ok(column)
+        Ok(columns)
     }
 
     fn parse_foreign_key_reference(
         &mut self,
         name: Option<String>,
-        column: String,
+        columns: Vec<String>,
     ) -> Result<ForeignKeyDefinition> {
         self.consume_token(&Token::References)?;
         let referenced_table = self.parse_identifier()?;
-        let referenced_column = self.parse_single_column_reference()?;
+        let referenced_columns = self.parse_column_reference_list()?;
+        let mut on_delete = crate::parser::ast::ForeignKeyAction::Restrict;
+        let mut on_update = crate::parser::ast::ForeignKeyAction::Restrict;
+        while matches!(self.peek_token(), Ok(Token::On)) {
+            self.consume_token(&Token::On)?;
+            let target_is_delete = match self.peek_token()? {
+                Token::Delete => {
+                    self.consume_token(&Token::Delete)?;
+                    true
+                }
+                Token::Update => {
+                    self.consume_token(&Token::Update)?;
+                    false
+                }
+                token => {
+                    return Err(HematiteError::ParseError(format!(
+                        "Expected DELETE or UPDATE after ON, found: {:?}",
+                        token
+                    )))
+                }
+            };
+            let action = self.parse_foreign_key_action()?;
+            if target_is_delete {
+                on_delete = action;
+            } else {
+                on_update = action;
+            }
+        }
         Ok(ForeignKeyDefinition {
             name,
-            column,
+            columns,
             referenced_table,
-            referenced_column,
+            referenced_columns,
+            on_delete,
+            on_update,
         })
+    }
+
+    fn parse_foreign_key_action(&mut self) -> Result<crate::parser::ast::ForeignKeyAction> {
+        match self.peek_token()? {
+            Token::Restrict => {
+                self.consume_token(&Token::Restrict)?;
+                Ok(crate::parser::ast::ForeignKeyAction::Restrict)
+            }
+            Token::Cascade => {
+                self.consume_token(&Token::Cascade)?;
+                Ok(crate::parser::ast::ForeignKeyAction::Cascade)
+            }
+            Token::Set => {
+                self.consume_token(&Token::Set)?;
+                self.consume_token(&Token::Null)?;
+                Ok(crate::parser::ast::ForeignKeyAction::SetNull)
+            }
+            token => Err(HematiteError::ParseError(format!(
+                "Expected foreign key action, found: {:?}",
+                token
+            ))),
+        }
     }
 
     fn parse_data_type(&mut self) -> Result<crate::catalog::DataType> {

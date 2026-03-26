@@ -622,9 +622,11 @@ mod executor_tests {
                     check_constraint: None,
                     references: Some(ForeignKeyDefinition {
                         name: None,
-                        column: "parent_id".to_string(),
+                        columns: vec!["parent_id".to_string()],
                         referenced_table: "parents".to_string(),
-                        referenced_column: "id".to_string(),
+                        referenced_columns: vec!["id".to_string()],
+                        on_delete: ForeignKeyAction::Restrict,
+                        on_update: ForeignKeyAction::Restrict,
                     }),
                 },
             ],

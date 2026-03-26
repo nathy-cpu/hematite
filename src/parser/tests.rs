@@ -1270,9 +1270,11 @@ mod parser_tests {
             create.columns[1].references,
             Some(ForeignKeyDefinition {
                 name: None,
-                column: "user_id".to_string(),
+                columns: vec!["user_id".to_string()],
                 referenced_table: "users".to_string(),
-                referenced_column: "id".to_string(),
+                referenced_columns: vec!["id".to_string()],
+                on_delete: ForeignKeyAction::Restrict,
+                on_update: ForeignKeyAction::Restrict,
             })
         );
         assert_eq!(
@@ -1284,12 +1286,37 @@ mod parser_tests {
         );
         assert!(matches!(
             &create.constraints[0],
-            TableConstraint::ForeignKey(ForeignKeyDefinition { name: Some(name), column, referenced_table, referenced_column })
-                if name == "fk_user" && column == "user_id" && referenced_table == "users" && referenced_column == "id"
+            TableConstraint::ForeignKey(ForeignKeyDefinition { name: Some(name), columns, referenced_table, referenced_columns, on_delete: ForeignKeyAction::Restrict, on_update: ForeignKeyAction::Restrict })
+                if name == "fk_user"
+                    && columns == &vec!["user_id".to_string()]
+                    && referenced_table == "users"
+                    && referenced_columns == &vec!["id".to_string()]
         ));
         assert!(matches!(
             &create.constraints[1],
             TableConstraint::Check(CheckConstraintDefinition { expression_sql, .. }) if expression_sql == "id > 0"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_multi_column_foreign_key_with_actions() -> Result<()> {
+        let create = parse_create(
+            "CREATE TABLE child (id INT PRIMARY KEY, a INT, b INT, CONSTRAINT fk_parent FOREIGN KEY (a, b) REFERENCES parent (x, y) ON DELETE CASCADE ON UPDATE SET NULL);",
+        )?;
+        assert!(matches!(
+            &create.constraints[0],
+            TableConstraint::ForeignKey(ForeignKeyDefinition {
+                name: Some(name),
+                columns,
+                referenced_table,
+                referenced_columns,
+                on_delete: ForeignKeyAction::Cascade,
+                on_update: ForeignKeyAction::SetNull,
+            }) if name == "fk_parent"
+                && columns == &vec!["a".to_string(), "b".to_string()]
+                && referenced_table == "parent"
+                && referenced_columns == &vec!["x".to_string(), "y".to_string()]
         ));
         Ok(())
     }
