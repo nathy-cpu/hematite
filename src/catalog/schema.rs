@@ -108,6 +108,10 @@ impl Schema {
             .and_then(|&id| self.tables.get(&id))
     }
 
+    pub(crate) fn tables(&self) -> &HashMap<TableId, Table> {
+        &self.tables
+    }
+
     pub fn drop_table(&mut self, table_id: TableId) -> Result<()> {
         let table = self
             .tables
@@ -181,6 +185,61 @@ impl Schema {
         }
 
         Ok(())
+    }
+
+    pub fn drop_column(&mut self, table_id: TableId, column_name: &str) -> Result<usize> {
+        let table_name = self
+            .tables
+            .get(&table_id)
+            .ok_or_else(|| HematiteError::StorageError("Table not found".to_string()))?
+            .name
+            .clone();
+        if self.tables.values().any(|other_table| {
+            other_table.id != table_id
+                && other_table.foreign_keys.iter().any(|foreign_key| {
+                    foreign_key.referenced_table == table_name
+                        && foreign_key
+                            .referenced_columns
+                            .iter()
+                            .any(|referenced_column| referenced_column == column_name)
+                })
+        }) {
+            return Err(HematiteError::StorageError(format!(
+                "Column '{}' is referenced by a foreign key",
+                column_name
+            )));
+        }
+        let table = self
+            .tables
+            .get_mut(&table_id)
+            .ok_or_else(|| HematiteError::StorageError("Table not found".to_string()))?;
+        table.drop_column(column_name)
+    }
+
+    pub fn set_column_default(
+        &mut self,
+        table_id: TableId,
+        column_name: &str,
+        default_value: Option<super::types::Value>,
+    ) -> Result<()> {
+        let table = self
+            .tables
+            .get_mut(&table_id)
+            .ok_or_else(|| HematiteError::StorageError("Table not found".to_string()))?;
+        table.set_column_default(column_name, default_value)
+    }
+
+    pub fn set_column_nullable(
+        &mut self,
+        table_id: TableId,
+        column_name: &str,
+        nullable: bool,
+    ) -> Result<()> {
+        let table = self
+            .tables
+            .get_mut(&table_id)
+            .ok_or_else(|| HematiteError::StorageError("Table not found".to_string()))?;
+        table.set_column_nullable(column_name, nullable)
     }
 
     pub fn add_check_constraint(

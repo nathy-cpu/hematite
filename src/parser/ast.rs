@@ -282,8 +282,25 @@ pub struct AlterStatement {
 #[derive(Debug, Clone)]
 pub enum AlterOperation {
     RenameTo(String),
-    RenameColumn { old_name: String, new_name: String },
+    RenameColumn {
+        old_name: String,
+        new_name: String,
+    },
     AddColumn(ColumnDefinition),
+    DropColumn(String),
+    AlterColumnSetDefault {
+        column_name: String,
+        default_value: Value,
+    },
+    AlterColumnDropDefault {
+        column_name: String,
+    },
+    AlterColumnSetNotNull {
+        column_name: String,
+    },
+    AlterColumnDropNotNull {
+        column_name: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -1768,6 +1785,24 @@ impl AlterStatement {
                     }
                 }
             }
+            AlterOperation::DropColumn(column_name) => {
+                self.validate_drop_column(catalog, column_name)?;
+            }
+            AlterOperation::AlterColumnSetDefault {
+                column_name,
+                default_value,
+            } => {
+                self.validate_set_column_default(catalog, column_name, default_value)?;
+            }
+            AlterOperation::AlterColumnDropDefault { column_name } => {
+                self.validate_existing_column(catalog, column_name)?;
+            }
+            AlterOperation::AlterColumnSetNotNull { column_name } => {
+                self.validate_existing_column(catalog, column_name)?;
+            }
+            AlterOperation::AlterColumnDropNotNull { column_name } => {
+                self.validate_existing_column(catalog, column_name)?;
+            }
         }
 
         Ok(())
@@ -1806,9 +1841,157 @@ impl AlterStatement {
         }
         Ok(())
     }
+
+    fn validate_existing_column(
+        &self,
+        catalog: &crate::catalog::Schema,
+        column_name: &str,
+    ) -> Result<()> {
+        let table = self.require_table(catalog)?;
+        if table.get_column_by_name(column_name).is_none() {
+            return Err(HematiteError::ParseError(format!(
+                "Column '{}' does not exist in table '{}'",
+                column_name, self.table
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_set_column_default(
+        &self,
+        catalog: &crate::catalog::Schema,
+        column_name: &str,
+        default_value: &Value,
+    ) -> Result<()> {
+        let table = self.require_table(catalog)?;
+        let column = table.get_column_by_name(column_name).ok_or_else(|| {
+            HematiteError::ParseError(format!(
+                "Column '{}' does not exist in table '{}'",
+                column_name, self.table
+            ))
+        })?;
+        if default_value.is_null() && !column.nullable {
+            return Err(HematiteError::ParseError(format!(
+                "Column '{}' cannot use DEFAULT NULL while declared NOT NULL",
+                column_name
+            )));
+        }
+        if !default_value.is_null() && !default_value.is_compatible_with(column.data_type) {
+            return Err(HematiteError::ParseError(format!(
+                "DEFAULT value for column '{}' is incompatible with {:?}",
+                column_name, column.data_type
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_drop_column(
+        &self,
+        catalog: &crate::catalog::Schema,
+        column_name: &str,
+    ) -> Result<()> {
+        let table = self.require_table(catalog)?;
+        let column_index = table.get_column_index(column_name).ok_or_else(|| {
+            HematiteError::ParseError(format!(
+                "Column '{}' does not exist in table '{}'",
+                column_name, self.table
+            ))
+        })?;
+        if table.columns.len() == 1 {
+            return Err(HematiteError::ParseError(
+                "ALTER TABLE DROP COLUMN cannot remove the last column".to_string(),
+            ));
+        }
+        if table.primary_key_columns.contains(&column_index) {
+            return Err(HematiteError::ParseError(format!(
+                "Cannot drop primary-key column '{}'",
+                column_name
+            )));
+        }
+        if table
+            .secondary_indexes
+            .iter()
+            .any(|index| index.column_indices.contains(&column_index))
+        {
+            return Err(HematiteError::ParseError(format!(
+                "Cannot drop column '{}' because it is used by an index",
+                column_name
+            )));
+        }
+        if table
+            .foreign_keys
+            .iter()
+            .any(|foreign_key| foreign_key.column_indices.contains(&column_index))
+        {
+            return Err(HematiteError::ParseError(format!(
+                "Cannot drop column '{}' because it is used by a foreign key",
+                column_name
+            )));
+        }
+        for constraint in &table.check_constraints {
+            let condition =
+                crate::parser::parser::parse_condition_fragment(&constraint.expression_sql)?;
+            if condition.references_column(column_name, Some(&table.name)) {
+                return Err(HematiteError::ParseError(format!(
+                    "Cannot drop column '{}' because it is used by a CHECK constraint",
+                    column_name
+                )));
+            }
+        }
+        if catalog.tables().values().any(|other_table| {
+            other_table.name != table.name
+                && other_table.foreign_keys.iter().any(|foreign_key| {
+                    foreign_key.referenced_table == table.name
+                        && foreign_key
+                            .referenced_columns
+                            .iter()
+                            .any(|referenced_column| referenced_column == column_name)
+                })
+        }) {
+            return Err(HematiteError::ParseError(format!(
+                "Cannot drop column '{}' because it is referenced by a foreign key",
+                column_name
+            )));
+        }
+        Ok(())
+    }
 }
 
 impl Condition {
+    pub(crate) fn references_column(&self, column_name: &str, table_name: Option<&str>) -> bool {
+        match self {
+            Condition::Comparison { left, right, .. } => {
+                left.references_column(column_name, table_name)
+                    || right.references_column(column_name, table_name)
+            }
+            Condition::InList { expr, values, .. } => {
+                expr.references_column(column_name, table_name)
+                    || values
+                        .iter()
+                        .any(|value| value.references_column(column_name, table_name))
+            }
+            Condition::InSubquery { expr, .. } => expr.references_column(column_name, table_name),
+            Condition::Between {
+                expr, lower, upper, ..
+            } => {
+                expr.references_column(column_name, table_name)
+                    || lower.references_column(column_name, table_name)
+                    || upper.references_column(column_name, table_name)
+            }
+            Condition::Like { expr, pattern, .. } => {
+                expr.references_column(column_name, table_name)
+                    || pattern.references_column(column_name, table_name)
+            }
+            Condition::Exists { .. } => false,
+            Condition::NullCheck { expr, .. } => expr.references_column(column_name, table_name),
+            Condition::Not(condition) => condition.references_column(column_name, table_name),
+            Condition::Logical { left, right, .. } => {
+                left.references_column(column_name, table_name)
+                    || right.references_column(column_name, table_name)
+            }
+        }
+    }
+
     pub(crate) fn rename_column_references(
         &mut self,
         old_name: &str,
@@ -1926,6 +2109,22 @@ impl Condition {
 }
 
 impl Expression {
+    pub(crate) fn references_column(&self, column_name: &str, table_name: Option<&str>) -> bool {
+        match self {
+            Expression::Column(name) => column_name_matches(name, column_name, table_name),
+            Expression::AggregateCall { target, .. } => match target {
+                AggregateTarget::All => false,
+                AggregateTarget::Column(name) => column_name_matches(name, column_name, table_name),
+            },
+            Expression::UnaryMinus(expr) => expr.references_column(column_name, table_name),
+            Expression::Binary { left, right, .. } => {
+                left.references_column(column_name, table_name)
+                    || right.references_column(column_name, table_name)
+            }
+            Expression::Literal(_) | Expression::Parameter(_) => false,
+        }
+    }
+
     pub(crate) fn rename_column_references(
         &mut self,
         old_name: &str,
@@ -2109,6 +2308,15 @@ fn rename_column_name(name: &mut String, old_name: &str, new_name: &str, table_n
         if name == &qualified {
             *name = format!("{}.{}", table_name, new_name);
         }
+    }
+}
+
+fn column_name_matches(name: &str, column_name: &str, table_name: Option<&str>) -> bool {
+    let (qualifier, bare_name) = SelectStatement::split_column_reference(name);
+    if let Some(qualifier) = qualifier {
+        qualifier == table_name.unwrap_or_default() && bare_name == column_name
+    } else {
+        name == column_name
     }
 }
 

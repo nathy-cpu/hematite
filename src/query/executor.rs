@@ -2548,6 +2548,64 @@ impl QueryExecutor for AlterExecutor {
                 ctx.catalog.add_column(table.id, column)?;
                 ctx.engine.replace_table_rows(&self.statement.table, rows)?;
             }
+            AlterOperation::DropColumn(column_name) => {
+                let table = catalog_table(ctx, &self.statement.table)?;
+                let column_index = table.get_column_index(column_name).ok_or_else(|| {
+                    HematiteError::InternalError(format!(
+                        "Column '{}' disappeared during ALTER TABLE DROP COLUMN",
+                        column_name
+                    ))
+                })?;
+                let mut rows = ctx.engine.read_rows_with_ids(&self.statement.table)?;
+                for row in &mut rows {
+                    row.values.remove(column_index);
+                }
+
+                ctx.catalog.drop_column(table.id, column_name)?;
+                ctx.engine.replace_table_rows(&self.statement.table, rows)?;
+            }
+            AlterOperation::AlterColumnSetDefault {
+                column_name,
+                default_value,
+            } => {
+                let table = catalog_table(ctx, &self.statement.table)?;
+                ctx.catalog.set_column_default(
+                    table.id,
+                    column_name,
+                    Some(default_value.clone()),
+                )?;
+            }
+            AlterOperation::AlterColumnDropDefault { column_name } => {
+                let table = catalog_table(ctx, &self.statement.table)?;
+                ctx.catalog
+                    .set_column_default(table.id, column_name, None)?;
+            }
+            AlterOperation::AlterColumnSetNotNull { column_name } => {
+                let table = catalog_table(ctx, &self.statement.table)?;
+                let column_index = table.get_column_index(column_name).ok_or_else(|| {
+                    HematiteError::InternalError(format!(
+                        "Column '{}' disappeared during ALTER COLUMN SET NOT NULL",
+                        column_name
+                    ))
+                })?;
+                let rows = ctx.engine.read_from_table(&self.statement.table)?;
+                if rows
+                    .iter()
+                    .any(|row| row.get(column_index).is_some_and(Value::is_null))
+                {
+                    return Err(HematiteError::ParseError(format!(
+                        "Cannot set column '{}' to NOT NULL because existing rows contain NULL",
+                        column_name
+                    )));
+                }
+                ctx.catalog
+                    .set_column_nullable(table.id, column_name, false)?;
+            }
+            AlterOperation::AlterColumnDropNotNull { column_name } => {
+                let table = catalog_table(ctx, &self.statement.table)?;
+                ctx.catalog
+                    .set_column_nullable(table.id, column_name, true)?;
+            }
         }
 
         Ok(QueryResult {

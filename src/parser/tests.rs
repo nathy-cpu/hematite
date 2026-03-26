@@ -1431,6 +1431,18 @@ mod parser_tests {
     }
 
     #[test]
+    fn test_parse_alter_table_drop_column() -> Result<()> {
+        let alter = parse_alter("ALTER TABLE users DROP COLUMN active;")?;
+        assert_eq!(alter.table, "users");
+        assert!(matches!(
+            alter.operation,
+            AlterOperation::DropColumn(ref column_name) if column_name == "active"
+        ));
+
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_begin_commit_rollback() -> Result<()> {
         for (sql, expected) in [
             ("BEGIN;", "begin"),

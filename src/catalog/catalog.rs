@@ -195,6 +195,39 @@ impl Catalog {
         Ok(())
     }
 
+    pub fn drop_column(&mut self, table_id: TableId, column_name: &str) -> Result<usize> {
+        let dropped_index = self.schema.drop_column(table_id, column_name)?;
+        self.schema_dirty = true;
+        self.save_schema_to_btree()?;
+        Ok(dropped_index)
+    }
+
+    pub fn set_column_default(
+        &mut self,
+        table_id: TableId,
+        column_name: &str,
+        default_value: Option<crate::catalog::Value>,
+    ) -> Result<()> {
+        self.schema
+            .set_column_default(table_id, column_name, default_value)?;
+        self.schema_dirty = true;
+        self.save_schema_to_btree()?;
+        Ok(())
+    }
+
+    pub fn set_column_nullable(
+        &mut self,
+        table_id: TableId,
+        column_name: &str,
+        nullable: bool,
+    ) -> Result<()> {
+        self.schema
+            .set_column_nullable(table_id, column_name, nullable)?;
+        self.schema_dirty = true;
+        self.save_schema_to_btree()?;
+        Ok(())
+    }
+
     pub fn add_check_constraint(
         &mut self,
         table_id: TableId,

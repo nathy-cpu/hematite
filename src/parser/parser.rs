@@ -1055,6 +1055,79 @@ impl Parser {
                     operation: AlterOperation::AddColumn(column),
                 }))
             }
+            Token::Drop => {
+                self.consume_token(&Token::Drop)?;
+                if matches!(self.peek_token(), Ok(Token::Column)) {
+                    self.consume_token(&Token::Column)?;
+                }
+                let column_name = self.parse_identifier()?;
+                self.consume_token(&Token::Semicolon)?;
+                Ok(Statement::Alter(AlterStatement {
+                    table,
+                    operation: AlterOperation::DropColumn(column_name),
+                }))
+            }
+            Token::Alter => {
+                self.consume_token(&Token::Alter)?;
+                if matches!(self.peek_token(), Ok(Token::Column)) {
+                    self.consume_token(&Token::Column)?;
+                }
+                let column_name = self.parse_identifier()?;
+                let operation = match self.peek_token()? {
+                    Token::Set => {
+                        self.consume_token(&Token::Set)?;
+                        match self.peek_token()? {
+                            Token::Default => {
+                                self.consume_token(&Token::Default)?;
+                                let default_value = self.parse_default_value()?;
+                                AlterOperation::AlterColumnSetDefault {
+                                    column_name,
+                                    default_value,
+                                }
+                            }
+                            Token::Not => {
+                                self.consume_token(&Token::Not)?;
+                                self.consume_token(&Token::Null)?;
+                                AlterOperation::AlterColumnSetNotNull { column_name }
+                            }
+                            token => {
+                                return Err(HematiteError::ParseError(format!(
+                                    "Expected DEFAULT or NOT NULL after SET, found: {:?}",
+                                    token
+                                )))
+                            }
+                        }
+                    }
+                    Token::Drop => {
+                        self.consume_token(&Token::Drop)?;
+                        match self.peek_token()? {
+                            Token::Default => {
+                                self.consume_token(&Token::Default)?;
+                                AlterOperation::AlterColumnDropDefault { column_name }
+                            }
+                            Token::Not => {
+                                self.consume_token(&Token::Not)?;
+                                self.consume_token(&Token::Null)?;
+                                AlterOperation::AlterColumnDropNotNull { column_name }
+                            }
+                            token => {
+                                return Err(HematiteError::ParseError(format!(
+                                    "Expected DEFAULT or NOT NULL after DROP, found: {:?}",
+                                    token
+                                )))
+                            }
+                        }
+                    }
+                    token => {
+                        return Err(HematiteError::ParseError(format!(
+                            "Expected SET or DROP after ALTER COLUMN, found: {:?}",
+                            token
+                        )))
+                    }
+                };
+                self.consume_token(&Token::Semicolon)?;
+                Ok(Statement::Alter(AlterStatement { table, operation }))
+            }
             token => Err(HematiteError::ParseError(format!(
                 "Expected supported ALTER TABLE operation, found: {:?}",
                 token

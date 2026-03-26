@@ -315,6 +315,106 @@ impl Table {
         Ok(())
     }
 
+    pub fn drop_column(&mut self, name: &str) -> Result<usize> {
+        let index = self.get_column_index(name).ok_or_else(|| {
+            HematiteError::StorageError(format!(
+                "Column '{}' does not exist in table '{}'",
+                name, self.name
+            ))
+        })?;
+
+        if self.columns.len() == 1 {
+            return Err(HematiteError::StorageError(
+                "Cannot drop the last column from a table".to_string(),
+            ));
+        }
+        if self.primary_key_columns.contains(&index) {
+            return Err(HematiteError::StorageError(format!(
+                "Cannot drop primary-key column '{}'",
+                name
+            )));
+        }
+        if self
+            .secondary_indexes
+            .iter()
+            .any(|secondary_index| secondary_index.column_indices.contains(&index))
+        {
+            return Err(HematiteError::StorageError(format!(
+                "Cannot drop column '{}' because it is used by an index",
+                name
+            )));
+        }
+        if self
+            .foreign_keys
+            .iter()
+            .any(|foreign_key| foreign_key.column_indices.contains(&index))
+        {
+            return Err(HematiteError::StorageError(format!(
+                "Cannot drop column '{}' because it is used by a foreign key",
+                name
+            )));
+        }
+
+        self.columns.remove(index);
+        self.rebuild_column_indices();
+        self.primary_key_columns = self
+            .primary_key_columns
+            .iter()
+            .filter_map(|&primary_key_index| {
+                if primary_key_index == index {
+                    None
+                } else if primary_key_index > index {
+                    Some(primary_key_index - 1)
+                } else {
+                    Some(primary_key_index)
+                }
+            })
+            .collect();
+        for foreign_key in &mut self.foreign_keys {
+            for column_index in &mut foreign_key.column_indices {
+                if *column_index > index {
+                    *column_index -= 1;
+                }
+            }
+        }
+
+        Ok(index)
+    }
+
+    pub fn set_column_default(&mut self, name: &str, default_value: Option<Value>) -> Result<()> {
+        let index = self.get_column_index(name).ok_or_else(|| {
+            HematiteError::StorageError(format!(
+                "Column '{}' does not exist in table '{}'",
+                name, self.name
+            ))
+        })?;
+        self.columns[index].default_value = default_value;
+        Ok(())
+    }
+
+    pub fn set_column_nullable(&mut self, name: &str, nullable: bool) -> Result<()> {
+        let index = self.get_column_index(name).ok_or_else(|| {
+            HematiteError::StorageError(format!(
+                "Column '{}' does not exist in table '{}'",
+                name, self.name
+            ))
+        })?;
+        if self.columns[index].primary_key && nullable {
+            return Err(HematiteError::StorageError(format!(
+                "Primary-key column '{}' cannot be nullable",
+                name
+            )));
+        }
+        if self.columns[index].auto_increment && nullable {
+            return Err(HematiteError::StorageError(format!(
+                "AUTO_INCREMENT column '{}' cannot be nullable",
+                name
+            )));
+        }
+        self.columns[index].nullable = nullable;
+        Ok(())
+    }
+
     pub fn rewrite_inbound_referenced_column(
         &mut self,
         referenced_table: &str,
@@ -340,6 +440,15 @@ impl Table {
             constraint.expression_sql = condition.to_sql();
         }
         Ok(())
+    }
+
+    fn rebuild_column_indices(&mut self) {
+        self.column_indices = self
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| (column.name.clone(), index))
+            .collect();
     }
 
     pub fn add_check_constraint(&mut self, constraint: CheckConstraint) -> Result<()> {

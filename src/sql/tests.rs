@@ -558,6 +558,45 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_alter_table_drop_column_rewrites_existing_rows() -> Result<()> {
+        let db = TestDbFile::new("_test_alter_table_drop_column_rewrites_existing_rows");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, active BOOLEAN);")?;
+        conn.execute("INSERT INTO users (id, name, active) VALUES (1, 'alice', TRUE);")?;
+        conn.execute("ALTER TABLE users DROP COLUMN active;")?;
+
+        let result = conn.execute("SELECT * FROM users;")?;
+        assert_eq!(
+            result.rows,
+            vec![vec![
+                crate::catalog::Value::Integer(1),
+                crate::catalog::Value::Text("alice".to_string()),
+            ]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_alter_table_drop_column_rejects_index_dependency() -> Result<()> {
+        let db = TestDbFile::new("_test_alter_table_drop_column_rejects_index_dependency");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT, name TEXT);")?;
+        conn.execute("CREATE INDEX idx_users_email ON users (email);")?;
+
+        let err = conn
+            .execute("ALTER TABLE users DROP COLUMN email;")
+            .unwrap_err();
+        assert!(err.to_string().contains("used by an index"));
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_create_table_unique_column_rejects_duplicate_insert_and_update() -> Result<()> {
         let db = TestDbFile::new("_test_create_table_unique_column");
         let mut conn = Connection::new(db.path())?;
