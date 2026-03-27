@@ -17,6 +17,7 @@ pub mod header;
 pub mod ids;
 pub(crate) mod index_store;
 pub(crate) mod integrity;
+pub mod object;
 pub mod record;
 pub mod row_id;
 pub(crate) mod runtime_metadata;
@@ -37,6 +38,7 @@ pub use engine::{
 };
 pub use header::DatabaseHeader;
 pub use ids::{ColumnId, TableId};
+pub use object::{NamedConstraint, NamedConstraintKind, Trigger, TriggerEvent, View};
 pub use record::StoredRow;
 pub use schema::Schema;
 pub use serialization::{IndexKeyCodec, RowCodec, RowSerializer};

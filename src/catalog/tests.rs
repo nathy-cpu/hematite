@@ -1,7 +1,11 @@
 #[cfg(test)]
 mod tests {
+    use crate::catalog::table::{CheckConstraint, ForeignKeyAction, ForeignKeyConstraint};
     use crate::catalog::types::{DataType, Value};
-    use crate::catalog::{Column, ColumnId, DatabaseHeader, Schema, Table, TableId};
+    use crate::catalog::{
+        Column, ColumnId, DatabaseHeader, NamedConstraintKind, Schema, Table, TableId, Trigger,
+        TriggerEvent, View,
+    };
     use crate::error::Result;
     use crate::storage::Page;
 
@@ -615,6 +619,75 @@ mod tests {
             Column::new(ColumnId::new(2), "name".to_string(), DataType::Text),
             Column::new(ColumnId::new(3), "active".to_string(), DataType::Boolean),
         ]
+    }
+
+    #[test]
+    fn test_view_metadata_validation() -> Result<()> {
+        let view = View {
+            name: "active_users".to_string(),
+            query_sql: "SELECT id, name FROM users WHERE active = TRUE".to_string(),
+            column_names: vec!["id".to_string(), "name".to_string()],
+            dependencies: vec!["users".to_string()],
+        };
+        view.validate()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_trigger_metadata_validation() -> Result<()> {
+        let trigger = Trigger {
+            name: "audit_users_insert".to_string(),
+            table_name: "users".to_string(),
+            event: TriggerEvent::Insert,
+            body_sql: "INSERT INTO audit_log (entry) VALUES (NEW.name)".to_string(),
+            old_alias: None,
+            new_alias: Some("NEW".to_string()),
+        };
+        trigger.validate()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_table_lists_named_constraints() -> Result<()> {
+        let columns = vec![
+            Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer).primary_key(true),
+            Column::new(ColumnId::new(2), "email".to_string(), DataType::Text),
+            Column::new(ColumnId::new(3), "org_id".to_string(), DataType::Integer),
+        ];
+        let mut table = Table::new(TableId::new(42), "users".to_string(), columns, 7)?;
+
+        table.add_secondary_index(crate::catalog::SecondaryIndex {
+            name: "uq_users_email".to_string(),
+            column_indices: vec![1],
+            root_page_id: 11,
+            unique: true,
+        })?;
+        table.add_check_constraint(CheckConstraint {
+            name: Some("chk_users_email".to_string()),
+            expression_sql: "email != ''".to_string(),
+        })?;
+        table.add_foreign_key(ForeignKeyConstraint {
+            name: Some("fk_users_org".to_string()),
+            column_indices: vec![2],
+            referenced_table: "orgs".to_string(),
+            referenced_columns: vec!["id".to_string()],
+            on_delete: ForeignKeyAction::Restrict,
+            on_update: ForeignKeyAction::Restrict,
+        })?;
+
+        let constraints = table.list_named_constraints();
+        assert!(constraints.iter().any(|constraint| {
+            constraint.name == "uq_users_email" && constraint.kind == NamedConstraintKind::Unique
+        }));
+        assert!(constraints.iter().any(|constraint| {
+            constraint.name == "chk_users_email" && constraint.kind == NamedConstraintKind::Check
+        }));
+        assert!(constraints.iter().any(|constraint| {
+            constraint.name == "fk_users_org"
+                && constraint.kind == NamedConstraintKind::ForeignKey
+        }));
+
+        Ok(())
     }
 
     #[test]

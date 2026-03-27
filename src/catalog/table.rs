@@ -3,6 +3,7 @@
 use super::column::Column;
 use super::ids::TableId;
 use super::types::Value;
+use crate::catalog::object::{NamedConstraint, NamedConstraintKind};
 use crate::HematiteError;
 use crate::Result;
 use std::collections::HashMap;
@@ -274,6 +275,41 @@ impl Table {
         Ok(())
     }
 
+    pub fn list_named_constraints(&self) -> Vec<NamedConstraint> {
+        let mut constraints = Vec::new();
+        constraints.extend(self.check_constraints.iter().filter_map(|constraint| {
+            constraint.name.as_ref().map(|name| NamedConstraint {
+                table_name: self.name.clone(),
+                name: name.clone(),
+                kind: NamedConstraintKind::Check,
+            })
+        }));
+        constraints.extend(self.foreign_keys.iter().filter_map(|constraint| {
+            constraint.name.as_ref().map(|name| NamedConstraint {
+                table_name: self.name.clone(),
+                name: name.clone(),
+                kind: NamedConstraintKind::ForeignKey,
+            })
+        }));
+        constraints.extend(
+            self.secondary_indexes
+                .iter()
+                .filter(|index| index.unique)
+                .map(|index| NamedConstraint {
+                    table_name: self.name.clone(),
+                    name: index.name.clone(),
+                    kind: NamedConstraintKind::Unique,
+                }),
+        );
+        constraints
+    }
+
+    pub fn named_constraint(&self, name: &str) -> Option<NamedConstraint> {
+        self.list_named_constraints()
+            .into_iter()
+            .find(|constraint| constraint.name == name)
+    }
+
     pub fn add_column(&mut self, column: Column) -> Result<()> {
         if self.column_indices.contains_key(&column.name) {
             return Err(HematiteError::StorageError(format!(
@@ -453,13 +489,9 @@ impl Table {
 
     pub fn add_check_constraint(&mut self, constraint: CheckConstraint) -> Result<()> {
         if let Some(name) = &constraint.name {
-            if self
-                .check_constraints
-                .iter()
-                .any(|existing| existing.name.as_deref() == Some(name.as_str()))
-            {
+            if self.named_constraint(name).is_some() {
                 return Err(HematiteError::StorageError(format!(
-                    "Check constraint '{}' already exists on table '{}'",
+                    "Constraint '{}' already exists on table '{}'",
                     name, self.name
                 )));
             }
@@ -471,13 +503,9 @@ impl Table {
     pub fn add_foreign_key(&mut self, constraint: ForeignKeyConstraint) -> Result<()> {
         constraint.validate_for_table(&self.name, self.columns.len())?;
         if let Some(name) = &constraint.name {
-            if self
-                .foreign_keys
-                .iter()
-                .any(|existing| existing.name.as_deref() == Some(name.as_str()))
-            {
+            if self.named_constraint(name).is_some() {
                 return Err(HematiteError::StorageError(format!(
-                    "Foreign key '{}' already exists on table '{}'",
+                    "Constraint '{}' already exists on table '{}'",
                     name, self.name
                 )));
             }
