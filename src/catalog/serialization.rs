@@ -1,6 +1,8 @@
 //! Relational row and index-key encoding.
 
-use crate::catalog::{DateTimeValue, DateValue, DecimalValue, Value};
+use crate::catalog::{
+    DateTimeValue, DateValue, DecimalValue, TimeValue, TimeWithTimeZoneValue, TimestampValue, Value,
+};
 use crate::error::{HematiteError, Result};
 
 use super::record::StoredRow;
@@ -35,6 +37,10 @@ impl RowCodec {
                     buffer.push(2);
                     write_bytes(&mut buffer, s.as_bytes());
                 }
+                Value::Enum(s) => {
+                    buffer.push(11);
+                    write_bytes(&mut buffer, s.as_bytes());
+                }
                 Value::Boolean(b) => {
                     buffer.push(3);
                     buffer.push(u8::from(*b));
@@ -55,9 +61,22 @@ impl RowCodec {
                     buffer.push(9);
                     buffer.extend_from_slice(&date.days_since_epoch().to_le_bytes());
                 }
+                Value::Time(time) => {
+                    buffer.push(12);
+                    buffer.extend_from_slice(&time.seconds_since_midnight().to_le_bytes());
+                }
                 Value::DateTime(datetime) => {
                     buffer.push(10);
                     buffer.extend_from_slice(&datetime.seconds_since_epoch().to_le_bytes());
+                }
+                Value::Timestamp(timestamp) => {
+                    buffer.push(13);
+                    buffer.extend_from_slice(&timestamp.seconds_since_epoch().to_le_bytes());
+                }
+                Value::TimeWithTimeZone(value) => {
+                    buffer.push(14);
+                    buffer.extend_from_slice(&value.seconds_since_midnight().to_le_bytes());
+                    buffer.extend_from_slice(&value.offset_minutes().to_le_bytes());
                 }
                 Value::Null => buffer.push(5),
             }
@@ -106,18 +125,14 @@ impl RowCodec {
             ));
         }
 
-        let row_id = u64::from_le_bytes(
-            data[offset..offset + 8]
-                .try_into()
-                .map_err(|_| HematiteError::CorruptedData("Stored row rowid is truncated".to_string()))?,
-        );
+        let row_id = u64::from_le_bytes(data[offset..offset + 8].try_into().map_err(|_| {
+            HematiteError::CorruptedData("Stored row rowid is truncated".to_string())
+        })?);
         offset += 8;
 
-        let value_count = u32::from_le_bytes(
-            data[offset..offset + 4]
-                .try_into()
-                .map_err(|_| HematiteError::CorruptedData("Stored row value count is truncated".to_string()))?,
-        ) as usize;
+        let value_count = u32::from_le_bytes(data[offset..offset + 4].try_into().map_err(|_| {
+            HematiteError::CorruptedData("Stored row value count is truncated".to_string())
+        })?) as usize;
         offset += 4;
 
         let payload_end = payload_len + 4;
@@ -144,6 +159,13 @@ impl RowCodec {
                     })?;
                     Value::Text(text)
                 }
+                11 => {
+                    let bytes = read_bytes(data, &mut offset, payload_end, "Enum value")?;
+                    let text = String::from_utf8(bytes).map_err(|_| {
+                        HematiteError::CorruptedData("Invalid UTF-8 in enum value".to_string())
+                    })?;
+                    Value::Enum(text)
+                }
                 3 => {
                     let bytes = read_exact(data, &mut offset, payload_end, 1, "Boolean value")?;
                     Value::Boolean(bytes[0] != 0)
@@ -165,12 +187,51 @@ impl RowCodec {
                         bytes.try_into().unwrap(),
                     )))
                 }
+                12 => {
+                    let bytes = read_exact(data, &mut offset, payload_end, 4, "Time value")?;
+                    Value::Time(TimeValue::from_seconds_since_midnight(u32::from_le_bytes(
+                        bytes.try_into().unwrap(),
+                    )))
+                }
                 10 => {
-                    let bytes =
-                        read_exact(data, &mut offset, payload_end, 8, "DateTime value")?;
+                    let bytes = read_exact(data, &mut offset, payload_end, 8, "DateTime value")?;
                     Value::DateTime(DateTimeValue::from_seconds_since_epoch(i64::from_le_bytes(
                         bytes.try_into().unwrap(),
                     )))
+                }
+                13 => {
+                    let bytes = read_exact(data, &mut offset, payload_end, 8, "Timestamp value")?;
+                    Value::Timestamp(TimestampValue::from_seconds_since_epoch(
+                        i64::from_le_bytes(bytes.try_into().unwrap()),
+                    ))
+                }
+                14 => {
+                    let seconds = u32::from_le_bytes(
+                        read_exact(
+                            data,
+                            &mut offset,
+                            payload_end,
+                            4,
+                            "Time with time zone seconds",
+                        )?
+                        .try_into()
+                        .unwrap(),
+                    );
+                    let offset_minutes = i16::from_le_bytes(
+                        read_exact(
+                            data,
+                            &mut offset,
+                            payload_end,
+                            2,
+                            "Time with time zone offset",
+                        )?
+                        .try_into()
+                        .unwrap(),
+                    );
+                    Value::TimeWithTimeZone(TimeWithTimeZoneValue::from_parts(
+                        seconds,
+                        offset_minutes,
+                    ))
                 }
                 _ => {
                     return Err(HematiteError::CorruptedData(format!(
@@ -290,6 +351,10 @@ fn encode_key_value(buffer: &mut Vec<u8>, value: &Value) {
             buffer.push(7);
             write_bytes(buffer, value.as_bytes());
         }
+        Value::Enum(value) => {
+            buffer.push(11);
+            write_bytes(buffer, value.as_bytes());
+        }
         Value::Blob(value) => {
             buffer.push(8);
             write_bytes(buffer, value);
@@ -298,9 +363,22 @@ fn encode_key_value(buffer: &mut Vec<u8>, value: &Value) {
             buffer.push(9);
             buffer.extend_from_slice(&(i32::to_be_bytes(value.days_since_epoch() ^ i32::MIN)));
         }
+        Value::Time(value) => {
+            buffer.push(12);
+            buffer.extend_from_slice(&value.seconds_since_midnight().to_be_bytes());
+        }
         Value::DateTime(value) => {
             buffer.push(10);
             buffer.extend_from_slice(&(i64::to_be_bytes(value.seconds_since_epoch() ^ i64::MIN)));
+        }
+        Value::Timestamp(value) => {
+            buffer.push(13);
+            buffer.extend_from_slice(&(i64::to_be_bytes(value.seconds_since_epoch() ^ i64::MIN)));
+        }
+        Value::TimeWithTimeZone(value) => {
+            buffer.push(14);
+            buffer.extend_from_slice(&value.seconds_since_midnight().to_be_bytes());
+            buffer.extend_from_slice(&(i16::to_be_bytes(value.offset_minutes() ^ i16::MIN)));
         }
     }
 }
@@ -366,9 +444,7 @@ fn read_decimal(data: &[u8], offset: &mut usize, end: usize) -> Result<DecimalVa
     let packed_len = digit_count.div_ceil(2);
     let packed = read_exact(data, offset, end, packed_len, "Decimal digits")?;
     let digits = read_packed_digits(packed, digit_count)?;
-    let mut decimal = DecimalValue::parse(
-        &format_decimal_digits(sign, &digits, scale as usize),
-    )?;
+    let mut decimal = DecimalValue::parse(&format_decimal_digits(sign, &digits, scale as usize))?;
     if decimal.digit_bytes().len() == 1 && decimal.digit_bytes()[0] == 0 {
         decimal = DecimalValue::zero();
     }
@@ -406,7 +482,11 @@ fn format_decimal_digits(negative: bool, digits: &[u8], scale: usize) -> String 
 fn write_packed_digits(buffer: &mut Vec<u8>, digits: &[u8]) {
     for chunk in digits.chunks(2) {
         let high = chunk[0] & 0x0F;
-        let low = if chunk.len() > 1 { chunk[1] & 0x0F } else { 0x0F };
+        let low = if chunk.len() > 1 {
+            chunk[1] & 0x0F
+        } else {
+            0x0F
+        };
         buffer.push((high << 4) | low);
     }
 }

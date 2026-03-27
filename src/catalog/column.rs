@@ -1,6 +1,9 @@
 //! Column definitions for database tables.
 
-use super::types::{DataType, DateTimeValue, DateValue, DecimalValue, Value};
+use super::types::{
+    DataType, DateTimeValue, DateValue, DecimalValue, TimeValue, TimeWithTimeZoneValue,
+    TimestampValue, Value,
+};
 use super::ColumnId;
 use crate::error::HematiteError;
 
@@ -59,7 +62,7 @@ impl Column {
             return self.nullable;
         }
 
-        if !value.is_compatible_with(self.data_type) {
+        if !value.is_compatible_with(self.data_type.clone()) {
             return false;
         }
 
@@ -67,7 +70,12 @@ impl Column {
             (DataType::TinyInt, Value::Integer(value)) => i8::try_from(*value).is_ok(),
             (DataType::SmallInt, Value::Integer(value)) => i16::try_from(*value).is_ok(),
             (DataType::Char(length), Value::Text(text))
-            | (DataType::VarChar(length), Value::Text(text)) => text.chars().count() <= *length as usize,
+            | (DataType::VarChar(length), Value::Text(text)) => {
+                text.chars().count() <= *length as usize
+            }
+            (DataType::Binary(length), Value::Blob(bytes))
+            | (DataType::VarBinary(length), Value::Blob(bytes)) => bytes.len() <= *length as usize,
+            (DataType::Enum(values), Value::Enum(value)) => values.contains(value),
             (DataType::Decimal { precision, scale }, Value::Decimal(value))
             | (DataType::Numeric { precision, scale }, Value::Decimal(value)) => {
                 value.fits_precision_scale(*precision, *scale)
@@ -91,14 +99,23 @@ impl Column {
                         DataType::Text | DataType::Char(_) | DataType::VarChar(_) => {
                             Value::Text(String::new())
                         }
+                        DataType::Binary(length) => Value::Blob(vec![0; *length as usize]),
+                        DataType::VarBinary(_) | DataType::Blob => Value::Blob(Vec::new()),
+                        DataType::Enum(values) => {
+                            Value::Enum(values.first().cloned().unwrap_or_default())
+                        }
                         DataType::Boolean => Value::Boolean(false),
                         DataType::Float | DataType::Real | DataType::Double => Value::Float(0.0),
                         DataType::Decimal { .. } | DataType::Numeric { .. } => {
                             Value::Decimal(DecimalValue::zero())
                         }
-                        DataType::Blob => Value::Blob(Vec::new()),
                         DataType::Date => Value::Date(DateValue::epoch()),
+                        DataType::Time => Value::Time(TimeValue::midnight()),
                         DataType::DateTime => Value::DateTime(DateTimeValue::epoch()),
+                        DataType::Timestamp => Value::Timestamp(TimestampValue::epoch()),
+                        DataType::TimeWithTimeZone => {
+                            Value::TimeWithTimeZone(TimeWithTimeZoneValue::utc_midnight())
+                        }
                     }
                 }
             }
@@ -154,9 +171,10 @@ impl Column {
                 "Invalid column name".to_string(),
             ));
         }
-        let name = String::from_utf8(buffer[*offset..*offset + name_len].to_vec()).map_err(|_| {
-            HematiteError::CorruptedData("Invalid UTF-8 in column name".to_string())
-        })?;
+        let name =
+            String::from_utf8(buffer[*offset..*offset + name_len].to_vec()).map_err(|_| {
+                HematiteError::CorruptedData("Invalid UTF-8 in column name".to_string())
+            })?;
         *offset += name_len;
 
         let data_type = read_data_type(buffer, offset)?;
@@ -201,23 +219,42 @@ fn write_data_type(buffer: &mut Vec<u8>, data_type: &DataType) {
             buffer.push(6);
             buffer.extend_from_slice(&length.to_le_bytes());
         }
-        DataType::Boolean => buffer.push(7),
-        DataType::Float => buffer.push(8),
-        DataType::Real => buffer.push(9),
-        DataType::Double => buffer.push(10),
+        DataType::Binary(length) => {
+            buffer.push(7);
+            buffer.extend_from_slice(&length.to_le_bytes());
+        }
+        DataType::VarBinary(length) => {
+            buffer.push(8);
+            buffer.extend_from_slice(&length.to_le_bytes());
+        }
+        DataType::Enum(values) => {
+            buffer.push(9);
+            buffer.extend_from_slice(&(values.len() as u32).to_le_bytes());
+            for value in values {
+                buffer.extend_from_slice(&(value.len() as u32).to_le_bytes());
+                buffer.extend_from_slice(value.as_bytes());
+            }
+        }
+        DataType::Boolean => buffer.push(10),
+        DataType::Float => buffer.push(11),
+        DataType::Real => buffer.push(12),
+        DataType::Double => buffer.push(13),
         DataType::Decimal { precision, scale } => {
-            buffer.push(11);
+            buffer.push(14);
             write_optional_u32(buffer, *precision);
             write_optional_u32(buffer, *scale);
         }
         DataType::Numeric { precision, scale } => {
-            buffer.push(12);
+            buffer.push(15);
             write_optional_u32(buffer, *precision);
             write_optional_u32(buffer, *scale);
         }
-        DataType::Blob => buffer.push(13),
-        DataType::Date => buffer.push(14),
-        DataType::DateTime => buffer.push(15),
+        DataType::Blob => buffer.push(16),
+        DataType::Date => buffer.push(17),
+        DataType::Time => buffer.push(18),
+        DataType::DateTime => buffer.push(19),
+        DataType::Timestamp => buffer.push(20),
+        DataType::TimeWithTimeZone => buffer.push(21),
     }
 }
 
@@ -239,21 +276,39 @@ fn read_data_type(buffer: &[u8], offset: &mut usize) -> Result<DataType, Hematit
         4 => DataType::Text,
         5 => DataType::Char(read_u32(buffer, offset, "CHAR length")?),
         6 => DataType::VarChar(read_u32(buffer, offset, "VARCHAR length")?),
-        7 => DataType::Boolean,
-        8 => DataType::Float,
-        9 => DataType::Real,
-        10 => DataType::Double,
-        11 => DataType::Decimal {
+        7 => DataType::Binary(read_u32(buffer, offset, "BINARY length")?),
+        8 => DataType::VarBinary(read_u32(buffer, offset, "VARBINARY length")?),
+        9 => {
+            let count = read_u32(buffer, offset, "ENUM value count")? as usize;
+            let mut values = Vec::with_capacity(count);
+            for _ in 0..count {
+                let len = read_u32(buffer, offset, "ENUM value length")? as usize;
+                let bytes = read_fixed(buffer, offset, len, "ENUM value")?;
+                let value = String::from_utf8(bytes.to_vec()).map_err(|_| {
+                    HematiteError::CorruptedData("Invalid UTF-8 in ENUM value".to_string())
+                })?;
+                values.push(value);
+            }
+            DataType::Enum(values)
+        }
+        10 => DataType::Boolean,
+        11 => DataType::Float,
+        12 => DataType::Real,
+        13 => DataType::Double,
+        14 => DataType::Decimal {
             precision: read_optional_u32(buffer, offset, "DECIMAL precision")?,
             scale: read_optional_u32(buffer, offset, "DECIMAL scale")?,
         },
-        12 => DataType::Numeric {
+        15 => DataType::Numeric {
             precision: read_optional_u32(buffer, offset, "NUMERIC precision")?,
             scale: read_optional_u32(buffer, offset, "NUMERIC scale")?,
         },
-        13 => DataType::Blob,
-        14 => DataType::Date,
-        15 => DataType::DateTime,
+        16 => DataType::Blob,
+        17 => DataType::Date,
+        18 => DataType::Time,
+        19 => DataType::DateTime,
+        20 => DataType::Timestamp,
+        21 => DataType::TimeWithTimeZone,
         _ => {
             return Err(HematiteError::CorruptedData(
                 "Invalid data type".to_string(),
@@ -304,6 +359,11 @@ fn write_optional_value(buffer: &mut Vec<u8>, value: Option<&Value>) {
             buffer.extend_from_slice(&(value.len() as u32).to_le_bytes());
             buffer.extend_from_slice(value.as_bytes());
         }
+        Some(Value::Enum(value)) => {
+            buffer.push(10);
+            buffer.extend_from_slice(&(value.len() as u32).to_le_bytes());
+            buffer.extend_from_slice(value.as_bytes());
+        }
         Some(Value::Boolean(value)) => {
             buffer.push(2);
             buffer.push(u8::from(*value));
@@ -331,9 +391,22 @@ fn write_optional_value(buffer: &mut Vec<u8>, value: Option<&Value>) {
             buffer.push(7);
             buffer.extend_from_slice(&value.days_since_epoch().to_le_bytes());
         }
+        Some(Value::Time(value)) => {
+            buffer.push(11);
+            buffer.extend_from_slice(&value.seconds_since_midnight().to_le_bytes());
+        }
         Some(Value::DateTime(value)) => {
             buffer.push(8);
             buffer.extend_from_slice(&value.seconds_since_epoch().to_le_bytes());
+        }
+        Some(Value::Timestamp(value)) => {
+            buffer.push(12);
+            buffer.extend_from_slice(&value.seconds_since_epoch().to_le_bytes());
+        }
+        Some(Value::TimeWithTimeZone(value)) => {
+            buffer.push(13);
+            buffer.extend_from_slice(&value.seconds_since_midnight().to_le_bytes());
+            buffer.extend_from_slice(&value.offset_minutes().to_le_bytes());
         }
         Some(Value::Null) => buffer.push(9),
     }
@@ -365,6 +438,14 @@ fn read_optional_value(buffer: &[u8], offset: &mut usize) -> Result<Option<Value
             })?;
             Some(Value::Text(text))
         }
+        10 => {
+            let len = read_u32(buffer, offset, "default enum length")? as usize;
+            let bytes = read_fixed(buffer, offset, len, "default enum")?;
+            let text = String::from_utf8(bytes.to_vec()).map_err(|_| {
+                HematiteError::CorruptedData("Invalid UTF-8 in default enum".to_string())
+            })?;
+            Some(Value::Enum(text))
+        }
         2 => {
             let value = read_fixed(buffer, offset, 1, "default boolean")?[0] != 0;
             Some(Value::Boolean(value))
@@ -391,13 +472,15 @@ fn read_optional_value(buffer: &[u8], offset: &mut usize) -> Result<Option<Value
             let text = String::from_utf8(bytes.to_vec()).map_err(|_| {
                 HematiteError::CorruptedData("Invalid UTF-8 in default decimal".to_string())
             })?;
-            Some(Value::Decimal(DecimalValue::parse(&text).map_err(|_| {
-                HematiteError::CorruptedData("Invalid default decimal".to_string())
-            })?))
+            Some(Value::Decimal(DecimalValue::parse(&text).map_err(
+                |_| HematiteError::CorruptedData("Invalid default decimal".to_string()),
+            )?))
         }
         6 => {
             let len = read_u32(buffer, offset, "default blob length")? as usize;
-            Some(Value::Blob(read_fixed(buffer, offset, len, "default blob")?.to_vec()))
+            Some(Value::Blob(
+                read_fixed(buffer, offset, len, "default blob")?.to_vec(),
+            ))
         }
         7 => {
             let days = i32::from_le_bytes(
@@ -407,6 +490,14 @@ fn read_optional_value(buffer: &[u8], offset: &mut usize) -> Result<Option<Value
             );
             Some(Value::Date(DateValue::from_days_since_epoch(days)))
         }
+        11 => {
+            let seconds = u32::from_le_bytes(
+                read_fixed(buffer, offset, 4, "default time")?
+                    .try_into()
+                    .unwrap(),
+            );
+            Some(Value::Time(TimeValue::from_seconds_since_midnight(seconds)))
+        }
         8 => {
             let seconds = i64::from_le_bytes(
                 read_fixed(buffer, offset, 8, "default datetime")?
@@ -415,6 +506,32 @@ fn read_optional_value(buffer: &[u8], offset: &mut usize) -> Result<Option<Value
             );
             Some(Value::DateTime(DateTimeValue::from_seconds_since_epoch(
                 seconds,
+            )))
+        }
+        12 => {
+            let seconds = i64::from_le_bytes(
+                read_fixed(buffer, offset, 8, "default timestamp")?
+                    .try_into()
+                    .unwrap(),
+            );
+            Some(Value::Timestamp(TimestampValue::from_seconds_since_epoch(
+                seconds,
+            )))
+        }
+        13 => {
+            let seconds = u32::from_le_bytes(
+                read_fixed(buffer, offset, 4, "default time with time zone seconds")?
+                    .try_into()
+                    .unwrap(),
+            );
+            let offset_minutes = i16::from_le_bytes(
+                read_fixed(buffer, offset, 2, "default time with time zone offset")?
+                    .try_into()
+                    .unwrap(),
+            );
+            Some(Value::TimeWithTimeZone(TimeWithTimeZoneValue::from_parts(
+                seconds,
+                offset_minutes,
             )))
         }
         9 => Some(Value::Null),

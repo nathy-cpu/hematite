@@ -5,7 +5,7 @@ use std::fmt;
 
 use crate::error::{HematiteError, Result};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DataType {
     TinyInt,
     SmallInt,
@@ -14,6 +14,9 @@ pub enum DataType {
     Text,
     Char(u32),
     VarChar(u32),
+    Binary(u32),
+    VarBinary(u32),
+    Enum(Vec<String>),
     Boolean,
     Float,
     Real,
@@ -28,7 +31,10 @@ pub enum DataType {
     },
     Blob,
     Date,
+    Time,
     DateTime,
+    Timestamp,
+    TimeWithTimeZone,
 }
 
 impl DataType {
@@ -40,6 +46,8 @@ impl DataType {
             DataType::BigInt => 8,
             DataType::Text => 255,
             DataType::Char(length) | DataType::VarChar(length) => *length as usize,
+            DataType::Binary(length) | DataType::VarBinary(length) => *length as usize,
+            DataType::Enum(values) => values.iter().map(|value| value.len()).max().unwrap_or(0),
             DataType::Boolean => 1,
             DataType::Float => 8,
             DataType::Real => 4,
@@ -49,7 +57,10 @@ impl DataType {
             }
             DataType::Blob => 255,
             DataType::Date => 4,
+            DataType::Time => 4,
             DataType::DateTime => 8,
+            DataType::Timestamp => 8,
+            DataType::TimeWithTimeZone => 6,
         }
     }
 
@@ -62,6 +73,16 @@ impl DataType {
             DataType::Text => "TEXT".to_string(),
             DataType::Char(length) => format!("CHAR({length})"),
             DataType::VarChar(length) => format!("VARCHAR({length})"),
+            DataType::Binary(length) => format!("BINARY({length})"),
+            DataType::VarBinary(length) => format!("VARBINARY({length})"),
+            DataType::Enum(values) => format!(
+                "ENUM({})",
+                values
+                    .iter()
+                    .map(|value| format!("'{}'", value.replace('\'', "''")))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             DataType::Boolean => "BOOLEAN".to_string(),
             DataType::Float => "FLOAT".to_string(),
             DataType::Real => "REAL".to_string(),
@@ -74,7 +95,10 @@ impl DataType {
             }
             DataType::Blob => "BLOB".to_string(),
             DataType::Date => "DATE".to_string(),
+            DataType::Time => "TIME".to_string(),
             DataType::DateTime => "DATETIME".to_string(),
+            DataType::Timestamp => "TIMESTAMP".to_string(),
+            DataType::TimeWithTimeZone => "TIME WITH TIME ZONE".to_string(),
         }
     }
 
@@ -87,6 +111,9 @@ impl DataType {
             DataType::Text => "TEXT",
             DataType::Char(_) => "CHAR",
             DataType::VarChar(_) => "VARCHAR",
+            DataType::Binary(_) => "BINARY",
+            DataType::VarBinary(_) => "VARBINARY",
+            DataType::Enum(_) => "ENUM",
             DataType::Boolean => "BOOLEAN",
             DataType::Float => "FLOAT",
             DataType::Real => "REAL",
@@ -95,7 +122,10 @@ impl DataType {
             DataType::Numeric { .. } => "NUMERIC",
             DataType::Blob => "BLOB",
             DataType::Date => "DATE",
+            DataType::Time => "TIME",
             DataType::DateTime => "DATETIME",
+            DataType::Timestamp => "TIMESTAMP",
+            DataType::TimeWithTimeZone => "TIME WITH TIME ZONE",
         }
     }
 
@@ -334,7 +364,9 @@ pub struct DateValue {
 
 impl DateValue {
     pub fn epoch() -> Self {
-        Self { days_since_epoch: 0 }
+        Self {
+            days_since_epoch: 0,
+        }
     }
 
     pub fn parse(input: &str) -> Result<Self> {
@@ -344,7 +376,9 @@ impl DateValue {
             || parts[0].len() != 4
             || parts[1].len() != 2
             || parts[2].len() != 2
-            || !parts.iter().all(|part| part.chars().all(|ch| ch.is_ascii_digit()))
+            || !parts
+                .iter()
+                .all(|part| part.chars().all(|ch| ch.is_ascii_digit()))
         {
             return Err(HematiteError::ParseError(format!(
                 "Invalid DATE value '{}'",
@@ -352,15 +386,15 @@ impl DateValue {
             )));
         }
 
-        let year = parts[0].parse::<i32>().map_err(|_| {
-            HematiteError::ParseError(format!("Invalid DATE value '{}'", input))
-        })?;
-        let month = parts[1].parse::<u32>().map_err(|_| {
-            HematiteError::ParseError(format!("Invalid DATE value '{}'", input))
-        })?;
-        let day = parts[2].parse::<u32>().map_err(|_| {
-            HematiteError::ParseError(format!("Invalid DATE value '{}'", input))
-        })?;
+        let year = parts[0]
+            .parse::<i32>()
+            .map_err(|_| HematiteError::ParseError(format!("Invalid DATE value '{}'", input)))?;
+        let month = parts[1]
+            .parse::<u32>()
+            .map_err(|_| HematiteError::ParseError(format!("Invalid DATE value '{}'", input)))?;
+        let day = parts[2]
+            .parse::<u32>()
+            .map_err(|_| HematiteError::ParseError(format!("Invalid DATE value '{}'", input)))?;
         validate_date_components(year, month, day, input)?;
         Ok(Self {
             days_since_epoch: days_from_civil(year, month, day),
@@ -380,6 +414,46 @@ impl fmt::Display for DateValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let (year, month, day) = civil_from_days(self.days_since_epoch);
         write!(f, "{year:04}-{month:02}-{day:02}")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TimeValue {
+    seconds_since_midnight: u32,
+}
+
+impl TimeValue {
+    pub fn midnight() -> Self {
+        Self {
+            seconds_since_midnight: 0,
+        }
+    }
+
+    pub fn parse(input: &str) -> Result<Self> {
+        let value = input.trim();
+        let (hour, minute, second) = parse_time_components(value, "TIME")?;
+        Ok(Self {
+            seconds_since_midnight: hour * 3_600 + minute * 60 + second,
+        })
+    }
+
+    pub fn from_seconds_since_midnight(seconds_since_midnight: u32) -> Self {
+        Self {
+            seconds_since_midnight: seconds_since_midnight % 86_400,
+        }
+    }
+
+    pub fn seconds_since_midnight(self) -> u32 {
+        self.seconds_since_midnight
+    }
+}
+
+impl fmt::Display for TimeValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let hour = self.seconds_since_midnight / 3_600;
+        let minute = (self.seconds_since_midnight % 3_600) / 60;
+        let second = self.seconds_since_midnight % 60;
+        write!(f, "{hour:02}:{minute:02}:{second:02}")
     }
 }
 
@@ -407,33 +481,7 @@ impl DateTimeValue {
             )));
         }
         let date = DateValue::parse(date)?;
-        let time_parts = time.split(':').collect::<Vec<_>>();
-        if time_parts.len() != 3
-            || time_parts.iter().any(|part| part.len() != 2)
-            || !time_parts
-                .iter()
-                .all(|part| part.chars().all(|ch| ch.is_ascii_digit()))
-        {
-            return Err(HematiteError::ParseError(format!(
-                "Invalid DATETIME value '{}'",
-                input
-            )));
-        }
-        let hour = time_parts[0].parse::<u32>().map_err(|_| {
-            HematiteError::ParseError(format!("Invalid DATETIME value '{}'", input))
-        })?;
-        let minute = time_parts[1].parse::<u32>().map_err(|_| {
-            HematiteError::ParseError(format!("Invalid DATETIME value '{}'", input))
-        })?;
-        let second = time_parts[2].parse::<u32>().map_err(|_| {
-            HematiteError::ParseError(format!("Invalid DATETIME value '{}'", input))
-        })?;
-        if hour > 23 || minute > 59 || second > 59 {
-            return Err(HematiteError::ParseError(format!(
-                "Invalid DATETIME value '{}'",
-                input
-            )));
-        }
+        let (hour, minute, second) = parse_time_components(time, "DATETIME")?;
 
         Ok(Self {
             seconds_since_epoch: date.days_since_epoch as i64 * 86_400
@@ -469,17 +517,122 @@ impl fmt::Display for DateTimeValue {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TimestampValue {
+    seconds_since_epoch: i64,
+}
+
+impl TimestampValue {
+    pub fn epoch() -> Self {
+        Self {
+            seconds_since_epoch: 0,
+        }
+    }
+
+    pub fn parse(input: &str) -> Result<Self> {
+        Ok(Self {
+            seconds_since_epoch: DateTimeValue::parse(input)?.seconds_since_epoch(),
+        })
+    }
+
+    pub fn from_seconds_since_epoch(seconds_since_epoch: i64) -> Self {
+        Self {
+            seconds_since_epoch,
+        }
+    }
+
+    pub fn seconds_since_epoch(self) -> i64 {
+        self.seconds_since_epoch
+    }
+}
+
+impl fmt::Display for TimestampValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        DateTimeValue::from_seconds_since_epoch(self.seconds_since_epoch).fmt(f)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TimeWithTimeZoneValue {
+    seconds_since_midnight: u32,
+    offset_minutes: i16,
+}
+
+impl TimeWithTimeZoneValue {
+    pub fn utc_midnight() -> Self {
+        Self {
+            seconds_since_midnight: 0,
+            offset_minutes: 0,
+        }
+    }
+
+    pub fn parse(input: &str) -> Result<Self> {
+        let value = input.trim();
+        let split = value
+            .rfind(['+', '-'])
+            .filter(|index| *index > 0)
+            .ok_or_else(|| {
+                HematiteError::ParseError(format!("Invalid TIME WITH TIME ZONE value '{}'", input))
+            })?;
+        let (time, offset) = value.split_at(split);
+        let time = TimeValue::parse(time).map_err(|_| {
+            HematiteError::ParseError(format!("Invalid TIME WITH TIME ZONE value '{}'", input))
+        })?;
+        let offset_minutes = parse_timezone_offset(offset, input)?;
+        Ok(Self {
+            seconds_since_midnight: time.seconds_since_midnight(),
+            offset_minutes,
+        })
+    }
+
+    pub fn from_parts(seconds_since_midnight: u32, offset_minutes: i16) -> Self {
+        Self {
+            seconds_since_midnight: seconds_since_midnight % 86_400,
+            offset_minutes,
+        }
+    }
+
+    pub fn seconds_since_midnight(self) -> u32 {
+        self.seconds_since_midnight
+    }
+
+    pub fn offset_minutes(self) -> i16 {
+        self.offset_minutes
+    }
+}
+
+impl fmt::Display for TimeWithTimeZoneValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let sign = if self.offset_minutes < 0 { '-' } else { '+' };
+        let offset = self.offset_minutes.unsigned_abs();
+        let offset_hours = offset / 60;
+        let offset_minutes = offset % 60;
+        write!(
+            f,
+            "{}{}{:02}:{:02}",
+            TimeValue::from_seconds_since_midnight(self.seconds_since_midnight),
+            sign,
+            offset_hours,
+            offset_minutes
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Integer(i32),
     BigInt(i64),
     Text(String),
+    Enum(String),
     Boolean(bool),
     Float(f64),
     Decimal(DecimalValue),
     Blob(Vec<u8>),
     Date(DateValue),
+    Time(TimeValue),
     DateTime(DateTimeValue),
+    Timestamp(TimestampValue),
+    TimeWithTimeZone(TimeWithTimeZoneValue),
     Null,
 }
 
@@ -489,6 +642,7 @@ impl Value {
             Value::Integer(_) => DataType::Integer,
             Value::BigInt(_) => DataType::BigInt,
             Value::Text(_) => DataType::Text,
+            Value::Enum(_) => DataType::Enum(Vec::new()),
             Value::Boolean(_) => DataType::Boolean,
             Value::Float(_) => DataType::Float,
             Value::Decimal(_) => DataType::Decimal {
@@ -497,7 +651,10 @@ impl Value {
             },
             Value::Blob(_) => DataType::Blob,
             Value::Date(_) => DataType::Date,
+            Value::Time(_) => DataType::Time,
             Value::DateTime(_) => DataType::DateTime,
+            Value::Timestamp(_) => DataType::Timestamp,
+            Value::TimeWithTimeZone(_) => DataType::TimeWithTimeZone,
             Value::Null => DataType::Text,
         }
     }
@@ -511,6 +668,10 @@ impl Value {
             (Value::Text(_), DataType::Text)
             | (Value::Text(_), DataType::Char(_))
             | (Value::Text(_), DataType::VarChar(_)) => true,
+            (Value::Blob(_), DataType::Binary(_)) | (Value::Blob(_), DataType::VarBinary(_)) => {
+                true
+            }
+            (Value::Enum(value), DataType::Enum(values)) => values.contains(value),
             (Value::Boolean(_), DataType::Boolean) => true,
             (Value::Float(_), DataType::Float)
             | (Value::Float(_), DataType::Real)
@@ -521,7 +682,10 @@ impl Value {
             }
             (Value::Blob(_), DataType::Blob) => true,
             (Value::Date(_), DataType::Date) => true,
+            (Value::Time(_), DataType::Time) => true,
             (Value::DateTime(_), DataType::DateTime) => true,
+            (Value::Timestamp(_), DataType::Timestamp) => true,
+            (Value::TimeWithTimeZone(_), DataType::TimeWithTimeZone) => true,
             (Value::Null, _) => true,
             _ => false,
         }
@@ -537,9 +701,13 @@ impl Value {
     pub fn as_text(&self) -> Option<String> {
         match self {
             Value::Text(s) => Some(s.clone()),
+            Value::Enum(s) => Some(s.clone()),
             Value::Decimal(s) => Some(s.to_string()),
             Value::Date(s) => Some(s.to_string()),
+            Value::Time(s) => Some(s.to_string()),
             Value::DateTime(s) => Some(s.to_string()),
+            Value::Timestamp(s) => Some(s.to_string()),
+            Value::TimeWithTimeZone(s) => Some(s.to_string()),
             _ => None,
         }
     }
@@ -586,17 +754,82 @@ impl PartialOrd for Value {
             (Value::Integer(a), Value::Integer(b)) => a.partial_cmp(b),
             (Value::BigInt(a), Value::BigInt(b)) => a.partial_cmp(b),
             (Value::Text(a), Value::Text(b)) => a.partial_cmp(b),
+            (Value::Enum(a), Value::Enum(b)) => a.partial_cmp(b),
             (Value::Boolean(a), Value::Boolean(b)) => a.partial_cmp(b),
             (Value::Float(a), Value::Float(b)) => a.partial_cmp(b),
             (Value::Decimal(a), Value::Decimal(b)) => a.partial_cmp(b),
             (Value::Blob(a), Value::Blob(b)) => a.partial_cmp(b),
             (Value::Date(a), Value::Date(b)) => a.partial_cmp(b),
+            (Value::Time(a), Value::Time(b)) => a.partial_cmp(b),
             (Value::DateTime(a), Value::DateTime(b)) => a.partial_cmp(b),
+            (Value::Timestamp(a), Value::Timestamp(b)) => a.partial_cmp(b),
+            (Value::TimeWithTimeZone(a), Value::TimeWithTimeZone(b)) => a.partial_cmp(b),
             (Value::Null, _) => Some(Ordering::Less),
             (_, Value::Null) => Some(Ordering::Greater),
             _ => None,
         }
     }
+}
+
+fn parse_time_components(input: &str, type_name: &str) -> Result<(u32, u32, u32)> {
+    let parts = input.split(':').collect::<Vec<_>>();
+    if parts.len() != 3
+        || parts.iter().any(|part| part.len() != 2)
+        || !parts
+            .iter()
+            .all(|part| part.chars().all(|ch| ch.is_ascii_digit()))
+    {
+        return Err(HematiteError::ParseError(format!(
+            "Invalid {} value '{}'",
+            type_name, input
+        )));
+    }
+    let hour = parts[0].parse::<u32>().map_err(|_| {
+        HematiteError::ParseError(format!("Invalid {} value '{}'", type_name, input))
+    })?;
+    let minute = parts[1].parse::<u32>().map_err(|_| {
+        HematiteError::ParseError(format!("Invalid {} value '{}'", type_name, input))
+    })?;
+    let second = parts[2].parse::<u32>().map_err(|_| {
+        HematiteError::ParseError(format!("Invalid {} value '{}'", type_name, input))
+    })?;
+    if hour > 23 || minute > 59 || second > 59 {
+        return Err(HematiteError::ParseError(format!(
+            "Invalid {} value '{}'",
+            type_name, input
+        )));
+    }
+    Ok((hour, minute, second))
+}
+
+fn parse_timezone_offset(offset: &str, input: &str) -> Result<i16> {
+    if offset.len() != 6
+        || !matches!(offset.as_bytes()[0], b'+' | b'-')
+        || offset.as_bytes()[3] != b':'
+        || !offset[1..3].chars().all(|ch| ch.is_ascii_digit())
+        || !offset[4..6].chars().all(|ch| ch.is_ascii_digit())
+    {
+        return Err(HematiteError::ParseError(format!(
+            "Invalid TIME WITH TIME ZONE value '{}'",
+            input
+        )));
+    }
+
+    let sign = if offset.as_bytes()[0] == b'-' { -1 } else { 1 };
+    let hours = offset[1..3].parse::<i16>().map_err(|_| {
+        HematiteError::ParseError(format!("Invalid TIME WITH TIME ZONE value '{}'", input))
+    })?;
+    let minutes = offset[4..6].parse::<i16>().map_err(|_| {
+        HematiteError::ParseError(format!("Invalid TIME WITH TIME ZONE value '{}'", input))
+    })?;
+    if hours > 23 || minutes > 59 {
+        return Err(HematiteError::ParseError(format!(
+            "Invalid TIME WITH TIME ZONE value '{}'",
+            input
+        )));
+    }
+
+    Ok(sign * (hours * 60 + minutes))
 }
 
 fn validate_date_components(year: i32, month: u32, day: u32, input: &str) -> Result<()> {

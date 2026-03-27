@@ -1478,6 +1478,23 @@ mod parser_tests {
     }
 
     #[test]
+    fn test_parse_additional_temporal_binary_and_enum_types() -> Result<()> {
+        let create = parse_create(
+            "CREATE TABLE typed (id INTEGER PRIMARY KEY, at TIME, stamped TIMESTAMP, zone_time TIME WITH TIME ZONE, code BINARY(4), bytes VARBINARY(16), state ENUM('draft', 'live'));",
+        )?;
+        assert_eq!(create.columns[1].data_type, SqlTypeName::Time);
+        assert_eq!(create.columns[2].data_type, SqlTypeName::Timestamp);
+        assert_eq!(create.columns[3].data_type, SqlTypeName::TimeWithTimeZone);
+        assert_eq!(create.columns[4].data_type, SqlTypeName::Binary(4));
+        assert_eq!(create.columns[5].data_type, SqlTypeName::VarBinary(16));
+        assert_eq!(
+            create.columns[6].data_type,
+            SqlTypeName::Enum(vec!["draft".to_string(), "live".to_string()])
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_create_with_check_and_foreign_key_constraints() -> Result<()> {
         let create = parse_create(
             "CREATE TABLE posts (id INT PRIMARY KEY, user_id INT REFERENCES users(id), title TEXT CHECK (title != ''), CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id), CHECK (id > 0));",

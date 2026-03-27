@@ -23,7 +23,10 @@ use crate::catalog::table::{
     CheckConstraint, ForeignKeyAction as CatalogForeignKeyAction, ForeignKeyConstraint,
 };
 use crate::catalog::StoredRow;
-use crate::catalog::{Column, DataType, DateTimeValue, DateValue, DecimalValue, Table, Value};
+use crate::catalog::{
+    Column, DataType, DateTimeValue, DateValue, DecimalValue, Table, TimeValue,
+    TimeWithTimeZoneValue, TimestampValue, Value,
+};
 use crate::error::{HematiteError, Result};
 use crate::parser::ast::*;
 use crate::query::lowering::{lower_literal_value, lower_type_name, raise_literal_value};
@@ -245,7 +248,7 @@ impl SelectExecutor {
             ))),
             Expression::Cast { expr, target_type } => cast_value_to_type(
                 self.evaluate_expression(ctx, cache, sources, expr, row)?,
-                lower_type_name(*target_type),
+                lower_type_name(target_type.clone()),
             ),
             Expression::Case {
                 branches,
@@ -1785,7 +1788,7 @@ impl SelectExecutor {
                     output_columns,
                     group_rows,
                 )?,
-                lower_type_name(*target_type),
+                lower_type_name(target_type.clone()),
             ),
             Expression::Case {
                 branches,
@@ -2784,7 +2787,7 @@ impl InsertExecutor {
             ))),
             Expression::Cast { expr, target_type } => cast_value_to_type(
                 self.evaluate_value_expression(expr)?,
-                lower_type_name(*target_type),
+                lower_type_name(target_type.clone()),
             ),
             Expression::Case {
                 branches,
@@ -2996,23 +2999,25 @@ impl InsertExecutor {
         table: &Table,
         candidate_row: &[Value],
     ) -> Result<Option<StoredRow>> {
-        let mut conflict_row: Option<StoredRow> = ctx.engine.lookup_row_by_primary_key(
-            table,
-            &primary_key_values(table, candidate_row)?,
-        )?;
+        let mut conflict_row: Option<StoredRow> = ctx
+            .engine
+            .lookup_row_by_primary_key(table, &primary_key_values(table, candidate_row)?)?;
 
         for index in table.secondary_indexes.iter().filter(|index| index.unique) {
             let key_values = secondary_index_key_values(index, candidate_row);
-            for row_id in ctx
-                .engine
-                .lookup_secondary_index_rowids(table, &index.name, &key_values)?
+            for row_id in
+                ctx.engine
+                    .lookup_secondary_index_rowids(table, &index.name, &key_values)?
             {
-                let row = ctx.engine.lookup_row_by_rowid(&table.name, row_id)?.ok_or_else(|| {
-                    HematiteError::CorruptedData(format!(
-                        "Unique index '{}' points at missing rowid {} in table '{}'",
-                        index.name, row_id, table.name
-                    ))
-                })?;
+                let row = ctx
+                    .engine
+                    .lookup_row_by_rowid(&table.name, row_id)?
+                    .ok_or_else(|| {
+                        HematiteError::CorruptedData(format!(
+                            "Unique index '{}' points at missing rowid {} in table '{}'",
+                            index.name, row_id, table.name
+                        ))
+                    })?;
                 if let Some(existing) = &conflict_row {
                     if existing.row_id != row.row_id {
                         return Err(HematiteError::ParseError(format!(
@@ -3162,7 +3167,11 @@ impl QueryExecutor for InsertExecutor {
                     ExecutionProgram::Select {
                         statement,
                         access_path,
-                    } => SelectExecutor::new(statement, access_path).execute(ctx)?.rows,
+                    } => {
+                        SelectExecutor::new(statement, access_path)
+                            .execute(ctx)?
+                            .rows
+                    }
                     _ => {
                         return Err(HematiteError::InternalError(
                             "Expected SELECT execution program for INSERT source".to_string(),
@@ -3175,7 +3184,9 @@ impl QueryExecutor for InsertExecutor {
         for value_row in &input_rows {
             let row_values = self.build_row_with_metadata(ctx, &table, value_row)?;
             if let Some(assignments) = &self.statement.on_duplicate {
-                if let Some(conflicting_row) = self.find_conflicting_row(ctx, &table, &row_values)? {
+                if let Some(conflicting_row) =
+                    self.find_conflicting_row(ctx, &table, &row_values)?
+                {
                     self.apply_on_duplicate_assignments(ctx, &table, conflicting_row, assignments)?;
                     continue;
                 }
@@ -3550,14 +3561,15 @@ impl CreateExecutor {
             let mut column = Column::new(
                 crate::catalog::ColumnId::new(next_id),
                 col_def.name.clone(),
-                lower_type_name(col_def.data_type),
+                lower_type_name(col_def.data_type.clone()),
             )
             .nullable(col_def.nullable)
             .primary_key(col_def.primary_key)
             .auto_increment(col_def.auto_increment);
 
             if let Some(default_val) = &col_def.default_value {
-                let coerced_default = coerce_column_value(&column, lower_literal_value(default_val))?;
+                let coerced_default =
+                    coerce_column_value(&column, lower_literal_value(default_val))?;
                 column = column.default_value(coerced_default);
             }
 
@@ -3826,7 +3838,7 @@ impl QueryExecutor for AlterExecutor {
                 let column = Column::new(
                     crate::catalog::ColumnId::new(ctx.catalog.next_column_id()),
                     column_def.name.clone(),
-                    lower_type_name(column_def.data_type),
+                    lower_type_name(column_def.data_type.clone()),
                 )
                 .nullable(column_def.nullable)
                 .primary_key(column_def.primary_key);
@@ -3877,7 +3889,10 @@ impl QueryExecutor for AlterExecutor {
                 ctx.catalog.set_column_default(
                     table.id,
                     column_name,
-                    Some(coerce_column_value(column, lower_literal_value(default_value))?),
+                    Some(coerce_column_value(
+                        column,
+                        lower_literal_value(default_value),
+                    )?),
                 )?;
             }
             AlterOperation::AlterColumnDropDefault { column_name } => {
@@ -4109,6 +4124,31 @@ fn coerce_text_value(value: String, max_chars: u32, label: &str) -> Result<Value
     Ok(Value::Text(value))
 }
 
+fn coerce_binary_value(value: Value, max_len: u32, label: &str, fixed: bool) -> Result<Value> {
+    let mut bytes = match value {
+        Value::Blob(bytes) => bytes,
+        Value::Text(value) => value.into_bytes(),
+        Value::Enum(value) => value.into_bytes(),
+        value => {
+            return Err(HematiteError::ParseError(format!(
+                "Expected binary-compatible value for {}, found {:?}",
+                label, value
+            )))
+        }
+    };
+
+    if bytes.len() > max_len as usize {
+        return Err(HematiteError::ParseError(format!(
+            "{} exceeds declared byte length {}",
+            label, max_len
+        )));
+    }
+    if fixed {
+        bytes.resize(max_len as usize, 0);
+    }
+    Ok(Value::Blob(bytes))
+}
+
 fn coerce_decimal_value(value: Value) -> Result<DecimalValue> {
     match value {
         Value::Decimal(value) => Ok(value),
@@ -4121,6 +4161,27 @@ fn coerce_decimal_value(value: Value) -> Result<DecimalValue> {
             value
         ))),
     }
+}
+
+fn coerce_enum_value(value: Value, variants: &[String], label: &str) -> Result<Value> {
+    let value = match value {
+        Value::Enum(value) | Value::Text(value) => value,
+        value => {
+            return Err(HematiteError::ParseError(format!(
+                "Expected ENUM-compatible value for {}, found {:?}",
+                label, value
+            )))
+        }
+    };
+
+    if !variants.contains(&value) {
+        return Err(HematiteError::ParseError(format!(
+            "{} is not a valid ENUM variant",
+            value
+        )));
+    }
+
+    Ok(Value::Enum(value))
 }
 
 fn coerce_column_value(column: &Column, value: Value) -> Result<Value> {
@@ -4139,9 +4200,14 @@ fn coerce_column_value(column: &Column, value: Value) -> Result<Value> {
         (DataType::BigInt, Value::BigInt(i)) => Ok(Value::BigInt(i)),
         (DataType::Text, Value::Text(s)) => Ok(Value::Text(s)),
         (DataType::Char(length), Value::Text(s)) => coerce_text_value(s, *length, &column.name),
-        (DataType::VarChar(length), Value::Text(s)) => {
-            coerce_text_value(s, *length, &column.name)
+        (DataType::VarChar(length), Value::Text(s)) => coerce_text_value(s, *length, &column.name),
+        (DataType::Binary(length), value) => {
+            coerce_binary_value(value, *length, &column.name, true)
         }
+        (DataType::VarBinary(length), value) => {
+            coerce_binary_value(value, *length, &column.name, false)
+        }
+        (DataType::Enum(values), value) => coerce_enum_value(value, values, &column.name),
         (DataType::Boolean, Value::Boolean(b)) => Ok(Value::Boolean(b)),
         (DataType::Float, Value::Float(f)) => Ok(Value::Float(f)),
         (DataType::Real, Value::Float(f)) => Ok(Value::Float(f)),
@@ -4168,8 +4234,18 @@ fn coerce_column_value(column: &Column, value: Value) -> Result<Value> {
         (DataType::Blob, Value::Text(s)) => Ok(Value::Blob(s.into_bytes())),
         (DataType::Date, Value::Date(s)) => Ok(Value::Date(s)),
         (DataType::Date, Value::Text(s)) => Ok(Value::Date(validate_date_string(&s)?)),
+        (DataType::Time, Value::Time(s)) => Ok(Value::Time(s)),
+        (DataType::Time, Value::Text(s)) => Ok(Value::Time(validate_time_string(&s)?)),
         (DataType::DateTime, Value::DateTime(s)) => Ok(Value::DateTime(s)),
         (DataType::DateTime, Value::Text(s)) => Ok(Value::DateTime(validate_datetime_string(&s)?)),
+        (DataType::Timestamp, Value::Timestamp(s)) => Ok(Value::Timestamp(s)),
+        (DataType::Timestamp, Value::Text(s)) => {
+            Ok(Value::Timestamp(validate_timestamp_string(&s)?))
+        }
+        (DataType::TimeWithTimeZone, Value::TimeWithTimeZone(s)) => Ok(Value::TimeWithTimeZone(s)),
+        (DataType::TimeWithTimeZone, Value::Text(s)) => Ok(Value::TimeWithTimeZone(
+            validate_time_with_time_zone_string(&s)?,
+        )),
         (_, Value::Null) if column.nullable => Ok(Value::Null),
         (_, Value::Null) => Err(HematiteError::ParseError(format!(
             "Column '{}' cannot be NULL",
@@ -4839,20 +4915,26 @@ fn evaluate_float_arithmetic(
 }
 
 fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
-    match (data_type, value) {
+    match (data_type.clone(), value) {
         (_, Value::Null) => Ok(Value::Null),
         (DataType::TinyInt, Value::Integer(value)) => i8::try_from(value)
             .map(|_| Value::Integer(value))
-            .map_err(|_| HematiteError::ParseError("Cannot CAST out-of-range INTEGER AS TINYINT".to_string())),
+            .map_err(|_| {
+                HematiteError::ParseError("Cannot CAST out-of-range INTEGER AS TINYINT".to_string())
+            }),
         (DataType::SmallInt, Value::Integer(value)) => i16::try_from(value)
             .map(|_| Value::Integer(value))
-            .map_err(|_| HematiteError::ParseError("Cannot CAST out-of-range INTEGER AS SMALLINT".to_string())),
-        (DataType::Integer, Value::Integer(value)) => Ok(Value::Integer(value)),
-        (DataType::Integer, Value::BigInt(value)) => i32::try_from(value)
-            .map(Value::Integer)
             .map_err(|_| {
-                HematiteError::ParseError("Cannot CAST out-of-range BIGINT AS INTEGER".to_string())
+                HematiteError::ParseError(
+                    "Cannot CAST out-of-range INTEGER AS SMALLINT".to_string(),
+                )
             }),
+        (DataType::Integer, Value::Integer(value)) => Ok(Value::Integer(value)),
+        (DataType::Integer, Value::BigInt(value)) => {
+            i32::try_from(value).map(Value::Integer).map_err(|_| {
+                HematiteError::ParseError("Cannot CAST out-of-range BIGINT AS INTEGER".to_string())
+            })
+        }
         (DataType::Integer, Value::Float(value)) => Ok(Value::Integer(value as i32)),
         (DataType::Integer, Value::Boolean(true)) => Ok(Value::Integer(1)),
         (DataType::Integer, Value::Boolean(false)) => Ok(Value::Integer(0)),
@@ -4872,17 +4954,26 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
         (DataType::Text, Value::Integer(value)) => Ok(Value::Text(value.to_string())),
         (DataType::Text, Value::BigInt(value)) => Ok(Value::Text(value.to_string())),
         (DataType::Text, Value::Float(value)) => Ok(Value::Text(value.to_string())),
+        (DataType::Text, Value::Enum(value)) => Ok(Value::Text(value)),
         (DataType::Text, Value::Boolean(true)) => Ok(Value::Text("TRUE".to_string())),
         (DataType::Text, Value::Boolean(false)) => Ok(Value::Text("FALSE".to_string())),
         (DataType::Text, Value::Text(value)) => Ok(Value::Text(value)),
         (DataType::Text, Value::Decimal(value)) => Ok(Value::Text(value.to_string())),
         (DataType::Text, Value::Date(value)) => Ok(Value::Text(value.to_string())),
+        (DataType::Text, Value::Time(value)) => Ok(Value::Text(value.to_string())),
         (DataType::Text, Value::DateTime(value)) => Ok(Value::Text(value.to_string())),
+        (DataType::Text, Value::Timestamp(value)) => Ok(Value::Text(value.to_string())),
+        (DataType::Text, Value::TimeWithTimeZone(value)) => Ok(Value::Text(value.to_string())),
         (DataType::Text, Value::Blob(value)) => {
             Ok(Value::Text(String::from_utf8_lossy(&value).into_owned()))
         }
         (DataType::Char(length), Value::Text(value))
-        | (DataType::VarChar(length), Value::Text(value)) => coerce_text_value(value, length, "CAST"),
+        | (DataType::VarChar(length), Value::Text(value)) => {
+            coerce_text_value(value, length, "CAST")
+        }
+        (DataType::Binary(length), value) => coerce_binary_value(value, length, "CAST", true),
+        (DataType::VarBinary(length), value) => coerce_binary_value(value, length, "CAST", false),
+        (DataType::Enum(values), value) => coerce_enum_value(value, &values, "CAST"),
         (DataType::Boolean, Value::Boolean(value)) => Ok(Value::Boolean(value)),
         (DataType::Boolean, Value::Integer(value)) => Ok(Value::Boolean(value != 0)),
         (DataType::Boolean, Value::BigInt(value)) => Ok(Value::Boolean(value != 0)),
@@ -4935,8 +5026,22 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
         (DataType::Blob, Value::BigInt(value)) => Ok(Value::Blob(value.to_le_bytes().to_vec())),
         (DataType::Date, Value::Date(value)) => Ok(Value::Date(value)),
         (DataType::Date, Value::Text(value)) => Ok(Value::Date(validate_date_string(&value)?)),
+        (DataType::Time, Value::Time(value)) => Ok(Value::Time(value)),
+        (DataType::Time, Value::Text(value)) => Ok(Value::Time(validate_time_string(&value)?)),
         (DataType::DateTime, Value::DateTime(value)) => Ok(Value::DateTime(value)),
-        (DataType::DateTime, Value::Text(value)) => Ok(Value::DateTime(validate_datetime_string(&value)?)),
+        (DataType::DateTime, Value::Text(value)) => {
+            Ok(Value::DateTime(validate_datetime_string(&value)?))
+        }
+        (DataType::Timestamp, Value::Timestamp(value)) => Ok(Value::Timestamp(value)),
+        (DataType::Timestamp, Value::Text(value)) => {
+            Ok(Value::Timestamp(validate_timestamp_string(&value)?))
+        }
+        (DataType::TimeWithTimeZone, Value::TimeWithTimeZone(value)) => {
+            Ok(Value::TimeWithTimeZone(value))
+        }
+        (DataType::TimeWithTimeZone, Value::Text(value)) => Ok(Value::TimeWithTimeZone(
+            validate_time_with_time_zone_string(&value)?,
+        )),
         (data_type, value) => Err(HematiteError::ParseError(format!(
             "Cannot CAST {:?} AS {}",
             value,
@@ -5283,9 +5388,13 @@ fn expect_numeric_argument(function_name: &str, value: Value) -> Result<f64> {
 fn coerce_value_to_string(function_name: &str, value: Value) -> Result<String> {
     match value {
         Value::Text(text) => Ok(text),
+        Value::Enum(text) => Ok(text),
         Value::Decimal(text) => Ok(text.to_string()),
         Value::Date(text) => Ok(text.to_string()),
+        Value::Time(text) => Ok(text.to_string()),
         Value::DateTime(text) => Ok(text.to_string()),
+        Value::Timestamp(text) => Ok(text.to_string()),
+        Value::TimeWithTimeZone(text) => Ok(text.to_string()),
         Value::Integer(value) => Ok(value.to_string()),
         Value::BigInt(value) => Ok(value.to_string()),
         Value::Float(value) => Ok(value.to_string()),
@@ -5611,8 +5720,20 @@ fn validate_date_string(input: &str) -> Result<DateValue> {
     DateValue::parse(input)
 }
 
+fn validate_time_string(input: &str) -> Result<TimeValue> {
+    TimeValue::parse(input)
+}
+
 fn validate_datetime_string(input: &str) -> Result<DateTimeValue> {
     DateTimeValue::parse(input)
+}
+
+fn validate_timestamp_string(input: &str) -> Result<TimestampValue> {
+    TimestampValue::parse(input)
+}
+
+fn validate_time_with_time_zone_string(input: &str) -> Result<TimeWithTimeZoneValue> {
+    TimeWithTimeZoneValue::parse(input)
 }
 
 fn compare_condition_values(

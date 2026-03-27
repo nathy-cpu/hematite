@@ -1,7 +1,7 @@
 //! Centralized tests for the sql module
 
 mod connection_tests {
-    use crate::catalog::{DataType, JournalMode};
+    use crate::catalog::{DataType, JournalMode, TimeValue, TimeWithTimeZoneValue, TimestampValue};
     use crate::error::Result;
     use crate::sql::connection::*;
     use crate::test_utils::TestDbFile;
@@ -38,6 +38,48 @@ mod connection_tests {
         let result = conn.execute("SELECT * FROM test;")?;
         assert_eq!(result.columns, vec!["id", "name"]);
         assert_eq!(result.rows.len(), 1);
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_additional_temporal_binary_and_enum_types_round_trip() -> Result<()> {
+        let db = TestDbFile::new("_test_additional_temporal_binary_and_enum_types_round_trip");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute(
+            "CREATE TABLE typed (\
+                id INTEGER PRIMARY KEY,\
+                at TIME,\
+                stamped TIMESTAMP,\
+                zone_time TIME WITH TIME ZONE,\
+                code BINARY(4),\
+                bytes VARBINARY(8),\
+                state ENUM('draft', 'live')\
+            );",
+        )?;
+        conn.execute(
+            "INSERT INTO typed (id, at, stamped, zone_time, code, bytes, state) \
+             VALUES (1, '10:11:12', '2026-03-28 13:14:15', '10:11:12+03:00', 'AB', 'xyz', 'live');",
+        )?;
+
+        let result = conn.execute(
+            "SELECT at, stamped, zone_time, code, bytes, state FROM typed WHERE id = 1;",
+        )?;
+        let row = crate::sql::result::Row::new(result.rows[0].clone());
+        assert_eq!(row.get_time(0)?, TimeValue::parse("10:11:12")?);
+        assert_eq!(
+            row.get_timestamp(1)?,
+            TimestampValue::parse("2026-03-28 13:14:15")?
+        );
+        assert_eq!(
+            row.get_time_with_time_zone(2)?,
+            TimeWithTimeZoneValue::parse("10:11:12+03:00")?
+        );
+        assert_eq!(row.get_blob(3)?, vec![b'A', b'B', 0, 0]);
+        assert_eq!(row.get_blob(4)?, b"xyz".to_vec());
+        assert_eq!(row.get_string(5)?, "live");
 
         conn.close()?;
         Ok(())
@@ -2895,9 +2937,8 @@ mod connection_tests {
             );",
         )?;
 
-        let result = conn.execute(
-            "SELECT id, amount, payload, event_date, created_at FROM typed;",
-        )?;
+        let result =
+            conn.execute("SELECT id, amount, payload, event_date, created_at FROM typed;")?;
         assert_eq!(
             result.rows,
             vec![vec![
@@ -3016,9 +3057,7 @@ mod connection_tests {
         conn.execute("CREATE TABLE target (id INTEGER PRIMARY KEY, name TEXT);")?;
         conn.execute("INSERT INTO source (id, name) VALUES (1, 'Alice'), (2, 'Bob');")?;
 
-        conn.execute(
-            "INSERT INTO target (id, name) SELECT id, name FROM source WHERE id >= 2;",
-        )?;
+        conn.execute("INSERT INTO target (id, name) SELECT id, name FROM source WHERE id >= 2;")?;
 
         let result = conn.execute("SELECT id, name FROM target ORDER BY id ASC;")?;
         assert_eq!(
@@ -3038,7 +3077,9 @@ mod connection_tests {
         let db = TestDbFile::new("_test_insert_on_duplicate_key_update");
         let mut conn = Connection::new(db.path())?;
 
-        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT UNIQUE, visits INTEGER);")?;
+        conn.execute(
+            "CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT UNIQUE, visits INTEGER);",
+        )?;
         conn.execute("INSERT INTO test (id, name, visits) VALUES (1, 'Alice', 1);")?;
 
         conn.execute(
@@ -3973,7 +4014,9 @@ mod interface_tests {
 }
 
 mod result_tests {
-    use crate::catalog::{DateTimeValue, DateValue, DecimalValue};
+    use crate::catalog::{
+        DateTimeValue, DateValue, DecimalValue, TimeValue, TimeWithTimeZoneValue, TimestampValue,
+    };
     use crate::error::Result;
     use crate::query::{QueryResult, Value};
     use crate::sql::result::*;
@@ -4034,6 +4077,10 @@ mod result_tests {
             Value::Blob(b"abc".to_vec()),
             Value::Date(DateValue::parse("2026-03-27")?),
             Value::DateTime(DateTimeValue::parse("2026-03-27 10:11:12")?),
+            Value::Time(TimeValue::parse("10:11:12")?),
+            Value::Timestamp(TimestampValue::parse("2026-03-27 10:11:12")?),
+            Value::TimeWithTimeZone(TimeWithTimeZoneValue::parse("10:11:12+03:00")?),
+            Value::Enum("live".to_string()),
         ];
 
         let row = Row::new(values);
@@ -4043,6 +4090,13 @@ mod result_tests {
         assert_eq!(row.get_blob(2)?, b"abc".to_vec());
         assert_eq!(row.get_date(3)?.to_string(), "2026-03-27");
         assert_eq!(row.get_datetime(4)?.to_string(), "2026-03-27 10:11:12");
+        assert_eq!(row.get_time(5)?.to_string(), "10:11:12");
+        assert_eq!(row.get_timestamp(6)?.to_string(), "2026-03-27 10:11:12");
+        assert_eq!(
+            row.get_time_with_time_zone(7)?.to_string(),
+            "10:11:12+03:00"
+        );
+        assert_eq!(row.get_string(8)?, "live");
 
         Ok(())
     }

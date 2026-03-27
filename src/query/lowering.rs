@@ -22,12 +22,16 @@ pub(crate) fn raise_literal_value(value: &Value) -> LiteralValue {
         Value::Integer(value) => LiteralValue::Integer(*value),
         Value::BigInt(value) => LiteralValue::Text(value.to_string()),
         Value::Text(value) => LiteralValue::Text(value.clone()),
+        Value::Enum(value) => LiteralValue::Text(value.clone()),
         Value::Boolean(value) => LiteralValue::Boolean(*value),
         Value::Float(value) => LiteralValue::Float(*value),
         Value::Decimal(value) => LiteralValue::Text(value.to_string()),
         Value::Blob(value) => LiteralValue::Text(String::from_utf8_lossy(value).into_owned()),
         Value::Date(value) => LiteralValue::Text(value.to_string()),
+        Value::Time(value) => LiteralValue::Text(value.to_string()),
         Value::DateTime(value) => LiteralValue::Text(value.to_string()),
+        Value::Timestamp(value) => LiteralValue::Text(value.to_string()),
+        Value::TimeWithTimeZone(value) => LiteralValue::Text(value.to_string()),
         Value::Null => LiteralValue::Null,
     }
 }
@@ -41,6 +45,9 @@ pub(crate) fn lower_type_name(data_type: SqlTypeName) -> DataType {
         SqlTypeName::Text => DataType::Text,
         SqlTypeName::Char(length) => DataType::Char(length),
         SqlTypeName::VarChar(length) => DataType::VarChar(length),
+        SqlTypeName::Binary(length) => DataType::Binary(length),
+        SqlTypeName::VarBinary(length) => DataType::VarBinary(length),
+        SqlTypeName::Enum(values) => DataType::Enum(values),
         SqlTypeName::Boolean => DataType::Boolean,
         SqlTypeName::Float => DataType::Float,
         SqlTypeName::Real => DataType::Real,
@@ -49,6 +56,9 @@ pub(crate) fn lower_type_name(data_type: SqlTypeName) -> DataType {
         SqlTypeName::Numeric { precision, scale } => DataType::Numeric { precision, scale },
         SqlTypeName::Blob => DataType::Blob,
         SqlTypeName::Date => DataType::Date,
+        SqlTypeName::Time => DataType::Time,
         SqlTypeName::DateTime => DataType::DateTime,
+        SqlTypeName::Timestamp => DataType::Timestamp,
+        SqlTypeName::TimeWithTimeZone => DataType::TimeWithTimeZone,
     }
 }

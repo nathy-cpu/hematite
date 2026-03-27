@@ -2,7 +2,7 @@
 
 use std::cmp::Ordering;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SqlTypeName {
     TinyInt,
     SmallInt,
@@ -11,6 +11,9 @@ pub enum SqlTypeName {
     Text,
     Char(u32),
     VarChar(u32),
+    Binary(u32),
+    VarBinary(u32),
+    Enum(Vec<String>),
     Boolean,
     Float,
     Real,
@@ -25,11 +28,14 @@ pub enum SqlTypeName {
     },
     Blob,
     Date,
+    Time,
     DateTime,
+    Timestamp,
+    TimeWithTimeZone,
 }
 
 impl SqlTypeName {
-    pub fn to_sql(self) -> String {
+    pub fn to_sql(&self) -> String {
         match self {
             SqlTypeName::TinyInt => "TINYINT".to_string(),
             SqlTypeName::SmallInt => "SMALLINT".to_string(),
@@ -38,19 +44,32 @@ impl SqlTypeName {
             SqlTypeName::Text => "TEXT".to_string(),
             SqlTypeName::Char(length) => format!("CHAR({length})"),
             SqlTypeName::VarChar(length) => format!("VARCHAR({length})"),
+            SqlTypeName::Binary(length) => format!("BINARY({length})"),
+            SqlTypeName::VarBinary(length) => format!("VARBINARY({length})"),
+            SqlTypeName::Enum(values) => format!(
+                "ENUM({})",
+                values
+                    .iter()
+                    .map(|value| format!("'{}'", value.replace('\'', "''")))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             SqlTypeName::Boolean => "BOOLEAN".to_string(),
             SqlTypeName::Float => "FLOAT".to_string(),
             SqlTypeName::Real => "REAL".to_string(),
             SqlTypeName::Double => "DOUBLE".to_string(),
             SqlTypeName::Decimal { precision, scale } => {
-                format_numeric_type("DECIMAL", precision, scale)
+                format_numeric_type("DECIMAL", *precision, *scale)
             }
             SqlTypeName::Numeric { precision, scale } => {
-                format_numeric_type("NUMERIC", precision, scale)
+                format_numeric_type("NUMERIC", *precision, *scale)
             }
             SqlTypeName::Blob => "BLOB".to_string(),
             SqlTypeName::Date => "DATE".to_string(),
+            SqlTypeName::Time => "TIME".to_string(),
             SqlTypeName::DateTime => "DATETIME".to_string(),
+            SqlTypeName::Timestamp => "TIMESTAMP".to_string(),
+            SqlTypeName::TimeWithTimeZone => "TIME WITH TIME ZONE".to_string(),
         }
     }
 }
@@ -99,9 +118,15 @@ impl LiteralValue {
             (LiteralValue::Text(_), SqlTypeName::Text) => true,
             (LiteralValue::Text(_), SqlTypeName::Char(_)) => true,
             (LiteralValue::Text(_), SqlTypeName::VarChar(_)) => true,
+            (LiteralValue::Text(_), SqlTypeName::Binary(_)) => true,
+            (LiteralValue::Text(_), SqlTypeName::VarBinary(_)) => true,
+            (LiteralValue::Text(_), SqlTypeName::Enum(_)) => true,
             (LiteralValue::Text(_), SqlTypeName::Blob) => true,
             (LiteralValue::Text(_), SqlTypeName::Date) => true,
+            (LiteralValue::Text(_), SqlTypeName::Time) => true,
             (LiteralValue::Text(_), SqlTypeName::DateTime) => true,
+            (LiteralValue::Text(_), SqlTypeName::Timestamp) => true,
+            (LiteralValue::Text(_), SqlTypeName::TimeWithTimeZone) => true,
             (LiteralValue::Text(_), SqlTypeName::Decimal { .. }) => true,
             (LiteralValue::Text(_), SqlTypeName::Numeric { .. }) => true,
             (LiteralValue::Boolean(_), SqlTypeName::Boolean) => true,

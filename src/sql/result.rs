@@ -1,7 +1,10 @@
 //! SQL result set and row interface
 
 use crate::error::{HematiteError, Result};
-use crate::query::{DateTimeValue, DateValue, DecimalValue, QueryResult, Value};
+use crate::query::{
+    DateTimeValue, DateValue, DecimalValue, QueryResult, TimeValue, TimeWithTimeZoneValue,
+    TimestampValue, Value,
+};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -111,6 +114,13 @@ impl Row {
     pub fn get_string(&self, index: usize) -> Result<String> {
         match self.get(index) {
             Some(Value::Text(s)) => Ok(s.clone()),
+            Some(Value::Enum(s)) => Ok(s.clone()),
+            Some(Value::Decimal(value)) => Ok(value.to_string()),
+            Some(Value::Date(value)) => Ok(value.to_string()),
+            Some(Value::Time(value)) => Ok(value.to_string()),
+            Some(Value::DateTime(value)) => Ok(value.to_string()),
+            Some(Value::Timestamp(value)) => Ok(value.to_string()),
+            Some(Value::TimeWithTimeZone(value)) => Ok(value.to_string()),
             Some(value) => Err(HematiteError::ParseError(format!(
                 "Expected TEXT, found {:?}",
                 value
@@ -206,11 +216,50 @@ impl Row {
         }
     }
 
+    pub fn get_time(&self, index: usize) -> Result<TimeValue> {
+        match self.get(index) {
+            Some(Value::Time(value)) => Ok(*value),
+            Some(value) => Err(HematiteError::ParseError(format!(
+                "Expected TIME, found {:?}",
+                value
+            ))),
+            None => Err(HematiteError::ParseError(
+                "Column index out of bounds".to_string(),
+            )),
+        }
+    }
+
     pub fn get_datetime(&self, index: usize) -> Result<DateTimeValue> {
         match self.get(index) {
             Some(Value::DateTime(value)) => Ok(*value),
             Some(value) => Err(HematiteError::ParseError(format!(
                 "Expected DATETIME, found {:?}",
+                value
+            ))),
+            None => Err(HematiteError::ParseError(
+                "Column index out of bounds".to_string(),
+            )),
+        }
+    }
+
+    pub fn get_timestamp(&self, index: usize) -> Result<TimestampValue> {
+        match self.get(index) {
+            Some(Value::Timestamp(value)) => Ok(*value),
+            Some(value) => Err(HematiteError::ParseError(format!(
+                "Expected TIMESTAMP, found {:?}",
+                value
+            ))),
+            None => Err(HematiteError::ParseError(
+                "Column index out of bounds".to_string(),
+            )),
+        }
+    }
+
+    pub fn get_time_with_time_zone(&self, index: usize) -> Result<TimeWithTimeZoneValue> {
+        match self.get(index) {
+            Some(Value::TimeWithTimeZone(value)) => Ok(*value),
+            Some(value) => Err(HematiteError::ParseError(format!(
+                "Expected TIME WITH TIME ZONE, found {:?}",
                 value
             ))),
             None => Err(HematiteError::ParseError(

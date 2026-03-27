@@ -41,4 +41,7 @@ pub use record::StoredRow;
 pub use schema::Schema;
 pub use serialization::{IndexKeyCodec, RowCodec, RowSerializer};
 pub use table::{SecondaryIndex, Table};
-pub use types::{DataType, DateTimeValue, DateValue, DecimalValue, JournalMode, Value};
+pub use types::{
+    DataType, DateTimeValue, DateValue, DecimalValue, JournalMode, TimeValue,
+    TimeWithTimeZoneValue, TimestampValue, Value,
+};

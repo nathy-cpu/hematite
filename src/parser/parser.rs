@@ -2074,15 +2074,32 @@ impl Parser {
             }
             Token::Blob => SqlTypeName::Blob,
             Token::Date => SqlTypeName::Date,
+            Token::Time => {
+                self.consume_token(&token)?;
+                if matches!(self.peek_token(), Ok(Token::With)) {
+                    self.consume_token(&Token::With)?;
+                    self.consume_token(&Token::Time)?;
+                    self.consume_token(&Token::Zone)?;
+                    return Ok(SqlTypeName::TimeWithTimeZone);
+                }
+                return Ok(SqlTypeName::Time);
+            }
             Token::DateTime => SqlTypeName::DateTime,
-            Token::Varchar | Token::Char => {
+            Token::Timestamp => SqlTypeName::Timestamp,
+            Token::Varchar | Token::Char | Token::BinaryType | Token::VarBinary => {
                 self.consume_token(&token)?;
                 let length = self.parse_type_length()?;
                 return Ok(match token {
                     Token::Varchar => SqlTypeName::VarChar(length),
                     Token::Char => SqlTypeName::Char(length),
+                    Token::BinaryType => SqlTypeName::Binary(length),
+                    Token::VarBinary => SqlTypeName::VarBinary(length),
                     _ => unreachable!(),
                 });
+            }
+            Token::Enum => {
+                self.consume_token(&token)?;
+                return Ok(SqlTypeName::Enum(self.parse_enum_variants()?));
             }
             _ => {
                 return Err(HematiteError::ParseError(format!(
@@ -2096,6 +2113,49 @@ impl Parser {
         self.consume_optional_double_precision()?;
         self.consume_optional_unsigned()?;
         Ok(data_type)
+    }
+
+    fn parse_enum_variants(&mut self) -> Result<Vec<String>> {
+        self.consume_token(&Token::LeftParen)?;
+        let mut variants = Vec::new();
+        loop {
+            match self.peek_token()? {
+                Token::StringLiteral(value) => {
+                    self.consume_token(&Token::StringLiteral(value.clone()))?;
+                    variants.push(value);
+                }
+                token => {
+                    return Err(HematiteError::ParseError(format!(
+                        "Expected ENUM string literal, found: {:?}",
+                        token
+                    )))
+                }
+            }
+
+            match self.peek_token()? {
+                Token::Comma => {
+                    self.consume_token(&Token::Comma)?;
+                }
+                Token::RightParen => {
+                    self.consume_token(&Token::RightParen)?;
+                    break;
+                }
+                token => {
+                    return Err(HematiteError::ParseError(format!(
+                        "Expected ',' or ')' in ENUM type, found: {:?}",
+                        token
+                    )))
+                }
+            }
+        }
+
+        if variants.is_empty() {
+            return Err(HematiteError::ParseError(
+                "ENUM type requires at least one variant".to_string(),
+            ));
+        }
+
+        Ok(variants)
     }
 
     fn parse_type_length(&mut self) -> Result<u32> {

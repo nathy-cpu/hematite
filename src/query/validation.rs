@@ -511,7 +511,9 @@ fn validate_alter(alter: &AlterStatement, catalog: &Schema) -> Result<()> {
                         column.name
                     )));
                 }
-                if !default_value.is_null() && !default_value.is_compatible_with(column.data_type) {
+                if !default_value.is_null()
+                    && !default_value.is_compatible_with(column.data_type.clone())
+                {
                     return Err(HematiteError::ParseError(format!(
                         "DEFAULT value for column '{}' is incompatible with {:?}",
                         column.name, column.data_type
@@ -1165,7 +1167,8 @@ fn validate_set_column_default(
         )));
     }
     if !default_value.is_null()
-        && !default_value.is_compatible_with(sql_type_name_for_catalog_type(column.data_type))
+        && !default_value
+            .is_compatible_with(sql_type_name_for_catalog_type(column.data_type.clone()))
     {
         return Err(HematiteError::ParseError(format!(
             "DEFAULT value for column '{}' is incompatible with {:?}",
@@ -1388,6 +1391,9 @@ fn sql_type_name_for_catalog_type(data_type: crate::catalog::DataType) -> SqlTyp
         crate::catalog::DataType::Text => SqlTypeName::Text,
         crate::catalog::DataType::Char(length) => SqlTypeName::Char(length),
         crate::catalog::DataType::VarChar(length) => SqlTypeName::VarChar(length),
+        crate::catalog::DataType::Binary(length) => SqlTypeName::Binary(length),
+        crate::catalog::DataType::VarBinary(length) => SqlTypeName::VarBinary(length),
+        crate::catalog::DataType::Enum(values) => SqlTypeName::Enum(values),
         crate::catalog::DataType::Boolean => SqlTypeName::Boolean,
         crate::catalog::DataType::Float => SqlTypeName::Float,
         crate::catalog::DataType::Real => SqlTypeName::Real,
@@ -1400,7 +1406,10 @@ fn sql_type_name_for_catalog_type(data_type: crate::catalog::DataType) -> SqlTyp
         }
         crate::catalog::DataType::Blob => SqlTypeName::Blob,
         crate::catalog::DataType::Date => SqlTypeName::Date,
+        crate::catalog::DataType::Time => SqlTypeName::Time,
         crate::catalog::DataType::DateTime => SqlTypeName::DateTime,
+        crate::catalog::DataType::Timestamp => SqlTypeName::Timestamp,
+        crate::catalog::DataType::TimeWithTimeZone => SqlTypeName::TimeWithTimeZone,
     }
 }
 
