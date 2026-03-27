@@ -3522,6 +3522,7 @@ mod connection_tests {
 mod interface_tests {
     use crate::error::Result;
     use crate::sql::interface::*;
+    use crate::sql::ExecutedStatement;
     use crate::test_utils::TestDbFile;
 
     #[test]
@@ -3691,11 +3692,67 @@ mod interface_tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_iter_script_steps_through_mixed_statements() -> Result<()> {
+        let test_db = TestDbFile::new("_test_iter_script_steps");
+        let mut db = Hematite::new(test_db.path())?;
+
+        let mut steps = db.iter_script(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);\
+             INSERT INTO users (id, name) VALUES (1, 'Alice');\
+             SELECT name FROM users;",
+        )?;
+
+        match steps.next().transpose()?.unwrap() {
+            ExecutedStatement::Statement(result) => assert_eq!(result.affected_rows, 0),
+            ExecutedStatement::Query(_) => panic!("expected statement result"),
+        }
+
+        match steps.next().transpose()?.unwrap() {
+            ExecutedStatement::Statement(result) => assert_eq!(result.affected_rows, 1),
+            ExecutedStatement::Query(_) => panic!("expected statement result"),
+        }
+
+        match steps.next().transpose()?.unwrap() {
+            ExecutedStatement::Query(result_set) => {
+                assert_eq!(result_set.len(), 1);
+                assert_eq!(result_set.get_row(0).unwrap().get_string(0)?, "Alice");
+            }
+            ExecutedStatement::Statement(_) => panic!("expected query result"),
+        }
+
+        assert!(steps.next().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_iter_script_stops_at_first_error() -> Result<()> {
+        let test_db = TestDbFile::new("_test_iter_script_error_stop");
+        let mut db = Hematite::new(test_db.path())?;
+
+        let mut steps = db.iter_script(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);\
+             INSERT INTO users (id, name) VALUES (1, 'Alice');\
+             INSERT INTO users (id, name) VALUES (1, 'Bob');\
+             INSERT INTO users (id, name) VALUES (2, 'Cara');",
+        )?;
+
+        assert!(steps.next().transpose()?.is_some());
+        assert!(steps.next().transpose()?.is_some());
+        assert!(steps.next().transpose().is_err());
+        drop(steps);
+
+        let rs = db.query("SELECT name FROM users ORDER BY id;")?;
+        assert_eq!(rs.len(), 1);
+        assert_eq!(rs.get_row(0).unwrap().get_string(0)?, "Alice");
+        Ok(())
+    }
 }
 
 mod result_tests {
-    use crate::catalog::Value;
     use crate::error::Result;
+    use crate::query::{QueryResult, Value};
     use crate::sql::result::*;
 
     #[test]
@@ -3758,6 +3815,28 @@ mod result_tests {
         assert_eq!(result.last_insert_id, Some(42));
         assert_eq!(result.message, "Row inserted");
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_executed_statement_helpers() -> Result<()> {
+        let query = ExecutedStatement::from_query_result(QueryResult {
+            affected_rows: 0,
+            columns: vec!["value".to_string()],
+            rows: vec![vec![Value::Integer(7)]],
+        });
+        assert!(matches!(query, ExecutedStatement::Query(_)));
+        assert_eq!(query.as_query().unwrap().get_row(0).unwrap().get_int(0)?, 7);
+        assert!(query.as_statement().is_none());
+
+        let statement = ExecutedStatement::from_query_result(QueryResult {
+            affected_rows: 2,
+            columns: Vec::new(),
+            rows: Vec::new(),
+        });
+        assert!(matches!(statement, ExecutedStatement::Statement(_)));
+        assert_eq!(statement.as_statement().unwrap().affected_rows, 2);
+        assert!(statement.as_query().is_none());
         Ok(())
     }
 }

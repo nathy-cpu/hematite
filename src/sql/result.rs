@@ -1,7 +1,7 @@
 //! SQL result set and row interface
 
 use crate::error::{HematiteError, Result};
-use crate::query::Value;
+use crate::query::{QueryResult, Value};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -183,6 +183,39 @@ impl StatementResult {
             affected_rows,
             last_insert_id: Some(last_insert_id),
             message,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ExecutedStatement {
+    Query(ResultSet),
+    Statement(StatementResult),
+}
+
+impl ExecutedStatement {
+    pub(crate) fn from_query_result(query_result: QueryResult) -> Self {
+        if query_result.columns.is_empty() {
+            Self::Statement(StatementResult::new(
+                query_result.affected_rows,
+                "Statement executed successfully".to_string(),
+            ))
+        } else {
+            Self::Query(ResultSet::new(query_result.columns, query_result.rows))
+        }
+    }
+
+    pub fn as_query(&self) -> Option<&ResultSet> {
+        match self {
+            Self::Query(result_set) => Some(result_set),
+            Self::Statement(_) => None,
+        }
+    }
+
+    pub fn as_statement(&self) -> Option<&StatementResult> {
+        match self {
+            Self::Query(_) => None,
+            Self::Statement(result) => Some(result),
         }
     }
 }

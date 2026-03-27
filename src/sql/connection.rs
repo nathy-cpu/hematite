@@ -29,6 +29,8 @@ use crate::query::{
     Catalog, CatalogEngine, ExecutionContext, JournalMode, QueryCatalogSnapshot, QueryExecutor,
     QueryPlanner, QueryResult, Schema, Value,
 };
+use crate::sql::result::ExecutedStatement;
+use crate::sql::script::{split_script_tokens, ScriptIter};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -154,6 +156,14 @@ impl Connection {
         self.execute_mutating_statement(statement)
     }
 
+    pub(crate) fn execute_statement_result(
+        &mut self,
+        statement: crate::parser::ast::Statement,
+    ) -> Result<ExecutedStatement> {
+        self.execute_statement(statement)
+            .map(ExecutedStatement::from_query_result)
+    }
+
     fn execute_read_statement(
         &mut self,
         statement: crate::parser::ast::Statement,
@@ -277,29 +287,18 @@ impl Connection {
         self.execute_statement(Self::parse_statement(sql)?)
     }
 
+    pub fn execute_result(&mut self, sql: &str) -> Result<ExecutedStatement> {
+        self.execute(sql).map(ExecutedStatement::from_query_result)
+    }
+
+    pub fn iter_script<'a>(&'a mut self, sql: &str) -> Result<ScriptIter<'a>> {
+        Ok(ScriptIter::new(self, split_script_tokens(sql)?))
+    }
+
     pub fn execute_batch(&mut self, sql: &str) -> Result<()> {
-        let mut lexer = Lexer::new(sql.to_string());
-        lexer.tokenize()?;
-
-        let mut current_tokens = Vec::new();
-        for token in lexer.get_tokens().iter().cloned() {
-            current_tokens.push(token.clone());
-
-            if matches!(token, crate::parser::lexer::Token::Semicolon) {
-                let mut parser = Parser::new(current_tokens);
-                let statement = parser.parse()?;
-                self.execute_statement(statement)?;
-                current_tokens = Vec::new();
-            }
+        for result in self.iter_script(sql)? {
+            result?;
         }
-
-        if !current_tokens.is_empty() {
-            current_tokens.push(crate::parser::lexer::Token::Semicolon);
-            let mut parser = Parser::new(current_tokens);
-            let statement = parser.parse()?;
-            self.execute_statement(statement)?;
-        }
-
         Ok(())
     }
 

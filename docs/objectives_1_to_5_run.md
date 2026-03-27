@@ -99,14 +99,14 @@ Current lower-stack status that should be preserved:
 
 #### Block 3A — Result Surface
 
-- [ ] Introduce a unified per-statement execution result enum.
-- [ ] Rebuild eager helpers on top of one core execution path.
+- [x] Introduce a unified per-statement execution result enum.
+- [x] Rebuild eager helpers on top of one core execution path.
 
 #### Block 3B — Script Iterator
 
-- [ ] Add lexer-driven SQL statement splitting.
-- [ ] Add a stepped iterator over semicolon-delimited statements.
-- [ ] Rebuild batch execution on top of the iterator.
+- [x] Add lexer-driven SQL statement splitting.
+- [x] Add a stepped iterator over semicolon-delimited statements.
+- [x] Rebuild batch execution on top of the iterator.
 
 ### Phase 4 — CLI
 
@@ -152,3 +152,5 @@ Current lower-stack status that should be preserved:
 - `665209e` Add architecture tracker and import guard
 - `e59d7aa` Decouple parser literal and type AST nodes
 - `ffec849` Move statement validation into query
+- `cedbf37` Route catalog metadata through B-tree interfaces
+- `96a0f4d` Route SQL through parser and query facades

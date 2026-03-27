@@ -3,7 +3,8 @@
 use crate::error::{HematiteError, Result};
 use crate::query::{JournalMode, Value};
 use crate::sql::connection::{Connection, PreparedStatement, Transaction};
-use crate::sql::result::{ResultSet, Row, StatementResult};
+use crate::sql::result::{ExecutedStatement, ResultSet, Row, StatementResult};
+use crate::sql::script::ScriptIter;
 
 /// High-level interface for SQL operations
 pub struct Hematite {
@@ -25,29 +26,22 @@ impl Hematite {
 
     /// Execute a SQL statement and return the result
     pub fn execute(&mut self, sql: &str) -> Result<StatementResult> {
-        let query_result = self.connection.execute(sql)?;
-
-        // Convert QueryResult to StatementResult
-        if query_result.columns.is_empty() {
-            // This was a DML statement (INSERT, UPDATE, DELETE, CREATE, etc.)
-            Ok(StatementResult::new(
-                query_result.affected_rows,
-                "Statement executed successfully".to_string(),
-            ))
-        } else {
-            // This was a SELECT query - return as ResultSet
-            Err(HematiteError::ParseError(
+        match self.connection.execute_result(sql)? {
+            ExecutedStatement::Statement(result) => Ok(result),
+            ExecutedStatement::Query(_) => Err(HematiteError::ParseError(
                 "Use query() method for SELECT statements".to_string(),
-            ))
+            )),
         }
     }
 
     /// Execute a SQL query and return the result set
     pub fn query(&mut self, sql: &str) -> Result<ResultSet> {
-        let query_result = self.connection.execute(sql)?;
-
-        // Convert QueryResult to ResultSet
-        Ok(ResultSet::new(query_result.columns, query_result.rows))
+        match self.connection.execute_result(sql)? {
+            ExecutedStatement::Query(result_set) => Ok(result_set),
+            ExecutedStatement::Statement(_) => Err(HematiteError::ParseError(
+                "Use execute() method for non-SELECT statements".to_string(),
+            )),
+        }
     }
 
     /// Execute a SQL statement and return the first row of the result
@@ -85,21 +79,20 @@ impl Hematite {
 
     /// Execute a prepared statement
     pub fn execute_prepared(&mut self, stmt: &mut PreparedStatement) -> Result<StatementResult> {
-        let query_result = stmt.execute(&mut self.connection)?;
-
-        // Convert QueryResult to StatementResult
-        if query_result.columns.is_empty() {
-            // This was a DML statement (INSERT, UPDATE, DELETE, CREATE, etc.)
-            Ok(StatementResult::new(
-                query_result.affected_rows,
-                "Statement executed successfully".to_string(),
-            ))
-        } else {
-            // This was a SELECT query - return as ResultSet
-            Err(HematiteError::ParseError(
+        match ExecutedStatement::from_query_result(stmt.execute(&mut self.connection)?) {
+            ExecutedStatement::Statement(result) => Ok(result),
+            ExecutedStatement::Query(_) => Err(HematiteError::ParseError(
                 "Use query_prepared() method for SELECT statements".to_string(),
-            ))
+            )),
         }
+    }
+
+    pub fn execute_result(&mut self, sql: &str) -> Result<ExecutedStatement> {
+        self.connection.execute_result(sql)
+    }
+
+    pub fn iter_script<'a>(&'a mut self, sql: &str) -> Result<ScriptIter<'a>> {
+        self.connection.iter_script(sql)
     }
 
     /// Begin a new transaction
