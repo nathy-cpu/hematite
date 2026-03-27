@@ -241,9 +241,29 @@ impl SelectExecutor {
                 "Unbound parameter {} reached execution",
                 index + 1
             ))),
-            Expression::Case { .. } => Err(HematiteError::ParseError(
-                "CASE expressions are not implemented yet".to_string(),
-            )),
+            Expression::Case { branches, else_expr } => {
+                for branch in branches {
+                    match self.evaluate_condition(ctx, cache, sources, &branch.condition, row)? {
+                        Some(true) => {
+                            return self.evaluate_expression(
+                                ctx,
+                                cache,
+                                sources,
+                                &branch.result,
+                                row,
+                            )
+                        }
+                        Some(false) | None => {}
+                    }
+                }
+
+                match else_expr {
+                    Some(else_expr) => {
+                        self.evaluate_expression(ctx, cache, sources, else_expr, row)
+                    }
+                    None => Ok(Value::Null),
+                }
+            }
             Expression::AggregateCall { .. } => Err(HematiteError::ParseError(
                 "Aggregate expressions can only be evaluated in grouped query contexts".to_string(),
             )),
@@ -300,26 +320,7 @@ impl SelectExecutor {
         operator: &ComparisonOperator,
         right_val: &Value,
     ) -> Option<bool> {
-        if left_val.is_null() || right_val.is_null() {
-            return None;
-        }
-
-        match operator {
-            ComparisonOperator::Equal => Some(sql_values_equal(left_val, right_val)),
-            ComparisonOperator::NotEqual => Some(!sql_values_equal(left_val, right_val)),
-            ComparisonOperator::LessThan => {
-                sql_partial_cmp(left_val, right_val).map(|ord| ord.is_lt())
-            }
-            ComparisonOperator::LessThanOrEqual => {
-                sql_partial_cmp(left_val, right_val).map(|ord| ord.is_le())
-            }
-            ComparisonOperator::GreaterThan => {
-                sql_partial_cmp(left_val, right_val).map(|ord| ord.is_gt())
-            }
-            ComparisonOperator::GreaterThanOrEqual => {
-                sql_partial_cmp(left_val, right_val).map(|ord| ord.is_ge())
-            }
-        }
+        compare_condition_values(left_val, operator, right_val)
     }
 
     fn like_matches(pattern: &str, text: &str) -> bool {
@@ -351,19 +352,11 @@ impl SelectExecutor {
     }
 
     fn logical_and(&self, left: Option<bool>, right: Option<bool>) -> Option<bool> {
-        match (left, right) {
-            (Some(false), _) | (_, Some(false)) => Some(false),
-            (Some(true), Some(true)) => Some(true),
-            _ => None,
-        }
+        logical_and_values(left, right)
     }
 
     fn logical_or(&self, left: Option<bool>, right: Option<bool>) -> Option<bool> {
-        match (left, right) {
-            (Some(true), _) | (_, Some(true)) => Some(true),
-            (Some(false), Some(false)) => Some(false),
-            _ => None,
-        }
+        logical_or_values(left, right)
     }
 
     fn evaluate_in_candidates(
@@ -372,30 +365,7 @@ impl SelectExecutor {
         candidates: impl IntoIterator<Item = Value>,
         is_not: bool,
     ) -> Option<bool> {
-        if probe.is_null() {
-            return None;
-        }
-
-        let mut matched = false;
-        let mut saw_null = false;
-        for candidate in candidates {
-            if candidate.is_null() {
-                saw_null = true;
-                continue;
-            }
-            if sql_values_equal(&candidate, &probe) {
-                matched = true;
-                break;
-            }
-        }
-
-        if matched {
-            Some(!is_not)
-        } else if saw_null {
-            None
-        } else {
-            Some(is_not)
-        }
+        evaluate_in_candidates(probe, candidates, is_not)
     }
 
     fn execute_subquery(
@@ -1634,9 +1604,45 @@ impl SelectExecutor {
                 "Unbound parameter {} reached execution",
                 index + 1
             ))),
-            Expression::Case { .. } => Err(HematiteError::ParseError(
-                "CASE expressions are not implemented yet".to_string(),
-            )),
+            Expression::Case { branches, else_expr } => {
+                for branch in branches {
+                    match self.evaluate_projected_condition(
+                        ctx,
+                        cache,
+                        sources,
+                        &branch.condition,
+                        row,
+                        output_columns,
+                        group_rows,
+                    )? {
+                        Some(true) => {
+                            return self.evaluate_projected_expression(
+                                ctx,
+                                cache,
+                                sources,
+                                &branch.result,
+                                row,
+                                output_columns,
+                                group_rows,
+                            )
+                        }
+                        Some(false) | None => {}
+                    }
+                }
+
+                match else_expr {
+                    Some(else_expr) => self.evaluate_projected_expression(
+                        ctx,
+                        cache,
+                        sources,
+                        else_expr,
+                        row,
+                        output_columns,
+                        group_rows,
+                    ),
+                    None => Ok(Value::Null),
+                }
+            }
             Expression::ScalarSubquery(subquery) => {
                 self.execute_scalar_subquery_cached(
                     ctx,
@@ -2360,9 +2366,19 @@ impl InsertExecutor {
                 "Unbound parameter {} reached execution",
                 index + 1
             ))),
-            Expression::Case { .. } => Err(HematiteError::ParseError(
-                "CASE expressions are not implemented yet".to_string(),
-            )),
+            Expression::Case { branches, else_expr } => {
+                for branch in branches {
+                    match self.evaluate_value_condition(&branch.condition)? {
+                        Some(true) => return self.evaluate_value_expression(&branch.result),
+                        Some(false) | None => {}
+                    }
+                }
+
+                match else_expr {
+                    Some(else_expr) => self.evaluate_value_expression(else_expr),
+                    None => Ok(Value::Null),
+                }
+            }
             Expression::ScalarSubquery(_) => Err(HematiteError::ParseError(
                 "INSERT expressions cannot use scalar subqueries".to_string(),
             )),
@@ -2402,6 +2418,78 @@ impl InsertExecutor {
                 "INSERT expressions cannot reference column '{}'",
                 name
             ))),
+        }
+    }
+
+    fn evaluate_value_condition(&self, condition: &Condition) -> Result<Option<bool>> {
+        match condition {
+            Condition::Comparison {
+                left,
+                operator,
+                right,
+            } => {
+                let left_val = self.evaluate_value_expression(left)?;
+                let right_val = self.evaluate_value_expression(right)?;
+                Ok(compare_condition_values(&left_val, operator, &right_val))
+            }
+            Condition::InList {
+                expr,
+                values,
+                is_not,
+            } => {
+                let probe = self.evaluate_value_expression(expr)?;
+                let candidates = values
+                    .iter()
+                    .map(|value_expr| self.evaluate_value_expression(value_expr))
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(evaluate_in_candidates(probe, candidates, *is_not))
+            }
+            Condition::InSubquery { .. } => Err(HematiteError::ParseError(
+                "INSERT expressions cannot use subqueries in CASE conditions".to_string(),
+            )),
+            Condition::Between {
+                expr,
+                lower,
+                upper,
+                is_not,
+            } => {
+                let value = self.evaluate_value_expression(expr)?;
+                let lower_value = self.evaluate_value_expression(lower)?;
+                let upper_value = self.evaluate_value_expression(upper)?;
+                Ok(evaluate_between_values(value, lower_value, upper_value, *is_not))
+            }
+            Condition::Like {
+                expr,
+                pattern,
+                is_not,
+            } => {
+                let value = self.evaluate_value_expression(expr)?;
+                let pattern_value = self.evaluate_value_expression(pattern)?;
+                Ok(evaluate_like_values(value, pattern_value, *is_not))
+            }
+            Condition::Exists { .. } => Err(HematiteError::ParseError(
+                "INSERT expressions cannot use EXISTS in CASE conditions".to_string(),
+            )),
+            Condition::NullCheck { expr, is_not } => {
+                let value = self.evaluate_value_expression(expr)?;
+                let is_null = value.is_null();
+                Ok(Some(if *is_not { !is_null } else { is_null }))
+            }
+            Condition::Not(condition) => Ok(self
+                .evaluate_value_condition(condition)?
+                .map(|value| !value)),
+            Condition::Logical {
+                left,
+                operator,
+                right,
+            } => {
+                let left_result = self.evaluate_value_condition(left)?;
+                let right_result = self.evaluate_value_condition(right)?;
+                Ok(match operator {
+                    LogicalOperator::And => logical_and_values(left_result, right_result),
+                    LogicalOperator::Or => logical_or_values(left_result, right_result),
+                })
+            }
         }
     }
 
@@ -4319,6 +4407,105 @@ fn sql_numeric_pair(left: &Value, right: &Value) -> Option<(f64, f64)> {
         (Value::Integer(left), Value::Float(right)) => Some((*left as f64, *right)),
         (Value::Float(left), Value::Integer(right)) => Some((*left, *right as f64)),
         (Value::Float(left), Value::Float(right)) => Some((*left, *right)),
+        _ => None,
+    }
+}
+
+fn compare_condition_values(
+    left: &Value,
+    operator: &ComparisonOperator,
+    right: &Value,
+) -> Option<bool> {
+    if left.is_null() || right.is_null() {
+        return None;
+    }
+
+    match operator {
+        ComparisonOperator::Equal => Some(sql_values_equal(left, right)),
+        ComparisonOperator::NotEqual => Some(!sql_values_equal(left, right)),
+        ComparisonOperator::LessThan => sql_partial_cmp(left, right).map(|ord| ord.is_lt()),
+        ComparisonOperator::LessThanOrEqual => sql_partial_cmp(left, right).map(|ord| ord.is_le()),
+        ComparisonOperator::GreaterThan => sql_partial_cmp(left, right).map(|ord| ord.is_gt()),
+        ComparisonOperator::GreaterThanOrEqual => {
+            sql_partial_cmp(left, right).map(|ord| ord.is_ge())
+        }
+    }
+}
+
+fn logical_and_values(left: Option<bool>, right: Option<bool>) -> Option<bool> {
+    match (left, right) {
+        (Some(false), _) | (_, Some(false)) => Some(false),
+        (Some(true), Some(true)) => Some(true),
+        _ => None,
+    }
+}
+
+fn logical_or_values(left: Option<bool>, right: Option<bool>) -> Option<bool> {
+    match (left, right) {
+        (Some(true), _) | (_, Some(true)) => Some(true),
+        (Some(false), Some(false)) => Some(false),
+        _ => None,
+    }
+}
+
+fn evaluate_in_candidates(
+    probe: Value,
+    candidates: impl IntoIterator<Item = Value>,
+    is_not: bool,
+) -> Option<bool> {
+    if probe.is_null() {
+        return None;
+    }
+
+    let mut matched = false;
+    let mut saw_null = false;
+    for candidate in candidates {
+        if candidate.is_null() {
+            saw_null = true;
+            continue;
+        }
+        if sql_values_equal(&candidate, &probe) {
+            matched = true;
+            break;
+        }
+    }
+
+    if matched {
+        Some(!is_not)
+    } else if saw_null {
+        None
+    } else {
+        Some(is_not)
+    }
+}
+
+fn evaluate_between_values(
+    value: Value,
+    lower: Value,
+    upper: Value,
+    is_not: bool,
+) -> Option<bool> {
+    if value.is_null() || lower.is_null() || upper.is_null() {
+        return None;
+    }
+
+    let lower_ok = sql_partial_cmp(&value, &lower).map(|ordering| !ordering.is_lt());
+    let upper_ok = sql_partial_cmp(&value, &upper).map(|ordering| !ordering.is_gt());
+
+    match (lower_ok, upper_ok) {
+        (Some(true), Some(true)) => Some(!is_not),
+        (Some(_), Some(_)) => Some(is_not),
+        _ => None,
+    }
+}
+
+fn evaluate_like_values(value: Value, pattern: Value, is_not: bool) -> Option<bool> {
+    match (value, pattern) {
+        (Value::Text(text), Value::Text(pattern)) => {
+            let matched = SelectExecutor::like_matches(&pattern, &text);
+            Some(if is_not { !matched } else { matched })
+        }
+        (left, right) if left.is_null() || right.is_null() => None,
         _ => None,
     }
 }

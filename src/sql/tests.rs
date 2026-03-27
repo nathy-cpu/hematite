@@ -490,6 +490,58 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_case_expression_in_select_and_where() -> Result<()> {
+        let db = TestDbFile::new("_test_case_expression_in_select_and_where");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE grades (id INTEGER PRIMARY KEY, score INTEGER, nickname TEXT);")?;
+        conn.execute(
+            "INSERT INTO grades (id, score, nickname) VALUES (1, 95, 'ace'), (2, 82, NULL), (3, 70, 'steady');",
+        )?;
+
+        let result = conn.execute(
+            "SELECT CASE WHEN score >= 90 THEN 'A' WHEN score >= 80 THEN 'B' ELSE 'C' END AS grade FROM grades WHERE score >= CASE WHEN nickname IS NULL THEN 80 ELSE 90 END ORDER BY id ASC;",
+        )?;
+
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![crate::catalog::Value::Text("A".to_string())],
+                vec![crate::catalog::Value::Text("B".to_string())],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_case_expression_in_update_assignment() -> Result<()> {
+        let db = TestDbFile::new("_test_case_expression_in_update_assignment");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE grades (id INTEGER PRIMARY KEY, score INTEGER, label TEXT);")?;
+        conn.execute(
+            "INSERT INTO grades (id, score, label) VALUES (1, 95, NULL), (2, 72, NULL);",
+        )?;
+        conn.execute(
+            "UPDATE grades SET label = CASE WHEN score >= 90 THEN 'top' WHEN score >= 80 THEN 'mid' ELSE 'base' END;",
+        )?;
+
+        let result = conn.execute("SELECT label FROM grades ORDER BY id ASC;")?;
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![crate::catalog::Value::Text("top".to_string())],
+                vec![crate::catalog::Value::Text("base".to_string())],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_check_constraint_rejects_invalid_insert() -> Result<()> {
         let db = TestDbFile::new("_test_check_constraint_rejects_invalid_insert");
         let mut conn = Connection::new(db.path())?;
