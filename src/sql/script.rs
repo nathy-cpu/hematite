@@ -10,6 +10,18 @@ use super::connection::Connection;
 use super::result::ExecutedStatement;
 
 pub(crate) fn split_script_tokens(sql: &str) -> Result<Vec<Vec<Token>>> {
+    Ok(split_script_state(sql, true)?.0)
+}
+
+pub fn script_is_complete(sql: &str) -> Result<bool> {
+    let (statements, has_incomplete_tail) = split_script_state(sql, false)?;
+    Ok(!statements.is_empty() && !has_incomplete_tail)
+}
+
+fn split_script_state(
+    sql: &str,
+    append_trailing_statement: bool,
+) -> Result<(Vec<Vec<Token>>, bool)> {
     let mut lexer = Lexer::new(sql.to_string());
     lexer.tokenize()?;
 
@@ -29,11 +41,15 @@ pub(crate) fn split_script_tokens(sql: &str) -> Result<Vec<Vec<Token>>> {
     }
 
     if contains_statement_tokens(&current_tokens) {
-        current_tokens.push(Token::Semicolon);
-        statements.push(current_tokens);
+        if append_trailing_statement {
+            current_tokens.push(Token::Semicolon);
+            statements.push(current_tokens);
+            return Ok((statements, false));
+        }
+        return Ok((statements, true));
     }
 
-    Ok(statements)
+    Ok((statements, false))
 }
 
 fn contains_statement_tokens(tokens: &[Token]) -> bool {

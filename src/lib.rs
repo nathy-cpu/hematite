@@ -22,5 +22,6 @@ pub use error::{HematiteError, Result};
 pub use parser::parser::Parser;
 pub use parser::{ast::*, Lexer};
 pub use sql::{
-    Connection, Database, Hematite, PreparedStatement, ResultSet, Row, StatementResult, Transaction,
+    script_is_complete, Connection, Database, ExecutedStatement, Hematite, PreparedStatement,
+    ResultSet, Row, StatementResult, Transaction,
 };

@@ -112,14 +112,14 @@ Current lower-stack status that should be preserved:
 
 #### Block 4A — One-Shot Mode
 
-- [ ] Parse `db_path` and optional SQL script from CLI arguments.
-- [ ] Execute one-shot scripts through the stepped interface.
+- [x] Parse `db_path` and optional SQL script from CLI arguments.
+- [x] Execute one-shot scripts through the stepped interface.
 
 #### Block 4B — Interactive Mode
 
-- [ ] Enter REPL when only the database path is provided.
-- [ ] Accumulate input until semicolon-terminated statements are complete.
-- [ ] Execute consecutive statements from one input buffer safely.
+- [x] Enter REPL when only the database path is provided.
+- [x] Accumulate input until semicolon-terminated statements are complete.
+- [x] Execute consecutive statements from one input buffer safely.
 
 ### Phase 5 — Practical-Core SQL And Types
 
@@ -154,3 +154,4 @@ Current lower-stack status that should be preserved:
 - `ffec849` Move statement validation into query
 - `cedbf37` Route catalog metadata through B-tree interfaces
 - `96a0f4d` Route SQL through parser and query facades
+- `1f59a7f` Add stepped SQL script execution
