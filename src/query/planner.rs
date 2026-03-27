@@ -34,13 +34,21 @@ impl QueryPlanner {
         validate_statement(&statement, &self.catalog)?;
 
         let plan = match statement {
-            Statement::Begin | Statement::Commit | Statement::Rollback => {
+            Statement::Begin
+            | Statement::Commit
+            | Statement::Rollback
+            | Statement::Savepoint(_)
+            | Statement::RollbackToSavepoint(_)
+            | Statement::ReleaseSavepoint(_) => {
                 return Err(HematiteError::ParseError(
                     "Transaction control statements are handled at the SQL connection boundary"
                         .to_string(),
                 ))
             }
-            Statement::Explain(_) | Statement::Describe(_) | Statement::ShowTables => {
+            Statement::Explain(_)
+            | Statement::Describe(_)
+            | Statement::ShowTables
+            | Statement::ShowViews => {
                 return Err(HematiteError::ParseError(
                     "Introspection statements are handled at the SQL connection boundary"
                         .to_string(),
@@ -51,9 +59,19 @@ impl QueryPlanner {
             Statement::Insert(insert) => self.plan_insert(insert),
             Statement::Delete(delete) => self.plan_delete(delete),
             Statement::Create(create) => self.plan_create(create),
+            Statement::CreateView(_) | Statement::CreateTrigger(_) => {
+                return Err(HematiteError::ParseError(
+                    "View and trigger statements are not planned yet".to_string(),
+                ))
+            }
             Statement::CreateIndex(create_index) => self.plan_create_index(create_index),
             Statement::Alter(alter) => self.plan_alter(alter),
             Statement::Drop(drop) => self.plan_drop(drop),
+            Statement::DropView(_) | Statement::DropTrigger(_) => {
+                return Err(HematiteError::ParseError(
+                    "View and trigger statements are not planned yet".to_string(),
+                ))
+            }
             Statement::DropIndex(drop_index) => self.plan_drop_index(drop_index),
         }?;
 

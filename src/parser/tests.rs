@@ -851,6 +851,26 @@ mod parser_tests {
         }
     }
 
+    fn parse_create_view(sql: &str) -> Result<CreateViewStatement> {
+        match parse_statement(sql)? {
+            Statement::CreateView(create_view) => Ok(create_view),
+            other => Err(crate::error::HematiteError::InternalError(format!(
+                "Expected CREATE VIEW statement, found {:?}",
+                other
+            ))),
+        }
+    }
+
+    fn parse_create_trigger(sql: &str) -> Result<CreateTriggerStatement> {
+        match parse_statement(sql)? {
+            Statement::CreateTrigger(create_trigger) => Ok(create_trigger),
+            other => Err(crate::error::HematiteError::InternalError(format!(
+                "Expected CREATE TRIGGER statement, found {:?}",
+                other
+            ))),
+        }
+    }
+
     fn parse_create_index(sql: &str) -> Result<CreateIndexStatement> {
         match parse_statement(sql)? {
             Statement::CreateIndex(create_index) => Ok(create_index),
@@ -1987,6 +2007,54 @@ mod parser_tests {
         lexer.tokenize()?;
         let mut parser = Parser::new(lexer.get_tokens().to_vec());
         assert!(matches!(parser.parse()?, Statement::ShowTables));
+
+        let mut lexer = Lexer::new("SHOW VIEWS;".to_string());
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        assert!(matches!(parser.parse()?, Statement::ShowViews));
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_view_trigger_and_savepoint_statements() -> Result<()> {
+        let create_view =
+            parse_create_view("CREATE VIEW user_names AS SELECT name FROM users;")?;
+        assert_eq!(create_view.view, "user_names");
+        assert!(matches!(
+            create_view.query.from,
+            TableReference::Table(name, None) if name == "users"
+        ));
+
+        let create_trigger = parse_create_trigger(
+            "CREATE TRIGGER audit_users AFTER INSERT ON users AS INSERT INTO audit_log (entry) VALUES (NEW.name);",
+        )?;
+        assert_eq!(create_trigger.trigger, "audit_users");
+        assert_eq!(create_trigger.table, "users");
+        assert_eq!(create_trigger.event, TriggerEvent::Insert);
+        assert!(matches!(*create_trigger.body, Statement::Insert(_)));
+
+        assert!(matches!(
+            parse_statement("DROP VIEW IF EXISTS user_names;")?,
+            Statement::DropView(DropViewStatement { ref view, if_exists })
+                if view == "user_names" && if_exists
+        ));
+        assert!(matches!(
+            parse_statement("DROP TRIGGER IF EXISTS audit_users;")?,
+            Statement::DropTrigger(DropTriggerStatement { ref trigger, if_exists })
+                if trigger == "audit_users" && if_exists
+        ));
+        assert!(matches!(
+            parse_statement("SAVEPOINT before_users;")?,
+            Statement::Savepoint(ref name) if name == "before_users"
+        ));
+        assert!(matches!(
+            parse_statement("ROLLBACK TO SAVEPOINT before_users;")?,
+            Statement::RollbackToSavepoint(ref name) if name == "before_users"
+        ));
+        assert!(matches!(
+            parse_statement("RELEASE SAVEPOINT before_users;")?,
+            Statement::ReleaseSavepoint(ref name) if name == "before_users"
+        ));
         Ok(())
     }
 }

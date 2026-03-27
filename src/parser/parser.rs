@@ -49,6 +49,8 @@ impl Parser {
             Token::Begin => self.parse_begin(),
             Token::Commit => self.parse_commit(),
             Token::Rollback => self.parse_rollback(),
+            Token::Savepoint => self.parse_savepoint(),
+            Token::Release => self.parse_release_savepoint(),
             Token::Explain => self.parse_explain(),
             Token::Describe => self.parse_describe(),
             Token::Show => self.parse_show(),
@@ -60,7 +62,7 @@ impl Parser {
             Token::Alter => self.parse_alter(),
             Token::Drop => self.parse_drop(),
             _ => Err(HematiteError::ParseError(format!(
-                "Expected BEGIN, COMMIT, ROLLBACK, EXPLAIN, DESCRIBE, SHOW, SELECT, UPDATE, INSERT, DELETE, CREATE, ALTER, or DROP, found: {:?}",
+                "Expected BEGIN, COMMIT, ROLLBACK, SAVEPOINT, RELEASE, EXPLAIN, DESCRIBE, SHOW, SELECT, UPDATE, INSERT, DELETE, CREATE, ALTER, or DROP, found: {:?}",
                 token
             ))),
         }
@@ -80,8 +82,34 @@ impl Parser {
 
     fn parse_rollback(&mut self) -> Result<Statement> {
         self.consume_token(&Token::Rollback)?;
+        if matches!(self.peek_token(), Ok(Token::To)) {
+            self.consume_token(&Token::To)?;
+            if matches!(self.peek_token(), Ok(Token::Savepoint)) {
+                self.consume_token(&Token::Savepoint)?;
+            }
+            let name = self.parse_identifier()?;
+            self.consume_token(&Token::Semicolon)?;
+            return Ok(Statement::RollbackToSavepoint(name));
+        }
         self.consume_token(&Token::Semicolon)?;
         Ok(Statement::Rollback)
+    }
+
+    fn parse_savepoint(&mut self) -> Result<Statement> {
+        self.consume_token(&Token::Savepoint)?;
+        let name = self.parse_identifier()?;
+        self.consume_token(&Token::Semicolon)?;
+        Ok(Statement::Savepoint(name))
+    }
+
+    fn parse_release_savepoint(&mut self) -> Result<Statement> {
+        self.consume_token(&Token::Release)?;
+        if matches!(self.peek_token(), Ok(Token::Savepoint)) {
+            self.consume_token(&Token::Savepoint)?;
+        }
+        let name = self.parse_identifier()?;
+        self.consume_token(&Token::Semicolon)?;
+        Ok(Statement::ReleaseSavepoint(name))
     }
 
     fn parse_select(&mut self) -> Result<Statement> {
@@ -110,8 +138,13 @@ impl Parser {
                 self.consume_token(&Token::Semicolon)?;
                 Ok(Statement::ShowTables)
             }
+            Token::Views => {
+                self.consume_token(&Token::Views)?;
+                self.consume_token(&Token::Semicolon)?;
+                Ok(Statement::ShowViews)
+            }
             token => Err(HematiteError::ParseError(format!(
-                "Expected TABLES after SHOW, found: {:?}",
+                "Expected TABLES or VIEWS after SHOW, found: {:?}",
                 token
             ))),
         }
@@ -1380,6 +1413,63 @@ impl Parser {
                     if_not_exists,
                 }))
             }
+            Token::View => {
+                if unique {
+                    return Err(HematiteError::ParseError(
+                        "CREATE UNIQUE VIEW is not supported".to_string(),
+                    ));
+                }
+                self.consume_token(&Token::View)?;
+                let if_not_exists = self.parse_if_not_exists_clause()?;
+                let view = self.parse_identifier()?;
+                self.consume_token(&Token::As)?;
+                let query = self.parse_query_statement(true)?;
+                Ok(Statement::CreateView(CreateViewStatement {
+                    view,
+                    if_not_exists,
+                    query,
+                }))
+            }
+            Token::Trigger => {
+                if unique {
+                    return Err(HematiteError::ParseError(
+                        "CREATE UNIQUE TRIGGER is not supported".to_string(),
+                    ));
+                }
+                self.consume_token(&Token::Trigger)?;
+                let trigger = self.parse_identifier()?;
+                self.consume_token(&Token::After)?;
+                let event = match self.peek_token()? {
+                    Token::Insert => {
+                        self.consume_token(&Token::Insert)?;
+                        TriggerEvent::Insert
+                    }
+                    Token::Update => {
+                        self.consume_token(&Token::Update)?;
+                        TriggerEvent::Update
+                    }
+                    Token::Delete => {
+                        self.consume_token(&Token::Delete)?;
+                        TriggerEvent::Delete
+                    }
+                    token => {
+                        return Err(HematiteError::ParseError(format!(
+                            "Expected INSERT, UPDATE, or DELETE after AFTER, found: {:?}",
+                            token
+                        )))
+                    }
+                };
+                self.consume_token(&Token::On)?;
+                let table = self.parse_identifier()?;
+                self.consume_token(&Token::As)?;
+                let body = Box::new(self.parse()?);
+                Ok(Statement::CreateTrigger(CreateTriggerStatement {
+                    trigger,
+                    table,
+                    event,
+                    body,
+                }))
+            }
             Token::Index | Token::Key => {
                 if matches!(self.peek_token(), Ok(Token::Index)) {
                     self.consume_token(&Token::Index)?;
@@ -1406,7 +1496,7 @@ impl Parser {
                 }))
             }
             token => Err(HematiteError::ParseError(format!(
-                "Expected TABLE, INDEX, or KEY after CREATE, found: {:?}",
+                "Expected TABLE, VIEW, TRIGGER, INDEX, or KEY after CREATE, found: {:?}",
                 token
             ))),
         }
@@ -1434,6 +1524,23 @@ impl Parser {
                 self.consume_token(&Token::Semicolon)?;
                 Ok(Statement::Drop(DropStatement { table, if_exists }))
             }
+            Token::View => {
+                self.consume_token(&Token::View)?;
+                let if_exists = self.parse_if_exists_clause()?;
+                let view = self.parse_identifier()?;
+                self.consume_token(&Token::Semicolon)?;
+                Ok(Statement::DropView(DropViewStatement { view, if_exists }))
+            }
+            Token::Trigger => {
+                self.consume_token(&Token::Trigger)?;
+                let if_exists = self.parse_if_exists_clause()?;
+                let trigger = self.parse_identifier()?;
+                self.consume_token(&Token::Semicolon)?;
+                Ok(Statement::DropTrigger(DropTriggerStatement {
+                    trigger,
+                    if_exists,
+                }))
+            }
             Token::Index => {
                 self.consume_token(&Token::Index)?;
                 let if_exists = self.parse_if_exists_clause()?;
@@ -1448,7 +1555,7 @@ impl Parser {
                 }))
             }
             token => Err(HematiteError::ParseError(format!(
-                "Expected TABLE or INDEX after DROP, found: {:?}",
+                "Expected TABLE, VIEW, TRIGGER, or INDEX after DROP, found: {:?}",
                 token
             ))),
         }

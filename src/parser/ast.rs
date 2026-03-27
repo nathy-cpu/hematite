@@ -8,17 +8,25 @@ pub enum Statement {
     Begin,
     Commit,
     Rollback,
+    Savepoint(String),
+    RollbackToSavepoint(String),
+    ReleaseSavepoint(String),
     Explain(ExplainStatement),
     Describe(DescribeStatement),
     ShowTables,
+    ShowViews,
     Select(SelectStatement),
     Update(UpdateStatement),
     Insert(InsertStatement),
     Delete(DeleteStatement),
     Create(CreateStatement),
+    CreateView(CreateViewStatement),
+    CreateTrigger(CreateTriggerStatement),
     CreateIndex(CreateIndexStatement),
     Alter(AlterStatement),
     Drop(DropStatement),
+    DropView(DropViewStatement),
+    DropTrigger(DropTriggerStatement),
     DropIndex(DropIndexStatement),
 }
 
@@ -383,6 +391,28 @@ pub struct CreateStatement {
 }
 
 #[derive(Debug, Clone)]
+pub struct CreateViewStatement {
+    pub view: String,
+    pub if_not_exists: bool,
+    pub query: SelectStatement,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateTriggerStatement {
+    pub trigger: String,
+    pub table: String,
+    pub event: TriggerEvent,
+    pub body: Box<Statement>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriggerEvent {
+    Insert,
+    Update,
+    Delete,
+}
+
+#[derive(Debug, Clone)]
 pub struct CreateIndexStatement {
     pub index_name: String,
     pub table: String,
@@ -394,6 +424,18 @@ pub struct CreateIndexStatement {
 #[derive(Debug, Clone)]
 pub struct DropStatement {
     pub table: String,
+    pub if_exists: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct DropViewStatement {
+    pub view: String,
+    pub if_exists: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct DropTriggerStatement {
+    pub trigger: String,
     pub if_exists: bool,
 }
 
@@ -487,7 +529,14 @@ impl Statement {
     #[cfg(test)]
     pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
         match self {
-            Statement::Begin | Statement::Commit | Statement::Rollback | Statement::ShowTables => {
+            Statement::Begin
+            | Statement::Commit
+            | Statement::Rollback
+            | Statement::Savepoint(_)
+            | Statement::RollbackToSavepoint(_)
+            | Statement::ReleaseSavepoint(_)
+            | Statement::ShowTables
+            | Statement::ShowViews => {
                 Ok(())
             }
             Statement::Explain(explain) => explain.statement.validate(catalog),
@@ -506,9 +555,13 @@ impl Statement {
             Statement::Insert(insert) => insert.validate(catalog),
             Statement::Delete(delete) => delete.validate(catalog),
             Statement::Create(create) => create.validate(catalog),
+            Statement::CreateView(_create_view) => Ok(()),
+            Statement::CreateTrigger(_create_trigger) => Ok(()),
             Statement::CreateIndex(create_index) => create_index.validate(catalog),
             Statement::Alter(alter) => alter.validate(catalog),
             Statement::Drop(drop) => drop.validate(catalog),
+            Statement::DropView(_drop_view) => Ok(()),
+            Statement::DropTrigger(_drop_trigger) => Ok(()),
             Statement::DropIndex(drop_index) => drop_index.validate(catalog),
         }
     }
@@ -528,6 +581,7 @@ impl Statement {
             Statement::Explain(_)
                 | Statement::Describe(_)
                 | Statement::ShowTables
+                | Statement::ShowViews
                 | Statement::Select(_)
         )
     }
@@ -536,9 +590,13 @@ impl Statement {
         matches!(
             self,
             Statement::Create(_)
+                | Statement::CreateView(_)
+                | Statement::CreateTrigger(_)
                 | Statement::CreateIndex(_)
                 | Statement::Alter(_)
                 | Statement::Drop(_)
+                | Statement::DropView(_)
+                | Statement::DropTrigger(_)
                 | Statement::DropIndex(_)
         )
     }
@@ -563,8 +621,12 @@ impl Statement {
             Statement::Begin
             | Statement::Commit
             | Statement::Rollback
+            | Statement::Savepoint(_)
+            | Statement::RollbackToSavepoint(_)
+            | Statement::ReleaseSavepoint(_)
             | Statement::Describe(_)
-            | Statement::ShowTables => {}
+            | Statement::ShowTables
+            | Statement::ShowViews => {}
             Statement::Explain(explain) => explain.statement.visit_parameters(f),
             Statement::Select(select) => {
                 select.visit_parameters(f);
@@ -602,9 +664,13 @@ impl Statement {
                 }
             }
             Statement::Create(_)
+            | Statement::CreateView(_)
+            | Statement::CreateTrigger(_)
             | Statement::CreateIndex(_)
             | Statement::Alter(_)
             | Statement::Drop(_)
+            | Statement::DropView(_)
+            | Statement::DropTrigger(_)
             | Statement::DropIndex(_) => {}
         }
     }
@@ -614,11 +680,17 @@ impl Statement {
             Statement::Begin => Ok(Statement::Begin),
             Statement::Commit => Ok(Statement::Commit),
             Statement::Rollback => Ok(Statement::Rollback),
+            Statement::Savepoint(name) => Ok(Statement::Savepoint(name.clone())),
+            Statement::RollbackToSavepoint(name) => {
+                Ok(Statement::RollbackToSavepoint(name.clone()))
+            }
+            Statement::ReleaseSavepoint(name) => Ok(Statement::ReleaseSavepoint(name.clone())),
             Statement::Explain(explain) => Ok(Statement::Explain(ExplainStatement {
                 statement: Box::new(explain.statement.bind_parameters(parameters)?),
             })),
             Statement::Describe(describe) => Ok(Statement::Describe(describe.clone())),
             Statement::ShowTables => Ok(Statement::ShowTables),
+            Statement::ShowViews => Ok(Statement::ShowViews),
             Statement::Select(select) => Ok(Statement::Select(SelectStatement {
                 with_clause: select
                     .with_clause
@@ -738,11 +810,32 @@ impl Statement {
                     .transpose()?,
             })),
             Statement::Create(create) => Ok(Statement::Create(create.clone())),
+            Statement::CreateView(create_view) => {
+                Ok(Statement::CreateView(CreateViewStatement {
+                    view: create_view.view.clone(),
+                    if_not_exists: create_view.if_not_exists,
+                    query: Statement::Select(create_view.query.clone())
+                        .bind_parameters(parameters)?
+                        .into_select()?,
+                }))
+            }
+            Statement::CreateTrigger(create_trigger) => {
+                Ok(Statement::CreateTrigger(CreateTriggerStatement {
+                    trigger: create_trigger.trigger.clone(),
+                    table: create_trigger.table.clone(),
+                    event: create_trigger.event,
+                    body: Box::new(create_trigger.body.bind_parameters(parameters)?),
+                }))
+            }
             Statement::CreateIndex(create_index) => {
                 Ok(Statement::CreateIndex(create_index.clone()))
             }
             Statement::Alter(alter) => Ok(Statement::Alter(alter.clone())),
             Statement::Drop(drop) => Ok(Statement::Drop(drop.clone())),
+            Statement::DropView(drop_view) => Ok(Statement::DropView(drop_view.clone())),
+            Statement::DropTrigger(drop_trigger) => {
+                Ok(Statement::DropTrigger(drop_trigger.clone()))
+            }
             Statement::DropIndex(drop_index) => Ok(Statement::DropIndex(drop_index.clone())),
         }
     }

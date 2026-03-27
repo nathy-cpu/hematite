@@ -13,18 +13,29 @@ struct SourceBinding {
 
 pub(crate) fn validate_statement(statement: &Statement, catalog: &Schema) -> Result<()> {
     match statement {
-        Statement::Begin | Statement::Commit | Statement::Rollback => Ok(()),
+        Statement::Begin
+        | Statement::Commit
+        | Statement::Rollback
+        | Statement::Savepoint(_)
+        | Statement::RollbackToSavepoint(_)
+        | Statement::ReleaseSavepoint(_) => Ok(()),
         Statement::Explain(explain) => validate_statement(&explain.statement, catalog),
         Statement::Describe(describe) => require_table(catalog, &describe.table).map(|_| ()),
-        Statement::ShowTables => Ok(()),
+        Statement::ShowTables | Statement::ShowViews => Ok(()),
         Statement::Select(select) => validate_select(select, catalog),
         Statement::Update(update) => validate_update(update, catalog),
         Statement::Insert(insert) => validate_insert(insert, catalog),
         Statement::Delete(delete) => validate_delete(delete, catalog),
         Statement::Create(create) => validate_create(create, catalog),
+        Statement::CreateView(create_view) => validate_select(&create_view.query, catalog),
+        Statement::CreateTrigger(create_trigger) => {
+            require_table(catalog, &create_trigger.table)?;
+            validate_statement(&create_trigger.body, catalog)
+        }
         Statement::CreateIndex(create_index) => validate_create_index(create_index, catalog),
         Statement::Alter(alter) => validate_alter(alter, catalog),
         Statement::Drop(drop) => validate_drop(drop, catalog),
+        Statement::DropView(_) | Statement::DropTrigger(_) => Ok(()),
         Statement::DropIndex(drop_index) => validate_drop_index(drop_index, catalog),
     }
 }

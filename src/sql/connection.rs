@@ -146,6 +146,13 @@ impl Connection {
                 self.rollback_active_transaction()?;
                 return Ok(Self::empty_result());
             }
+            crate::parser::ast::Statement::Savepoint(_)
+            | crate::parser::ast::Statement::RollbackToSavepoint(_)
+            | crate::parser::ast::Statement::ReleaseSavepoint(_) => {
+                return Err(HematiteError::ParseError(
+                    "SAVEPOINT statements are not implemented yet".to_string(),
+                ));
+            }
             crate::parser::ast::Statement::Explain(explain) => {
                 return self.execute_explain_statement(*explain.statement);
             }
@@ -154,6 +161,19 @@ impl Connection {
             }
             crate::parser::ast::Statement::ShowTables => {
                 return self.execute_show_tables_statement();
+            }
+            crate::parser::ast::Statement::ShowViews => {
+                return Err(HematiteError::ParseError(
+                    "SHOW VIEWS is not implemented yet".to_string(),
+                ));
+            }
+            crate::parser::ast::Statement::CreateView(_)
+            | crate::parser::ast::Statement::DropView(_)
+            | crate::parser::ast::Statement::CreateTrigger(_)
+            | crate::parser::ast::Statement::DropTrigger(_) => {
+                return Err(HematiteError::ParseError(
+                    "View and trigger statements are not implemented yet".to_string(),
+                ));
             }
             _ => {}
         }
