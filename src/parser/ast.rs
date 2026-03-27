@@ -189,6 +189,10 @@ pub enum Expression {
     Literal(Value),
     Parameter(usize),
     ScalarSubquery(Box<SelectStatement>),
+    Case {
+        branches: Vec<CaseWhenClause>,
+        else_expr: Option<Box<Expression>>,
+    },
     ScalarFunctionCall {
         function: ScalarFunction,
         args: Vec<Expression>,
@@ -224,6 +228,12 @@ pub enum ScalarFunction {
     Trim,
     Abs,
     Round,
+}
+
+#[derive(Debug, Clone)]
+pub struct CaseWhenClause {
+    pub condition: Condition,
+    pub result: Expression,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -764,6 +774,15 @@ impl Expression {
         match self {
             Expression::Parameter(index) => f(*index),
             Expression::ScalarSubquery(subquery) => subquery.visit_parameters(f),
+            Expression::Case { branches, else_expr } => {
+                for branch in branches {
+                    branch.condition.visit_parameters(f);
+                    branch.result.visit_parameters(f);
+                }
+                if let Some(else_expr) = else_expr {
+                    else_expr.visit_parameters(f);
+                }
+            }
             Expression::ScalarFunctionCall { args, .. } => {
                 for arg in args {
                     arg.visit_parameters(f);
@@ -798,6 +817,21 @@ impl Expression {
                     .bind_parameters(parameters)?
                     .into_select()?,
             ))),
+            Expression::Case { branches, else_expr } => Ok(Expression::Case {
+                branches: branches
+                    .iter()
+                    .map(|branch| {
+                        Ok(CaseWhenClause {
+                            condition: branch.condition.bind(parameters)?,
+                            result: branch.result.bind(parameters)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+                else_expr: else_expr
+                    .as_ref()
+                    .map(|expr| expr.bind(parameters).map(Box::new))
+                    .transpose()?,
+            }),
             Expression::ScalarFunctionCall { function, args } => {
                 let mut bound_args = Vec::with_capacity(args.len());
                 for arg in args {
@@ -1498,6 +1532,15 @@ impl SelectStatement {
                     ));
                 }
             }
+            Expression::Case { branches, else_expr } => {
+                for branch in branches {
+                    self.validate_condition(&branch.condition, catalog, from, outer_bindings)?;
+                    self.validate_expression(&branch.result, catalog, from, outer_bindings)?;
+                }
+                if let Some(else_expr) = else_expr {
+                    self.validate_expression(else_expr, catalog, from, outer_bindings)?;
+                }
+            }
             Expression::ScalarFunctionCall { args, .. } => {
                 for arg in args {
                     self.validate_expression(arg, catalog, from, outer_bindings)?;
@@ -1525,6 +1568,14 @@ impl SelectStatement {
         match expr {
             Expression::AggregateCall { .. } => true,
             Expression::ScalarSubquery(_) => false,
+            Expression::Case { branches, else_expr } => {
+                branches.iter().any(|branch| {
+                    Self::condition_contains_aggregate(&branch.condition)
+                        || Self::expression_contains_aggregate(&branch.result)
+                }) || else_expr
+                    .as_ref()
+                    .is_some_and(|expr| Self::expression_contains_aggregate(expr))
+            }
             Expression::ScalarFunctionCall { args, .. } => {
                 args.iter().any(Self::expression_contains_aggregate)
             }
@@ -2411,6 +2462,14 @@ impl Expression {
     pub(crate) fn references_source_name(&self, name: &str) -> bool {
         match self {
             Expression::ScalarSubquery(subquery) => subquery.references_source_name(name),
+            Expression::Case { branches, else_expr } => {
+                branches.iter().any(|branch| {
+                    branch.condition.references_source_name(name)
+                        || branch.result.references_source_name(name)
+                }) || else_expr
+                    .as_ref()
+                    .is_some_and(|expr| expr.references_source_name(name))
+            }
             Expression::ScalarFunctionCall { args, .. } => {
                 args.iter().any(|arg| arg.references_source_name(name))
             }
@@ -2429,6 +2488,14 @@ impl Expression {
         match self {
             Expression::Column(name) => column_name_matches(name, column_name, table_name),
             Expression::ScalarSubquery(_) => false,
+            Expression::Case { branches, else_expr } => {
+                branches.iter().any(|branch| {
+                    branch.condition.references_column(column_name, table_name)
+                        || branch.result.references_column(column_name, table_name)
+                }) || else_expr
+                    .as_ref()
+                    .is_some_and(|expr| expr.references_column(column_name, table_name))
+            }
             Expression::ScalarFunctionCall { args, .. } => args
                 .iter()
                 .any(|arg| arg.references_column(column_name, table_name)),
@@ -2456,6 +2523,19 @@ impl Expression {
                 rename_column_name(name, old_name, new_name, table_name);
             }
             Expression::ScalarSubquery(_) => {}
+            Expression::Case { branches, else_expr } => {
+                for branch in branches {
+                    branch
+                        .condition
+                        .rename_column_references(old_name, new_name, table_name);
+                    branch
+                        .result
+                        .rename_column_references(old_name, new_name, table_name);
+                }
+                if let Some(else_expr) = else_expr {
+                    else_expr.rename_column_references(old_name, new_name, table_name);
+                }
+            }
             Expression::ScalarFunctionCall { args, .. } => {
                 for arg in args {
                     arg.rename_column_references(old_name, new_name, table_name);
@@ -2490,6 +2570,21 @@ impl Expression {
             },
             Expression::Parameter(index) => format!("?{}", index + 1),
             Expression::ScalarSubquery(_) => "(<subquery>)".to_string(),
+            Expression::Case { branches, else_expr } => {
+                let mut parts = vec!["CASE".to_string()];
+                for branch in branches {
+                    parts.push(format!(
+                        "WHEN {} THEN {}",
+                        branch.condition.to_sql(),
+                        branch.result.to_sql()
+                    ));
+                }
+                if let Some(else_expr) = else_expr {
+                    parts.push(format!("ELSE {}", else_expr.to_sql()));
+                }
+                parts.push("END".to_string());
+                parts.join(" ")
+            }
             Expression::ScalarFunctionCall { function, args } => format!(
                 "{}({})",
                 function.to_sql(),

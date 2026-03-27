@@ -266,6 +266,7 @@ impl Parser {
                     | Token::NullLiteral
                     | Token::Placeholder
                     | Token::LeftParen
+                    | Token::Case
                     | Token::Minus => {
                         let expr = self.parse_expression()?;
                         columns.push(match expr {
@@ -818,6 +819,7 @@ impl Parser {
     fn parse_primary_expression(&mut self) -> Result<Expression> {
         let token = self.peek_token()?;
         match token {
+            Token::Case => self.parse_case_expression(),
             Token::Count | Token::Sum | Token::Avg | Token::Min | Token::Max => {
                 self.parse_aggregate_expression()
             }
@@ -880,6 +882,35 @@ impl Parser {
                 token
             ))),
         }
+    }
+
+    fn parse_case_expression(&mut self) -> Result<Expression> {
+        self.consume_token(&Token::Case)?;
+        let mut branches = Vec::new();
+
+        while matches!(self.peek_token(), Ok(Token::When)) {
+            self.consume_token(&Token::When)?;
+            let condition = self.parse_or_condition()?;
+            self.consume_token(&Token::Then)?;
+            let result = self.parse_expression()?;
+            branches.push(CaseWhenClause { condition, result });
+        }
+
+        if branches.is_empty() {
+            return Err(HematiteError::ParseError(
+                "CASE expression requires at least one WHEN ... THEN branch".to_string(),
+            ));
+        }
+
+        let else_expr = if matches!(self.peek_token(), Ok(Token::Else)) {
+            self.consume_token(&Token::Else)?;
+            Some(Box::new(self.parse_expression()?))
+        } else {
+            None
+        };
+
+        self.consume_token(&Token::End)?;
+        Ok(Expression::Case { branches, else_expr })
     }
 
     fn parse_scalar_function_expression(&mut self) -> Result<Expression> {

@@ -1000,6 +1000,20 @@ mod parser_tests {
     }
 
     #[test]
+    fn test_parse_case_expression() -> Result<()> {
+        let select = parse_select(
+            "SELECT CASE WHEN score >= 90 THEN 'A' WHEN score >= 80 THEN 'B' ELSE 'C' END AS grade FROM users;",
+        )?;
+        assert!(matches!(
+            &select.columns[0],
+            SelectItem::Expression(Expression::Case { branches, else_expr })
+                if branches.len() == 2 && else_expr.is_some()
+        ));
+        assert_eq!(select.column_aliases[0].as_deref(), Some("grade"));
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_order_by() -> Result<()> {
         let select = parse_select("SELECT id FROM users ORDER BY name DESC, id ASC;")?;
         assert_eq!(select.order_by.len(), 2);

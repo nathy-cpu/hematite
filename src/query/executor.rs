@@ -241,6 +241,9 @@ impl SelectExecutor {
                 "Unbound parameter {} reached execution",
                 index + 1
             ))),
+            Expression::Case { .. } => Err(HematiteError::ParseError(
+                "CASE expressions are not implemented yet".to_string(),
+            )),
             Expression::AggregateCall { .. } => Err(HematiteError::ParseError(
                 "Aggregate expressions can only be evaluated in grouped query contexts".to_string(),
             )),
@@ -574,6 +577,15 @@ impl SelectExecutor {
                 }
                 if let Some(value) = self.lookup_outer_scope_value(scopes, name)? {
                     *expr = Expression::Literal(value);
+                }
+            }
+            Expression::Case { branches, else_expr } => {
+                for branch in branches {
+                    self.bind_condition_outer_references(ctx, from, &mut branch.condition, scopes)?;
+                    self.bind_expression_outer_references(ctx, from, &mut branch.result, scopes)?;
+                }
+                if let Some(else_expr) = else_expr {
+                    self.bind_expression_outer_references(ctx, from, else_expr, scopes)?;
                 }
             }
             Expression::ScalarSubquery(subquery) => {
@@ -1622,6 +1634,9 @@ impl SelectExecutor {
                 "Unbound parameter {} reached execution",
                 index + 1
             ))),
+            Expression::Case { .. } => Err(HematiteError::ParseError(
+                "CASE expressions are not implemented yet".to_string(),
+            )),
             Expression::ScalarSubquery(subquery) => {
                 self.execute_scalar_subquery_cached(
                     ctx,
@@ -2345,6 +2360,9 @@ impl InsertExecutor {
                 "Unbound parameter {} reached execution",
                 index + 1
             ))),
+            Expression::Case { .. } => Err(HematiteError::ParseError(
+                "CASE expressions are not implemented yet".to_string(),
+            )),
             Expression::ScalarSubquery(_) => Err(HematiteError::ParseError(
                 "INSERT expressions cannot use scalar subqueries".to_string(),
             )),
