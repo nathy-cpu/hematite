@@ -850,6 +850,20 @@ mod tests {
             Column::new(ColumnId::new(5), "name".to_string(), DataType::Text),
         ];
         let table2_id = original_schema.create_table("products".to_string(), columns2)?;
+        original_schema.insert_view(View {
+            name: "active_users".to_string(),
+            query_sql: "SELECT id, name FROM users WHERE active = TRUE".to_string(),
+            column_names: vec!["id".to_string(), "name".to_string()],
+            dependencies: vec!["users".to_string()],
+        })?;
+        original_schema.insert_trigger(Trigger {
+            name: "audit_user_delete".to_string(),
+            table_name: "users".to_string(),
+            event: TriggerEvent::Delete,
+            body_sql: "INSERT INTO audit_log (entry) VALUES (OLD.name)".to_string(),
+            old_alias: Some("OLD".to_string()),
+            new_alias: None,
+        })?;
 
         // Serialize
         let mut buffer = Vec::new();
@@ -866,6 +880,8 @@ mod tests {
         assert!(deserialized_schema.get_table(table2_id).is_some());
         assert!(deserialized_schema.get_table_by_name("users").is_some());
         assert!(deserialized_schema.get_table_by_name("products").is_some());
+        assert!(deserialized_schema.view("active_users").is_some());
+        assert!(deserialized_schema.trigger("audit_user_delete").is_some());
 
         Ok(())
     }
@@ -879,6 +895,8 @@ mod tests {
 
         let deserialized = Schema::deserialize(&buffer)?;
         assert_eq!(deserialized.get_table_count(), 0);
+        assert!(deserialized.list_views().is_empty());
+        assert!(deserialized.list_triggers().is_empty());
 
         Ok(())
     }

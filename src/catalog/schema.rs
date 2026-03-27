@@ -2,6 +2,7 @@
 
 use super::column::Column;
 use super::ids::TableId;
+use super::object::{Trigger, View};
 use super::table::{CheckConstraint, ForeignKeyConstraint, SecondaryIndex, Table};
 use crate::error::HematiteError;
 use crate::Result;
@@ -11,6 +12,8 @@ use std::collections::HashMap;
 pub struct Schema {
     tables: HashMap<TableId, Table>,
     table_names: HashMap<String, TableId>,
+    views: HashMap<String, View>,
+    triggers: HashMap<String, Trigger>,
     next_table_id: u32,
     next_column_id: u32,
 }
@@ -20,6 +23,8 @@ impl Schema {
         Self {
             tables: HashMap::new(),
             table_names: HashMap::new(),
+            views: HashMap::new(),
+            triggers: HashMap::new(),
             next_table_id: 1,
             next_column_id: 1,
         }
@@ -106,6 +111,22 @@ impl Schema {
         self.table_names
             .get(name)
             .and_then(|&id| self.tables.get(&id))
+    }
+
+    pub fn view(&self, name: &str) -> Option<&View> {
+        self.views.get(name)
+    }
+
+    pub fn trigger(&self, name: &str) -> Option<&Trigger> {
+        self.triggers.get(name)
+    }
+
+    pub(crate) fn views(&self) -> &HashMap<String, View> {
+        &self.views
+    }
+
+    pub(crate) fn triggers(&self) -> &HashMap<String, Trigger> {
+        &self.triggers
     }
 
     pub(crate) fn tables(&self) -> &HashMap<TableId, Table> {
@@ -310,6 +331,14 @@ impl Schema {
             .collect()
     }
 
+    pub fn list_views(&self) -> Vec<String> {
+        self.views.keys().cloned().collect()
+    }
+
+    pub fn list_triggers(&self) -> Vec<String> {
+        self.triggers.keys().cloned().collect()
+    }
+
     pub fn get_table_count(&self) -> usize {
         self.tables.len()
     }
@@ -366,6 +395,16 @@ impl Schema {
             table.serialize(buffer)?;
         }
 
+        buffer.extend_from_slice(&(self.views.len() as u32).to_le_bytes());
+        for view in self.views.values() {
+            view.serialize(buffer);
+        }
+
+        buffer.extend_from_slice(&(self.triggers.len() as u32).to_le_bytes());
+        for trigger in self.triggers.values() {
+            trigger.serialize(buffer);
+        }
+
         Ok(())
     }
 
@@ -408,6 +447,8 @@ impl Schema {
         let mut schema = Self {
             tables: HashMap::new(),
             table_names: HashMap::new(),
+            views: HashMap::new(),
+            triggers: HashMap::new(),
             next_table_id,
             next_column_id,
         };
@@ -420,6 +461,50 @@ impl Schema {
 
             schema.table_names.insert(name, id);
             schema.tables.insert(id, table);
+        }
+
+        if offset == buffer.len() {
+            return Ok(schema);
+        }
+
+        if offset + 4 > buffer.len() {
+            return Err(HematiteError::CorruptedData(
+                "Invalid view count".to_string(),
+            ));
+        }
+        let view_count = u32::from_le_bytes([
+            buffer[offset],
+            buffer[offset + 1],
+            buffer[offset + 2],
+            buffer[offset + 3],
+        ]) as usize;
+        offset += 4;
+
+        for _ in 0..view_count {
+            let view = View::deserialize(buffer, &mut offset)?;
+            schema.views.insert(view.name.clone(), view);
+        }
+
+        if offset == buffer.len() {
+            return Ok(schema);
+        }
+
+        if offset + 4 > buffer.len() {
+            return Err(HematiteError::CorruptedData(
+                "Invalid trigger count".to_string(),
+            ));
+        }
+        let trigger_count = u32::from_le_bytes([
+            buffer[offset],
+            buffer[offset + 1],
+            buffer[offset + 2],
+            buffer[offset + 3],
+        ]) as usize;
+        offset += 4;
+
+        for _ in 0..trigger_count {
+            let trigger = Trigger::deserialize(buffer, &mut offset)?;
+            schema.triggers.insert(trigger.name.clone(), trigger);
         }
 
         Ok(schema)
@@ -460,6 +545,28 @@ impl Schema {
 
         self.table_names.insert(table.name.clone(), table.id);
         self.tables.insert(table.id, table);
+        Ok(())
+    }
+
+    pub fn insert_view(&mut self, view: View) -> Result<()> {
+        if self.table_names.contains_key(&view.name) || self.views.contains_key(&view.name) {
+            return Err(HematiteError::CorruptedData(format!(
+                "Duplicate schema object name '{}' while loading schema",
+                view.name
+            )));
+        }
+        self.views.insert(view.name.clone(), view);
+        Ok(())
+    }
+
+    pub fn insert_trigger(&mut self, trigger: Trigger) -> Result<()> {
+        if self.triggers.contains_key(&trigger.name) {
+            return Err(HematiteError::CorruptedData(format!(
+                "Duplicate trigger name '{}' while loading schema",
+                trigger.name
+            )));
+        }
+        self.triggers.insert(trigger.name.clone(), trigger);
         Ok(())
     }
 }
