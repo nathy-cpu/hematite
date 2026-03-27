@@ -49,6 +49,9 @@ impl Parser {
             Token::Begin => self.parse_begin(),
             Token::Commit => self.parse_commit(),
             Token::Rollback => self.parse_rollback(),
+            Token::Explain => self.parse_explain(),
+            Token::Describe => self.parse_describe(),
+            Token::Show => self.parse_show(),
             Token::Select | Token::With => self.parse_select(),
             Token::Update => self.parse_update(),
             Token::Insert => self.parse_insert(),
@@ -57,7 +60,7 @@ impl Parser {
             Token::Alter => self.parse_alter(),
             Token::Drop => self.parse_drop(),
             _ => Err(HematiteError::ParseError(format!(
-                "Expected BEGIN, COMMIT, ROLLBACK, SELECT, UPDATE, INSERT, DELETE, CREATE, ALTER, or DROP, found: {:?}",
+                "Expected BEGIN, COMMIT, ROLLBACK, EXPLAIN, DESCRIBE, SHOW, SELECT, UPDATE, INSERT, DELETE, CREATE, ALTER, or DROP, found: {:?}",
                 token
             ))),
         }
@@ -83,6 +86,35 @@ impl Parser {
 
     fn parse_select(&mut self) -> Result<Statement> {
         Ok(Statement::Select(self.parse_query_statement(true)?))
+    }
+
+    fn parse_explain(&mut self) -> Result<Statement> {
+        self.consume_token(&Token::Explain)?;
+        Ok(Statement::Explain(ExplainStatement {
+            statement: Box::new(self.parse()?),
+        }))
+    }
+
+    fn parse_describe(&mut self) -> Result<Statement> {
+        self.consume_token(&Token::Describe)?;
+        let table = self.parse_identifier()?;
+        self.consume_token(&Token::Semicolon)?;
+        Ok(Statement::Describe(DescribeStatement { table }))
+    }
+
+    fn parse_show(&mut self) -> Result<Statement> {
+        self.consume_token(&Token::Show)?;
+        match self.peek_token()? {
+            Token::Tables => {
+                self.consume_token(&Token::Tables)?;
+                self.consume_token(&Token::Semicolon)?;
+                Ok(Statement::ShowTables)
+            }
+            token => Err(HematiteError::ParseError(format!(
+                "Expected TABLES after SHOW, found: {:?}",
+                token
+            ))),
+        }
     }
 
     fn parse_query_statement(&mut self, expect_semicolon: bool) -> Result<SelectStatement> {

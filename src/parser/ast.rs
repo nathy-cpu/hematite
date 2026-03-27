@@ -8,6 +8,9 @@ pub enum Statement {
     Begin,
     Commit,
     Rollback,
+    Explain(ExplainStatement),
+    Describe(DescribeStatement),
+    ShowTables,
     Select(SelectStatement),
     Update(UpdateStatement),
     Insert(InsertStatement),
@@ -17,6 +20,16 @@ pub enum Statement {
     Alter(AlterStatement),
     Drop(DropStatement),
     DropIndex(DropIndexStatement),
+}
+
+#[derive(Debug, Clone)]
+pub struct ExplainStatement {
+    pub statement: Box<Statement>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DescribeStatement {
+    pub table: String,
 }
 
 #[derive(Debug, Clone)]
@@ -451,7 +464,20 @@ impl Statement {
     #[cfg(test)]
     pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
         match self {
-            Statement::Begin | Statement::Commit | Statement::Rollback => Ok(()),
+            Statement::Begin | Statement::Commit | Statement::Rollback | Statement::ShowTables => {
+                Ok(())
+            }
+            Statement::Explain(explain) => explain.statement.validate(catalog),
+            Statement::Describe(describe) => {
+                if catalog.get_table_by_name(&describe.table).is_none() {
+                    Err(HematiteError::ParseError(format!(
+                        "Table '{}' does not exist",
+                        describe.table
+                    )))
+                } else {
+                    Ok(())
+                }
+            }
             Statement::Select(select) => select.validate(catalog),
             Statement::Update(update) => update.validate(catalog),
             Statement::Insert(insert) => insert.validate(catalog),
@@ -474,7 +500,13 @@ impl Statement {
     }
 
     pub fn is_read_only(&self) -> bool {
-        matches!(self, Statement::Select(_))
+        matches!(
+            self,
+            Statement::Explain(_)
+                | Statement::Describe(_)
+                | Statement::ShowTables
+                | Statement::Select(_)
+        )
     }
 
     pub fn mutates_schema(&self) -> bool {
@@ -505,7 +537,12 @@ impl Statement {
         F: FnMut(usize),
     {
         match self {
-            Statement::Begin | Statement::Commit | Statement::Rollback => {}
+            Statement::Begin
+            | Statement::Commit
+            | Statement::Rollback
+            | Statement::Describe(_)
+            | Statement::ShowTables => {}
+            Statement::Explain(explain) => explain.statement.visit_parameters(f),
             Statement::Select(select) => {
                 select.visit_parameters(f);
             }
@@ -542,6 +579,11 @@ impl Statement {
             Statement::Begin => Ok(Statement::Begin),
             Statement::Commit => Ok(Statement::Commit),
             Statement::Rollback => Ok(Statement::Rollback),
+            Statement::Explain(explain) => Ok(Statement::Explain(ExplainStatement {
+                statement: Box::new(explain.statement.bind_parameters(parameters)?),
+            })),
+            Statement::Describe(describe) => Ok(Statement::Describe(describe.clone())),
+            Statement::ShowTables => Ok(Statement::ShowTables),
             Statement::Select(select) => Ok(Statement::Select(SelectStatement {
                 with_clause: select
                     .with_clause

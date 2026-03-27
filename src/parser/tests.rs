@@ -1827,4 +1827,23 @@ mod parser_tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_parse_explain_describe_and_show_tables() -> Result<()> {
+        let mut lexer = Lexer::new("EXPLAIN SELECT * FROM users;".to_string());
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        assert!(matches!(parser.parse()?, Statement::Explain(_)));
+
+        let mut lexer = Lexer::new("DESCRIBE users;".to_string());
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        assert!(matches!(parser.parse()?, Statement::Describe(_)));
+
+        let mut lexer = Lexer::new("SHOW TABLES;".to_string());
+        lexer.tokenize()?;
+        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        assert!(matches!(parser.parse()?, Statement::ShowTables));
+        Ok(())
+    }
 }

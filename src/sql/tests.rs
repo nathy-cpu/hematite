@@ -176,6 +176,45 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_explain_describe_and_show_tables() -> Result<()> {
+        let db = TestDbFile::new("_test_explain_describe_show_tables");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE);",
+        )?;
+
+        let explain = conn.execute("EXPLAIN SELECT * FROM users WHERE id = 1;")?;
+        assert_eq!(explain.columns, vec!["kind", "detail"]);
+        assert!(!explain.rows.is_empty());
+
+        let describe = conn.execute("DESCRIBE users;")?;
+        assert_eq!(
+            describe.columns,
+            vec![
+                "column",
+                "type",
+                "nullable",
+                "default",
+                "primary_key",
+                "unique",
+                "auto_increment",
+            ]
+        );
+        assert_eq!(describe.rows.len(), 3);
+
+        let show_tables = conn.execute("SHOW TABLES;")?;
+        assert_eq!(show_tables.columns, vec!["table_name"]);
+        assert_eq!(
+            show_tables.rows,
+            vec![vec![crate::catalog::Value::Text("users".to_string())]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_mysql_identifier_quoting_and_type_aliases() -> Result<()> {
         let db = TestDbFile::new("_test_mysql_identifier_quoting_and_type_aliases");
         let mut conn = Connection::new(db.path())?;

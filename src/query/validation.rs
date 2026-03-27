@@ -14,6 +14,9 @@ struct SourceBinding {
 pub(crate) fn validate_statement(statement: &Statement, catalog: &Schema) -> Result<()> {
     match statement {
         Statement::Begin | Statement::Commit | Statement::Rollback => Ok(()),
+        Statement::Explain(explain) => validate_statement(&explain.statement, catalog),
+        Statement::Describe(describe) => require_table(catalog, &describe.table).map(|_| ()),
+        Statement::ShowTables => Ok(()),
         Statement::Select(select) => validate_select(select, catalog),
         Statement::Update(update) => validate_update(update, catalog),
         Statement::Insert(insert) => validate_insert(insert, catalog),

@@ -146,6 +146,15 @@ impl Connection {
                 self.rollback_active_transaction()?;
                 return Ok(Self::empty_result());
             }
+            crate::parser::ast::Statement::Explain(explain) => {
+                return self.execute_explain_statement(*explain.statement);
+            }
+            crate::parser::ast::Statement::Describe(describe) => {
+                return self.execute_describe_statement(&describe.table);
+            }
+            crate::parser::ast::Statement::ShowTables => {
+                return self.execute_show_tables_statement();
+            }
             _ => {}
         }
 
@@ -154,6 +163,91 @@ impl Connection {
         }
 
         self.execute_mutating_statement(statement)
+    }
+
+    fn execute_explain_statement(
+        &mut self,
+        statement: crate::parser::ast::Statement,
+    ) -> Result<QueryResult> {
+        let (schema, table_row_counts) = self.read_planning_state()?;
+        let planner = QueryPlanner::new(schema).with_table_row_counts(table_row_counts);
+        let plan = planner.plan(statement)?;
+        Ok(QueryResult {
+            affected_rows: 0,
+            columns: vec!["kind".to_string(), "detail".to_string()],
+            rows: vec![
+                vec![
+                    Value::Text("node".to_string()),
+                    Value::Text(format!("{:?}", plan.node)),
+                ],
+                vec![
+                    Value::Text("estimated_cost".to_string()),
+                    Value::Text(format!("{:.2}", plan.estimated_cost)),
+                ],
+            ],
+        })
+    }
+
+    fn execute_describe_statement(&mut self, table_name: &str) -> Result<QueryResult> {
+        let catalog_guard = self.lock_catalog()?;
+        let table = catalog_guard
+            .get_table_by_name(table_name)?
+            .ok_or_else(|| {
+                HematiteError::ParseError(format!("Table '{}' does not exist", table_name))
+            })?;
+        drop(catalog_guard);
+
+        let rows = table
+            .columns
+            .iter()
+            .map(|column| {
+                let is_unique = table.secondary_indexes.iter().any(|index| {
+                    index.unique && index.column_indices == vec![column.id.as_u32() as usize]
+                });
+                vec![
+                    Value::Text(column.name.clone()),
+                    Value::Text(column.data_type.name().to_string()),
+                    Value::Boolean(column.nullable),
+                    match &column.default_value {
+                        Some(default) => Value::Text(format!("{default:?}")),
+                        None => Value::Null,
+                    },
+                    Value::Boolean(column.primary_key),
+                    Value::Boolean(is_unique),
+                    Value::Boolean(column.auto_increment),
+                ]
+            })
+            .collect();
+
+        Ok(QueryResult {
+            affected_rows: 0,
+            columns: vec![
+                "column".to_string(),
+                "type".to_string(),
+                "nullable".to_string(),
+                "default".to_string(),
+                "primary_key".to_string(),
+                "unique".to_string(),
+                "auto_increment".to_string(),
+            ],
+            rows,
+        })
+    }
+
+    fn execute_show_tables_statement(&mut self) -> Result<QueryResult> {
+        let catalog_guard = self.lock_catalog()?;
+        let mut tables = catalog_guard.list_tables()?;
+        drop(catalog_guard);
+        tables.sort_by(|left, right| left.1.cmp(&right.1));
+
+        Ok(QueryResult {
+            affected_rows: 0,
+            columns: vec!["table_name".to_string()],
+            rows: tables
+                .into_iter()
+                .map(|(_, name)| vec![Value::Text(name)])
+                .collect(),
+        })
     }
 
     pub(crate) fn execute_statement_result(

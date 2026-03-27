@@ -40,6 +40,12 @@ impl QueryPlanner {
                         .to_string(),
                 ))
             }
+            Statement::Explain(_) | Statement::Describe(_) | Statement::ShowTables => {
+                return Err(HematiteError::ParseError(
+                    "Introspection statements are handled at the SQL connection boundary"
+                        .to_string(),
+                ))
+            }
             Statement::Select(select) => self.plan_select(select),
             Statement::Update(update) => self.plan_update(update),
             Statement::Insert(insert) => self.plan_insert(insert),
