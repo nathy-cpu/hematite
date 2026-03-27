@@ -79,11 +79,7 @@ fn production_imports_match_layer_matrix_or_temporary_exceptions() {
         ("main", BTreeSet::from(["sql", "error"])),
     ]);
 
-    let temporary_exceptions: BTreeSet<(&str, &str)> = BTreeSet::from([
-        ("src/sql/interface.rs", "catalog"),
-        ("src/sql/connection.rs", "catalog"),
-        ("src/sql/result.rs", "catalog"),
-    ]);
+    let temporary_exceptions: BTreeSet<(&str, &str)> = BTreeSet::new();
 
     let mut files = Vec::new();
     collect_rs_files(Path::new("src"), &mut files);

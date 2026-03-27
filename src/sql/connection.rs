@@ -22,25 +22,24 @@
 //! errors are coordinated. The connection should not need to understand row encoding or page
 //! structure; it only sequences higher-level components.
 
-use crate::catalog::Catalog;
-use crate::catalog::CatalogEngine;
-use crate::catalog::JournalMode;
-use crate::catalog::Value;
 use crate::error::{HematiteError, Result};
 use crate::parser::{Lexer, Parser};
 use crate::query::lowering::raise_literal_value;
-use crate::query::{ExecutionContext, QueryExecutor, QueryPlanner, QueryResult};
+use crate::query::{
+    Catalog, CatalogEngine, ExecutionContext, JournalMode, QueryCatalogSnapshot, QueryExecutor,
+    QueryPlanner, QueryResult, Schema, Value,
+};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 #[derive(Debug, Clone)]
 struct ConnectionTransaction {
-    snapshot: crate::catalog::catalog::CatalogSnapshot,
+    snapshot: QueryCatalogSnapshot,
 }
 
 #[derive(Debug)]
 struct ImplicitMutation {
-    snapshot: Option<crate::catalog::catalog::CatalogSnapshot>,
+    snapshot: Option<QueryCatalogSnapshot>,
 }
 
 impl ImplicitMutation {
@@ -226,14 +225,14 @@ impl Connection {
     fn plan_executor(
         &self,
         statement: crate::parser::ast::Statement,
-    ) -> Result<(crate::catalog::Schema, Box<dyn QueryExecutor>)> {
+    ) -> Result<(Schema, Box<dyn QueryExecutor>)> {
         let (schema, table_row_counts) = self.read_planning_state()?;
         let planner = QueryPlanner::new(schema.clone()).with_table_row_counts(table_row_counts);
         let plan = planner.plan(statement)?;
         Ok((schema, plan.into_executor()))
     }
 
-    fn read_planning_state(&self) -> Result<(crate::catalog::Schema, HashMap<String, usize>)> {
+    fn read_planning_state(&self) -> Result<(Schema, HashMap<String, usize>)> {
         let mut catalog_guard = self.lock_catalog()?;
         let schema = catalog_guard.clone_schema();
         let table_row_counts =
@@ -278,6 +277,32 @@ impl Connection {
         self.execute_statement(Self::parse_statement(sql)?)
     }
 
+    pub fn execute_batch(&mut self, sql: &str) -> Result<()> {
+        let mut lexer = Lexer::new(sql.to_string());
+        lexer.tokenize()?;
+
+        let mut current_tokens = Vec::new();
+        for token in lexer.get_tokens().iter().cloned() {
+            current_tokens.push(token.clone());
+
+            if matches!(token, crate::parser::lexer::Token::Semicolon) {
+                let mut parser = Parser::new(current_tokens);
+                let statement = parser.parse()?;
+                self.execute_statement(statement)?;
+                current_tokens = Vec::new();
+            }
+        }
+
+        if !current_tokens.is_empty() {
+            current_tokens.push(crate::parser::lexer::Token::Semicolon);
+            let mut parser = Parser::new(current_tokens);
+            let statement = parser.parse()?;
+            self.execute_statement(statement)?;
+        }
+
+        Ok(())
+    }
+
     pub fn execute_query(&mut self, sql: &str) -> Result<QueryResult> {
         self.execute(sql)
     }
@@ -316,7 +341,7 @@ impl Connection {
     }
 
     #[cfg(test)]
-    pub(crate) fn schema_snapshot(&self) -> Result<crate::catalog::Schema> {
+    pub(crate) fn schema_snapshot(&self) -> Result<Schema> {
         let catalog_guard = self.lock_catalog()?;
         Ok(catalog_guard.clone_schema())
     }

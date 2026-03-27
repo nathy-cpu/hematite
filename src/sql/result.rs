@@ -1,7 +1,7 @@
 //! SQL result set and row interface
 
-use crate::catalog::Value;
 use crate::error::{HematiteError, Result};
+use crate::query::Value;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]

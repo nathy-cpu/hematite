@@ -1,9 +1,7 @@
 //! High-level SQL interface
 
-use crate::catalog::{JournalMode, Value};
 use crate::error::{HematiteError, Result};
-use crate::parser::lexer::Token;
-use crate::parser::{Lexer, Parser};
+use crate::query::{JournalMode, Value};
 use crate::sql::connection::{Connection, PreparedStatement, Transaction};
 use crate::sql::result::{ResultSet, Row, StatementResult};
 
@@ -123,29 +121,7 @@ impl Hematite {
 
     /// Execute multiple SQL statements in sequence
     pub fn execute_batch(&mut self, sql: &str) -> Result<()> {
-        let mut lexer = Lexer::new(sql.to_string());
-        lexer.tokenize()?;
-
-        let mut current_tokens = Vec::new();
-        for token in lexer.get_tokens().iter().cloned() {
-            current_tokens.push(token.clone());
-
-            if token == Token::Semicolon {
-                let mut parser = Parser::new(current_tokens);
-                let statement = parser.parse()?;
-                self.connection.execute_statement(statement)?;
-                current_tokens = Vec::new();
-            }
-        }
-
-        if !current_tokens.is_empty() {
-            current_tokens.push(Token::Semicolon);
-            let mut parser = Parser::new(current_tokens);
-            let statement = parser.parse()?;
-            self.connection.execute_statement(statement)?;
-        }
-
-        Ok(())
+        self.connection.execute_batch(sql)
     }
 }
 

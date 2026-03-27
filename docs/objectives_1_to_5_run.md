@@ -86,9 +86,9 @@ Current lower-stack status that should be preserved:
 
 #### Block 2C — Upper-Layer Facades
 
-- [ ] Remove direct parser and catalog reach-through from `sql/interface.rs`.
-- [ ] Tighten `sql/connection.rs` so it acts as the SQL/query boundary rather than a dependency grab-bag.
-- [ ] Narrow public re-exports that encourage boundary bypassing.
+- [x] Remove direct parser and catalog reach-through from `sql/interface.rs`.
+- [x] Tighten `sql/connection.rs` so it acts as the SQL/query boundary rather than a dependency grab-bag.
+- [x] Narrow public re-exports that encourage boundary bypassing.
 
 #### Block 2D — Concrete Guardrails
 
