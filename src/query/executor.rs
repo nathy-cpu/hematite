@@ -30,6 +30,7 @@ use crate::query::lowering::{lower_literal_value, lower_type_name, raise_literal
 use crate::query::plan::{ExecutionProgram, QueryPlan, SelectAccessPath};
 use crate::query::predicate::extract_literal_equalities;
 pub use crate::query::runtime::{ExecutionContext, QueryExecutor, QueryResult};
+use crate::query::validation::{validate_column_reference, validate_statement};
 use crate::query::QueryPlanner;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -668,10 +669,7 @@ impl SelectExecutor {
                     offset: None,
                     set_operation: None,
                 };
-                if local_scope
-                    .validate_column_reference(name, &ctx.catalog, from)
-                    .is_ok()
-                {
+                if validate_column_reference(&local_scope, name, &ctx.catalog, from).is_ok() {
                     return Ok(());
                 }
                 if let Some(value) = self.lookup_outer_scope_value(scopes, name)? {
@@ -2743,7 +2741,7 @@ impl SelectExecutor {
 
 impl QueryExecutor for SelectExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext) -> Result<QueryResult> {
-        self.statement.validate(&ctx.catalog)?;
+        validate_statement(&Statement::Select(self.statement.clone()), &ctx.catalog)?;
         self.execute_body(ctx)
     }
 }
@@ -3030,7 +3028,7 @@ impl InsertExecutor {
 
 impl QueryExecutor for InsertExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext) -> Result<QueryResult> {
-        self.statement.validate(&ctx.catalog)?;
+        validate_statement(&Statement::Insert(self.statement.clone()), &ctx.catalog)?;
 
         let table = catalog_table(ctx, &self.statement.table)?;
 
@@ -3158,7 +3156,7 @@ impl UpdateExecutor {
 
 impl QueryExecutor for UpdateExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext<'_>) -> Result<QueryResult> {
-        self.statement.validate(&ctx.catalog)?;
+        validate_statement(&Statement::Update(self.statement.clone()), &ctx.catalog)?;
 
         let table = catalog_table(ctx, &self.statement.table)?;
 
@@ -3361,7 +3359,7 @@ fn locate_rows_for_access_path(
 
 impl QueryExecutor for DeleteExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext) -> Result<QueryResult> {
-        self.statement.validate(&ctx.catalog)?;
+        validate_statement(&Statement::Delete(self.statement.clone()), &ctx.catalog)?;
 
         let table = catalog_table(ctx, &self.statement.table)?;
 
@@ -3554,7 +3552,7 @@ struct CreateConstraints {
 
 impl QueryExecutor for CreateExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext) -> Result<QueryResult> {
-        self.statement.validate(&ctx.catalog)?;
+        validate_statement(&Statement::Create(self.statement.clone()), &ctx.catalog)?;
         if self.statement.if_not_exists
             && ctx
                 .catalog
@@ -3622,7 +3620,7 @@ impl DropExecutor {
 
 impl QueryExecutor for DropExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext<'_>) -> Result<QueryResult> {
-        self.statement.validate(&ctx.catalog)?;
+        validate_statement(&Statement::Drop(self.statement.clone()), &ctx.catalog)?;
         if self.statement.if_exists
             && ctx
                 .catalog
@@ -3660,7 +3658,7 @@ impl AlterExecutor {
 
 impl QueryExecutor for AlterExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext<'_>) -> Result<QueryResult> {
-        self.statement.validate(&ctx.catalog)?;
+        validate_statement(&Statement::Alter(self.statement.clone()), &ctx.catalog)?;
 
         match &self.statement.operation {
             AlterOperation::RenameTo(new_name) => {
@@ -3780,7 +3778,7 @@ impl CreateIndexExecutor {
 
 impl QueryExecutor for CreateIndexExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext<'_>) -> Result<QueryResult> {
-        self.statement.validate(&ctx.catalog)?;
+        validate_statement(&Statement::CreateIndex(self.statement.clone()), &ctx.catalog)?;
         if self.statement.if_not_exists {
             if let Some(table) = ctx.catalog.get_table_by_name(&self.statement.table) {
                 if table
@@ -5398,7 +5396,7 @@ impl DropIndexExecutor {
 
 impl QueryExecutor for DropIndexExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext<'_>) -> Result<QueryResult> {
-        self.statement.validate(&ctx.catalog)?;
+        validate_statement(&Statement::DropIndex(self.statement.clone()), &ctx.catalog)?;
         if self.statement.if_exists {
             let Some(table) = ctx.catalog.get_table_by_name(&self.statement.table) else {
                 return Ok(mutation_result(0));

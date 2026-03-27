@@ -5,6 +5,7 @@ mod ast_tests {
     use crate::error::Result;
     use crate::parser::ast::*;
     use crate::parser::LiteralValue;
+    use crate::query::validation::validate_statement;
 
     #[test]
     fn test_select_statement_validation() -> Result<()> {
@@ -41,7 +42,7 @@ mod ast_tests {
             set_operation: None,
         };
 
-        assert!(select.validate(&catalog).is_ok());
+        assert!(validate_statement(&Statement::Select(select.clone()), &catalog).is_ok());
         Ok(())
     }
 
@@ -72,7 +73,7 @@ mod ast_tests {
             set_operation: None,
         };
 
-        assert!(select.validate(&catalog).is_err());
+        assert!(validate_statement(&Statement::Select(select.clone()), &catalog).is_err());
     }
 
     #[test]
@@ -108,7 +109,7 @@ mod ast_tests {
             set_operation: None,
         };
 
-        assert!(select.validate(&catalog).is_err());
+        assert!(validate_statement(&Statement::Select(select.clone()), &catalog).is_err());
     }
 
     #[test]
@@ -151,7 +152,7 @@ mod ast_tests {
             set_operation: None,
         };
 
-        assert!(select.validate(&catalog).is_err());
+        assert!(validate_statement(&Statement::Select(select.clone()), &catalog).is_err());
     }
 
     #[test]
@@ -214,14 +215,14 @@ mod ast_tests {
             set_operation: None,
         };
 
-        assert!(ambiguous.validate(&catalog).is_err());
+        assert!(validate_statement(&Statement::Select(ambiguous.clone()), &catalog).is_err());
 
         let qualified = SelectStatement {
             columns: vec![SelectItem::Column("u.id".to_string())],
             ..ambiguous.clone()
         };
 
-        assert!(qualified.validate(&catalog).is_ok());
+        assert!(validate_statement(&Statement::Select(qualified.clone()), &catalog).is_ok());
         Ok(())
     }
 }

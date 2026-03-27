@@ -6,6 +6,7 @@ use crate::parser::ast::*;
 use crate::query::optimizer::QueryOptimizer;
 pub use crate::query::plan::*;
 use crate::query::predicate::extract_literal_equalities;
+use crate::query::validation::validate_statement;
 use crate::HematiteError;
 use std::collections::HashMap;
 
@@ -30,7 +31,7 @@ impl QueryPlanner {
 
     pub fn plan(&self, statement: Statement) -> Result<QueryPlan> {
         // Validate statement against catalog
-        statement.validate(&self.catalog)?;
+        validate_statement(&statement, &self.catalog)?;
 
         let plan = match statement {
             Statement::Begin | Statement::Commit | Statement::Rollback => {

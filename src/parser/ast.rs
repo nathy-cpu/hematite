@@ -114,6 +114,7 @@ pub struct TableBinding {
 }
 
 #[derive(Debug, Clone)]
+#[cfg(test)]
 struct SourceBinding {
     source_name: String,
     alias: Option<String>,
@@ -447,6 +448,7 @@ pub enum ForeignKeyAction {
 }
 
 impl Statement {
+    #[cfg(test)]
     pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
         match self {
             Statement::Begin | Statement::Commit | Statement::Rollback => Ok(()),
@@ -1032,7 +1034,7 @@ impl Expression {
 }
 
 impl SelectStatement {
-    fn single_table_scope(table_name: &str) -> Self {
+    pub(crate) fn single_table_scope(table_name: &str) -> Self {
         Self {
             with_clause: Vec::new(),
             distinct: false,
@@ -1073,7 +1075,7 @@ impl SelectStatement {
         }
     }
 
-    fn is_hidden_rowid(name: &str) -> bool {
+    pub(crate) fn is_hidden_rowid(name: &str) -> bool {
         name.eq_ignore_ascii_case("rowid")
     }
 
@@ -1187,6 +1189,7 @@ impl SelectStatement {
         }
     }
 
+    #[cfg(test)]
     fn collect_source_bindings(
         &self,
         catalog: &crate::catalog::Schema,
@@ -1197,6 +1200,7 @@ impl SelectStatement {
         Ok(bindings)
     }
 
+    #[cfg(test)]
     fn collect_source_bindings_into(
         &self,
         catalog: &crate::catalog::Schema,
@@ -1257,6 +1261,7 @@ impl SelectStatement {
         }
     }
 
+    #[cfg(test)]
     fn projected_column_names(&self, catalog: &crate::catalog::Schema) -> Result<Vec<String>> {
         let mut names = Vec::with_capacity(self.columns.len());
         for (index, item) in self.columns.iter().enumerate() {
@@ -1298,6 +1303,7 @@ impl SelectStatement {
         Ok(names)
     }
 
+    #[cfg(test)]
     pub(crate) fn validate_column_reference(
         &self,
         name: &str,
@@ -1307,6 +1313,7 @@ impl SelectStatement {
         self.validate_column_reference_with_outer(name, catalog, from, &[])
     }
 
+    #[cfg(test)]
     fn validate_column_reference_with_outer(
         &self,
         name: &str,
@@ -1352,6 +1359,7 @@ impl SelectStatement {
         }
     }
 
+    #[cfg(test)]
     fn collect_matching_source_names(
         qualifier: Option<&str>,
         column_name: &str,
@@ -1384,6 +1392,7 @@ impl SelectStatement {
         Ok(matched_tables)
     }
 
+    #[cfg(test)]
     fn combined_outer_bindings(
         &self,
         catalog: &crate::catalog::Schema,
@@ -1395,10 +1404,12 @@ impl SelectStatement {
         Ok(bindings)
     }
 
+    #[cfg(test)]
     pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
         self.validate_with_outer_bindings(catalog, &[])
     }
 
+    #[cfg(test)]
     fn validate_with_outer_bindings(
         &self,
         catalog: &crate::catalog::Schema,
@@ -1584,6 +1595,7 @@ impl SelectStatement {
         Ok(())
     }
 
+    #[cfg(test)]
     fn validate_table_reference(
         &self,
         catalog: &crate::catalog::Schema,
@@ -1612,6 +1624,7 @@ impl SelectStatement {
         }
     }
 
+    #[cfg(test)]
     fn validate_condition(
         &self,
         condition: &Condition,
@@ -1674,6 +1687,7 @@ impl SelectStatement {
         Ok(())
     }
 
+    #[cfg(test)]
     fn validate_expression(
         &self,
         expr: &Expression,
@@ -1780,6 +1794,7 @@ impl SelectStatement {
         Ok(())
     }
 
+    #[cfg(test)]
     fn expression_contains_aggregate(expr: &Expression) -> bool {
         match expr {
             Expression::AggregateCall { .. } => true,
@@ -1849,6 +1864,7 @@ impl SelectStatement {
         }
     }
 
+    #[cfg(test)]
     fn condition_contains_aggregate(condition: &Condition) -> bool {
         match condition {
             Condition::Comparison { left, right, .. } => {
@@ -1931,6 +1947,7 @@ impl TableReference {
     }
 }
 
+#[cfg(test)]
 impl InsertStatement {
     pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
         let table = catalog.get_table_by_name(&self.table).ok_or_else(|| {
@@ -1986,6 +2003,7 @@ impl InsertStatement {
     }
 }
 
+#[cfg(test)]
 impl UpdateStatement {
     pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
         let table = catalog.get_table_by_name(&self.table).ok_or_else(|| {
@@ -2028,6 +2046,7 @@ impl UpdateStatement {
     }
 }
 
+#[cfg(test)]
 impl CreateStatement {
     pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
         // Validate table doesn't already exist
@@ -2232,6 +2251,7 @@ impl CreateStatement {
     }
 }
 
+#[cfg(test)]
 impl DeleteStatement {
     pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
         let _table = require_table(catalog, &self.table)?;
@@ -2247,6 +2267,7 @@ impl DeleteStatement {
     }
 }
 
+#[cfg(test)]
 impl DropStatement {
     pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
         if self.if_exists && catalog.get_table_by_name(&self.table).is_none() {
@@ -2257,6 +2278,7 @@ impl DropStatement {
     }
 }
 
+#[cfg(test)]
 impl AlterStatement {
     pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
         match &self.operation {
@@ -3154,6 +3176,7 @@ impl ArithmeticOperator {
     }
 }
 
+#[cfg(test)]
 impl CreateIndexStatement {
     pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
         let table = require_table(catalog, &self.table)?;
@@ -3189,6 +3212,7 @@ impl CreateIndexStatement {
     }
 }
 
+#[cfg(test)]
 fn require_table<'a>(
     catalog: &'a crate::catalog::Schema,
     table_name: &str,
@@ -3198,6 +3222,7 @@ fn require_table<'a>(
         .ok_or_else(|| HematiteError::ParseError(format!("Table '{}' does not exist", table_name)))
 }
 
+#[cfg(test)]
 fn sql_type_name_for_catalog_type(data_type: crate::catalog::DataType) -> SqlTypeName {
     match data_type {
         crate::catalog::DataType::Integer => SqlTypeName::Integer,
@@ -3207,6 +3232,7 @@ fn sql_type_name_for_catalog_type(data_type: crate::catalog::DataType) -> SqlTyp
     }
 }
 
+#[cfg(test)]
 fn validate_named_columns<F>(
     columns: &[String],
     constraint_label: &str,
@@ -3248,6 +3274,7 @@ fn column_name_matches(name: &str, column_name: &str, table_name: Option<&str>) 
     }
 }
 
+#[cfg(test)]
 impl DropIndexStatement {
     pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
         if self.if_exists && catalog.get_table_by_name(&self.table).is_none() {
