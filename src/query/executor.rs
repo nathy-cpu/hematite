@@ -2990,6 +2990,95 @@ impl InsertExecutor {
         Ok(())
     }
 
+    fn find_conflicting_row(
+        &self,
+        ctx: &mut ExecutionContext<'_>,
+        table: &Table,
+        candidate_row: &[Value],
+    ) -> Result<Option<StoredRow>> {
+        let mut conflict_row: Option<StoredRow> = ctx.engine.lookup_row_by_primary_key(
+            table,
+            &primary_key_values(table, candidate_row)?,
+        )?;
+
+        for index in table.secondary_indexes.iter().filter(|index| index.unique) {
+            let key_values = secondary_index_key_values(index, candidate_row);
+            for row_id in ctx
+                .engine
+                .lookup_secondary_index_rowids(table, &index.name, &key_values)?
+            {
+                let row = ctx.engine.lookup_row_by_rowid(&table.name, row_id)?.ok_or_else(|| {
+                    HematiteError::CorruptedData(format!(
+                        "Unique index '{}' points at missing rowid {} in table '{}'",
+                        index.name, row_id, table.name
+                    ))
+                })?;
+                if let Some(existing) = &conflict_row {
+                    if existing.row_id != row.row_id {
+                        return Err(HematiteError::ParseError(format!(
+                            "INSERT ON DUPLICATE KEY UPDATE matched multiple rows in table '{}'",
+                            table.name
+                        )));
+                    }
+                } else {
+                    conflict_row = Some(row);
+                }
+            }
+        }
+
+        Ok(conflict_row)
+    }
+
+    fn apply_on_duplicate_assignments(
+        &self,
+        ctx: &mut ExecutionContext<'_>,
+        table: &Table,
+        mut row: StoredRow,
+        assignments: &[UpdateAssignment],
+    ) -> Result<()> {
+        if assignments.is_empty() {
+            return Ok(());
+        }
+
+        let evaluator = SelectExecutor::new(
+            SelectStatement::single_table_scope(&table.name),
+            SelectAccessPath::FullTableScan,
+        );
+        let sources = evaluator.resolve_sources(ctx)?;
+        let mut subquery_cache = SubqueryCache::new();
+        let original_values = row.values.clone();
+
+        for assignment in assignments {
+            let column_index = table.get_column_index(&assignment.column).ok_or_else(|| {
+                HematiteError::ParseError(format!(
+                    "Column '{}' does not exist in table '{}'",
+                    assignment.column, table.name
+                ))
+            })?;
+            let column = &table.columns[column_index];
+            let value = evaluator.evaluate_expression(
+                ctx,
+                &mut subquery_cache,
+                &sources,
+                &assignment.value,
+                &row.values,
+            )?;
+            row.values[column_index] = coerce_column_value(column, value)?;
+        }
+
+        table
+            .validate_row(&row.values)
+            .map_err(|err| HematiteError::ParseError(err.to_string()))?;
+        validate_row_constraints(ctx, table, &row.values)?;
+        if parent_reference_key_changed(ctx, table, &original_values, &row.values)? {
+            apply_parent_update_foreign_key_actions(ctx, table, &original_values, &row.values)?;
+        }
+        ensure_stored_row_uniqueness(ctx, table, &row)?;
+        remove_stored_row(ctx, &table.name, table, row.row_id)?;
+        write_stored_row(ctx, &table.name, table, row, true)?;
+        Ok(())
+    }
+
     fn build_row_with_metadata(
         &self,
         ctx: &ExecutionContext<'_>,
@@ -3085,6 +3174,13 @@ impl QueryExecutor for InsertExecutor {
 
         for value_row in &input_rows {
             let row_values = self.build_row_with_metadata(ctx, &table, value_row)?;
+            if let Some(assignments) = &self.statement.on_duplicate {
+                if let Some(conflicting_row) = self.find_conflicting_row(ctx, &table, &row_values)? {
+                    self.apply_on_duplicate_assignments(ctx, &table, conflicting_row, assignments)?;
+                    continue;
+                }
+            }
+
             validate_row_constraints(ctx, &table, &row_values)?;
             self.ensure_primary_key_is_unique(ctx, &table, &[], &row_values)?;
             self.ensure_unique_secondary_indexes_are_unique(ctx, &table, &row_values)?;

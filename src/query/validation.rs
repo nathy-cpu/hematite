@@ -288,6 +288,26 @@ fn validate_insert(insert: &InsertStatement, catalog: &Schema) -> Result<()> {
         }
     }
 
+    if let Some(assignments) = &insert.on_duplicate {
+        let scope = SelectStatement::single_table_scope(&insert.table);
+        let mut seen_columns = std::collections::HashSet::new();
+        for assignment in assignments {
+            if !seen_columns.insert(&assignment.column) {
+                return Err(HematiteError::ParseError(format!(
+                    "Duplicate column '{}' in ON DUPLICATE KEY UPDATE",
+                    assignment.column
+                )));
+            }
+            if table.get_column_by_name(&assignment.column).is_none() {
+                return Err(HematiteError::ParseError(format!(
+                    "Column '{}' does not exist in table '{}'",
+                    assignment.column, insert.table
+                )));
+            }
+            validate_expression(&scope, &assignment.value, catalog, &scope.from, &[])?;
+        }
+    }
+
     Ok(())
 }
 

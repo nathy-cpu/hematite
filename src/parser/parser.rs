@@ -1264,13 +1264,23 @@ impl Parser {
             }
         };
 
+        let on_duplicate = if matches!(self.peek_token(), Ok(Token::On)) {
+            self.consume_token(&Token::On)?;
+            self.consume_token(&Token::Duplicate)?;
+            self.consume_token(&Token::Key)?;
+            self.consume_token(&Token::Update)?;
+            Some(self.parse_update_assignments()?)
+        } else {
+            None
+        };
+
         self.consume_token(&Token::Semicolon)?;
 
         Ok(Statement::Insert(InsertStatement {
             table,
             columns,
             source,
-            on_duplicate: None,
+            on_duplicate,
         }))
     }
 

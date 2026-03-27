@@ -2990,6 +2990,32 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_insert_on_duplicate_key_update() -> Result<()> {
+        let db = TestDbFile::new("_test_insert_on_duplicate_key_update");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT UNIQUE, visits INTEGER);")?;
+        conn.execute("INSERT INTO test (id, name, visits) VALUES (1, 'Alice', 1);")?;
+
+        conn.execute(
+            "INSERT INTO test (id, name, visits) VALUES (1, 'Alice', 5) ON DUPLICATE KEY UPDATE visits = visits + 1;",
+        )?;
+
+        let result = conn.execute("SELECT id, name, visits FROM test ORDER BY id ASC;")?;
+        assert_eq!(
+            result.rows,
+            vec![vec![
+                crate::catalog::Value::Integer(1),
+                crate::catalog::Value::Text("Alice".to_string()),
+                crate::catalog::Value::Integer(2),
+            ]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_auto_increment_assigns_integer_primary_keys() -> Result<()> {
         let db = TestDbFile::new("_test_auto_increment_assigns_integer_primary_keys");
         let mut conn = Connection::new(db.path())?;

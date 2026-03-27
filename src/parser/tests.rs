@@ -1272,6 +1272,16 @@ mod parser_tests {
     }
 
     #[test]
+    fn test_parse_insert_on_duplicate_key_update() -> Result<()> {
+        let insert = parse_insert(
+            "INSERT INTO users (id, name) VALUES (1, 'Alice') ON DUPLICATE KEY UPDATE name = 'Bob';",
+        )?;
+        assert!(matches!(insert.source, InsertSource::Values(_)));
+        assert!(matches!(insert.on_duplicate, Some(assignments) if assignments.len() == 1));
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_delete() -> Result<()> {
         let delete = parse_delete("DELETE FROM users WHERE id = 1;")?;
         assert_eq!(delete.table, "users");
