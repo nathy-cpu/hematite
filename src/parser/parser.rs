@@ -821,6 +821,9 @@ impl Parser {
             Token::Count | Token::Sum | Token::Avg | Token::Min | Token::Max => {
                 self.parse_aggregate_expression()
             }
+            Token::Identifier(_) if self.next_token_is(&Token::LeftParen) => {
+                self.parse_scalar_function_expression()
+            }
             Token::Identifier(_) => Ok(Expression::Column(self.parse_identifier_reference()?)),
             Token::StringLiteral(value) => {
                 self.consume_token(&Token::StringLiteral(value.clone()))?;
@@ -877,6 +880,29 @@ impl Parser {
                 token
             ))),
         }
+    }
+
+    fn parse_scalar_function_expression(&mut self) -> Result<Expression> {
+        let function_name = self.parse_identifier()?;
+        let function = ScalarFunction::from_identifier(&function_name).ok_or_else(|| {
+            HematiteError::ParseError(format!("Unsupported scalar function '{}'", function_name))
+        })?;
+        self.consume_token(&Token::LeftParen)?;
+
+        let mut args = Vec::new();
+        if !matches!(self.peek_token(), Ok(Token::RightParen)) {
+            loop {
+                args.push(self.parse_expression()?);
+                if matches!(self.peek_token(), Ok(Token::Comma)) {
+                    self.consume_token(&Token::Comma)?;
+                    continue;
+                }
+                break;
+            }
+        }
+
+        self.consume_token(&Token::RightParen)?;
+        Ok(Expression::ScalarFunctionCall { function, args })
     }
 
     fn parse_comparison_operator(&mut self) -> Result<ComparisonOperator> {
@@ -1828,6 +1854,12 @@ impl Parser {
                 "Unexpected end of input".to_string(),
             ))
         }
+    }
+
+    fn next_token_is(&self, expected: &Token) -> bool {
+        self.tokens
+            .get(self.position + 1)
+            .is_some_and(|token| token == expected)
     }
 
     fn consume_token(&mut self, expected: &Token) -> Result<()> {

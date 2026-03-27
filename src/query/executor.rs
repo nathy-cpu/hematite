@@ -244,6 +244,12 @@ impl SelectExecutor {
             Expression::AggregateCall { .. } => Err(HematiteError::ParseError(
                 "Aggregate expressions can only be evaluated in grouped query contexts".to_string(),
             )),
+            Expression::ScalarFunctionCall { function, .. } => Err(HematiteError::ParseError(
+                format!(
+                    "Scalar function {} is not implemented yet",
+                    function.to_sql()
+                ),
+            )),
             Expression::ScalarSubquery(subquery) => {
                 self.execute_scalar_subquery_cached(ctx, cache, subquery, Some(sources), Some(row))
             }
@@ -569,6 +575,11 @@ impl SelectExecutor {
             }
             Expression::ScalarSubquery(subquery) => {
                 self.bind_select_outer_references(ctx, subquery, scopes)?;
+            }
+            Expression::ScalarFunctionCall { args, .. } => {
+                for arg in args {
+                    self.bind_expression_outer_references(ctx, from, arg, scopes)?;
+                }
             }
             Expression::UnaryMinus(inner) => {
                 self.bind_expression_outer_references(ctx, from, inner, scopes)?;
@@ -1626,6 +1637,12 @@ impl SelectExecutor {
                         "Aggregate expression evaluation produced no value".to_string(),
                     )
                 }),
+            Expression::ScalarFunctionCall { function, .. } => Err(HematiteError::ParseError(
+                format!(
+                    "Scalar function {} is not implemented yet",
+                    function.to_sql()
+                ),
+            )),
             Expression::Column(name) => {
                 let index = self
                     .result_column_index(output_columns, name)
@@ -2325,6 +2342,12 @@ impl InsertExecutor {
             )),
             Expression::AggregateCall { .. } => Err(HematiteError::ParseError(
                 "INSERT expressions cannot use aggregate functions".to_string(),
+            )),
+            Expression::ScalarFunctionCall { function, .. } => Err(HematiteError::ParseError(
+                format!(
+                    "Scalar function {} is not implemented yet",
+                    function.to_sql()
+                ),
             )),
             Expression::UnaryMinus(expr) => match self.evaluate_value_expression(expr)? {
                 Value::Integer(value) => value.checked_neg().map(Value::Integer).ok_or_else(|| {

@@ -972,6 +972,34 @@ mod parser_tests {
     }
 
     #[test]
+    fn test_parse_scalar_function_expression() -> Result<()> {
+        let select =
+            parse_select("SELECT COALESCE(name, 'unknown') AS display_name FROM users;")?;
+        assert!(matches!(
+            &select.columns[0],
+            SelectItem::Expression(Expression::ScalarFunctionCall {
+                function: ScalarFunction::Coalesce,
+                args,
+            }) if args.len() == 2
+        ));
+        assert_eq!(select.column_aliases[0].as_deref(), Some("display_name"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_nested_scalar_functions() -> Result<()> {
+        let select = parse_select("SELECT ROUND(ABS(score), 1) FROM users;")?;
+        assert!(matches!(
+            &select.columns[0],
+            SelectItem::Expression(Expression::ScalarFunctionCall {
+                function: ScalarFunction::Round,
+                args,
+            }) if args.len() == 2
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_order_by() -> Result<()> {
         let select = parse_select("SELECT id FROM users ORDER BY name DESC, id ASC;")?;
         assert_eq!(select.order_by.len(), 2);

@@ -189,6 +189,10 @@ pub enum Expression {
     Literal(Value),
     Parameter(usize),
     ScalarSubquery(Box<SelectStatement>),
+    ScalarFunctionCall {
+        function: ScalarFunction,
+        args: Vec<Expression>,
+    },
     AggregateCall {
         function: AggregateFunction,
         target: AggregateTarget,
@@ -207,6 +211,19 @@ pub enum ArithmeticOperator {
     Subtract,
     Multiply,
     Divide,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScalarFunction {
+    Coalesce,
+    IfNull,
+    NullIf,
+    Lower,
+    Upper,
+    Length,
+    Trim,
+    Abs,
+    Round,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -747,6 +764,11 @@ impl Expression {
         match self {
             Expression::Parameter(index) => f(*index),
             Expression::ScalarSubquery(subquery) => subquery.visit_parameters(f),
+            Expression::ScalarFunctionCall { args, .. } => {
+                for arg in args {
+                    arg.visit_parameters(f);
+                }
+            }
             Expression::AggregateCall { .. } => {}
             Expression::UnaryMinus(expr) => expr.visit_parameters(f),
             Expression::Binary { left, right, .. } => {
@@ -776,6 +798,16 @@ impl Expression {
                     .bind_parameters(parameters)?
                     .into_select()?,
             ))),
+            Expression::ScalarFunctionCall { function, args } => {
+                let mut bound_args = Vec::with_capacity(args.len());
+                for arg in args {
+                    bound_args.push(arg.bind(parameters)?);
+                }
+                Ok(Expression::ScalarFunctionCall {
+                    function: *function,
+                    args: bound_args,
+                })
+            }
             Expression::AggregateCall { function, target } => Ok(Expression::AggregateCall {
                 function: *function,
                 target: target.clone(),
@@ -1466,6 +1498,11 @@ impl SelectStatement {
                     ));
                 }
             }
+            Expression::ScalarFunctionCall { args, .. } => {
+                for arg in args {
+                    self.validate_expression(arg, catalog, from, outer_bindings)?;
+                }
+            }
             Expression::AggregateCall { target, .. } => {
                 if let AggregateTarget::Column(name) = target {
                     self.validate_column_reference_with_outer(name, catalog, from, outer_bindings)?;
@@ -1488,6 +1525,9 @@ impl SelectStatement {
         match expr {
             Expression::AggregateCall { .. } => true,
             Expression::ScalarSubquery(_) => false,
+            Expression::ScalarFunctionCall { args, .. } => {
+                args.iter().any(Self::expression_contains_aggregate)
+            }
             Expression::UnaryMinus(expr) => Self::expression_contains_aggregate(expr),
             Expression::Binary { left, right, .. } => {
                 Self::expression_contains_aggregate(left)
@@ -2371,6 +2411,9 @@ impl Expression {
     pub(crate) fn references_source_name(&self, name: &str) -> bool {
         match self {
             Expression::ScalarSubquery(subquery) => subquery.references_source_name(name),
+            Expression::ScalarFunctionCall { args, .. } => {
+                args.iter().any(|arg| arg.references_source_name(name))
+            }
             Expression::UnaryMinus(expr) => expr.references_source_name(name),
             Expression::Binary { left, right, .. } => {
                 left.references_source_name(name) || right.references_source_name(name)
@@ -2386,6 +2429,9 @@ impl Expression {
         match self {
             Expression::Column(name) => column_name_matches(name, column_name, table_name),
             Expression::ScalarSubquery(_) => false,
+            Expression::ScalarFunctionCall { args, .. } => args
+                .iter()
+                .any(|arg| arg.references_column(column_name, table_name)),
             Expression::AggregateCall { target, .. } => match target {
                 AggregateTarget::All => false,
                 AggregateTarget::Column(name) => column_name_matches(name, column_name, table_name),
@@ -2410,6 +2456,11 @@ impl Expression {
                 rename_column_name(name, old_name, new_name, table_name);
             }
             Expression::ScalarSubquery(_) => {}
+            Expression::ScalarFunctionCall { args, .. } => {
+                for arg in args {
+                    arg.rename_column_references(old_name, new_name, table_name);
+                }
+            }
             Expression::AggregateCall { target, .. } => {
                 if let AggregateTarget::Column(name) = target {
                     rename_column_name(name, old_name, new_name, table_name);
@@ -2439,6 +2490,14 @@ impl Expression {
             },
             Expression::Parameter(index) => format!("?{}", index + 1),
             Expression::ScalarSubquery(_) => "(<subquery>)".to_string(),
+            Expression::ScalarFunctionCall { function, args } => format!(
+                "{}({})",
+                function.to_sql(),
+                args.iter()
+                    .map(Expression::to_sql)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             Expression::AggregateCall { function, target } => {
                 format!("{}({})", function.to_sql(), target.to_sql())
             }
@@ -2465,6 +2524,37 @@ impl AggregateFunction {
             AggregateFunction::Avg => "AVG",
             AggregateFunction::Min => "MIN",
             AggregateFunction::Max => "MAX",
+        }
+    }
+}
+
+impl ScalarFunction {
+    pub fn from_identifier(name: &str) -> Option<Self> {
+        match name.to_ascii_uppercase().as_str() {
+            "COALESCE" => Some(Self::Coalesce),
+            "IFNULL" => Some(Self::IfNull),
+            "NULLIF" => Some(Self::NullIf),
+            "LOWER" => Some(Self::Lower),
+            "UPPER" => Some(Self::Upper),
+            "LENGTH" => Some(Self::Length),
+            "TRIM" => Some(Self::Trim),
+            "ABS" => Some(Self::Abs),
+            "ROUND" => Some(Self::Round),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn to_sql(self) -> &'static str {
+        match self {
+            ScalarFunction::Coalesce => "COALESCE",
+            ScalarFunction::IfNull => "IFNULL",
+            ScalarFunction::NullIf => "NULLIF",
+            ScalarFunction::Lower => "LOWER",
+            ScalarFunction::Upper => "UPPER",
+            ScalarFunction::Length => "LENGTH",
+            ScalarFunction::Trim => "TRIM",
+            ScalarFunction::Abs => "ABS",
+            ScalarFunction::Round => "ROUND",
         }
     }
 }
