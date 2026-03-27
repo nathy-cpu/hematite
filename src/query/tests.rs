@@ -372,10 +372,11 @@ mod executor_tests {
         let statement = InsertStatement {
             table: "users".to_string(),
             columns: vec!["id".to_string(), "name".to_string()],
-            values: vec![vec![
+            source: InsertSource::Values(vec![vec![
                 Expression::Literal(LiteralValue::Integer(4)),
                 Expression::Literal(LiteralValue::Text("Dave".to_string())),
-            ]],
+            ]]),
+            on_duplicate: None,
         };
 
         let mut executor = InsertExecutor::new(statement);
@@ -1575,10 +1576,11 @@ mod planner_tests {
         let statement = InsertStatement {
             table: "users".to_string(),
             columns: vec!["id".to_string(), "name".to_string()],
-            values: vec![vec![
+            source: InsertSource::Values(vec![vec![
                 Expression::Literal(LiteralValue::Integer(1)),
                 Expression::Literal(LiteralValue::Text("Alice".to_string())),
-            ]],
+            ]]),
+            on_duplicate: None,
         };
 
         let plan = planner.plan(Statement::Insert(statement))?;

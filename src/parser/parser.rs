@@ -1220,14 +1220,27 @@ impl Parser {
 
         let table = self.parse_identifier()?;
 
-        let (columns, values) = match self.peek_token()? {
+        let (columns, source) = match self.peek_token()? {
             Token::LeftParen => {
                 self.consume_token(&Token::LeftParen)?;
                 let columns = self.parse_column_list()?;
                 self.consume_token(&Token::RightParen)?;
-                self.consume_token(&Token::Values)?;
-                let values = self.parse_value_lists()?;
-                (columns, values)
+                let source = match self.peek_token()? {
+                    Token::Values => {
+                        self.consume_token(&Token::Values)?;
+                        InsertSource::Values(self.parse_value_lists()?)
+                    }
+                    Token::Select | Token::With => {
+                        InsertSource::Select(Box::new(self.parse_query_statement(false)?))
+                    }
+                    token => {
+                        return Err(HematiteError::ParseError(format!(
+                            "Expected VALUES or SELECT after INSERT column list, found: {:?}",
+                            token
+                        )))
+                    }
+                };
+                (columns, source)
             }
             Token::Set => {
                 self.consume_token(&Token::Set)?;
@@ -1237,10 +1250,10 @@ impl Parser {
                         .iter()
                         .map(|assignment| assignment.column.clone())
                         .collect(),
-                    vec![assignments
+                    InsertSource::Values(vec![assignments
                         .into_iter()
                         .map(|assignment| assignment.value)
-                        .collect()],
+                        .collect()]),
                 )
             }
             token => {
@@ -1256,7 +1269,8 @@ impl Parser {
         Ok(Statement::Insert(InsertStatement {
             table,
             columns,
-            values,
+            source,
+            on_duplicate: None,
         }))
     }
 

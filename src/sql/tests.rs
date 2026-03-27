@@ -2964,6 +2964,32 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_insert_select_syntax() -> Result<()> {
+        let db = TestDbFile::new("_test_insert_select_syntax");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE source (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("CREATE TABLE target (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("INSERT INTO source (id, name) VALUES (1, 'Alice'), (2, 'Bob');")?;
+
+        conn.execute(
+            "INSERT INTO target (id, name) SELECT id, name FROM source WHERE id >= 2;",
+        )?;
+
+        let result = conn.execute("SELECT id, name FROM target ORDER BY id ASC;")?;
+        assert_eq!(
+            result.rows,
+            vec![vec![
+                crate::catalog::Value::Integer(2),
+                crate::catalog::Value::Text("Bob".to_string()),
+            ]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_auto_increment_assigns_integer_primary_keys() -> Result<()> {
         let db = TestDbFile::new("_test_auto_increment_assigns_integer_primary_keys");
         let mut conn = Connection::new(db.path())?;

@@ -84,10 +84,14 @@ impl QueryPlanner {
 
     fn plan_insert(&self, statement: InsertStatement) -> Result<QueryPlan> {
         // For INSERT, the planning is straightforward
-        let estimated_cost = statement.values.len() as f64;
+        let row_count = match &statement.source {
+            InsertSource::Values(rows) => rows.len(),
+            InsertSource::Select(_) => 1,
+        };
+        let estimated_cost = row_count as f64;
         let node = PlanNode::Insert(InsertPlanNode {
             table_name: statement.table.clone(),
-            row_count: statement.values.len(),
+            row_count,
         });
 
         Ok(QueryPlan {

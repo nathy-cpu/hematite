@@ -2994,7 +2994,7 @@ impl InsertExecutor {
         &self,
         ctx: &ExecutionContext<'_>,
         table: &Table,
-        value_row: &[Expression],
+        value_row: &[Value],
     ) -> Result<Vec<Value>> {
         let mut row = Vec::with_capacity(table.columns.len());
         let next_row_id = ctx
@@ -3019,11 +3019,10 @@ impl InsertExecutor {
                 let expr = value_row.get(position).ok_or_else(|| {
                     HematiteError::ParseError(format!("Missing value for column '{}'", column.name))
                 })?;
-                let literal = self.evaluate_value_expression(expr)?;
-                if column.auto_increment && literal.is_null() {
+                if column.auto_increment && expr.is_null() {
                     Value::Integer(next_row_id as i32)
                 } else {
-                    coerce_column_value(column, literal)?
+                    coerce_column_value(column, expr.clone())?
                 }
             } else if column.auto_increment {
                 Value::Integer(next_row_id as i32)
@@ -3047,6 +3046,12 @@ impl InsertExecutor {
 
         Ok(row)
     }
+
+    fn evaluate_value_row(&self, row: &[Expression]) -> Result<Vec<Value>> {
+        row.iter()
+            .map(|expr| self.evaluate_value_expression(expr))
+            .collect()
+    }
 }
 
 impl QueryExecutor for InsertExecutor {
@@ -3055,7 +3060,30 @@ impl QueryExecutor for InsertExecutor {
 
         let table = catalog_table(ctx, &self.statement.table)?;
 
-        for value_row in &self.statement.values {
+        let input_rows = match &self.statement.source {
+            InsertSource::Values(rows) => rows
+                .iter()
+                .map(|row| self.evaluate_value_row(row))
+                .collect::<Result<Vec<_>>>()?,
+            InsertSource::Select(select) => {
+                let planner = QueryPlanner::new(ctx.catalog.clone())
+                    .with_table_row_counts(current_table_row_counts(ctx.engine));
+                let plan = planner.plan(Statement::Select((**select).clone()))?;
+                match plan.program {
+                    ExecutionProgram::Select {
+                        statement,
+                        access_path,
+                    } => SelectExecutor::new(statement, access_path).execute(ctx)?.rows,
+                    _ => {
+                        return Err(HematiteError::InternalError(
+                            "Expected SELECT execution program for INSERT source".to_string(),
+                        ))
+                    }
+                }
+            }
+        };
+
+        for value_row in &input_rows {
             let row_values = self.build_row_with_metadata(ctx, &table, value_row)?;
             validate_row_constraints(ctx, &table, &row_values)?;
             self.ensure_primary_key_is_unique(ctx, &table, &[], &row_values)?;
@@ -3072,7 +3100,7 @@ impl QueryExecutor for InsertExecutor {
             )?;
         }
 
-        Ok(mutation_result(self.statement.values.len()))
+        Ok(mutation_result(input_rows.len()))
     }
 }
 

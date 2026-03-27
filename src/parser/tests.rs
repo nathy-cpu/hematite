@@ -1193,8 +1193,13 @@ mod parser_tests {
     #[test]
     fn test_parse_parameterized_insert() -> Result<()> {
         let insert = parse_insert("INSERT INTO users (id, name) VALUES (?, ?);")?;
-        assert!(matches!(insert.values[0][0], Expression::Parameter(0)));
-        assert!(matches!(insert.values[0][1], Expression::Parameter(1)));
+        match &insert.source {
+            InsertSource::Values(rows) => {
+                assert!(matches!(rows[0][0], Expression::Parameter(0)));
+                assert!(matches!(rows[0][1], Expression::Parameter(1)));
+            }
+            InsertSource::Select(_) => panic!("expected VALUES source"),
+        }
 
         Ok(())
     }
@@ -1232,8 +1237,13 @@ mod parser_tests {
         let insert = parse_insert("INSERT INTO users (id, name) VALUES (1, 'John');")?;
         assert_eq!(insert.table, "users");
         assert_eq!(insert.columns, vec!["id", "name"]);
-        assert_eq!(insert.values.len(), 1);
-        assert_eq!(insert.values[0].len(), 2);
+        match &insert.source {
+            InsertSource::Values(rows) => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].len(), 2);
+            }
+            InsertSource::Select(_) => panic!("expected VALUES source"),
+        }
         Ok(())
     }
 
@@ -1242,8 +1252,22 @@ mod parser_tests {
         let insert = parse_insert("INSERT INTO users SET id = 1, name = 'John';")?;
         assert_eq!(insert.table, "users");
         assert_eq!(insert.columns, vec!["id", "name"]);
-        assert_eq!(insert.values.len(), 1);
-        assert_eq!(insert.values[0].len(), 2);
+        match &insert.source {
+            InsertSource::Values(rows) => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].len(), 2);
+            }
+            InsertSource::Select(_) => panic!("expected VALUES source"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_insert_select() -> Result<()> {
+        let insert = parse_insert("INSERT INTO users (id, name) SELECT id, name FROM source;")?;
+        assert_eq!(insert.table, "users");
+        assert_eq!(insert.columns, vec!["id", "name"]);
+        assert!(matches!(insert.source, InsertSource::Select(_)));
         Ok(())
     }
 

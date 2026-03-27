@@ -334,7 +334,14 @@ pub enum LogicalOperator {
 pub struct InsertStatement {
     pub table: String,
     pub columns: Vec<String>,
-    pub values: Vec<Vec<Expression>>,
+    pub source: InsertSource,
+    pub on_duplicate: Option<Vec<UpdateAssignment>>,
+}
+
+#[derive(Debug, Clone)]
+pub enum InsertSource {
+    Values(Vec<Vec<Expression>>),
+    Select(Box<SelectStatement>),
 }
 
 #[derive(Debug, Clone)]
@@ -560,9 +567,21 @@ impl Statement {
                 }
             }
             Statement::Insert(insert) => {
-                for row in &insert.values {
-                    for expr in row {
-                        expr.visit_parameters(f);
+                match &insert.source {
+                    InsertSource::Values(rows) => {
+                        for row in rows {
+                            for expr in row {
+                                expr.visit_parameters(f);
+                            }
+                        }
+                    }
+                    InsertSource::Select(select) => {
+                        select.visit_parameters(f);
+                    }
+                }
+                if let Some(assignments) = &insert.on_duplicate {
+                    for assignment in assignments {
+                        assignment.value.visit_parameters(f);
                     }
                 }
             }
@@ -667,15 +686,37 @@ impl Statement {
             Statement::Insert(insert) => Ok(Statement::Insert(InsertStatement {
                 table: insert.table.clone(),
                 columns: insert.columns.clone(),
-                values: insert
-                    .values
-                    .iter()
-                    .map(|row| {
-                        row.iter()
-                            .map(|expr| expr.bind(parameters))
+                source: match &insert.source {
+                    InsertSource::Values(rows) => InsertSource::Values(
+                        rows.iter()
+                            .map(|row| {
+                                row.iter()
+                                    .map(|expr| expr.bind(parameters))
+                                    .collect::<Result<Vec<_>>>()
+                            })
+                            .collect::<Result<Vec<_>>>()?,
+                    ),
+                    InsertSource::Select(select) => InsertSource::Select(Box::new(
+                        Statement::Select((**select).clone())
+                            .bind_parameters(parameters)?
+                            .into_select()?,
+                    )),
+                },
+                on_duplicate: insert
+                    .on_duplicate
+                    .as_ref()
+                    .map(|assignments| {
+                        assignments
+                            .iter()
+                            .map(|assignment| {
+                                Ok(UpdateAssignment {
+                                    column: assignment.column.clone(),
+                                    value: assignment.value.bind(parameters)?,
+                                })
+                            })
                             .collect::<Result<Vec<_>>>()
                     })
-                    .collect::<Result<Vec<_>>>()?,
+                    .transpose()?,
             })),
             Statement::Delete(delete) => Ok(Statement::Delete(DeleteStatement {
                 table: delete.table.clone(),
@@ -2034,22 +2075,34 @@ impl InsertStatement {
             ));
         }
 
-        // Validate values count matches columns
-        for (i, value_row) in self.values.iter().enumerate() {
-            if value_row.len() != self.columns.len() {
-                return Err(HematiteError::ParseError(format!(
-                    "Value row {} has {} values, expected {}",
-                    i,
-                    value_row.len(),
-                    self.columns.len()
-                )));
-            }
+        match &self.source {
+            InsertSource::Values(rows) => {
+                for (i, value_row) in rows.iter().enumerate() {
+                    if value_row.len() != self.columns.len() {
+                        return Err(HematiteError::ParseError(format!(
+                            "Value row {} has {} values, expected {}",
+                            i,
+                            value_row.len(),
+                            self.columns.len()
+                        )));
+                    }
 
-            for value in value_row {
-                if matches!(value, Expression::Column(_)) {
+                    for value in value_row {
+                        if matches!(value, Expression::Column(_)) {
+                            return Err(HematiteError::ParseError(format!(
+                                "INSERT value row {} cannot reference columns",
+                                i
+                            )));
+                        }
+                    }
+                }
+            }
+            InsertSource::Select(select) => {
+                if select.columns.len() != self.columns.len() {
                     return Err(HematiteError::ParseError(format!(
-                        "INSERT value row {} cannot reference columns",
-                        i
+                        "INSERT SELECT returns {} columns, expected {}",
+                        select.columns.len(),
+                        self.columns.len()
                     )));
                 }
             }

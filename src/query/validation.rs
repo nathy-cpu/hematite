@@ -254,21 +254,35 @@ fn validate_insert(insert: &InsertStatement, catalog: &Schema) -> Result<()> {
         ));
     }
 
-    for (i, value_row) in insert.values.iter().enumerate() {
-        if value_row.len() != insert.columns.len() {
-            return Err(HematiteError::ParseError(format!(
-                "Value row {} has {} values, expected {}",
-                i,
-                value_row.len(),
-                insert.columns.len()
-            )));
-        }
+    match &insert.source {
+        InsertSource::Values(rows) => {
+            for (i, value_row) in rows.iter().enumerate() {
+                if value_row.len() != insert.columns.len() {
+                    return Err(HematiteError::ParseError(format!(
+                        "Value row {} has {} values, expected {}",
+                        i,
+                        value_row.len(),
+                        insert.columns.len()
+                    )));
+                }
 
-        for value in value_row {
-            if matches!(value, Expression::Column(_)) {
+                for value in value_row {
+                    if matches!(value, Expression::Column(_)) {
+                        return Err(HematiteError::ParseError(format!(
+                            "INSERT value row {} cannot reference columns",
+                            i
+                        )));
+                    }
+                }
+            }
+        }
+        InsertSource::Select(select) => {
+            validate_select(select, catalog)?;
+            if select.columns.len() != insert.columns.len() {
                 return Err(HematiteError::ParseError(format!(
-                    "INSERT value row {} cannot reference columns",
-                    i
+                    "INSERT SELECT returns {} columns, expected {}",
+                    select.columns.len(),
+                    insert.columns.len()
                 )));
             }
         }
