@@ -86,6 +86,79 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_temporal_scalar_functions_and_arithmetic() -> Result<()> {
+        let db = TestDbFile::new("_test_temporal_scalar_functions_and_arithmetic");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute(
+            "CREATE TABLE typed (\
+                id INTEGER PRIMARY KEY,\
+                event_date DATE,\
+                at TIME,\
+                created_at DATETIME,\
+                stamped TIMESTAMP,\
+                zone_time TIME WITH TIME ZONE\
+            );",
+        )?;
+        conn.execute(
+            "INSERT INTO typed (id, event_date, at, created_at, stamped, zone_time) \
+             VALUES (1, '2026-03-28', '10:11:12', '2026-03-28 13:14:15', '2026-03-28 13:14:15', '10:11:12+03:00');",
+        )?;
+
+        let result = conn.execute(
+            "SELECT \
+                DATE(created_at), \
+                TIME(created_at), \
+                YEAR(event_date), \
+                MONTH(event_date), \
+                DAY(event_date), \
+                HOUR(at), \
+                MINUTE(at), \
+                SECOND(at), \
+                TIME_TO_SEC(at), \
+                SEC_TO_TIME(3661), \
+                UNIX_TIMESTAMP(stamped), \
+                event_date + 2, \
+                created_at + 45, \
+                stamped - 15, \
+                at + 120, \
+                zone_time + 60, \
+                DATE('2026-03-29 01:02:03'), \
+                TIME('2026-03-29 01:02:03') \
+             FROM typed WHERE id = 1;",
+        )?;
+
+        let row = crate::sql::result::Row::new(result.rows[0].clone());
+        assert_eq!(row.get_date(0)?.to_string(), "2026-03-28");
+        assert_eq!(row.get_time(1)?.to_string(), "13:14:15");
+        assert_eq!(row.get_int(2)?, 2026);
+        assert_eq!(row.get_int(3)?, 3);
+        assert_eq!(row.get_int(4)?, 28);
+        assert_eq!(row.get_int(5)?, 10);
+        assert_eq!(row.get_int(6)?, 11);
+        assert_eq!(row.get_int(7)?, 12);
+        assert_eq!(row.get_bigint(8)?, 36_672);
+        assert_eq!(row.get_time(9)?.to_string(), "01:01:01");
+        assert_eq!(
+            row.get_bigint(10)?,
+            TimestampValue::parse("2026-03-28 13:14:15")?.seconds_since_epoch()
+        );
+        assert_eq!(row.get_date(11)?.to_string(), "2026-03-30");
+        assert_eq!(row.get_datetime(12)?.to_string(), "2026-03-28 13:15:00");
+        assert_eq!(row.get_timestamp(13)?.to_string(), "2026-03-28 13:14:00");
+        assert_eq!(row.get_time(14)?.to_string(), "10:13:12");
+        assert_eq!(
+            row.get_time_with_time_zone(15)?.to_string(),
+            "10:12:12+03:00"
+        );
+        assert_eq!(row.get_date(16)?.to_string(), "2026-03-29");
+        assert_eq!(row.get_time(17)?.to_string(), "01:02:03");
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_prepared_statement() -> Result<()> {
         let db = TestDbFile::new("_test_prepared_statement");
         let mut conn = Connection::new(db.path())?;

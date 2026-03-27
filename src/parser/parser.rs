@@ -301,6 +301,9 @@ impl Parser {
                     | Token::LeftParen
                     | Token::Case
                     | Token::Cast
+                    | Token::Date
+                    | Token::Time
+                    | Token::Timestamp
                     | Token::Left
                     | Token::Right
                     | Token::Minus => {
@@ -1048,6 +1051,11 @@ impl Parser {
         match token {
             Token::Cast => self.parse_cast_expression(),
             Token::Case => self.parse_case_expression(),
+            Token::Date | Token::Time | Token::Timestamp
+                if self.next_token_is(&Token::LeftParen) =>
+            {
+                self.parse_scalar_function_expression()
+            }
             Token::Left | Token::Right if self.next_token_is(&Token::LeftParen) => {
                 self.parse_scalar_function_expression()
             }
@@ -1178,6 +1186,18 @@ impl Parser {
     fn parse_scalar_function_name(&mut self) -> Result<String> {
         match self.peek_token()? {
             Token::Identifier(_) => self.parse_identifier(),
+            Token::Date => {
+                self.consume_token(&Token::Date)?;
+                Ok("DATE".to_string())
+            }
+            Token::Time => {
+                self.consume_token(&Token::Time)?;
+                Ok("TIME".to_string())
+            }
+            Token::Timestamp => {
+                self.consume_token(&Token::Timestamp)?;
+                Ok("TIMESTAMP".to_string())
+            }
             Token::Left => {
                 self.consume_token(&Token::Left)?;
                 Ok("LEFT".to_string())

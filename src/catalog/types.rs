@@ -408,11 +408,15 @@ impl DateValue {
     pub fn days_since_epoch(self) -> i32 {
         self.days_since_epoch
     }
+
+    pub fn components(self) -> (i32, u32, u32) {
+        civil_from_days(self.days_since_epoch)
+    }
 }
 
 impl fmt::Display for DateValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (year, month, day) = civil_from_days(self.days_since_epoch);
+        let (year, month, day) = self.components();
         write!(f, "{year:04}-{month:02}-{day:02}")
     }
 }
@@ -446,13 +450,18 @@ impl TimeValue {
     pub fn seconds_since_midnight(self) -> u32 {
         self.seconds_since_midnight
     }
+
+    pub fn components(self) -> (u32, u32, u32) {
+        let hour = self.seconds_since_midnight / 3_600;
+        let minute = (self.seconds_since_midnight % 3_600) / 60;
+        let second = self.seconds_since_midnight % 60;
+        (hour, minute, second)
+    }
 }
 
 impl fmt::Display for TimeValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let hour = self.seconds_since_midnight / 3_600;
-        let minute = (self.seconds_since_midnight % 3_600) / 60;
-        let second = self.seconds_since_midnight % 60;
+        let (hour, minute, second) = self.components();
         write!(f, "{hour:02}:{minute:02}:{second:02}")
     }
 }
@@ -500,16 +509,22 @@ impl DateTimeValue {
     pub fn seconds_since_epoch(self) -> i64 {
         self.seconds_since_epoch
     }
+
+    pub fn components(self) -> (DateValue, TimeValue) {
+        let days = self.seconds_since_epoch.div_euclid(86_400) as i32;
+        let seconds = self.seconds_since_epoch.rem_euclid(86_400) as u32;
+        (
+            DateValue::from_days_since_epoch(days),
+            TimeValue::from_seconds_since_midnight(seconds),
+        )
+    }
 }
 
 impl fmt::Display for DateTimeValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let days = self.seconds_since_epoch.div_euclid(86_400);
-        let seconds = self.seconds_since_epoch.rem_euclid(86_400);
-        let (year, month, day) = civil_from_days(days as i32);
-        let hour = seconds / 3_600;
-        let minute = (seconds % 3_600) / 60;
-        let second = seconds % 60;
+        let (date, time) = self.components();
+        let (year, month, day) = date.components();
+        let (hour, minute, second) = time.components();
         write!(
             f,
             "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}"
@@ -543,6 +558,10 @@ impl TimestampValue {
 
     pub fn seconds_since_epoch(self) -> i64 {
         self.seconds_since_epoch
+    }
+
+    pub fn components(self) -> (DateValue, TimeValue) {
+        DateTimeValue::from_seconds_since_epoch(self.seconds_since_epoch).components()
     }
 }
 
@@ -599,6 +618,10 @@ impl TimeWithTimeZoneValue {
     pub fn offset_minutes(self) -> i16 {
         self.offset_minutes
     }
+
+    pub fn time(self) -> TimeValue {
+        TimeValue::from_seconds_since_midnight(self.seconds_since_midnight)
+    }
 }
 
 impl fmt::Display for TimeWithTimeZoneValue {
@@ -610,7 +633,7 @@ impl fmt::Display for TimeWithTimeZoneValue {
         write!(
             f,
             "{}{}{:02}:{:02}",
-            TimeValue::from_seconds_since_midnight(self.seconds_since_midnight),
+            self.time(),
             sign,
             offset_hours,
             offset_minutes

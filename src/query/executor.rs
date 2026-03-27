@@ -4841,6 +4841,10 @@ fn evaluate_arithmetic_values(
         return Ok(Value::Null);
     }
 
+    if let Some(value) = evaluate_temporal_arithmetic(operator, &left, &right)? {
+        return Ok(value);
+    }
+
     match (left, right) {
         (Value::Integer(left), Value::Integer(right)) => match operator {
             ArithmeticOperator::Add => {
@@ -4886,6 +4890,129 @@ fn evaluate_arithmetic_values(
             "Arithmetic requires numeric values, found {:?} and {:?}",
             left, right
         ))),
+    }
+}
+
+fn evaluate_temporal_arithmetic(
+    operator: &ArithmeticOperator,
+    left: &Value,
+    right: &Value,
+) -> Result<Option<Value>> {
+    match (left, right) {
+        (Value::Date(left), Value::Date(right))
+            if matches!(operator, ArithmeticOperator::Subtract) =>
+        {
+            Ok(Some(Value::BigInt(
+                left.days_since_epoch() as i64 - right.days_since_epoch() as i64,
+            )))
+        }
+        (Value::Date(left), right) => {
+            let Some(days) = integral_rhs(right) else {
+                return Ok(None);
+            };
+            let delta = match operator {
+                ArithmeticOperator::Add => days,
+                ArithmeticOperator::Subtract => -days,
+                _ => return Ok(None),
+            };
+            let result = left.days_since_epoch() as i64 + delta;
+            let result = i32::try_from(result).map_err(|_| {
+                HematiteError::ParseError("DATE arithmetic overflowed supported range".to_string())
+            })?;
+            Ok(Some(Value::Date(DateValue::from_days_since_epoch(result))))
+        }
+
+        (Value::DateTime(left), Value::DateTime(right))
+            if matches!(operator, ArithmeticOperator::Subtract) =>
+        {
+            Ok(Some(Value::BigInt(
+                left.seconds_since_epoch() - right.seconds_since_epoch(),
+            )))
+        }
+        (Value::DateTime(left), right) => {
+            let Some(seconds) = integral_rhs(right) else {
+                return Ok(None);
+            };
+            let delta = match operator {
+                ArithmeticOperator::Add => seconds,
+                ArithmeticOperator::Subtract => -seconds,
+                _ => return Ok(None),
+            };
+            Ok(Some(Value::DateTime(
+                DateTimeValue::from_seconds_since_epoch(left.seconds_since_epoch() + delta),
+            )))
+        }
+
+        (Value::Timestamp(left), Value::Timestamp(right))
+            if matches!(operator, ArithmeticOperator::Subtract) =>
+        {
+            Ok(Some(Value::BigInt(
+                left.seconds_since_epoch() - right.seconds_since_epoch(),
+            )))
+        }
+        (Value::Timestamp(left), right) => {
+            let Some(seconds) = integral_rhs(right) else {
+                return Ok(None);
+            };
+            let delta = match operator {
+                ArithmeticOperator::Add => seconds,
+                ArithmeticOperator::Subtract => -seconds,
+                _ => return Ok(None),
+            };
+            Ok(Some(Value::Timestamp(
+                TimestampValue::from_seconds_since_epoch(left.seconds_since_epoch() + delta),
+            )))
+        }
+
+        (Value::Time(left), Value::Time(right))
+            if matches!(operator, ArithmeticOperator::Subtract) =>
+        {
+            Ok(Some(Value::Integer(
+                left.seconds_since_midnight() as i32 - right.seconds_since_midnight() as i32,
+            )))
+        }
+        (Value::Time(left), right) => {
+            let Some(seconds) = integral_rhs(right) else {
+                return Ok(None);
+            };
+            let delta = match operator {
+                ArithmeticOperator::Add => seconds,
+                ArithmeticOperator::Subtract => -seconds,
+                _ => return Ok(None),
+            };
+            Ok(Some(Value::Time(TimeValue::from_seconds_since_midnight(
+                add_wrapped_seconds(left.seconds_since_midnight(), delta),
+            ))))
+        }
+        (Value::TimeWithTimeZone(left), right) => {
+            let Some(seconds) = integral_rhs(right) else {
+                return Ok(None);
+            };
+            let delta = match operator {
+                ArithmeticOperator::Add => seconds,
+                ArithmeticOperator::Subtract => -seconds,
+                _ => return Ok(None),
+            };
+            Ok(Some(Value::TimeWithTimeZone(
+                TimeWithTimeZoneValue::from_parts(
+                    add_wrapped_seconds(left.seconds_since_midnight(), delta),
+                    left.offset_minutes(),
+                ),
+            )))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn add_wrapped_seconds(seconds_since_midnight: u32, delta: i64) -> u32 {
+    (seconds_since_midnight as i64 + delta).rem_euclid(86_400) as u32
+}
+
+fn integral_rhs(value: &Value) -> Option<i64> {
+    match value {
+        Value::Integer(value) => Some(*value as i64),
+        Value::BigInt(value) => Some(*value),
+        _ => None,
     }
 }
 
@@ -5055,6 +5182,17 @@ fn evaluate_scalar_function(function: ScalarFunction, args: Vec<Value>) -> Resul
         ScalarFunction::Coalesce => evaluate_coalesce(args),
         ScalarFunction::IfNull => evaluate_ifnull(args),
         ScalarFunction::NullIf => evaluate_nullif(args),
+        ScalarFunction::DateFn => evaluate_date_fn(args),
+        ScalarFunction::TimeFn => evaluate_time_fn(args),
+        ScalarFunction::Year => evaluate_year(args),
+        ScalarFunction::Month => evaluate_month(args),
+        ScalarFunction::Day => evaluate_day(args),
+        ScalarFunction::Hour => evaluate_hour(args),
+        ScalarFunction::Minute => evaluate_minute(args),
+        ScalarFunction::Second => evaluate_second(args),
+        ScalarFunction::TimeToSec => evaluate_time_to_sec(args),
+        ScalarFunction::SecToTime => evaluate_sec_to_time(args),
+        ScalarFunction::UnixTimestamp => evaluate_unix_timestamp(args),
         ScalarFunction::Lower => evaluate_lower(args),
         ScalarFunction::Upper => evaluate_upper(args),
         ScalarFunction::Length => evaluate_length(args),
@@ -5092,6 +5230,98 @@ fn evaluate_coalesce(args: Vec<Value>) -> Result<Value> {
     }
 
     Ok(Value::Null)
+}
+
+fn evaluate_date_fn(args: Vec<Value>) -> Result<Value> {
+    expect_unary_temporal_function("DATE", args, |value| {
+        Ok(Value::Date(extract_date_component("DATE", value)?))
+    })
+}
+
+fn evaluate_time_fn(args: Vec<Value>) -> Result<Value> {
+    expect_unary_temporal_function("TIME", args, |value| {
+        Ok(Value::Time(extract_time_component("TIME", value)?))
+    })
+}
+
+fn evaluate_year(args: Vec<Value>) -> Result<Value> {
+    expect_unary_temporal_function("YEAR", args, |value| {
+        let (year, _, _) = extract_date_component("YEAR", value)?.components();
+        Ok(Value::Integer(year))
+    })
+}
+
+fn evaluate_month(args: Vec<Value>) -> Result<Value> {
+    expect_unary_temporal_function("MONTH", args, |value| {
+        let (_, month, _) = extract_date_component("MONTH", value)?.components();
+        Ok(Value::Integer(month as i32))
+    })
+}
+
+fn evaluate_day(args: Vec<Value>) -> Result<Value> {
+    expect_unary_temporal_function("DAY", args, |value| {
+        let (_, _, day) = extract_date_component("DAY", value)?.components();
+        Ok(Value::Integer(day as i32))
+    })
+}
+
+fn evaluate_hour(args: Vec<Value>) -> Result<Value> {
+    expect_unary_temporal_function("HOUR", args, |value| {
+        let (hour, _, _) = extract_time_component("HOUR", value)?.components();
+        Ok(Value::Integer(hour as i32))
+    })
+}
+
+fn evaluate_minute(args: Vec<Value>) -> Result<Value> {
+    expect_unary_temporal_function("MINUTE", args, |value| {
+        let (_, minute, _) = extract_time_component("MINUTE", value)?.components();
+        Ok(Value::Integer(minute as i32))
+    })
+}
+
+fn evaluate_second(args: Vec<Value>) -> Result<Value> {
+    expect_unary_temporal_function("SECOND", args, |value| {
+        let (_, _, second) = extract_time_component("SECOND", value)?.components();
+        Ok(Value::Integer(second as i32))
+    })
+}
+
+fn evaluate_time_to_sec(args: Vec<Value>) -> Result<Value> {
+    expect_unary_temporal_function("TIME_TO_SEC", args, |value| {
+        Ok(Value::BigInt(
+            extract_time_component("TIME_TO_SEC", value)?.seconds_since_midnight() as i64,
+        ))
+    })
+}
+
+fn evaluate_sec_to_time(args: Vec<Value>) -> Result<Value> {
+    if args.len() != 1 {
+        return Err(HematiteError::ParseError(
+            "SEC_TO_TIME requires exactly one argument".to_string(),
+        ));
+    }
+
+    let value = args.into_iter().next().expect("validated arity");
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Integer(value) => Ok(Value::Time(TimeValue::from_seconds_since_midnight(
+            add_wrapped_seconds(0, value as i64),
+        ))),
+        Value::BigInt(value) => Ok(Value::Time(TimeValue::from_seconds_since_midnight(
+            add_wrapped_seconds(0, value),
+        ))),
+        value => Err(HematiteError::ParseError(format!(
+            "SEC_TO_TIME requires an integer value, found {:?}",
+            value
+        ))),
+    }
+}
+
+fn evaluate_unix_timestamp(args: Vec<Value>) -> Result<Value> {
+    expect_unary_temporal_function("UNIX_TIMESTAMP", args, |value| {
+        let timestamp = extract_timestamp_component("UNIX_TIMESTAMP", value)?;
+        Ok(Value::BigInt(timestamp.seconds_since_epoch()))
+    })
 }
 
 fn evaluate_ifnull(args: Vec<Value>) -> Result<Value> {
@@ -5176,6 +5406,24 @@ where
             "{} requires a text value, found {:?}",
             name, value
         ))),
+    }
+}
+
+fn expect_unary_temporal_function<F>(name: &str, args: Vec<Value>, f: F) -> Result<Value>
+where
+    F: FnOnce(Value) -> Result<Value>,
+{
+    if args.len() != 1 {
+        return Err(HematiteError::ParseError(format!(
+            "{} requires exactly one argument",
+            name
+        )));
+    }
+
+    let value = args.into_iter().next().expect("validated unary arity");
+    match value {
+        Value::Null => Ok(Value::Null),
+        value => f(value),
     }
 }
 
@@ -5411,9 +5659,13 @@ fn coerce_value_to_string(function_name: &str, value: Value) -> Result<String> {
 fn expect_text_argument(function_name: &str, value: Value) -> Result<String> {
     match value {
         Value::Text(text) => Ok(text),
+        Value::Enum(text) => Ok(text),
         Value::Decimal(text) => Ok(text.to_string()),
         Value::Date(text) => Ok(text.to_string()),
+        Value::Time(text) => Ok(text.to_string()),
         Value::DateTime(text) => Ok(text.to_string()),
+        Value::Timestamp(text) => Ok(text.to_string()),
+        Value::TimeWithTimeZone(text) => Ok(text.to_string()),
         value => Err(HematiteError::ParseError(format!(
             "{} requires a text value, found {:?}",
             function_name, value
@@ -5431,6 +5683,85 @@ fn expect_integer_argument(function_name: &str, value: Value, label: &str) -> Re
         value => Err(HematiteError::ParseError(format!(
             "{} {} requires an integer value, found {:?}",
             function_name, label, value
+        ))),
+    }
+}
+
+fn extract_date_component(function_name: &str, value: Value) -> Result<DateValue> {
+    match value {
+        Value::Date(value) => Ok(value),
+        Value::DateTime(value) => Ok(value.components().0),
+        Value::Timestamp(value) => Ok(value.components().0),
+        Value::Text(value) | Value::Enum(value) => DateValue::parse(&value)
+            .or_else(|_| DateTimeValue::parse(&value).map(|value| value.components().0))
+            .or_else(|_| TimestampValue::parse(&value).map(|value| value.components().0))
+            .map_err(|_| {
+                HematiteError::ParseError(format!(
+                    "{} requires a DATE-like value, found '{}'",
+                    function_name, value
+                ))
+            }),
+        value => Err(HematiteError::ParseError(format!(
+            "{} requires a DATE-like value, found {:?}",
+            function_name, value
+        ))),
+    }
+}
+
+fn extract_time_component(function_name: &str, value: Value) -> Result<TimeValue> {
+    match value {
+        Value::Time(value) => Ok(value),
+        Value::TimeWithTimeZone(value) => Ok(value.time()),
+        Value::DateTime(value) => Ok(value.components().1),
+        Value::Timestamp(value) => Ok(value.components().1),
+        Value::Text(value) | Value::Enum(value) => TimeValue::parse(&value)
+            .or_else(|_| TimeWithTimeZoneValue::parse(&value).map(|value| value.time()))
+            .or_else(|_| DateTimeValue::parse(&value).map(|value| value.components().1))
+            .or_else(|_| TimestampValue::parse(&value).map(|value| value.components().1))
+            .map_err(|_| {
+                HematiteError::ParseError(format!(
+                    "{} requires a TIME-like value, found '{}'",
+                    function_name, value
+                ))
+            }),
+        value => Err(HematiteError::ParseError(format!(
+            "{} requires a TIME-like value, found {:?}",
+            function_name, value
+        ))),
+    }
+}
+
+fn extract_timestamp_component(function_name: &str, value: Value) -> Result<TimestampValue> {
+    match value {
+        Value::Timestamp(value) => Ok(value),
+        Value::DateTime(value) => Ok(TimestampValue::from_seconds_since_epoch(
+            value.seconds_since_epoch(),
+        )),
+        Value::Date(value) => Ok(TimestampValue::from_seconds_since_epoch(
+            value.days_since_epoch() as i64 * 86_400,
+        )),
+        Value::Text(value) | Value::Enum(value) => TimestampValue::parse(&value)
+            .or_else(|_| {
+                DateTimeValue::parse(&value).map(|value| {
+                    TimestampValue::from_seconds_since_epoch(value.seconds_since_epoch())
+                })
+            })
+            .or_else(|_| {
+                DateValue::parse(&value).map(|value| {
+                    TimestampValue::from_seconds_since_epoch(
+                        value.days_since_epoch() as i64 * 86_400,
+                    )
+                })
+            })
+            .map_err(|_| {
+                HematiteError::ParseError(format!(
+                    "{} requires a TIMESTAMP-like value, found '{}'",
+                    function_name, value
+                ))
+            }),
+        value => Err(HematiteError::ParseError(format!(
+            "{} requires a TIMESTAMP-like value, found {:?}",
+            function_name, value
         ))),
     }
 }

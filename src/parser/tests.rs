@@ -1000,6 +1000,49 @@ mod parser_tests {
     }
 
     #[test]
+    fn test_parse_temporal_scalar_functions() -> Result<()> {
+        let select = parse_select(
+            "SELECT DATE(created_at), TIME(created_at), YEAR(created_at), TIME_TO_SEC(at), UNIX_TIMESTAMP(stamped) FROM typed;",
+        )?;
+        assert!(matches!(
+            &select.columns[0],
+            SelectItem::Expression(Expression::ScalarFunctionCall {
+                function: ScalarFunction::DateFn,
+                ..
+            })
+        ));
+        assert!(matches!(
+            &select.columns[1],
+            SelectItem::Expression(Expression::ScalarFunctionCall {
+                function: ScalarFunction::TimeFn,
+                ..
+            })
+        ));
+        assert!(matches!(
+            &select.columns[2],
+            SelectItem::Expression(Expression::ScalarFunctionCall {
+                function: ScalarFunction::Year,
+                ..
+            })
+        ));
+        assert!(matches!(
+            &select.columns[3],
+            SelectItem::Expression(Expression::ScalarFunctionCall {
+                function: ScalarFunction::TimeToSec,
+                ..
+            })
+        ));
+        assert!(matches!(
+            &select.columns[4],
+            SelectItem::Expression(Expression::ScalarFunctionCall {
+                function: ScalarFunction::UnixTimestamp,
+                ..
+            })
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_case_expression() -> Result<()> {
         let select = parse_select(
             "SELECT CASE WHEN score >= 90 THEN 'A' WHEN score >= 80 THEN 'B' ELSE 'C' END AS grade FROM users;",
