@@ -2,7 +2,7 @@
 
 use super::column::Column;
 use super::ids::TableId;
-use super::object::{Trigger, View};
+use super::object::{NamedConstraintKind, Trigger, View};
 use super::table::{CheckConstraint, ForeignKeyConstraint, SecondaryIndex, Table};
 use crate::error::HematiteError;
 use crate::Result;
@@ -121,12 +121,40 @@ impl Schema {
         self.triggers.get(name)
     }
 
-    pub(crate) fn views(&self) -> &HashMap<String, View> {
-        &self.views
+    pub fn create_view(&mut self, view: View) -> Result<()> {
+        view.validate()?;
+        if self.table_names.contains_key(&view.name) || self.views.contains_key(&view.name) {
+            return Err(HematiteError::ParseError(format!(
+                "Schema object '{}' already exists",
+                view.name
+            )));
+        }
+        self.views.insert(view.name.clone(), view);
+        Ok(())
     }
 
-    pub(crate) fn triggers(&self) -> &HashMap<String, Trigger> {
-        &self.triggers
+    pub fn drop_view(&mut self, name: &str) -> Result<View> {
+        self.views.remove(name).ok_or_else(|| {
+            HematiteError::StorageError(format!("View '{}' does not exist", name))
+        })
+    }
+
+    pub fn create_trigger(&mut self, trigger: Trigger) -> Result<()> {
+        trigger.validate()?;
+        if self.triggers.contains_key(&trigger.name) {
+            return Err(HematiteError::ParseError(format!(
+                "Trigger '{}' already exists",
+                trigger.name
+            )));
+        }
+        self.triggers.insert(trigger.name.clone(), trigger);
+        Ok(())
+    }
+
+    pub fn drop_trigger(&mut self, name: &str) -> Result<Trigger> {
+        self.triggers.remove(name).ok_or_else(|| {
+            HematiteError::StorageError(format!("Trigger '{}' does not exist", name))
+        })
     }
 
     pub(crate) fn tables(&self) -> &HashMap<TableId, Table> {
@@ -294,6 +322,18 @@ impl Schema {
             .ok_or_else(|| HematiteError::StorageError("Table not found".to_string()))?;
         let _ = table.drop_secondary_index(index_name)?;
         Ok(())
+    }
+
+    pub fn drop_named_constraint(
+        &mut self,
+        table_id: TableId,
+        constraint_name: &str,
+    ) -> Result<NamedConstraintKind> {
+        let table = self
+            .tables
+            .get_mut(&table_id)
+            .ok_or_else(|| HematiteError::StorageError("Table not found".to_string()))?;
+        table.drop_named_constraint(constraint_name)
     }
 
     pub fn set_table_primary_key_root_page(

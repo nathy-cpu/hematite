@@ -529,6 +529,40 @@ impl Table {
         Ok(self.secondary_indexes.remove(index))
     }
 
+    pub fn drop_named_constraint(&mut self, name: &str) -> Result<NamedConstraintKind> {
+        if let Some(index) = self
+            .check_constraints
+            .iter()
+            .position(|constraint| constraint.name.as_deref() == Some(name))
+        {
+            self.check_constraints.remove(index);
+            return Ok(NamedConstraintKind::Check);
+        }
+
+        if let Some(index) = self
+            .foreign_keys
+            .iter()
+            .position(|constraint| constraint.name.as_deref() == Some(name))
+        {
+            self.foreign_keys.remove(index);
+            return Ok(NamedConstraintKind::ForeignKey);
+        }
+
+        if let Some(index) = self
+            .secondary_indexes
+            .iter()
+            .position(|constraint| constraint.unique && constraint.name == name)
+        {
+            self.secondary_indexes.remove(index);
+            return Ok(NamedConstraintKind::Unique);
+        }
+
+        Err(HematiteError::StorageError(format!(
+            "Constraint '{}' does not exist on table '{}'",
+            name, self.name
+        )))
+    }
+
     pub fn serialize(&self, buffer: &mut Vec<u8>) -> Result<()> {
         // Table ID (4 bytes)
         buffer.extend_from_slice(&self.id.as_u32().to_le_bytes());

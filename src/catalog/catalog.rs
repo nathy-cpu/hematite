@@ -21,6 +21,7 @@
 use crate::catalog::column::Column;
 use crate::catalog::engine::{CatalogEngine, CatalogEngineSnapshot, CatalogIntegrityReport};
 use crate::catalog::ids::TableId;
+use crate::catalog::object::{NamedConstraintKind, Trigger, View};
 use crate::catalog::schema::Schema;
 use crate::catalog::table::{CheckConstraint, ForeignKeyConstraint, SecondaryIndex, Table};
 use crate::catalog::JournalMode;
@@ -252,6 +253,59 @@ impl Catalog {
 
     pub fn list_tables(&self) -> Result<Vec<(TableId, String)>> {
         Ok(self.schema.list_tables())
+    }
+
+    pub fn create_view(&mut self, view: View) -> Result<()> {
+        self.schema.create_view(view)?;
+        self.schema_dirty = true;
+        self.save_schema_to_btree()
+    }
+
+    pub fn drop_view(&mut self, name: &str) -> Result<View> {
+        let view = self.schema.drop_view(name)?;
+        self.schema_dirty = true;
+        self.save_schema_to_btree()?;
+        Ok(view)
+    }
+
+    pub fn get_view(&self, name: &str) -> Result<Option<View>> {
+        Ok(self.schema.view(name).cloned())
+    }
+
+    pub fn list_views(&self) -> Result<Vec<String>> {
+        Ok(self.schema.list_views())
+    }
+
+    pub fn create_trigger(&mut self, trigger: Trigger) -> Result<()> {
+        self.schema.create_trigger(trigger)?;
+        self.schema_dirty = true;
+        self.save_schema_to_btree()
+    }
+
+    pub fn drop_trigger(&mut self, name: &str) -> Result<Trigger> {
+        let trigger = self.schema.drop_trigger(name)?;
+        self.schema_dirty = true;
+        self.save_schema_to_btree()?;
+        Ok(trigger)
+    }
+
+    pub fn get_trigger(&self, name: &str) -> Result<Option<Trigger>> {
+        Ok(self.schema.trigger(name).cloned())
+    }
+
+    pub fn list_triggers(&self) -> Result<Vec<String>> {
+        Ok(self.schema.list_triggers())
+    }
+
+    pub fn drop_named_constraint(
+        &mut self,
+        table_id: TableId,
+        constraint_name: &str,
+    ) -> Result<NamedConstraintKind> {
+        let kind = self.schema.drop_named_constraint(table_id, constraint_name)?;
+        self.schema_dirty = true;
+        self.save_schema_to_btree()?;
+        Ok(kind)
     }
 
     pub fn get_schema(&self) -> &Schema {

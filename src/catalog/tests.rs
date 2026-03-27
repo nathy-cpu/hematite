@@ -3,8 +3,8 @@ mod tests {
     use crate::catalog::table::{CheckConstraint, ForeignKeyAction, ForeignKeyConstraint};
     use crate::catalog::types::{DataType, Value};
     use crate::catalog::{
-        Column, ColumnId, DatabaseHeader, NamedConstraintKind, Schema, Table, TableId, Trigger,
-        TriggerEvent, View,
+        Catalog, Column, ColumnId, DatabaseHeader, NamedConstraintKind, Schema, Table, TableId,
+        Trigger, TriggerEvent, View,
     };
     use crate::error::Result;
     use crate::storage::Page;
@@ -686,6 +686,154 @@ mod tests {
             constraint.name == "fk_users_org"
                 && constraint.kind == NamedConstraintKind::ForeignKey
         }));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_schema_create_list_and_drop_views_and_triggers() -> Result<()> {
+        let mut schema = Schema::new();
+        let table_id = schema.create_table(
+            "users".to_string(),
+            vec![
+                Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer)
+                    .primary_key(true),
+                Column::new(ColumnId::new(2), "name".to_string(), DataType::Text),
+            ],
+        )?;
+
+        schema.create_view(View {
+            name: "user_names".to_string(),
+            query_sql: "SELECT name FROM users".to_string(),
+            column_names: vec!["name".to_string()],
+            dependencies: vec!["users".to_string()],
+        })?;
+        schema.create_trigger(Trigger {
+            name: "audit_users_insert".to_string(),
+            table_name: "users".to_string(),
+            event: TriggerEvent::Insert,
+            body_sql: "INSERT INTO audit_log (entry) VALUES (NEW.name)".to_string(),
+            old_alias: None,
+            new_alias: Some("NEW".to_string()),
+        })?;
+
+        assert_eq!(schema.list_views(), vec!["user_names".to_string()]);
+        assert_eq!(schema.list_triggers(), vec!["audit_users_insert".to_string()]);
+        assert_eq!(schema.view("user_names").unwrap().dependencies, vec!["users"]);
+        assert_eq!(
+            schema.trigger("audit_users_insert").unwrap().table_name,
+            "users"
+        );
+
+        let dropped_trigger = schema.drop_trigger("audit_users_insert")?;
+        let dropped_view = schema.drop_view("user_names")?;
+        assert_eq!(dropped_trigger.name, "audit_users_insert");
+        assert_eq!(dropped_view.name, "user_names");
+        assert!(schema.trigger("audit_users_insert").is_none());
+        assert!(schema.view("user_names").is_none());
+
+        schema.drop_table(table_id)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_schema_drop_named_constraint_returns_kind() -> Result<()> {
+        let mut schema = Schema::new();
+        let table_id = schema.create_table(
+            "users".to_string(),
+            vec![
+                Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer)
+                    .primary_key(true),
+                Column::new(ColumnId::new(2), "email".to_string(), DataType::Text),
+                Column::new(ColumnId::new(3), "org_id".to_string(), DataType::Integer),
+            ],
+        )?;
+
+        schema.add_check_constraint(
+            table_id,
+            CheckConstraint {
+                name: Some("chk_users_email".to_string()),
+                expression_sql: "email != ''".to_string(),
+            },
+        )?;
+        schema.add_foreign_key(
+            table_id,
+            ForeignKeyConstraint {
+                name: Some("fk_users_org".to_string()),
+                column_indices: vec![2],
+                referenced_table: "orgs".to_string(),
+                referenced_columns: vec!["id".to_string()],
+                on_delete: ForeignKeyAction::Restrict,
+                on_update: ForeignKeyAction::Restrict,
+            },
+        )?;
+        schema.add_secondary_index(
+            table_id,
+            crate::catalog::SecondaryIndex {
+                name: "uq_users_email".to_string(),
+                column_indices: vec![1],
+                root_page_id: 12,
+                unique: true,
+            },
+        )?;
+
+        assert_eq!(
+            schema.drop_named_constraint(table_id, "chk_users_email")?,
+            NamedConstraintKind::Check
+        );
+        assert_eq!(
+            schema.drop_named_constraint(table_id, "fk_users_org")?,
+            NamedConstraintKind::ForeignKey
+        );
+        assert_eq!(
+            schema.drop_named_constraint(table_id, "uq_users_email")?,
+            NamedConstraintKind::Unique
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_catalog_create_list_and_drop_views_and_triggers() -> Result<()> {
+        let mut catalog = Catalog::open_in_memory()?;
+        catalog.create_table(
+            "users",
+            vec![
+                Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer)
+                    .primary_key(true),
+                Column::new(ColumnId::new(2), "name".to_string(), DataType::Text),
+            ],
+        )?;
+
+        catalog.create_view(View {
+            name: "user_names".to_string(),
+            query_sql: "SELECT name FROM users".to_string(),
+            column_names: vec!["name".to_string()],
+            dependencies: vec!["users".to_string()],
+        })?;
+        catalog.create_trigger(Trigger {
+            name: "audit_users_insert".to_string(),
+            table_name: "users".to_string(),
+            event: TriggerEvent::Insert,
+            body_sql: "INSERT INTO audit_log (entry) VALUES (NEW.name)".to_string(),
+            old_alias: None,
+            new_alias: Some("NEW".to_string()),
+        })?;
+
+        assert_eq!(catalog.list_views()?, vec!["user_names".to_string()]);
+        assert_eq!(
+            catalog.list_triggers()?,
+            vec!["audit_users_insert".to_string()]
+        );
+        assert!(catalog.get_view("user_names")?.is_some());
+        assert!(catalog.get_trigger("audit_users_insert")?.is_some());
+
+        let dropped_trigger = catalog.drop_trigger("audit_users_insert")?;
+        let dropped_view = catalog.drop_view("user_names")?;
+        assert_eq!(dropped_trigger.name, "audit_users_insert");
+        assert_eq!(dropped_view.name, "user_names");
+        assert!(catalog.get_trigger("audit_users_insert")?.is_none());
+        assert!(catalog.get_view("user_names")?.is_none());
 
         Ok(())
     }
