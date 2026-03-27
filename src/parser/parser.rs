@@ -267,6 +267,8 @@ impl Parser {
                     | Token::Placeholder
                     | Token::LeftParen
                     | Token::Case
+                    | Token::Left
+                    | Token::Right
                     | Token::Minus => {
                         let expr = self.parse_expression()?;
                         columns.push(match expr {
@@ -820,6 +822,9 @@ impl Parser {
         let token = self.peek_token()?;
         match token {
             Token::Case => self.parse_case_expression(),
+            Token::Left | Token::Right if self.next_token_is(&Token::LeftParen) => {
+                self.parse_scalar_function_expression()
+            }
             Token::Count | Token::Sum | Token::Avg | Token::Min | Token::Max => {
                 self.parse_aggregate_expression()
             }
@@ -914,7 +919,7 @@ impl Parser {
     }
 
     fn parse_scalar_function_expression(&mut self) -> Result<Expression> {
-        let function_name = self.parse_identifier()?;
+        let function_name = self.parse_scalar_function_name()?;
         let function = ScalarFunction::from_identifier(&function_name).ok_or_else(|| {
             HematiteError::ParseError(format!("Unsupported scalar function '{}'", function_name))
         })?;
@@ -934,6 +939,24 @@ impl Parser {
 
         self.consume_token(&Token::RightParen)?;
         Ok(Expression::ScalarFunctionCall { function, args })
+    }
+
+    fn parse_scalar_function_name(&mut self) -> Result<String> {
+        match self.peek_token()? {
+            Token::Identifier(_) => self.parse_identifier(),
+            Token::Left => {
+                self.consume_token(&Token::Left)?;
+                Ok("LEFT".to_string())
+            }
+            Token::Right => {
+                self.consume_token(&Token::Right)?;
+                Ok("RIGHT".to_string())
+            }
+            token => Err(HematiteError::ParseError(format!(
+                "Expected scalar function name, found: {:?}",
+                token
+            ))),
+        }
     }
 
     fn parse_comparison_operator(&mut self) -> Result<ComparisonOperator> {

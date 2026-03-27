@@ -4188,6 +4188,9 @@ fn evaluate_scalar_function(function: ScalarFunction, args: Vec<Value>) -> Resul
         ScalarFunction::Round => evaluate_round(args),
         ScalarFunction::Concat => evaluate_concat(args),
         ScalarFunction::ConcatWs => evaluate_concat_ws(args),
+        ScalarFunction::Substring => evaluate_substring(args),
+        ScalarFunction::LeftFn => evaluate_left(args),
+        ScalarFunction::RightFn => evaluate_right(args),
     }
 }
 
@@ -4385,6 +4388,82 @@ fn evaluate_concat_ws(args: Vec<Value>) -> Result<Value> {
     Ok(Value::Text(parts.join(&separator)))
 }
 
+fn evaluate_substring(args: Vec<Value>) -> Result<Value> {
+    if args.len() != 2 && args.len() != 3 {
+        return Err(HematiteError::ParseError(
+            "SUBSTRING requires two or three arguments".to_string(),
+        ));
+    }
+
+    let mut args = args.into_iter();
+    let text = args.next().expect("validated substring arity");
+    let start = args.next().expect("validated substring arity");
+    let len = args.next();
+
+    if text.is_null() || start.is_null() || len.as_ref().is_some_and(Value::is_null) {
+        return Ok(Value::Null);
+    }
+
+    let text = expect_text_argument("SUBSTRING", text)?;
+    let start = expect_integer_argument("SUBSTRING", start, "start position")?;
+    let len = len
+        .map(|value| expect_integer_argument("SUBSTRING", value, "length"))
+        .transpose()?;
+
+    substring_chars(&text, start, len)
+}
+
+fn evaluate_left(args: Vec<Value>) -> Result<Value> {
+    if args.len() != 2 {
+        return Err(HematiteError::ParseError(
+            "LEFT requires exactly two arguments".to_string(),
+        ));
+    }
+
+    let mut args = args.into_iter();
+    let text = args.next().expect("validated left arity");
+    let len = args.next().expect("validated left arity");
+    if text.is_null() || len.is_null() {
+        return Ok(Value::Null);
+    }
+
+    let text = expect_text_argument("LEFT", text)?;
+    let len = expect_integer_argument("LEFT", len, "length")?;
+    if len < 0 {
+        return Ok(Value::Text(String::new()));
+    }
+
+    let out = text.chars().take(len as usize).collect::<String>();
+    Ok(Value::Text(out))
+}
+
+fn evaluate_right(args: Vec<Value>) -> Result<Value> {
+    if args.len() != 2 {
+        return Err(HematiteError::ParseError(
+            "RIGHT requires exactly two arguments".to_string(),
+        ));
+    }
+
+    let mut args = args.into_iter();
+    let text = args.next().expect("validated right arity");
+    let len = args.next().expect("validated right arity");
+    if text.is_null() || len.is_null() {
+        return Ok(Value::Null);
+    }
+
+    let text = expect_text_argument("RIGHT", text)?;
+    let len = expect_integer_argument("RIGHT", len, "length")?;
+    if len < 0 {
+        return Ok(Value::Text(String::new()));
+    }
+
+    let chars = text.chars().collect::<Vec<_>>();
+    let take = len as usize;
+    let start = chars.len().saturating_sub(take);
+    let out = chars[start..].iter().collect::<String>();
+    Ok(Value::Text(out))
+}
+
 fn expect_unary_numeric_function<F>(name: &str, args: Vec<Value>, f: F) -> Result<Value>
 where
     F: FnOnce(Value) -> Result<Value>,
@@ -4419,6 +4498,53 @@ fn coerce_value_to_string(function_name: &str, value: Value) -> Result<String> {
             function_name
         ))),
     }
+}
+
+fn expect_text_argument(function_name: &str, value: Value) -> Result<String> {
+    match value {
+        Value::Text(text) => Ok(text),
+        value => Err(HematiteError::ParseError(format!(
+            "{} requires a text value, found {:?}",
+            function_name, value
+        ))),
+    }
+}
+
+fn expect_integer_argument(function_name: &str, value: Value, label: &str) -> Result<i32> {
+    match value {
+        Value::Null => Err(HematiteError::ParseError(format!(
+            "{} {} cannot be NULL",
+            function_name, label
+        ))),
+        Value::Integer(value) => Ok(value),
+        value => Err(HematiteError::ParseError(format!(
+            "{} {} requires an integer value, found {:?}",
+            function_name, label, value
+        ))),
+    }
+}
+
+fn substring_chars(text: &str, start: i32, len: Option<i32>) -> Result<Value> {
+    let chars = text.chars().collect::<Vec<_>>();
+    let start_index = if start > 0 {
+        start.saturating_sub(1) as usize
+    } else if start < 0 {
+        chars.len().saturating_sub((-start) as usize)
+    } else {
+        0
+    };
+
+    if let Some(len) = len {
+        if len <= 0 {
+            return Ok(Value::Text(String::new()));
+        }
+        let end = start_index.saturating_add(len as usize).min(chars.len());
+        return Ok(Value::Text(chars[start_index.min(chars.len())..end].iter().collect()));
+    }
+
+    Ok(Value::Text(
+        chars[start_index.min(chars.len())..].iter().collect(),
+    ))
 }
 
 fn round_integer(value: i32, precision: i32) -> Result<Value> {

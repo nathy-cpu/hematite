@@ -597,6 +597,54 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_substring_left_and_right_functions() -> Result<()> {
+        let db = TestDbFile::new("_test_substring_left_and_right_functions");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE docs (id INTEGER PRIMARY KEY, title TEXT);")?;
+        conn.execute("INSERT INTO docs (id, title) VALUES (1, 'hematite');")?;
+
+        let result = conn.execute(
+            "SELECT SUBSTRING(title, 2, 4), SUBSTR(title, -4), LEFT(title, 3), RIGHT(title, 2) FROM docs;",
+        )?;
+        assert_eq!(
+            result.rows,
+            vec![vec![
+                crate::catalog::Value::Text("emat".to_string()),
+                crate::catalog::Value::Text("tite".to_string()),
+                crate::catalog::Value::Text("hem".to_string()),
+                crate::catalog::Value::Text("te".to_string()),
+            ]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_substring_functions_work_in_filters_and_updates() -> Result<()> {
+        let db = TestDbFile::new("_test_substring_functions_work_in_filters_and_updates");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE docs (id INTEGER PRIMARY KEY, title TEXT, short_code TEXT);")?;
+        conn.execute("INSERT INTO docs (id, title, short_code) VALUES (1, 'hematite', NULL);")?;
+        conn.execute(
+            "UPDATE docs SET short_code = RIGHT(title, 3) WHERE LEFT(title, 4) = 'hema';",
+        )?;
+
+        let result = conn.execute(
+            "SELECT short_code FROM docs WHERE SUBSTRING(title, 5) = 'tite';",
+        )?;
+        assert_eq!(
+            result.rows,
+            vec![vec![crate::catalog::Value::Text("ite".to_string())]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_check_constraint_rejects_invalid_insert() -> Result<()> {
         let db = TestDbFile::new("_test_check_constraint_rejects_invalid_insert");
         let mut conn = Connection::new(db.path())?;

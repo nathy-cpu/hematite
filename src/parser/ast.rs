@@ -230,6 +230,9 @@ pub enum ScalarFunction {
     Round,
     Concat,
     ConcatWs,
+    Substring,
+    LeftFn,
+    RightFn,
 }
 
 #[derive(Debug, Clone)]
@@ -2639,6 +2642,9 @@ impl ScalarFunction {
             "ROUND" => Some(Self::Round),
             "CONCAT" => Some(Self::Concat),
             "CONCAT_WS" => Some(Self::ConcatWs),
+            "SUBSTRING" | "SUBSTR" => Some(Self::Substring),
+            "LEFT" => Some(Self::LeftFn),
+            "RIGHT" => Some(Self::RightFn),
             _ => None,
         }
     }
@@ -2656,6 +2662,9 @@ impl ScalarFunction {
             ScalarFunction::Round => "ROUND",
             ScalarFunction::Concat => "CONCAT",
             ScalarFunction::ConcatWs => "CONCAT_WS",
+            ScalarFunction::Substring => "SUBSTRING",
+            ScalarFunction::LeftFn => "LEFT",
+            ScalarFunction::RightFn => "RIGHT",
         }
     }
 }
