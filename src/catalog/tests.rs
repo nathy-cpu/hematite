@@ -1181,7 +1181,7 @@ mod tests {
 
         let text_val = Value::Text("hello".to_string());
         assert_eq!(text_val.as_integer(), None);
-        assert_eq!(text_val.as_text(), Some("hello"));
+        assert_eq!(text_val.as_text(), Some("hello".to_string()));
         assert_eq!(text_val.as_boolean(), None);
         assert_eq!(text_val.as_float(), None);
 
@@ -1246,8 +1246,8 @@ mod tests {
         let original = Value::Text("hello".to_string());
         let cloned = original.clone();
         assert_eq!(original, cloned);
-        assert_eq!(original.as_text(), Some("hello"));
-        assert_eq!(cloned.as_text(), Some("hello"));
+        assert_eq!(original.as_text(), Some("hello".to_string()));
+        assert_eq!(cloned.as_text(), Some("hello".to_string()));
     }
 }
 

@@ -2049,19 +2049,40 @@ impl Parser {
     fn parse_data_type(&mut self) -> Result<SqlTypeName> {
         let token = self.peek_token()?;
         let data_type = match token {
-            Token::Integer | Token::Int | Token::TinyInt | Token::SmallInt => SqlTypeName::Integer,
+            Token::TinyInt => SqlTypeName::TinyInt,
+            Token::SmallInt => SqlTypeName::SmallInt,
+            Token::Integer | Token::Int => SqlTypeName::Integer,
             Token::BigInt => SqlTypeName::BigInt,
             Token::Text => SqlTypeName::Text,
             Token::Boolean | Token::Bool => SqlTypeName::Boolean,
-            Token::Float | Token::Double | Token::Real => SqlTypeName::Float,
-            Token::Decimal | Token::Numeric => SqlTypeName::Decimal,
+            Token::Float => SqlTypeName::Float,
+            Token::Real => SqlTypeName::Real,
+            Token::Double => SqlTypeName::Double,
+            Token::Decimal => {
+                self.consume_token(&token)?;
+                self.consume_optional_double_precision()?;
+                self.consume_optional_unsigned()?;
+                let (precision, scale) = self.parse_optional_numeric_precision()?;
+                return Ok(SqlTypeName::Decimal { precision, scale });
+            }
+            Token::Numeric => {
+                self.consume_token(&token)?;
+                self.consume_optional_double_precision()?;
+                self.consume_optional_unsigned()?;
+                let (precision, scale) = self.parse_optional_numeric_precision()?;
+                return Ok(SqlTypeName::Numeric { precision, scale });
+            }
             Token::Blob => SqlTypeName::Blob,
             Token::Date => SqlTypeName::Date,
             Token::DateTime => SqlTypeName::DateTime,
             Token::Varchar | Token::Char => {
                 self.consume_token(&token)?;
-                self.parse_type_length()?;
-                return Ok(SqlTypeName::Text);
+                let length = self.parse_type_length()?;
+                return Ok(match token {
+                    Token::Varchar => SqlTypeName::VarChar(length),
+                    Token::Char => SqlTypeName::Char(length),
+                    _ => unreachable!(),
+                });
             }
             _ => {
                 return Err(HematiteError::ParseError(format!(
@@ -2074,17 +2095,15 @@ impl Parser {
         self.consume_token(&token)?;
         self.consume_optional_double_precision()?;
         self.consume_optional_unsigned()?;
-        if matches!(token, Token::Decimal | Token::Numeric) {
-            self.parse_optional_numeric_precision()?;
-        }
         Ok(data_type)
     }
 
-    fn parse_type_length(&mut self) -> Result<()> {
+    fn parse_type_length(&mut self) -> Result<u32> {
         self.consume_token(&Token::LeftParen)?;
-        match self.peek_token()? {
+        let length = match self.peek_token()? {
             Token::NumberLiteral(length) if length.fract() == 0.0 && length > 0.0 => {
                 self.consume_token(&Token::NumberLiteral(length))?;
+                length as u32
             }
             token => {
                 return Err(HematiteError::ParseError(format!(
@@ -2092,29 +2111,32 @@ impl Parser {
                     token
                 )))
             }
-        }
-        self.consume_token(&Token::RightParen)
+        };
+        self.consume_token(&Token::RightParen)?;
+        Ok(length)
     }
 
-    fn parse_optional_numeric_precision(&mut self) -> Result<()> {
+    fn parse_optional_numeric_precision(&mut self) -> Result<(Option<u32>, Option<u32>)> {
         if !matches!(self.peek_token(), Ok(Token::LeftParen)) {
-            return Ok(());
+            return Ok((None, None));
         }
 
         self.consume_token(&Token::LeftParen)?;
-        self.consume_positive_integer_literal("precision")?;
+        let precision = self.consume_positive_integer_literal("precision")?;
+        let mut scale = None;
         if matches!(self.peek_token(), Ok(Token::Comma)) {
             self.consume_token(&Token::Comma)?;
-            self.consume_positive_integer_literal("scale")?;
+            scale = Some(self.consume_positive_integer_literal("scale")?);
         }
-        self.consume_token(&Token::RightParen)
+        self.consume_token(&Token::RightParen)?;
+        Ok((Some(precision), scale))
     }
 
-    fn consume_positive_integer_literal(&mut self, label: &str) -> Result<()> {
+    fn consume_positive_integer_literal(&mut self, label: &str) -> Result<u32> {
         match self.peek_token()? {
             Token::NumberLiteral(value) if value.fract() == 0.0 && value >= 0.0 => {
                 self.consume_token(&Token::NumberLiteral(value))?;
-                Ok(())
+                Ok(value as u32)
             }
             token => Err(HematiteError::ParseError(format!(
                 "Expected non-negative integer {} value, found: {:?}",

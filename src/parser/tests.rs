@@ -1416,12 +1416,12 @@ mod parser_tests {
         assert!(create.columns[0].unique);
         assert_eq!(create.columns[1].data_type, SqlTypeName::Boolean);
         assert!(!create.columns[1].nullable);
-        assert_eq!(create.columns[2].data_type, SqlTypeName::Float);
+        assert_eq!(create.columns[2].data_type, SqlTypeName::Double);
         assert_eq!(
             create.columns[2].default_value,
             Some(LiteralValue::Float(1.5))
         );
-        assert_eq!(create.columns[3].data_type, SqlTypeName::Text);
+        assert_eq!(create.columns[3].data_type, SqlTypeName::VarChar(32));
         assert_eq!(
             create.columns[3].default_value,
             Some(LiteralValue::Text("x".to_string()))
@@ -1437,12 +1437,24 @@ mod parser_tests {
             "CREATE TABLE metrics (id BIGINT UNSIGNED PRIMARY KEY, ratio REAL, amount DECIMAL(10, 2), code CHAR(8), tiny TINYINT, small SMALLINT, exact NUMERIC(6));",
         )?;
         assert_eq!(create.columns[0].data_type, SqlTypeName::BigInt);
-        assert_eq!(create.columns[1].data_type, SqlTypeName::Float);
-        assert_eq!(create.columns[2].data_type, SqlTypeName::Decimal);
-        assert_eq!(create.columns[3].data_type, SqlTypeName::Text);
-        assert_eq!(create.columns[4].data_type, SqlTypeName::Integer);
-        assert_eq!(create.columns[5].data_type, SqlTypeName::Integer);
-        assert_eq!(create.columns[6].data_type, SqlTypeName::Decimal);
+        assert_eq!(create.columns[1].data_type, SqlTypeName::Real);
+        assert_eq!(
+            create.columns[2].data_type,
+            SqlTypeName::Decimal {
+                precision: Some(10),
+                scale: Some(2)
+            }
+        );
+        assert_eq!(create.columns[3].data_type, SqlTypeName::Char(8));
+        assert_eq!(create.columns[4].data_type, SqlTypeName::TinyInt);
+        assert_eq!(create.columns[5].data_type, SqlTypeName::SmallInt);
+        assert_eq!(
+            create.columns[6].data_type,
+            SqlTypeName::Numeric {
+                precision: Some(6),
+                scale: None
+            }
+        );
         Ok(())
     }
 
@@ -1452,7 +1464,13 @@ mod parser_tests {
             "CREATE TABLE events (id BIGINT PRIMARY KEY, amount DECIMAL(12, 4), payload BLOB, start_date DATE, created_at DATETIME);",
         )?;
         assert_eq!(create.columns[0].data_type, SqlTypeName::BigInt);
-        assert_eq!(create.columns[1].data_type, SqlTypeName::Decimal);
+        assert_eq!(
+            create.columns[1].data_type,
+            SqlTypeName::Decimal {
+                precision: Some(12),
+                scale: Some(4)
+            }
+        );
         assert_eq!(create.columns[2].data_type, SqlTypeName::Blob);
         assert_eq!(create.columns[3].data_type, SqlTypeName::Date);
         assert_eq!(create.columns[4].data_type, SqlTypeName::DateTime);

@@ -1,7 +1,7 @@
 //! SQL result set and row interface
 
 use crate::error::{HematiteError, Result};
-use crate::query::{QueryResult, Value};
+use crate::query::{DateTimeValue, DateValue, DecimalValue, QueryResult, Value};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -138,6 +138,7 @@ impl Row {
         match self.get(index) {
             Some(Value::Float(f)) => Ok(*f),
             Some(Value::Integer(i)) => Ok(*i as f64), // Allow integer to float conversion
+            Some(Value::BigInt(i)) => Ok(*i as f64),
             Some(value) => Err(HematiteError::ParseError(format!(
                 "Expected FLOAT, found {:?}",
                 value
@@ -150,6 +151,72 @@ impl Row {
 
     pub fn is_null(&self, index: usize) -> bool {
         matches!(self.get(index), Some(Value::Null))
+    }
+
+    pub fn get_bigint(&self, index: usize) -> Result<i64> {
+        match self.get(index) {
+            Some(Value::BigInt(i)) => Ok(*i),
+            Some(Value::Integer(i)) => Ok(*i as i64),
+            Some(value) => Err(HematiteError::ParseError(format!(
+                "Expected BIGINT, found {:?}",
+                value
+            ))),
+            None => Err(HematiteError::ParseError(
+                "Column index out of bounds".to_string(),
+            )),
+        }
+    }
+
+    pub fn get_decimal(&self, index: usize) -> Result<DecimalValue> {
+        match self.get(index) {
+            Some(Value::Decimal(value)) => Ok(value.clone()),
+            Some(value) => Err(HematiteError::ParseError(format!(
+                "Expected DECIMAL, found {:?}",
+                value
+            ))),
+            None => Err(HematiteError::ParseError(
+                "Column index out of bounds".to_string(),
+            )),
+        }
+    }
+
+    pub fn get_blob(&self, index: usize) -> Result<Vec<u8>> {
+        match self.get(index) {
+            Some(Value::Blob(value)) => Ok(value.clone()),
+            Some(value) => Err(HematiteError::ParseError(format!(
+                "Expected BLOB, found {:?}",
+                value
+            ))),
+            None => Err(HematiteError::ParseError(
+                "Column index out of bounds".to_string(),
+            )),
+        }
+    }
+
+    pub fn get_date(&self, index: usize) -> Result<DateValue> {
+        match self.get(index) {
+            Some(Value::Date(value)) => Ok(*value),
+            Some(value) => Err(HematiteError::ParseError(format!(
+                "Expected DATE, found {:?}",
+                value
+            ))),
+            None => Err(HematiteError::ParseError(
+                "Column index out of bounds".to_string(),
+            )),
+        }
+    }
+
+    pub fn get_datetime(&self, index: usize) -> Result<DateTimeValue> {
+        match self.get(index) {
+            Some(Value::DateTime(value)) => Ok(*value),
+            Some(value) => Err(HematiteError::ParseError(format!(
+                "Expected DATETIME, found {:?}",
+                value
+            ))),
+            None => Err(HematiteError::ParseError(
+                "Column index out of bounds".to_string(),
+            )),
+        }
     }
 }
 

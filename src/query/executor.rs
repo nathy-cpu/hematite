@@ -23,7 +23,7 @@ use crate::catalog::table::{
     CheckConstraint, ForeignKeyAction as CatalogForeignKeyAction, ForeignKeyConstraint,
 };
 use crate::catalog::StoredRow;
-use crate::catalog::{Column, DataType, Table, Value};
+use crate::catalog::{Column, DataType, DateTimeValue, DateValue, DecimalValue, Table, Value};
 use crate::error::{HematiteError, Result};
 use crate::parser::ast::*;
 use crate::query::lowering::{lower_literal_value, lower_type_name, raise_literal_value};
@@ -4092,38 +4092,83 @@ fn primary_key_values(table: &Table, row: &[Value]) -> Result<Vec<Value>> {
     })
 }
 
+fn out_of_range_error(column: &Column, type_name: &str) -> HematiteError {
+    HematiteError::ParseError(format!(
+        "Type mismatch: column '{}' expects {}, got out-of-range value",
+        column.name, type_name
+    ))
+}
+
+fn coerce_text_value(value: String, max_chars: u32, label: &str) -> Result<Value> {
+    if value.chars().count() > max_chars as usize {
+        return Err(HematiteError::ParseError(format!(
+            "{} exceeds declared character length {}",
+            label, max_chars
+        )));
+    }
+    Ok(Value::Text(value))
+}
+
+fn coerce_decimal_value(value: Value) -> Result<DecimalValue> {
+    match value {
+        Value::Decimal(value) => Ok(value),
+        Value::Integer(value) => Ok(DecimalValue::from_i32(value)),
+        Value::BigInt(value) => Ok(DecimalValue::from_i64(value)),
+        Value::Float(value) => DecimalValue::from_f64(value),
+        Value::Text(value) => DecimalValue::parse(&value),
+        value => Err(HematiteError::ParseError(format!(
+            "Expected DECIMAL-compatible value, found {:?}",
+            value
+        ))),
+    }
+}
+
 fn coerce_column_value(column: &Column, value: Value) -> Result<Value> {
     match (&column.data_type, value) {
+        (DataType::TinyInt, Value::Integer(i)) => i8::try_from(i)
+            .map(|_| Value::Integer(i))
+            .map_err(|_| out_of_range_error(column, "TINYINT")),
+        (DataType::SmallInt, Value::Integer(i)) => i16::try_from(i)
+            .map(|_| Value::Integer(i))
+            .map_err(|_| out_of_range_error(column, "SMALLINT")),
         (DataType::Integer, Value::Integer(i)) => Ok(Value::Integer(i)),
         (DataType::Integer, Value::BigInt(i)) => i32::try_from(i)
             .map(Value::Integer)
-            .map_err(|_| {
-                HematiteError::ParseError(format!(
-                    "Type mismatch: column '{}' expects INTEGER, got out-of-range BIGINT",
-                    column.name
-                ))
-            }),
+            .map_err(|_| out_of_range_error(column, "INTEGER")),
         (DataType::BigInt, Value::Integer(i)) => Ok(Value::BigInt(i as i64)),
         (DataType::BigInt, Value::BigInt(i)) => Ok(Value::BigInt(i)),
         (DataType::Text, Value::Text(s)) => Ok(Value::Text(s)),
+        (DataType::Char(length), Value::Text(s)) => coerce_text_value(s, *length, &column.name),
+        (DataType::VarChar(length), Value::Text(s)) => {
+            coerce_text_value(s, *length, &column.name)
+        }
         (DataType::Boolean, Value::Boolean(b)) => Ok(Value::Boolean(b)),
         (DataType::Float, Value::Float(f)) => Ok(Value::Float(f)),
+        (DataType::Real, Value::Float(f)) => Ok(Value::Float(f)),
+        (DataType::Double, Value::Float(f)) => Ok(Value::Float(f)),
         (DataType::Float, Value::Integer(i)) => Ok(Value::Float(i as f64)),
+        (DataType::Real, Value::Integer(i)) => Ok(Value::Float(i as f64)),
+        (DataType::Double, Value::Integer(i)) => Ok(Value::Float(i as f64)),
         (DataType::Float, Value::BigInt(i)) => Ok(Value::Float(i as f64)),
-        (DataType::Decimal, Value::Decimal(s)) => Ok(Value::Decimal(normalize_decimal_string(&s)?)),
-        (DataType::Decimal, Value::Integer(i)) => Ok(Value::Decimal(i.to_string())),
-        (DataType::Decimal, Value::BigInt(i)) => Ok(Value::Decimal(i.to_string())),
-        (DataType::Decimal, Value::Float(f)) => Ok(Value::Decimal(normalize_decimal_string(
-            &f.to_string(),
-        )?)),
-        (DataType::Decimal, Value::Text(s)) => Ok(Value::Decimal(normalize_decimal_string(&s)?)),
+        (DataType::Real, Value::BigInt(i)) => Ok(Value::Float(i as f64)),
+        (DataType::Double, Value::BigInt(i)) => Ok(Value::Float(i as f64)),
+        (DataType::Decimal { precision, scale }, value)
+        | (DataType::Numeric { precision, scale }, value) => {
+            let decimal = coerce_decimal_value(value)?;
+            if !decimal.fits_precision_scale(*precision, *scale) {
+                return Err(HematiteError::ParseError(format!(
+                    "Type mismatch: column '{}' exceeds {} precision/scale",
+                    column.name,
+                    column.data_type.base_name()
+                )));
+            }
+            Ok(Value::Decimal(decimal))
+        }
         (DataType::Blob, Value::Blob(bytes)) => Ok(Value::Blob(bytes)),
         (DataType::Blob, Value::Text(s)) => Ok(Value::Blob(s.into_bytes())),
-        (DataType::Date, Value::Date(s)) => Ok(Value::Date(validate_date_string(&s)?)),
+        (DataType::Date, Value::Date(s)) => Ok(Value::Date(s)),
         (DataType::Date, Value::Text(s)) => Ok(Value::Date(validate_date_string(&s)?)),
-        (DataType::DateTime, Value::DateTime(s)) => {
-            Ok(Value::DateTime(validate_datetime_string(&s)?))
-        }
+        (DataType::DateTime, Value::DateTime(s)) => Ok(Value::DateTime(s)),
         (DataType::DateTime, Value::Text(s)) => Ok(Value::DateTime(validate_datetime_string(&s)?)),
         (_, Value::Null) if column.nullable => Ok(Value::Null),
         (_, Value::Null) => Err(HematiteError::ParseError(format!(
@@ -4796,6 +4841,12 @@ fn evaluate_float_arithmetic(
 fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
     match (data_type, value) {
         (_, Value::Null) => Ok(Value::Null),
+        (DataType::TinyInt, Value::Integer(value)) => i8::try_from(value)
+            .map(|_| Value::Integer(value))
+            .map_err(|_| HematiteError::ParseError("Cannot CAST out-of-range INTEGER AS TINYINT".to_string())),
+        (DataType::SmallInt, Value::Integer(value)) => i16::try_from(value)
+            .map(|_| Value::Integer(value))
+            .map_err(|_| HematiteError::ParseError("Cannot CAST out-of-range INTEGER AS SMALLINT".to_string())),
         (DataType::Integer, Value::Integer(value)) => Ok(Value::Integer(value)),
         (DataType::Integer, Value::BigInt(value)) => i32::try_from(value)
             .map(Value::Integer)
@@ -4824,12 +4875,14 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
         (DataType::Text, Value::Boolean(true)) => Ok(Value::Text("TRUE".to_string())),
         (DataType::Text, Value::Boolean(false)) => Ok(Value::Text("FALSE".to_string())),
         (DataType::Text, Value::Text(value)) => Ok(Value::Text(value)),
-        (DataType::Text, Value::Decimal(value)) => Ok(Value::Text(value)),
-        (DataType::Text, Value::Date(value)) => Ok(Value::Text(value)),
-        (DataType::Text, Value::DateTime(value)) => Ok(Value::Text(value)),
+        (DataType::Text, Value::Decimal(value)) => Ok(Value::Text(value.to_string())),
+        (DataType::Text, Value::Date(value)) => Ok(Value::Text(value.to_string())),
+        (DataType::Text, Value::DateTime(value)) => Ok(Value::Text(value.to_string())),
         (DataType::Text, Value::Blob(value)) => {
             Ok(Value::Text(String::from_utf8_lossy(&value).into_owned()))
         }
+        (DataType::Char(length), Value::Text(value))
+        | (DataType::VarChar(length), Value::Text(value)) => coerce_text_value(value, length, "CAST"),
         (DataType::Boolean, Value::Boolean(value)) => Ok(Value::Boolean(value)),
         (DataType::Boolean, Value::Integer(value)) => Ok(Value::Boolean(value != 0)),
         (DataType::Boolean, Value::BigInt(value)) => Ok(Value::Boolean(value != 0)),
@@ -4851,29 +4904,39 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
             .parse::<f64>()
             .map(Value::Float)
             .map_err(|_| HematiteError::ParseError(format!("Cannot CAST '{}' AS FLOAT", value))),
-        (DataType::Decimal, Value::Decimal(value)) => {
-            Ok(Value::Decimal(normalize_decimal_string(&value)?))
+        (DataType::Real, Value::Float(value)) => Ok(Value::Float(value)),
+        (DataType::Real, Value::Integer(value)) => Ok(Value::Float(value as f64)),
+        (DataType::Real, Value::BigInt(value)) => Ok(Value::Float(value as f64)),
+        (DataType::Real, Value::Text(value)) => value
+            .parse::<f64>()
+            .map(Value::Float)
+            .map_err(|_| HematiteError::ParseError(format!("Cannot CAST '{}' AS REAL", value))),
+        (DataType::Double, Value::Float(value)) => Ok(Value::Float(value)),
+        (DataType::Double, Value::Integer(value)) => Ok(Value::Float(value as f64)),
+        (DataType::Double, Value::BigInt(value)) => Ok(Value::Float(value as f64)),
+        (DataType::Double, Value::Text(value)) => value
+            .parse::<f64>()
+            .map(Value::Float)
+            .map_err(|_| HematiteError::ParseError(format!("Cannot CAST '{}' AS DOUBLE", value))),
+        (DataType::Decimal { precision, scale }, value)
+        | (DataType::Numeric { precision, scale }, value) => {
+            let decimal = coerce_decimal_value(value)?;
+            if !decimal.fits_precision_scale(precision, scale) {
+                return Err(HematiteError::ParseError(format!(
+                    "Cannot CAST decimal outside declared precision/scale AS {}",
+                    data_type.base_name()
+                )));
+            }
+            Ok(Value::Decimal(decimal))
         }
-        (DataType::Decimal, Value::Integer(value)) => Ok(Value::Decimal(value.to_string())),
-        (DataType::Decimal, Value::BigInt(value)) => Ok(Value::Decimal(value.to_string())),
-        (DataType::Decimal, Value::Float(value)) => Ok(Value::Decimal(normalize_decimal_string(
-            &value.to_string(),
-        )?)),
-        (DataType::Decimal, Value::Text(value)) => Ok(Value::Decimal(normalize_decimal_string(
-            &value,
-        )?)),
         (DataType::Blob, Value::Blob(value)) => Ok(Value::Blob(value)),
         (DataType::Blob, Value::Text(value)) => Ok(Value::Blob(value.into_bytes())),
         (DataType::Blob, Value::Integer(value)) => Ok(Value::Blob(value.to_le_bytes().to_vec())),
         (DataType::Blob, Value::BigInt(value)) => Ok(Value::Blob(value.to_le_bytes().to_vec())),
-        (DataType::Date, Value::Date(value)) => Ok(Value::Date(validate_date_string(&value)?)),
+        (DataType::Date, Value::Date(value)) => Ok(Value::Date(value)),
         (DataType::Date, Value::Text(value)) => Ok(Value::Date(validate_date_string(&value)?)),
-        (DataType::DateTime, Value::DateTime(value)) => {
-            Ok(Value::DateTime(validate_datetime_string(&value)?))
-        }
-        (DataType::DateTime, Value::Text(value)) => {
-            Ok(Value::DateTime(validate_datetime_string(&value)?))
-        }
+        (DataType::DateTime, Value::DateTime(value)) => Ok(Value::DateTime(value)),
+        (DataType::DateTime, Value::Text(value)) => Ok(Value::DateTime(validate_datetime_string(&value)?)),
         (data_type, value) => Err(HematiteError::ParseError(format!(
             "Cannot CAST {:?} AS {}",
             value,
@@ -5203,7 +5266,7 @@ fn expect_numeric_argument(function_name: &str, value: Value) -> Result<f64> {
         Value::Integer(value) => Ok(value as f64),
         Value::BigInt(value) => Ok(value as f64),
         Value::Float(value) => Ok(value),
-        Value::Decimal(value) => value.parse::<f64>().map_err(|_| {
+        Value::Decimal(value) => value.to_string().parse::<f64>().map_err(|_| {
             HematiteError::ParseError(format!(
                 "{} requires a numeric value, found {:?}",
                 function_name,
@@ -5219,9 +5282,10 @@ fn expect_numeric_argument(function_name: &str, value: Value) -> Result<f64> {
 
 fn coerce_value_to_string(function_name: &str, value: Value) -> Result<String> {
     match value {
-        Value::Text(text) | Value::Decimal(text) | Value::Date(text) | Value::DateTime(text) => {
-            Ok(text)
-        }
+        Value::Text(text) => Ok(text),
+        Value::Decimal(text) => Ok(text.to_string()),
+        Value::Date(text) => Ok(text.to_string()),
+        Value::DateTime(text) => Ok(text.to_string()),
         Value::Integer(value) => Ok(value.to_string()),
         Value::BigInt(value) => Ok(value.to_string()),
         Value::Float(value) => Ok(value.to_string()),
@@ -5237,9 +5301,10 @@ fn coerce_value_to_string(function_name: &str, value: Value) -> Result<String> {
 
 fn expect_text_argument(function_name: &str, value: Value) -> Result<String> {
     match value {
-        Value::Text(text) | Value::Decimal(text) | Value::Date(text) | Value::DateTime(text) => {
-            Ok(text)
-        }
+        Value::Text(text) => Ok(text),
+        Value::Decimal(text) => Ok(text.to_string()),
+        Value::Date(text) => Ok(text.to_string()),
+        Value::DateTime(text) => Ok(text.to_string()),
         value => Err(HematiteError::ParseError(format!(
             "{} requires a text value, found {:?}",
             function_name, value
@@ -5525,210 +5590,29 @@ fn sql_numeric_pair(left: &Value, right: &Value) -> Option<(f64, f64)> {
 }
 
 fn sql_decimal_cmp(left: &Value, right: &Value) -> Option<Ordering> {
-    let left = decimal_compare_key(left)?;
-    let right = decimal_compare_key(right)?;
-    Some(compare_decimal_keys(&left, &right))
-}
-
-fn decimal_compare_key(value: &Value) -> Option<DecimalCompareKey> {
-    match value {
-        Value::Decimal(value) => Some(parse_decimal_compare_key(value).ok()?),
-        Value::Integer(value) => Some(parse_decimal_compare_key(&value.to_string()).ok()?),
-        Value::BigInt(value) => Some(parse_decimal_compare_key(&value.to_string()).ok()?),
-        Value::Float(value) => Some(parse_decimal_compare_key(&value.to_string()).ok()?),
-        _ => None,
-    }
-}
-
-#[derive(Debug)]
-struct DecimalCompareKey {
-    negative: bool,
-    integer: String,
-    fraction: String,
-}
-
-fn normalize_decimal_string(input: &str) -> Result<String> {
-    let key = parse_decimal_compare_key(input)?;
-    let mut out = String::new();
-    if key.negative && !(key.integer == "0" && key.fraction.is_empty()) {
-        out.push('-');
-    }
-    out.push_str(&key.integer);
-    if !key.fraction.is_empty() {
-        out.push('.');
-        out.push_str(&key.fraction);
-    }
-    Ok(out)
-}
-
-fn parse_decimal_compare_key(input: &str) -> Result<DecimalCompareKey> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return Err(HematiteError::ParseError(
-            "Decimal value cannot be empty".to_string(),
-        ));
-    }
-
-    let (negative, digits) = match trimmed.as_bytes()[0] {
-        b'+' => (false, &trimmed[1..]),
-        b'-' => (true, &trimmed[1..]),
-        _ => (false, trimmed),
+    let left = match left {
+        Value::Decimal(value) => value.clone(),
+        Value::Integer(value) => DecimalValue::from_i32(*value),
+        Value::BigInt(value) => DecimalValue::from_i64(*value),
+        Value::Float(value) => DecimalValue::from_f64(*value).ok()?,
+        _ => return None,
     };
-
-    if digits.is_empty() {
-        return Err(HematiteError::ParseError(format!(
-            "Invalid decimal value '{}'",
-            input
-        )));
-    }
-
-    let mut parts = digits.split('.');
-    let integer_part = parts.next().unwrap_or_default();
-    let fraction_part = parts.next();
-    if parts.next().is_some()
-        || !integer_part.chars().all(|ch| ch.is_ascii_digit())
-        || fraction_part
-            .is_some_and(|part| !part.chars().all(|ch| ch.is_ascii_digit()))
-    {
-        return Err(HematiteError::ParseError(format!(
-            "Invalid decimal value '{}'",
-            input
-        )));
-    }
-
-    let integer = integer_part.trim_start_matches('0');
-    let mut integer = if integer.is_empty() { "0" } else { integer }.to_string();
-    let mut fraction = fraction_part.unwrap_or_default().to_string();
-    while fraction.ends_with('0') {
-        fraction.pop();
-    }
-    if integer == "0" && fraction.is_empty() {
-        integer = "0".to_string();
-        return Ok(DecimalCompareKey {
-            negative: false,
-            integer,
-            fraction,
-        });
-    }
-    Ok(DecimalCompareKey {
-        negative,
-        integer,
-        fraction,
-    })
-}
-
-fn compare_decimal_keys(left: &DecimalCompareKey, right: &DecimalCompareKey) -> Ordering {
-    if left.negative != right.negative {
-        return if left.negative {
-            Ordering::Less
-        } else {
-            Ordering::Greater
-        };
-    }
-
-    let positive_ordering = left
-        .integer
-        .len()
-        .cmp(&right.integer.len())
-        .then_with(|| left.integer.cmp(&right.integer))
-        .then_with(|| {
-            let max_len = left.fraction.len().max(right.fraction.len());
-            let mut left_fraction = left.fraction.clone();
-            let mut right_fraction = right.fraction.clone();
-            left_fraction.extend(std::iter::repeat_n('0', max_len - left_fraction.len()));
-            right_fraction.extend(std::iter::repeat_n('0', max_len - right_fraction.len()));
-            left_fraction.cmp(&right_fraction)
-        });
-
-    if left.negative {
-        positive_ordering.reverse()
-    } else {
-        positive_ordering
-    }
-}
-
-fn validate_date_string(input: &str) -> Result<String> {
-    let value = input.trim();
-    let parts = value.split('-').collect::<Vec<_>>();
-    if parts.len() != 3
-        || parts[0].len() != 4
-        || parts[1].len() != 2
-        || parts[2].len() != 2
-        || !parts.iter().all(|part| part.chars().all(|ch| ch.is_ascii_digit()))
-    {
-        return Err(HematiteError::ParseError(format!(
-            "Invalid DATE value '{}'",
-            input
-        )));
-    }
-    let year = parts[0].parse::<i32>().unwrap_or(0);
-    let month = parts[1].parse::<u32>().unwrap_or(0);
-    let day = parts[2].parse::<u32>().unwrap_or(0);
-    validate_date_components(year, month, day, input)?;
-    Ok(format!("{year:04}-{month:02}-{day:02}"))
-}
-
-fn validate_datetime_string(input: &str) -> Result<String> {
-    let value = input.trim();
-    let mut parts = value.split(' ');
-    let date = parts.next().unwrap_or_default();
-    let time = parts.next().unwrap_or_default();
-    if parts.next().is_some() {
-        return Err(HematiteError::ParseError(format!(
-            "Invalid DATETIME value '{}'",
-            input
-        )));
-    }
-    let date = validate_date_string(date)?;
-    let time_parts = time.split(':').collect::<Vec<_>>();
-    if time_parts.len() != 3
-        || time_parts.iter().any(|part| part.len() != 2)
-        || !time_parts
-            .iter()
-            .all(|part| part.chars().all(|ch| ch.is_ascii_digit()))
-    {
-        return Err(HematiteError::ParseError(format!(
-            "Invalid DATETIME value '{}'",
-            input
-        )));
-    }
-    let hour = time_parts[0].parse::<u32>().unwrap_or(99);
-    let minute = time_parts[1].parse::<u32>().unwrap_or(99);
-    let second = time_parts[2].parse::<u32>().unwrap_or(99);
-    if hour > 23 || minute > 59 || second > 59 {
-        return Err(HematiteError::ParseError(format!(
-            "Invalid DATETIME value '{}'",
-            input
-        )));
-    }
-    Ok(format!("{date} {hour:02}:{minute:02}:{second:02}"))
-}
-
-fn validate_date_components(year: i32, month: u32, day: u32, input: &str) -> Result<()> {
-    if !(1..=12).contains(&month) {
-        return Err(HematiteError::ParseError(format!(
-            "Invalid DATE value '{}'",
-            input
-        )));
-    }
-    let max_day = match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if is_leap_year(year) => 29,
-        2 => 28,
-        _ => unreachable!(),
+    let right = match right {
+        Value::Decimal(value) => value.clone(),
+        Value::Integer(value) => DecimalValue::from_i32(*value),
+        Value::BigInt(value) => DecimalValue::from_i64(*value),
+        Value::Float(value) => DecimalValue::from_f64(*value).ok()?,
+        _ => return None,
     };
-    if day == 0 || day > max_day {
-        return Err(HematiteError::ParseError(format!(
-            "Invalid DATE value '{}'",
-            input
-        )));
-    }
-    Ok(())
+    Some(left.cmp(&right))
 }
 
-fn is_leap_year(year: i32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+fn validate_date_string(input: &str) -> Result<DateValue> {
+    DateValue::parse(input)
+}
+
+fn validate_datetime_string(input: &str) -> Result<DateTimeValue> {
+    DateTimeValue::parse(input)
 }
 
 fn compare_condition_values(

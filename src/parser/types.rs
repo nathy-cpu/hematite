@@ -4,30 +4,62 @@ use std::cmp::Ordering;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SqlTypeName {
+    TinyInt,
+    SmallInt,
     Integer,
     BigInt,
     Text,
+    Char(u32),
+    VarChar(u32),
     Boolean,
     Float,
-    Decimal,
+    Real,
+    Double,
+    Decimal {
+        precision: Option<u32>,
+        scale: Option<u32>,
+    },
+    Numeric {
+        precision: Option<u32>,
+        scale: Option<u32>,
+    },
     Blob,
     Date,
     DateTime,
 }
 
 impl SqlTypeName {
-    pub fn to_sql(self) -> &'static str {
+    pub fn to_sql(self) -> String {
         match self {
-            SqlTypeName::Integer => "INTEGER",
-            SqlTypeName::BigInt => "BIGINT",
-            SqlTypeName::Text => "TEXT",
-            SqlTypeName::Boolean => "BOOLEAN",
-            SqlTypeName::Float => "FLOAT",
-            SqlTypeName::Decimal => "DECIMAL",
-            SqlTypeName::Blob => "BLOB",
-            SqlTypeName::Date => "DATE",
-            SqlTypeName::DateTime => "DATETIME",
+            SqlTypeName::TinyInt => "TINYINT".to_string(),
+            SqlTypeName::SmallInt => "SMALLINT".to_string(),
+            SqlTypeName::Integer => "INTEGER".to_string(),
+            SqlTypeName::BigInt => "BIGINT".to_string(),
+            SqlTypeName::Text => "TEXT".to_string(),
+            SqlTypeName::Char(length) => format!("CHAR({length})"),
+            SqlTypeName::VarChar(length) => format!("VARCHAR({length})"),
+            SqlTypeName::Boolean => "BOOLEAN".to_string(),
+            SqlTypeName::Float => "FLOAT".to_string(),
+            SqlTypeName::Real => "REAL".to_string(),
+            SqlTypeName::Double => "DOUBLE".to_string(),
+            SqlTypeName::Decimal { precision, scale } => {
+                format_numeric_type("DECIMAL", precision, scale)
+            }
+            SqlTypeName::Numeric { precision, scale } => {
+                format_numeric_type("NUMERIC", precision, scale)
+            }
+            SqlTypeName::Blob => "BLOB".to_string(),
+            SqlTypeName::Date => "DATE".to_string(),
+            SqlTypeName::DateTime => "DATETIME".to_string(),
         }
+    }
+}
+
+fn format_numeric_type(name: &str, precision: Option<u32>, scale: Option<u32>) -> String {
+    match (precision, scale) {
+        (Some(precision), Some(scale)) => format!("{name}({precision}, {scale})"),
+        (Some(precision), None) => format!("{name}({precision})"),
+        (None, _) => name.to_string(),
     }
 }
 
@@ -53,10 +85,26 @@ impl LiteralValue {
 
     pub fn is_compatible_with(&self, data_type: SqlTypeName) -> bool {
         match (self, data_type) {
+            (LiteralValue::Integer(_), SqlTypeName::TinyInt) => true,
+            (LiteralValue::Integer(_), SqlTypeName::SmallInt) => true,
             (LiteralValue::Integer(_), SqlTypeName::Integer) => true,
-            (LiteralValue::Text(_), SqlTypeName::Text) => true,
-            (LiteralValue::Boolean(_), SqlTypeName::Boolean) => true,
+            (LiteralValue::Integer(_), SqlTypeName::BigInt) => true,
+            (LiteralValue::Integer(_), SqlTypeName::Decimal { .. }) => true,
+            (LiteralValue::Integer(_), SqlTypeName::Numeric { .. }) => true,
             (LiteralValue::Float(_), SqlTypeName::Float) => true,
+            (LiteralValue::Float(_), SqlTypeName::Real) => true,
+            (LiteralValue::Float(_), SqlTypeName::Double) => true,
+            (LiteralValue::Float(_), SqlTypeName::Decimal { .. }) => true,
+            (LiteralValue::Float(_), SqlTypeName::Numeric { .. }) => true,
+            (LiteralValue::Text(_), SqlTypeName::Text) => true,
+            (LiteralValue::Text(_), SqlTypeName::Char(_)) => true,
+            (LiteralValue::Text(_), SqlTypeName::VarChar(_)) => true,
+            (LiteralValue::Text(_), SqlTypeName::Blob) => true,
+            (LiteralValue::Text(_), SqlTypeName::Date) => true,
+            (LiteralValue::Text(_), SqlTypeName::DateTime) => true,
+            (LiteralValue::Text(_), SqlTypeName::Decimal { .. }) => true,
+            (LiteralValue::Text(_), SqlTypeName::Numeric { .. }) => true,
+            (LiteralValue::Boolean(_), SqlTypeName::Boolean) => true,
             (LiteralValue::Null, _) => true,
             _ => false,
         }

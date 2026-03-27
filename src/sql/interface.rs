@@ -1,7 +1,7 @@
 //! High-level SQL interface
 
 use crate::error::{HematiteError, Result};
-use crate::query::{JournalMode, Value};
+use crate::query::{DateTimeValue, DateValue, DecimalValue, JournalMode, Value};
 use crate::sql::connection::{Connection, PreparedStatement, Transaction};
 use crate::sql::result::{ExecutedStatement, ResultSet, Row, StatementResult};
 use crate::sql::script::ScriptIter;
@@ -139,6 +139,9 @@ impl FromValue for String {
     fn from_value(value: &Value) -> Result<Self> {
         match value {
             Value::Text(s) => Ok(s.clone()),
+            Value::Decimal(s) => Ok(s.to_string()),
+            Value::Date(s) => Ok(s.to_string()),
+            Value::DateTime(s) => Ok(s.to_string()),
             _ => Err(HematiteError::ParseError(format!(
                 "Expected TEXT, found {:?}",
                 value
@@ -164,6 +167,7 @@ impl FromValue for f64 {
         match value {
             Value::Float(f) => Ok(*f),
             Value::Integer(i) => Ok(*i as f64), // Allow integer to float conversion
+            Value::BigInt(i) => Ok(*i as f64),
             _ => Err(HematiteError::ParseError(format!(
                 "Expected FLOAT, found {:?}",
                 value
@@ -175,6 +179,67 @@ impl FromValue for f64 {
 impl FromValue for Value {
     fn from_value(value: &Value) -> Result<Self> {
         Ok(value.clone())
+    }
+}
+
+impl FromValue for i64 {
+    fn from_value(value: &Value) -> Result<Self> {
+        match value {
+            Value::BigInt(i) => Ok(*i),
+            Value::Integer(i) => Ok(*i as i64),
+            _ => Err(HematiteError::ParseError(format!(
+                "Expected BIGINT, found {:?}",
+                value
+            ))),
+        }
+    }
+}
+
+impl FromValue for DecimalValue {
+    fn from_value(value: &Value) -> Result<Self> {
+        match value {
+            Value::Decimal(value) => Ok(value.clone()),
+            _ => Err(HematiteError::ParseError(format!(
+                "Expected DECIMAL, found {:?}",
+                value
+            ))),
+        }
+    }
+}
+
+impl FromValue for Vec<u8> {
+    fn from_value(value: &Value) -> Result<Self> {
+        match value {
+            Value::Blob(value) => Ok(value.clone()),
+            _ => Err(HematiteError::ParseError(format!(
+                "Expected BLOB, found {:?}",
+                value
+            ))),
+        }
+    }
+}
+
+impl FromValue for DateValue {
+    fn from_value(value: &Value) -> Result<Self> {
+        match value {
+            Value::Date(value) => Ok(*value),
+            _ => Err(HematiteError::ParseError(format!(
+                "Expected DATE, found {:?}",
+                value
+            ))),
+        }
+    }
+}
+
+impl FromValue for DateTimeValue {
+    fn from_value(value: &Value) -> Result<Self> {
+        match value {
+            Value::DateTime(value) => Ok(*value),
+            _ => Err(HematiteError::ParseError(format!(
+                "Expected DATETIME, found {:?}",
+                value
+            ))),
+        }
     }
 }
 

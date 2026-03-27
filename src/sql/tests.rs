@@ -263,11 +263,11 @@ mod connection_tests {
             vec![vec![
                 crate::catalog::Value::BigInt(1),
                 crate::catalog::Value::Float(1.5),
-                crate::catalog::Value::Decimal("2.5".to_string()),
+                crate::catalog::Value::Decimal(crate::catalog::DecimalValue::parse("2.5")?),
                 crate::catalog::Value::Text("AB".to_string()),
                 crate::catalog::Value::Integer(3),
                 crate::catalog::Value::Integer(4),
-                crate::catalog::Value::Decimal("5.5".to_string()),
+                crate::catalog::Value::Decimal(crate::catalog::DecimalValue::parse("5.5")?),
             ]]
         );
 
@@ -2902,10 +2902,12 @@ mod connection_tests {
             result.rows,
             vec![vec![
                 crate::catalog::Value::BigInt(5_000_000_000),
-                crate::catalog::Value::Decimal("12.34".to_string()),
+                crate::catalog::Value::Decimal(crate::catalog::DecimalValue::parse("12.34")?),
                 crate::catalog::Value::Blob(b"abc".to_vec()),
-                crate::catalog::Value::Date("2026-03-27".to_string()),
-                crate::catalog::Value::DateTime("2026-03-27 10:11:12".to_string()),
+                crate::catalog::Value::Date(crate::catalog::DateValue::parse("2026-03-27")?),
+                crate::catalog::Value::DateTime(crate::catalog::DateTimeValue::parse(
+                    "2026-03-27 10:11:12",
+                )?),
             ]]
         );
 
@@ -3393,6 +3395,62 @@ mod connection_tests {
             conn.close()?;
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_distinct_alias_types_enforce_range_and_length() -> Result<()> {
+        let db = TestDbFile::new("_test_distinct_alias_types_enforce_range_and_length");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute(
+            "CREATE TABLE typed (
+                id INTEGER PRIMARY KEY,
+                tiny TINYINT,
+                small SMALLINT,
+                code CHAR(4),
+                nick VARCHAR(6),
+                amount DECIMAL(5, 2)
+            );",
+        )?;
+
+        conn.execute(
+            "INSERT INTO typed (id, tiny, small, code, nick, amount)
+             VALUES (1, 120, 32000, 'ABCD', 'alice', CAST('12.34' AS DECIMAL(5, 2)));",
+        )?;
+
+        assert!(conn
+            .execute(
+                "INSERT INTO typed (id, tiny, small, code, nick, amount)
+                 VALUES (2, 200, 0, 'ABCD', 'bob', CAST('1.00' AS DECIMAL(5, 2)));",
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO typed (id, tiny, small, code, nick, amount)
+                 VALUES (3, 1, 40000, 'ABCD', 'bob', CAST('1.00' AS DECIMAL(5, 2)));",
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO typed (id, tiny, small, code, nick, amount)
+                 VALUES (4, 1, 2, 'TOOLONG', 'bob', CAST('1.00' AS DECIMAL(5, 2)));",
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO typed (id, tiny, small, code, nick, amount)
+                 VALUES (5, 1, 2, 'ABCD', 'toolong', CAST('1.00' AS DECIMAL(5, 2)));",
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO typed (id, tiny, small, code, nick, amount)
+                 VALUES (6, 1, 2, 'ABCD', 'bob', CAST('1234.56' AS DECIMAL(5, 2)));",
+            )
+            .is_err());
+
+        conn.close()?;
         Ok(())
     }
 
@@ -3915,6 +3973,7 @@ mod interface_tests {
 }
 
 mod result_tests {
+    use crate::catalog::{DateTimeValue, DateValue, DecimalValue};
     use crate::error::Result;
     use crate::query::{QueryResult, Value};
     use crate::sql::result::*;
@@ -3963,6 +4022,27 @@ mod result_tests {
         // Test type conversion errors
         assert!(row.get_string(0).is_err());
         assert!(row.get_bool(0).is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_row_rich_type_accessors() -> Result<()> {
+        let values = vec![
+            Value::BigInt(5_000_000_000),
+            Value::Decimal(DecimalValue::parse("12.34")?),
+            Value::Blob(b"abc".to_vec()),
+            Value::Date(DateValue::parse("2026-03-27")?),
+            Value::DateTime(DateTimeValue::parse("2026-03-27 10:11:12")?),
+        ];
+
+        let row = Row::new(values);
+
+        assert_eq!(row.get_bigint(0)?, 5_000_000_000);
+        assert_eq!(row.get_decimal(1)?.to_string(), "12.34");
+        assert_eq!(row.get_blob(2)?, b"abc".to_vec());
+        assert_eq!(row.get_date(3)?.to_string(), "2026-03-27");
+        assert_eq!(row.get_datetime(4)?.to_string(), "2026-03-27 10:11:12");
 
         Ok(())
     }

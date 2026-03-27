@@ -1381,12 +1381,23 @@ fn require_table<'a>(catalog: &'a Schema, table_name: &str) -> Result<&'a Table>
 
 fn sql_type_name_for_catalog_type(data_type: crate::catalog::DataType) -> SqlTypeName {
     match data_type {
+        crate::catalog::DataType::TinyInt => SqlTypeName::TinyInt,
+        crate::catalog::DataType::SmallInt => SqlTypeName::SmallInt,
         crate::catalog::DataType::Integer => SqlTypeName::Integer,
         crate::catalog::DataType::BigInt => SqlTypeName::BigInt,
         crate::catalog::DataType::Text => SqlTypeName::Text,
+        crate::catalog::DataType::Char(length) => SqlTypeName::Char(length),
+        crate::catalog::DataType::VarChar(length) => SqlTypeName::VarChar(length),
         crate::catalog::DataType::Boolean => SqlTypeName::Boolean,
         crate::catalog::DataType::Float => SqlTypeName::Float,
-        crate::catalog::DataType::Decimal => SqlTypeName::Decimal,
+        crate::catalog::DataType::Real => SqlTypeName::Real,
+        crate::catalog::DataType::Double => SqlTypeName::Double,
+        crate::catalog::DataType::Decimal { precision, scale } => {
+            SqlTypeName::Decimal { precision, scale }
+        }
+        crate::catalog::DataType::Numeric { precision, scale } => {
+            SqlTypeName::Numeric { precision, scale }
+        }
         crate::catalog::DataType::Blob => SqlTypeName::Blob,
         crate::catalog::DataType::Date => SqlTypeName::Date,
         crate::catalog::DataType::DateTime => SqlTypeName::DateTime,
