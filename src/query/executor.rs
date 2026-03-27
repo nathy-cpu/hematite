@@ -4080,10 +4080,8 @@ fn evaluate_scalar_function(function: ScalarFunction, args: Vec<Value>) -> Resul
         ScalarFunction::Upper => evaluate_upper(args),
         ScalarFunction::Length => evaluate_length(args),
         ScalarFunction::Trim => evaluate_trim(args),
-        function => Err(HematiteError::ParseError(format!(
-            "Scalar function {} is not implemented yet",
-            function.to_sql()
-        ))),
+        ScalarFunction::Abs => evaluate_abs(args),
+        ScalarFunction::Round => evaluate_round(args),
     }
 }
 
@@ -4189,6 +4187,97 @@ where
             "{} requires a text value, found {:?}",
             name, value
         ))),
+    }
+}
+
+fn evaluate_abs(args: Vec<Value>) -> Result<Value> {
+    expect_unary_numeric_function("ABS", args, |value| match value {
+        Value::Integer(value) => {
+            if value == i32::MIN {
+                return Err(HematiteError::ParseError(
+                    "ABS overflowed INTEGER".to_string(),
+                ));
+            }
+            Ok(Value::Integer(value.abs()))
+        }
+        Value::Float(value) => Ok(Value::Float(value.abs())),
+        _ => unreachable!("validated numeric input"),
+    })
+}
+
+fn evaluate_round(args: Vec<Value>) -> Result<Value> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(HematiteError::ParseError(
+            "ROUND requires one or two arguments".to_string(),
+        ));
+    }
+
+    let mut args = args.into_iter();
+    let value = args.next().expect("validated round arity");
+    let precision = match args.next() {
+        Some(Value::Null) => return Ok(Value::Null),
+        Some(Value::Integer(value)) => value,
+        Some(value) => {
+            return Err(HematiteError::ParseError(format!(
+                "ROUND precision requires an integer value, found {:?}",
+                value
+            )))
+        }
+        None => 0,
+    };
+
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Integer(value) => round_integer(value, precision),
+        Value::Float(value) => Ok(Value::Float(round_float(value, precision))),
+        value => Err(HematiteError::ParseError(format!(
+            "ROUND requires a numeric value, found {:?}",
+            value
+        ))),
+    }
+}
+
+fn expect_unary_numeric_function<F>(name: &str, args: Vec<Value>, f: F) -> Result<Value>
+where
+    F: FnOnce(Value) -> Result<Value>,
+{
+    if args.len() != 1 {
+        return Err(HematiteError::ParseError(format!(
+            "{} requires exactly one argument",
+            name
+        )));
+    }
+
+    let value = args.into_iter().next().expect("validated unary arity");
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Integer(_) | Value::Float(_) => f(value),
+        value => Err(HematiteError::ParseError(format!(
+            "{} requires a numeric value, found {:?}",
+            name, value
+        ))),
+    }
+}
+
+fn round_integer(value: i32, precision: i32) -> Result<Value> {
+    if precision >= 0 {
+        return Ok(Value::Integer(value));
+    }
+
+    let rounded = round_float(value as f64, precision);
+    let rounded = i32::try_from(rounded as i64).map_err(|_| {
+        HematiteError::ParseError("ROUND overflowed INTEGER".to_string())
+    })?;
+    Ok(Value::Integer(rounded))
+}
+
+fn round_float(value: f64, precision: i32) -> f64 {
+    if precision >= 0 {
+        let factor = 10f64.powi(precision);
+        (value * factor).round() / factor
+    } else {
+        let factor = 10f64.powi(-precision);
+        (value / factor).round() * factor
     }
 }
 

@@ -391,6 +391,66 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_scalar_numeric_functions() -> Result<()> {
+        let db = TestDbFile::new("_test_scalar_numeric_functions");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE metrics (id INTEGER PRIMARY KEY, amount FLOAT, delta INTEGER);")?;
+        conn.execute(
+            "INSERT INTO metrics (id, amount, delta) VALUES (1, -12.345, -7), (2, NULL, NULL);",
+        )?;
+
+        let result = conn.execute(
+            "SELECT ABS(delta), ROUND(amount), ROUND(amount, 2), ROUND(delta, -1) FROM metrics ORDER BY id ASC;",
+        )?;
+
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![
+                    crate::catalog::Value::Integer(7),
+                    crate::catalog::Value::Float(-12.0),
+                    crate::catalog::Value::Float(-12.35),
+                    crate::catalog::Value::Integer(-10),
+                ],
+                vec![
+                    crate::catalog::Value::Null,
+                    crate::catalog::Value::Null,
+                    crate::catalog::Value::Null,
+                    crate::catalog::Value::Null,
+                ],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_scalar_numeric_functions_in_updates_and_filters() -> Result<()> {
+        let db = TestDbFile::new("_test_scalar_numeric_functions_in_updates_and_filters");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE metrics (id INTEGER PRIMARY KEY, amount FLOAT, delta INTEGER);")?;
+        conn.execute("INSERT INTO metrics (id, amount, delta) VALUES (1, 1.26, -4);")?;
+        conn.execute(
+            "UPDATE metrics SET amount = ROUND(amount, 1), delta = ABS(delta) WHERE ROUND(amount, 1) = 1.3;",
+        )?;
+
+        let result = conn.execute("SELECT amount, delta FROM metrics WHERE ABS(delta) = 4;")?;
+        assert_eq!(
+            result.rows,
+            vec![vec![
+                crate::catalog::Value::Float(1.3),
+                crate::catalog::Value::Integer(4),
+            ]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_check_constraint_rejects_invalid_insert() -> Result<()> {
         let db = TestDbFile::new("_test_check_constraint_rejects_invalid_insert");
         let mut conn = Connection::new(db.path())?;
