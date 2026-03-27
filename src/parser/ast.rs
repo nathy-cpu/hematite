@@ -235,6 +235,9 @@ pub enum ScalarFunction {
     RightFn,
     Greatest,
     Least,
+    Replace,
+    Repeat,
+    Reverse,
 }
 
 #[derive(Debug, Clone)]
@@ -2649,6 +2652,9 @@ impl ScalarFunction {
             "RIGHT" => Some(Self::RightFn),
             "GREATEST" => Some(Self::Greatest),
             "LEAST" => Some(Self::Least),
+            "REPLACE" => Some(Self::Replace),
+            "REPEAT" => Some(Self::Repeat),
+            "REVERSE" => Some(Self::Reverse),
             _ => None,
         }
     }
@@ -2671,6 +2677,9 @@ impl ScalarFunction {
             ScalarFunction::RightFn => "RIGHT",
             ScalarFunction::Greatest => "GREATEST",
             ScalarFunction::Least => "LEAST",
+            ScalarFunction::Replace => "REPLACE",
+            ScalarFunction::Repeat => "REPEAT",
+            ScalarFunction::Reverse => "REVERSE",
         }
     }
 }

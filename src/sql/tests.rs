@@ -700,6 +700,55 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_replace_repeat_and_reverse_functions() -> Result<()> {
+        let db = TestDbFile::new("_test_replace_repeat_and_reverse_functions");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE docs (id INTEGER PRIMARY KEY, title TEXT, code TEXT);")?;
+        conn.execute("INSERT INTO docs (id, title, code) VALUES (1, 'hematite-db', 'ab');")?;
+
+        let result = conn.execute(
+            "SELECT REPLACE(title, '-', ' '), REPEAT(code, 3), REVERSE(code) FROM docs;",
+        )?;
+        assert_eq!(
+            result.rows,
+            vec![vec![
+                crate::catalog::Value::Text("hematite db".to_string()),
+                crate::catalog::Value::Text("ababab".to_string()),
+                crate::catalog::Value::Text("ba".to_string()),
+            ]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_replace_repeat_and_reverse_in_update_and_null_cases() -> Result<()> {
+        let db = TestDbFile::new("_test_replace_repeat_and_reverse_in_update_and_null_cases");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE docs (id INTEGER PRIMARY KEY, title TEXT, code TEXT);")?;
+        conn.execute("INSERT INTO docs (id, title, code) VALUES (1, 'hematite-db', NULL);")?;
+        conn.execute(
+            "UPDATE docs SET title = REPLACE(title, '-', '_'), code = REPEAT(REVERSE('ab'), 2) WHERE id = 1;",
+        )?;
+
+        let result = conn.execute("SELECT title, code, REVERSE(NULL) FROM docs;")?;
+        assert_eq!(
+            result.rows,
+            vec![vec![
+                crate::catalog::Value::Text("hematite_db".to_string()),
+                crate::catalog::Value::Text("baba".to_string()),
+                crate::catalog::Value::Null,
+            ]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_check_constraint_rejects_invalid_insert() -> Result<()> {
         let db = TestDbFile::new("_test_check_constraint_rejects_invalid_insert");
         let mut conn = Connection::new(db.path())?;

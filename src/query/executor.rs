@@ -4193,6 +4193,9 @@ fn evaluate_scalar_function(function: ScalarFunction, args: Vec<Value>) -> Resul
         ScalarFunction::RightFn => evaluate_right(args),
         ScalarFunction::Greatest => evaluate_extremum("GREATEST", args, true),
         ScalarFunction::Least => evaluate_extremum("LEAST", args, false),
+        ScalarFunction::Replace => evaluate_replace(args),
+        ScalarFunction::Repeat => evaluate_repeat(args),
+        ScalarFunction::Reverse => evaluate_reverse(args),
     }
 }
 
@@ -4581,6 +4584,68 @@ fn evaluate_extremum(function_name: &str, args: Vec<Value>, pick_greater: bool) 
     }
 
     Ok(best)
+}
+
+fn evaluate_replace(args: Vec<Value>) -> Result<Value> {
+    if args.len() != 3 {
+        return Err(HematiteError::ParseError(
+            "REPLACE requires exactly three arguments".to_string(),
+        ));
+    }
+
+    let mut args = args.into_iter();
+    let text = args.next().expect("validated replace arity");
+    let from = args.next().expect("validated replace arity");
+    let to = args.next().expect("validated replace arity");
+    if text.is_null() || from.is_null() || to.is_null() {
+        return Ok(Value::Null);
+    }
+
+    let text = expect_text_argument("REPLACE", text)?;
+    let from = expect_text_argument("REPLACE", from)?;
+    let to = expect_text_argument("REPLACE", to)?;
+    Ok(Value::Text(text.replace(&from, &to)))
+}
+
+fn evaluate_repeat(args: Vec<Value>) -> Result<Value> {
+    if args.len() != 2 {
+        return Err(HematiteError::ParseError(
+            "REPEAT requires exactly two arguments".to_string(),
+        ));
+    }
+
+    let mut args = args.into_iter();
+    let text = args.next().expect("validated repeat arity");
+    let count = args.next().expect("validated repeat arity");
+    if text.is_null() || count.is_null() {
+        return Ok(Value::Null);
+    }
+
+    let text = expect_text_argument("REPEAT", text)?;
+    let count = expect_integer_argument("REPEAT", count, "count")?;
+    if count <= 0 {
+        return Ok(Value::Text(String::new()));
+    }
+
+    let count = usize::try_from(count)
+        .map_err(|_| HematiteError::ParseError("REPEAT count overflowed usize".to_string()))?;
+    Ok(Value::Text(text.repeat(count)))
+}
+
+fn evaluate_reverse(args: Vec<Value>) -> Result<Value> {
+    if args.len() != 1 {
+        return Err(HematiteError::ParseError(
+            "REVERSE requires exactly one argument".to_string(),
+        ));
+    }
+
+    let value = args.into_iter().next().expect("validated reverse arity");
+    if value.is_null() {
+        return Ok(Value::Null);
+    }
+
+    let text = expect_text_argument("REVERSE", value)?;
+    Ok(Value::Text(text.chars().rev().collect()))
 }
 
 fn round_integer(value: i32, precision: i32) -> Result<Value> {
