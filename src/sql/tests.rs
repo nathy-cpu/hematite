@@ -1848,6 +1848,57 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_select_with_recursive_cte_union_all() -> Result<()> {
+        let db = TestDbFile::new("_test_select_with_recursive_cte_union_all");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE seeds (n INTEGER PRIMARY KEY);")?;
+        conn.execute("INSERT INTO seeds (n) VALUES (1);")?;
+
+        let result = conn.execute(
+            "WITH RECURSIVE nums AS (\
+             SELECT n FROM seeds \
+             UNION ALL \
+             SELECT n + 1 AS n FROM nums WHERE n < 3\
+             ) \
+             SELECT n FROM nums ORDER BY n ASC;",
+        )?;
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![crate::catalog::Value::Integer(1)],
+                vec![crate::catalog::Value::Integer(2)],
+                vec![crate::catalog::Value::Integer(3)],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_select_with_recursive_cte_union_deduplicates() -> Result<()> {
+        let db = TestDbFile::new("_test_select_with_recursive_cte_union_deduplicates");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE seeds (n INTEGER PRIMARY KEY);")?;
+        conn.execute("INSERT INTO seeds (n) VALUES (1);")?;
+
+        let result = conn.execute(
+            "WITH RECURSIVE nums AS (\
+             SELECT n FROM seeds \
+             UNION \
+             SELECT n + 0 AS n FROM nums WHERE n <= 1\
+             ) \
+             SELECT n FROM nums;",
+        )?;
+        assert_eq!(result.rows, vec![vec![crate::catalog::Value::Integer(1)]]);
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_select_with_left_join() -> Result<()> {
         let db = TestDbFile::new("_test_select_with_left_join");
         let mut conn = Connection::new(db.path())?;

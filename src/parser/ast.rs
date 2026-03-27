@@ -977,7 +977,9 @@ impl SelectStatement {
         match from {
             TableReference::Table(table_name, alias) => {
                 if let Some(cte) = self.lookup_cte(table_name) {
-                    cte.query.validate(catalog)?;
+                    if !cte.recursive {
+                        cte.query.validate(catalog)?;
+                    }
                     bindings.push(SourceBinding {
                         source_name: table_name.clone(),
                         alias: alias.clone(),
@@ -1214,8 +1216,25 @@ impl SelectStatement {
                         cte.name
                     )));
                 }
+                if anchor.columns.len() != set_operation.right.columns.len() {
+                    return Err(HematiteError::ParseError(format!(
+                        "Recursive CTE '{}' anchor and recursive terms must project the same number of columns",
+                        cte.name
+                    )));
+                }
+
+                anchor.validate(catalog)?;
+
+                let mut recursive_term = (*set_operation.right).clone();
+                recursive_term.with_clause.push(CommonTableExpression {
+                    name: cte.name.clone(),
+                    recursive: false,
+                    query: Box::new(anchor.clone()),
+                });
+                recursive_term.validate(catalog)?;
+            } else {
+                cte.query.validate(catalog)?;
             }
-            cte.query.validate(catalog)?;
         }
 
         let bindings = self.collect_source_bindings(catalog, &self.from)?;

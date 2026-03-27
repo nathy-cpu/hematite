@@ -69,6 +69,7 @@ pub struct SelectExecutor {
     pub statement: SelectStatement,
     pub access_path: SelectAccessPath,
     outer_scopes: Vec<CorrelatedScope>,
+    materialized_ctes: HashMap<String, QueryResult>,
 }
 
 #[derive(Debug, Clone)]
@@ -88,7 +89,8 @@ impl ResolvedSource {
 #[derive(Debug, Clone)]
 enum NamedSourceKind {
     BaseTable,
-    Cte(SelectStatement),
+    MaterializedCte(Vec<Vec<Value>>),
+    Cte(CommonTableExpression),
 }
 
 #[derive(Debug, Clone)]
@@ -117,6 +119,7 @@ impl SelectExecutor {
             statement,
             access_path,
             outer_scopes: Vec::new(),
+            materialized_ctes: HashMap::new(),
         }
     }
 
@@ -126,6 +129,10 @@ impl SelectExecutor {
             row: row.to_vec(),
         });
         self
+    }
+
+    fn cte_key(name: &str) -> String {
+        name.to_ascii_lowercase()
     }
 
     fn resolve_sources(&self, ctx: &ExecutionContext) -> Result<Vec<ResolvedSource>> {
@@ -401,6 +408,7 @@ impl SelectExecutor {
             } => {
                 let mut executor = SelectExecutor::new(statement, access_path);
                 executor.outer_scopes = self.outer_scopes.clone();
+                executor.materialized_ctes = self.materialized_ctes.clone();
                 if let (Some(sources), Some(row)) = (current_sources, current_row) {
                     executor = executor.with_outer_scope(sources, row);
                 }
@@ -855,7 +863,7 @@ impl SelectExecutor {
     }
 
     fn materialize_join_sources(
-        &self,
+        &mut self,
         ctx: &mut ExecutionContext,
         left: &TableReference,
         right: &TableReference,
@@ -955,6 +963,18 @@ impl SelectExecutor {
         alias: Option<String>,
         offset: usize,
     ) -> Result<NamedSource> {
+        if let Some(result) = self.materialized_ctes.get(&Self::cte_key(table_name)) {
+            return Ok(NamedSource {
+                source: ResolvedSource {
+                    name: table_name.to_string(),
+                    columns: result.columns.clone(),
+                    alias,
+                    offset,
+                },
+                kind: NamedSourceKind::MaterializedCte(result.rows.clone()),
+            });
+        }
+
         if let Some(cte) = self.statement.lookup_cte(table_name) {
             return Ok(NamedSource {
                 source: ResolvedSource {
@@ -963,7 +983,7 @@ impl SelectExecutor {
                     alias,
                     offset,
                 },
-                kind: NamedSourceKind::Cte((*cte.query).clone()),
+                kind: NamedSourceKind::Cte(cte.clone()),
             });
         }
 
@@ -987,7 +1007,7 @@ impl SelectExecutor {
     }
 
     fn materialize_named_source(
-        &self,
+        &mut self,
         ctx: &mut ExecutionContext,
         table_name: &str,
         alias: Option<String>,
@@ -995,13 +1015,142 @@ impl SelectExecutor {
         let named_source = self.named_source(ctx, table_name, alias, 0)?;
         let rows = match named_source.kind {
             NamedSourceKind::BaseTable => ctx.engine.read_from_table(table_name)?,
-            NamedSourceKind::Cte(query) => self.execute_subquery(ctx, &query, None, None)?.rows,
+            NamedSourceKind::MaterializedCte(rows) => rows,
+            NamedSourceKind::Cte(cte) => {
+                let key = Self::cte_key(table_name);
+                if let Some(result) = self.materialized_ctes.get(&key) {
+                    result.rows.clone()
+                } else {
+                    self.materialize_cte(ctx, &cte)?.rows
+                }
+            }
         };
         Ok((named_source.source, rows))
     }
 
+    fn materialize_cte(
+        &mut self,
+        ctx: &mut ExecutionContext<'_>,
+        cte: &CommonTableExpression,
+    ) -> Result<QueryResult> {
+        let key = Self::cte_key(&cte.name);
+        if let Some(result) = self.materialized_ctes.get(&key) {
+            return Ok(result.clone());
+        }
+
+        let result = if cte.recursive {
+            self.execute_recursive_cte(ctx, cte)?
+        } else {
+            self.execute_subquery(ctx, &cte.query, None, None)?
+        };
+        self.materialized_ctes.insert(key, result.clone());
+        Ok(result)
+    }
+
+    fn execute_recursive_cte(
+        &mut self,
+        ctx: &mut ExecutionContext<'_>,
+        cte: &CommonTableExpression,
+    ) -> Result<QueryResult> {
+        const MAX_RECURSIVE_CTE_ITERATIONS: usize = 1024;
+
+        let mut anchor = (*cte.query).clone();
+        let set_operation = anchor.set_operation.take().ok_or_else(|| {
+            HematiteError::ParseError(format!(
+                "Recursive CTE '{}' requires UNION or UNION ALL",
+                cte.name
+            ))
+        })?;
+
+        let operator = set_operation.operator;
+        let mut recursive_term = *set_operation.right;
+        recursive_term.with_clause.push(CommonTableExpression {
+            name: cte.name.clone(),
+            recursive: false,
+            query: Box::new(anchor.clone()),
+        });
+        let anchor_result = self.execute_subquery(ctx, &anchor, None, None)?;
+        let columns = anchor_result.columns.clone();
+        let mut rows = match operator {
+            SetOperator::Union => deduplicate_rows(anchor_result.rows),
+            SetOperator::UnionAll => anchor_result.rows,
+            _ => {
+                return Err(HematiteError::ParseError(format!(
+                    "Recursive CTE '{}' requires UNION or UNION ALL",
+                    cte.name
+                )))
+            }
+        };
+        let mut delta = rows.clone();
+
+        let key = Self::cte_key(&cte.name);
+        let mut converged = false;
+        for _ in 0..MAX_RECURSIVE_CTE_ITERATIONS {
+            self.materialized_ctes.insert(
+                key.clone(),
+                QueryResult {
+                    affected_rows: delta.len(),
+                    columns: columns.clone(),
+                    rows: delta.clone(),
+                },
+            );
+
+            let mut recursive_executor =
+                SelectExecutor::new(recursive_term.clone(), SelectAccessPath::JoinScan);
+            recursive_executor.outer_scopes = self.outer_scopes.clone();
+            recursive_executor.materialized_ctes = self.materialized_ctes.clone();
+            let next_rows = recursive_executor.execute_body(ctx)?.rows;
+            if next_rows.is_empty() {
+                converged = true;
+                break;
+            }
+
+            delta = match operator {
+                SetOperator::Union => {
+                    let mut unique_rows = Vec::new();
+                    for row in next_rows {
+                        if !rows.contains(&row) && !unique_rows.contains(&row) {
+                            unique_rows.push(row);
+                        }
+                    }
+                    unique_rows
+                }
+                SetOperator::UnionAll => next_rows,
+                _ => Vec::new(),
+            };
+
+            if delta.is_empty() {
+                converged = true;
+                break;
+            }
+            rows.extend(delta.clone());
+        }
+
+        self.materialized_ctes.insert(
+            key,
+            QueryResult {
+                affected_rows: rows.len(),
+                columns: columns.clone(),
+                rows: rows.clone(),
+            },
+        );
+
+        if !converged {
+            return Err(HematiteError::ParseError(format!(
+                "Recursive CTE '{}' exceeded the maximum recursion depth of {}",
+                cte.name, MAX_RECURSIVE_CTE_ITERATIONS
+            )));
+        }
+
+        Ok(QueryResult {
+            affected_rows: rows.len(),
+            columns,
+            rows,
+        })
+    }
+
     fn materialize_reference(
-        &self,
+        &mut self,
         ctx: &mut ExecutionContext,
         from: &TableReference,
     ) -> Result<(Vec<ResolvedSource>, Vec<Vec<Value>>)> {
@@ -1149,6 +1298,94 @@ impl SelectExecutor {
                 Ok((sources, rows))
             }
         }
+    }
+
+    fn execute_body(&mut self, ctx: &mut ExecutionContext) -> Result<QueryResult> {
+        if let Some(set_operation) = &self.statement.set_operation {
+            let mut subquery_cache = SubqueryCache::new();
+            let mut left_statement = self.statement.clone();
+            left_statement.set_operation = None;
+            let mut left_executor = SelectExecutor::new(left_statement, self.access_path.clone());
+            left_executor.outer_scopes = self.outer_scopes.clone();
+            left_executor.materialized_ctes = self.materialized_ctes.clone();
+            let mut left_result = left_executor.execute_body(ctx)?;
+            let right_result = self.execute_subquery_cached(
+                ctx,
+                &mut subquery_cache,
+                &set_operation.right,
+                None,
+                None,
+            )?;
+
+            left_result.rows = apply_set_operation(
+                set_operation.operator,
+                left_result.rows,
+                right_result.rows,
+            );
+            left_result.affected_rows = left_result.rows.len();
+            return Ok(left_result);
+        }
+
+        let direct_table = match &self.statement.from {
+            TableReference::Table(table_name, _)
+                if self.statement.lookup_cte(table_name).is_none() =>
+            {
+                ctx.catalog.get_table_by_name(table_name).cloned()
+            }
+            _ => None,
+        };
+
+        let from = self.statement.from.clone();
+        let (sources, all_rows) = if self.uses_materialized_reference() {
+            self.materialize_reference(ctx, &from)?
+        } else if let (TableReference::Table(table_name, _), Some(table)) =
+            (&from, direct_table.as_ref())
+        {
+            let sources = self.resolve_sources(ctx)?;
+            let rows = self.materialize_table_access_rows(ctx, table_name, table)?;
+            (sources, rows)
+        } else {
+            return Err(HematiteError::InternalError(
+                "Planner selected a direct table access path for a non-table source".to_string(),
+            ));
+        };
+
+        let mut subquery_cache = SubqueryCache::new();
+        let mut filtered_rows =
+            self.filter_source_rows(ctx, &mut subquery_cache, &sources, all_rows)?;
+
+        if !self.statement.order_by.is_empty() {
+            filtered_rows.sort_by(|left, right| {
+                for item in &self.statement.order_by {
+                    let Ok(Some(index)) = self.resolve_column_index(&sources, &item.column) else {
+                        continue;
+                    };
+
+                    let ordering = self.compare_sort_values(&left[index], &right[index]);
+                    if ordering != Ordering::Equal {
+                        return match item.direction {
+                            SortDirection::Asc => ordering,
+                            SortDirection::Desc => ordering.reverse(),
+                        };
+                    }
+                }
+
+                Ordering::Equal
+            });
+        }
+
+        if !self.statement.group_by.is_empty() || self.has_aggregate_projection() {
+            return self.execute_grouped(ctx, &mut subquery_cache, &sources, &filtered_rows);
+        }
+
+        let mut projected_rows = Vec::new();
+        for row in filtered_rows {
+            projected_rows.push(self.project_row(ctx, &mut subquery_cache, &sources, &row)?);
+        }
+
+        apply_distinct_if_needed(self.statement.distinct, &mut projected_rows);
+        self.apply_select_window(&mut projected_rows);
+        Ok(self.build_query_result(self.get_column_names(&sources), projected_rows))
     }
 
     fn compare_sort_values(&self, left: &Value, right: &Value) -> Ordering {
@@ -2062,91 +2299,7 @@ impl SelectExecutor {
 impl QueryExecutor for SelectExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext) -> Result<QueryResult> {
         self.statement.validate(&ctx.catalog)?;
-
-        if let Some(set_operation) = &self.statement.set_operation {
-            let mut subquery_cache = SubqueryCache::new();
-            let mut left_statement = self.statement.clone();
-            left_statement.set_operation = None;
-            let mut left_executor = SelectExecutor::new(left_statement, self.access_path.clone());
-            let mut left_result = left_executor.execute(ctx)?;
-            let right_result = self.execute_subquery_cached(
-                ctx,
-                &mut subquery_cache,
-                &set_operation.right,
-                None,
-                None,
-            )?;
-
-            left_result.rows = apply_set_operation(
-                set_operation.operator,
-                left_result.rows,
-                right_result.rows,
-            );
-            left_result.affected_rows = left_result.rows.len();
-            return Ok(left_result);
-        }
-
-        let direct_table = match &self.statement.from {
-            TableReference::Table(table_name, _)
-                if self.statement.lookup_cte(table_name).is_none() =>
-            {
-                ctx.catalog.get_table_by_name(table_name).cloned()
-            }
-            _ => None,
-        };
-
-        let (sources, all_rows) = if self.uses_materialized_reference() {
-            self.materialize_reference(ctx, &self.statement.from)?
-        } else if let (TableReference::Table(table_name, _), Some(table)) =
-            (&self.statement.from, direct_table.as_ref())
-        {
-            let sources = self.resolve_sources(ctx)?;
-            let rows = self.materialize_table_access_rows(ctx, table_name, table)?;
-            (sources, rows)
-        } else {
-            return Err(HematiteError::InternalError(
-                "Planner selected a direct table access path for a non-table source".to_string(),
-            ));
-        };
-
-        let mut subquery_cache = SubqueryCache::new();
-        let mut filtered_rows =
-            self.filter_source_rows(ctx, &mut subquery_cache, &sources, all_rows)?;
-
-        if !self.statement.order_by.is_empty() {
-            filtered_rows.sort_by(|left, right| {
-                for item in &self.statement.order_by {
-                    let Ok(Some(index)) = self.resolve_column_index(&sources, &item.column) else {
-                        continue;
-                    };
-
-                    let ordering = self.compare_sort_values(&left[index], &right[index]);
-                    if ordering != Ordering::Equal {
-                        return match item.direction {
-                            SortDirection::Asc => ordering,
-                            SortDirection::Desc => ordering.reverse(),
-                        };
-                    }
-                }
-
-                Ordering::Equal
-            });
-        }
-
-        if !self.statement.group_by.is_empty() || self.has_aggregate_projection() {
-            return self.execute_grouped(ctx, &mut subquery_cache, &sources, &filtered_rows);
-        }
-
-        let mut projected_rows = Vec::new();
-        for row in filtered_rows {
-            projected_rows.push(self.project_row(ctx, &mut subquery_cache, &sources, &row)?);
-        }
-
-        apply_distinct_if_needed(self.statement.distinct, &mut projected_rows);
-
-        self.apply_select_window(&mut projected_rows);
-
-        Ok(self.build_query_result(self.get_column_names(&sources), projected_rows))
+        self.execute_body(ctx)
     }
 }
 
@@ -3788,6 +3941,11 @@ fn apply_distinct_if_needed(distinct: bool, rows: &mut Vec<Vec<Value>>) {
         }
     }
     *rows = distinct_rows;
+}
+
+fn deduplicate_rows(mut rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
+    apply_distinct_if_needed(true, &mut rows);
+    rows
 }
 
 fn locator_select_statement(
