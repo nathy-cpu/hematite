@@ -843,6 +843,34 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_additional_builtin_function_edge_cases() -> Result<()> {
+        let db = TestDbFile::new("_test_additional_builtin_function_edge_cases");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE docs (id INTEGER PRIMARY KEY, title TEXT);")?;
+        conn.execute("INSERT INTO docs (id, title) VALUES (1, 'abc');")?;
+
+        let result = conn.execute(
+            "SELECT REPEAT(title, -2), LOCATE('', title, 2), CEIL(NULL), POWER(NULL, 2) FROM docs;",
+        )?;
+        assert_eq!(
+            result.rows,
+            vec![vec![
+                crate::catalog::Value::Text(String::new()),
+                crate::catalog::Value::Integer(2),
+                crate::catalog::Value::Null,
+                crate::catalog::Value::Null,
+            ]]
+        );
+
+        assert!(conn.execute("SELECT LOCATE('a') FROM docs;").is_err());
+        assert!(conn.execute("SELECT POWER(title, 2) FROM docs;").is_err());
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_check_constraint_rejects_invalid_insert() -> Result<()> {
         let db = TestDbFile::new("_test_check_constraint_rejects_invalid_insert");
         let mut conn = Connection::new(db.path())?;
