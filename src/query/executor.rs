@@ -244,12 +244,13 @@ impl SelectExecutor {
             Expression::AggregateCall { .. } => Err(HematiteError::ParseError(
                 "Aggregate expressions can only be evaluated in grouped query contexts".to_string(),
             )),
-            Expression::ScalarFunctionCall { function, .. } => Err(HematiteError::ParseError(
-                format!(
-                    "Scalar function {} is not implemented yet",
-                    function.to_sql()
-                ),
-            )),
+            Expression::ScalarFunctionCall { function, args } => {
+                let mut values = Vec::with_capacity(args.len());
+                for arg in args {
+                    values.push(self.evaluate_expression(ctx, cache, sources, arg, row)?);
+                }
+                evaluate_scalar_function(*function, values)
+            }
             Expression::ScalarSubquery(subquery) => {
                 self.execute_scalar_subquery_cached(ctx, cache, subquery, Some(sources), Some(row))
             }
@@ -1637,12 +1638,21 @@ impl SelectExecutor {
                         "Aggregate expression evaluation produced no value".to_string(),
                     )
                 }),
-            Expression::ScalarFunctionCall { function, .. } => Err(HematiteError::ParseError(
-                format!(
-                    "Scalar function {} is not implemented yet",
-                    function.to_sql()
-                ),
-            )),
+            Expression::ScalarFunctionCall { function, args } => {
+                let mut values = Vec::with_capacity(args.len());
+                for arg in args {
+                    values.push(self.evaluate_projected_expression(
+                        ctx,
+                        cache,
+                        sources,
+                        arg,
+                        row,
+                        output_columns,
+                        group_rows,
+                    )?);
+                }
+                evaluate_scalar_function(*function, values)
+            }
             Expression::Column(name) => {
                 let index = self
                     .result_column_index(output_columns, name)
@@ -2343,12 +2353,13 @@ impl InsertExecutor {
             Expression::AggregateCall { .. } => Err(HematiteError::ParseError(
                 "INSERT expressions cannot use aggregate functions".to_string(),
             )),
-            Expression::ScalarFunctionCall { function, .. } => Err(HematiteError::ParseError(
-                format!(
-                    "Scalar function {} is not implemented yet",
-                    function.to_sql()
-                ),
-            )),
+            Expression::ScalarFunctionCall { function, args } => {
+                let mut values = Vec::with_capacity(args.len());
+                for arg in args {
+                    values.push(self.evaluate_value_expression(arg)?);
+                }
+                evaluate_scalar_function(*function, values)
+            }
             Expression::UnaryMinus(expr) => match self.evaluate_value_expression(expr)? {
                 Value::Integer(value) => value.checked_neg().map(Value::Integer).ok_or_else(|| {
                     HematiteError::ParseError(
@@ -4058,6 +4069,74 @@ fn evaluate_float_arithmetic(
         }
     };
     Ok(Value::Float(value))
+}
+
+fn evaluate_scalar_function(function: ScalarFunction, args: Vec<Value>) -> Result<Value> {
+    match function {
+        ScalarFunction::Coalesce => evaluate_coalesce(args),
+        ScalarFunction::IfNull => evaluate_ifnull(args),
+        ScalarFunction::NullIf => evaluate_nullif(args),
+        function => Err(HematiteError::ParseError(format!(
+            "Scalar function {} is not implemented yet",
+            function.to_sql()
+        ))),
+    }
+}
+
+fn evaluate_coalesce(args: Vec<Value>) -> Result<Value> {
+    if args.is_empty() {
+        return Err(HematiteError::ParseError(
+            "COALESCE requires at least one argument".to_string(),
+        ));
+    }
+
+    for arg in args {
+        if !arg.is_null() {
+            return Ok(arg);
+        }
+    }
+
+    Ok(Value::Null)
+}
+
+fn evaluate_ifnull(args: Vec<Value>) -> Result<Value> {
+    if args.len() != 2 {
+        return Err(HematiteError::ParseError(
+            "IFNULL requires exactly two arguments".to_string(),
+        ));
+    }
+
+    let mut args = args.into_iter();
+    let first = args.next().expect("ifnull validated arity");
+    let second = args.next().expect("ifnull validated arity");
+    if first.is_null() {
+        Ok(second)
+    } else {
+        Ok(first)
+    }
+}
+
+fn evaluate_nullif(args: Vec<Value>) -> Result<Value> {
+    if args.len() != 2 {
+        return Err(HematiteError::ParseError(
+            "NULLIF requires exactly two arguments".to_string(),
+        ));
+    }
+
+    let mut args = args.into_iter();
+    let left = args.next().expect("nullif validated arity");
+    let right = args.next().expect("nullif validated arity");
+    if left.is_null() {
+        return Ok(Value::Null);
+    }
+    if right.is_null() {
+        return Ok(left);
+    }
+    if left == right {
+        Ok(Value::Null)
+    } else {
+        Ok(left)
+    }
 }
 
 fn unique_index_parse_error(index_name: &str, table_name: &str) -> HematiteError {

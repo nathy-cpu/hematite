@@ -274,6 +274,66 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_scalar_null_handling_functions() -> Result<()> {
+        let db = TestDbFile::new("_test_scalar_null_handling_functions");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, nickname TEXT);")?;
+        conn.execute(
+            "INSERT INTO users (id, name, nickname) VALUES (1, NULL, 'ally'), (2, 'Bob', NULL);",
+        )?;
+
+        let result = conn.execute(
+            "SELECT COALESCE(name, nickname, 'unknown') AS display_name, IFNULL(nickname, 'none') AS nick, NULLIF(name, 'Bob') AS maybe_name FROM users ORDER BY id ASC;",
+        )?;
+
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![
+                    crate::catalog::Value::Text("ally".to_string()),
+                    crate::catalog::Value::Text("ally".to_string()),
+                    crate::catalog::Value::Null,
+                ],
+                vec![
+                    crate::catalog::Value::Text("Bob".to_string()),
+                    crate::catalog::Value::Text("none".to_string()),
+                    crate::catalog::Value::Null,
+                ],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_scalar_null_handling_functions_in_insert_and_update() -> Result<()> {
+        let db = TestDbFile::new("_test_scalar_null_handling_functions_in_insert_and_update");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, nickname TEXT);")?;
+        conn.execute(
+            "INSERT INTO users (id, name, nickname) VALUES (1, COALESCE(NULL, 'alice'), IFNULL(NULL, 'ally'));",
+        )?;
+        conn.execute(
+            "UPDATE users SET nickname = NULLIF(name, 'alice'), name = COALESCE(name, 'unknown') WHERE id = 1;",
+        )?;
+
+        let result = conn.execute("SELECT name, nickname FROM users WHERE id = 1;")?;
+        assert_eq!(
+            result.rows,
+            vec![vec![
+                crate::catalog::Value::Text("alice".to_string()),
+                crate::catalog::Value::Null,
+            ]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_check_constraint_rejects_invalid_insert() -> Result<()> {
         let db = TestDbFile::new("_test_check_constraint_rejects_invalid_insert");
         let mut conn = Connection::new(db.path())?;
