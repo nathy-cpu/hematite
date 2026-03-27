@@ -302,17 +302,19 @@ impl SelectExecutor {
         }
 
         match operator {
-            ComparisonOperator::Equal => Some(left_val == right_val),
-            ComparisonOperator::NotEqual => Some(left_val != right_val),
-            ComparisonOperator::LessThan => left_val.partial_cmp(right_val).map(|ord| ord.is_lt()),
+            ComparisonOperator::Equal => Some(sql_values_equal(left_val, right_val)),
+            ComparisonOperator::NotEqual => Some(!sql_values_equal(left_val, right_val)),
+            ComparisonOperator::LessThan => {
+                sql_partial_cmp(left_val, right_val).map(|ord| ord.is_lt())
+            }
             ComparisonOperator::LessThanOrEqual => {
-                left_val.partial_cmp(right_val).map(|ord| ord.is_le())
+                sql_partial_cmp(left_val, right_val).map(|ord| ord.is_le())
             }
             ComparisonOperator::GreaterThan => {
-                left_val.partial_cmp(right_val).map(|ord| ord.is_gt())
+                sql_partial_cmp(left_val, right_val).map(|ord| ord.is_gt())
             }
             ComparisonOperator::GreaterThanOrEqual => {
-                left_val.partial_cmp(right_val).map(|ord| ord.is_ge())
+                sql_partial_cmp(left_val, right_val).map(|ord| ord.is_ge())
             }
         }
     }
@@ -378,7 +380,7 @@ impl SelectExecutor {
                 saw_null = true;
                 continue;
             }
-            if candidate == probe {
+            if sql_values_equal(&candidate, &probe) {
                 matched = true;
                 break;
             }
@@ -718,11 +720,9 @@ impl SelectExecutor {
                     return Ok(None);
                 }
 
-                let lower_ok = value
-                    .partial_cmp(&lower_value)
+                let lower_ok = sql_partial_cmp(&value, &lower_value)
                     .map(|ordering| !ordering.is_lt());
-                let upper_ok = value
-                    .partial_cmp(&upper_value)
+                let upper_ok = sql_partial_cmp(&value, &upper_value)
                     .map(|ordering| !ordering.is_gt());
 
                 match (lower_ok, upper_ok) {
@@ -1405,7 +1405,7 @@ impl SelectExecutor {
             (true, true) => Ordering::Equal,
             (true, false) => Ordering::Less,
             (false, true) => Ordering::Greater,
-            (false, false) => left.partial_cmp(right).unwrap_or(Ordering::Equal),
+            (false, false) => sql_partial_cmp(left, right).unwrap_or(Ordering::Equal),
         }
     }
 
@@ -1854,11 +1854,9 @@ impl SelectExecutor {
                     return Ok(None);
                 }
 
-                let lower_ok = value
-                    .partial_cmp(&lower_value)
+                let lower_ok = sql_partial_cmp(&value, &lower_value)
                     .map(|ordering| !ordering.is_lt());
-                let upper_ok = value
-                    .partial_cmp(&upper_value)
+                let upper_ok = sql_partial_cmp(&value, &upper_value)
                     .map(|ordering| !ordering.is_gt());
 
                 match (lower_ok, upper_ok) {
@@ -4134,7 +4132,7 @@ fn evaluate_nullif(args: Vec<Value>) -> Result<Value> {
     if right.is_null() {
         return Ok(left);
     }
-    if left == right {
+    if sql_values_equal(&left, &right) {
         Ok(Value::Null)
     } else {
         Ok(left)
@@ -4278,6 +4276,32 @@ fn round_float(value: f64, precision: i32) -> f64 {
     } else {
         let factor = 10f64.powi(-precision);
         (value / factor).round() * factor
+    }
+}
+
+fn sql_values_equal(left: &Value, right: &Value) -> bool {
+    if let Some((left, right)) = sql_numeric_pair(left, right) {
+        return left == right;
+    }
+
+    left == right
+}
+
+fn sql_partial_cmp(left: &Value, right: &Value) -> Option<Ordering> {
+    if let Some((left, right)) = sql_numeric_pair(left, right) {
+        return left.partial_cmp(&right);
+    }
+
+    left.partial_cmp(right)
+}
+
+fn sql_numeric_pair(left: &Value, right: &Value) -> Option<(f64, f64)> {
+    match (left, right) {
+        (Value::Integer(left), Value::Integer(right)) => Some((*left as f64, *right as f64)),
+        (Value::Integer(left), Value::Float(right)) => Some((*left as f64, *right)),
+        (Value::Float(left), Value::Integer(right)) => Some((*left, *right as f64)),
+        (Value::Float(left), Value::Float(right)) => Some((*left, *right)),
+        _ => None,
     }
 }
 

@@ -451,6 +451,45 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_scalar_function_numeric_comparisons_coerce_integer_and_float() -> Result<()> {
+        let db = TestDbFile::new("_test_scalar_function_numeric_comparisons_coerce_integer_and_float");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE metrics (id INTEGER PRIMARY KEY, amount FLOAT);")?;
+        conn.execute("INSERT INTO metrics (id, amount) VALUES (1, 1.26), (2, 2.49);")?;
+
+        let result = conn.execute(
+            "SELECT id FROM metrics WHERE ROUND(amount) IN (1, 2) ORDER BY id ASC;",
+        )?;
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![crate::catalog::Value::Integer(1)],
+                vec![crate::catalog::Value::Integer(2)],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_scalar_function_argument_errors_are_reported() -> Result<()> {
+        let db = TestDbFile::new("_test_scalar_function_argument_errors_are_reported");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE metrics (id INTEGER PRIMARY KEY, name TEXT, amount FLOAT);")?;
+        conn.execute("INSERT INTO metrics (id, name, amount) VALUES (1, 'alice', 1.26);")?;
+
+        assert!(conn.execute("SELECT COALESCE() FROM metrics;").is_err());
+        assert!(conn.execute("SELECT LOWER(id) FROM metrics;").is_err());
+        assert!(conn.execute("SELECT ROUND(amount, 1.5) FROM metrics;").is_err());
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_check_constraint_rejects_invalid_insert() -> Result<()> {
         let db = TestDbFile::new("_test_check_constraint_rejects_invalid_insert");
         let mut conn = Connection::new(db.path())?;
