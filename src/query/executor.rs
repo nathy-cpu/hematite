@@ -4196,6 +4196,7 @@ fn evaluate_scalar_function(function: ScalarFunction, args: Vec<Value>) -> Resul
         ScalarFunction::Replace => evaluate_replace(args),
         ScalarFunction::Repeat => evaluate_repeat(args),
         ScalarFunction::Reverse => evaluate_reverse(args),
+        ScalarFunction::Locate => evaluate_locate(args),
     }
 }
 
@@ -4646,6 +4647,48 @@ fn evaluate_reverse(args: Vec<Value>) -> Result<Value> {
 
     let text = expect_text_argument("REVERSE", value)?;
     Ok(Value::Text(text.chars().rev().collect()))
+}
+
+fn evaluate_locate(args: Vec<Value>) -> Result<Value> {
+    if args.len() != 2 && args.len() != 3 {
+        return Err(HematiteError::ParseError(
+            "LOCATE requires two or three arguments".to_string(),
+        ));
+    }
+
+    let mut args = args.into_iter();
+    let needle = args.next().expect("validated locate arity");
+    let haystack = args.next().expect("validated locate arity");
+    let start = args.next();
+    if needle.is_null() || haystack.is_null() || start.as_ref().is_some_and(Value::is_null) {
+        return Ok(Value::Null);
+    }
+
+    let needle = expect_text_argument("LOCATE", needle)?;
+    let haystack = expect_text_argument("LOCATE", haystack)?;
+    let start = start
+        .map(|value| expect_integer_argument("LOCATE", value, "start position"))
+        .transpose()?
+        .unwrap_or(1);
+
+    let haystack_chars = haystack.chars().collect::<Vec<_>>();
+    let needle_chars = needle.chars().collect::<Vec<_>>();
+    let start_index = start.saturating_sub(1).max(0) as usize;
+    if needle_chars.is_empty() {
+        let position = start_index.min(haystack_chars.len()) + 1;
+        return Ok(Value::Integer(position as i32));
+    }
+    if start_index >= haystack_chars.len() || needle_chars.len() > haystack_chars.len() {
+        return Ok(Value::Integer(0));
+    }
+
+    for index in start_index..=haystack_chars.len() - needle_chars.len() {
+        if haystack_chars[index..index + needle_chars.len()] == needle_chars[..] {
+            return Ok(Value::Integer((index + 1) as i32));
+        }
+    }
+
+    Ok(Value::Integer(0))
 }
 
 fn round_integer(value: i32, precision: i32) -> Result<Value> {

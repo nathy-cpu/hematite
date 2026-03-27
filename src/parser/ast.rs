@@ -238,6 +238,7 @@ pub enum ScalarFunction {
     Replace,
     Repeat,
     Reverse,
+    Locate,
 }
 
 #[derive(Debug, Clone)]
@@ -2655,6 +2656,7 @@ impl ScalarFunction {
             "REPLACE" => Some(Self::Replace),
             "REPEAT" => Some(Self::Repeat),
             "REVERSE" => Some(Self::Reverse),
+            "LOCATE" => Some(Self::Locate),
             _ => None,
         }
     }
@@ -2680,6 +2682,7 @@ impl ScalarFunction {
             ScalarFunction::Replace => "REPLACE",
             ScalarFunction::Repeat => "REPEAT",
             ScalarFunction::Reverse => "REVERSE",
+            ScalarFunction::Locate => "LOCATE",
         }
     }
 }

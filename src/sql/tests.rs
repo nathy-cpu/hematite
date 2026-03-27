@@ -749,6 +749,53 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_locate_function() -> Result<()> {
+        let db = TestDbFile::new("_test_locate_function");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE docs (id INTEGER PRIMARY KEY, title TEXT);")?;
+        conn.execute("INSERT INTO docs (id, title) VALUES (1, 'hematite'), (2, 'metadata');")?;
+
+        let result = conn.execute(
+            "SELECT LOCATE('ti', title), LOCATE('ta', title, 4) FROM docs ORDER BY id ASC;",
+        )?;
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![
+                    crate::catalog::Value::Integer(5),
+                    crate::catalog::Value::Integer(0),
+                ],
+                vec![
+                    crate::catalog::Value::Integer(0),
+                    crate::catalog::Value::Integer(7),
+                ],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_locate_function_in_filters() -> Result<()> {
+        let db = TestDbFile::new("_test_locate_function_in_filters");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE docs (id INTEGER PRIMARY KEY, title TEXT);")?;
+        conn.execute("INSERT INTO docs (id, title) VALUES (1, 'hematite'), (2, 'metal');")?;
+
+        let result = conn.execute("SELECT id FROM docs WHERE LOCATE('ta', title) > 0 ORDER BY id ASC;")?;
+        assert_eq!(
+            result.rows,
+            vec![vec![crate::catalog::Value::Integer(2)]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_check_constraint_rejects_invalid_insert() -> Result<()> {
         let db = TestDbFile::new("_test_check_constraint_rejects_invalid_insert");
         let mut conn = Connection::new(db.path())?;
