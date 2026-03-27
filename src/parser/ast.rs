@@ -202,6 +202,10 @@ pub enum Expression {
     Literal(LiteralValue),
     Parameter(usize),
     ScalarSubquery(Box<SelectStatement>),
+    Cast {
+        expr: Box<Expression>,
+        target_type: SqlTypeName,
+    },
     Case {
         branches: Vec<CaseWhenClause>,
         else_expr: Option<Box<Expression>>,
@@ -268,6 +272,7 @@ pub enum ArithmeticOperator {
     Subtract,
     Multiply,
     Divide,
+    Modulo,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -871,6 +876,7 @@ impl Expression {
         match self {
             Expression::Parameter(index) => f(*index),
             Expression::ScalarSubquery(subquery) => subquery.visit_parameters(f),
+            Expression::Cast { expr, .. } => expr.visit_parameters(f),
             Expression::Case {
                 branches,
                 else_expr,
@@ -949,6 +955,10 @@ impl Expression {
                     .bind_parameters(parameters)?
                     .into_select()?,
             ))),
+            Expression::Cast { expr, target_type } => Ok(Expression::Cast {
+                expr: Box::new(expr.bind(parameters)?),
+                target_type: *target_type,
+            }),
             Expression::Case {
                 branches,
                 else_expr,
@@ -1780,6 +1790,9 @@ impl SelectStatement {
             Expression::UnaryNot(expr) => {
                 self.validate_expression(expr, catalog, from, outer_bindings)?
             }
+            Expression::Cast { expr, .. } => {
+                self.validate_expression(expr, catalog, from, outer_bindings)?
+            }
             Expression::Binary { left, right, .. } => {
                 self.validate_expression(left, catalog, from, outer_bindings)?;
                 self.validate_expression(right, catalog, from, outer_bindings)?;
@@ -1855,6 +1868,7 @@ impl SelectStatement {
             Expression::ScalarFunctionCall { args, .. } => {
                 args.iter().any(Self::expression_contains_aggregate)
             }
+            Expression::Cast { expr, .. } => Self::expression_contains_aggregate(expr),
             Expression::UnaryMinus(expr) => Self::expression_contains_aggregate(expr),
             Expression::UnaryNot(expr) => Self::expression_contains_aggregate(expr),
             Expression::Binary { left, right, .. } => {
@@ -2801,6 +2815,7 @@ impl Expression {
             Expression::ScalarFunctionCall { args, .. } => {
                 args.iter().any(|arg| arg.references_source_name(name))
             }
+            Expression::Cast { expr, .. } => expr.references_source_name(name),
             Expression::UnaryMinus(expr) => expr.references_source_name(name),
             Expression::UnaryNot(expr) => expr.references_source_name(name),
             Expression::Binary { left, right, .. } => {
@@ -2862,6 +2877,7 @@ impl Expression {
                 AggregateTarget::All => false,
                 AggregateTarget::Column(name) => column_name_matches(name, column_name, table_name),
             },
+            Expression::Cast { expr, .. } => expr.references_column(column_name, table_name),
             Expression::UnaryMinus(expr) => expr.references_column(column_name, table_name),
             Expression::UnaryNot(expr) => expr.references_column(column_name, table_name),
             Expression::Binary { left, right, .. } => {
@@ -2936,6 +2952,9 @@ impl Expression {
                 if let AggregateTarget::Column(name) = target {
                     rename_column_name(name, old_name, new_name, table_name);
                 }
+            }
+            Expression::Cast { expr, .. } => {
+                expr.rename_column_references(old_name, new_name, table_name);
             }
             Expression::UnaryMinus(expr) => {
                 expr.rename_column_references(old_name, new_name, table_name);
@@ -3024,6 +3043,9 @@ impl Expression {
             ),
             Expression::AggregateCall { function, target } => {
                 format!("{}({})", function.to_sql(), target.to_sql())
+            }
+            Expression::Cast { expr, target_type } => {
+                format!("CAST({} AS {})", expr.to_sql(), target_type.to_sql())
             }
             Expression::UnaryMinus(expr) => format!("-{}", expr.to_sql()),
             Expression::UnaryNot(expr) => format!("NOT {}", expr.to_sql()),
@@ -3214,6 +3236,7 @@ impl ArithmeticOperator {
             ArithmeticOperator::Subtract => "-",
             ArithmeticOperator::Multiply => "*",
             ArithmeticOperator::Divide => "/",
+            ArithmeticOperator::Modulo => "%",
         }
     }
 }

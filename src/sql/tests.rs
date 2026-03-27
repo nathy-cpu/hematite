@@ -2841,6 +2841,37 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_cast_and_modulo_expressions() -> Result<()> {
+        let db = TestDbFile::new("_test_cast_and_modulo_expressions");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, score INTEGER, label TEXT);")?;
+        conn.execute("INSERT INTO test (id, score, label) VALUES (1, 5, '7');")?;
+        conn.execute("INSERT INTO test (id, score, label) VALUES (2, 8, 'bad');")?;
+
+        let result = conn.execute(
+            "SELECT score % 2 AS remainder, CAST(label AS INTEGER) AS parsed FROM test WHERE id = 1;",
+        )?;
+        assert_eq!(
+            result.rows,
+            vec![vec![
+                crate::catalog::Value::Integer(1),
+                crate::catalog::Value::Integer(7),
+            ]]
+        );
+
+        conn.execute("UPDATE test SET score = CAST(label AS INTEGER) % 3 WHERE id = 1;")?;
+        let updated = conn.execute("SELECT score FROM test WHERE id = 1;")?;
+        assert_eq!(updated.rows, vec![vec![crate::catalog::Value::Integer(1)]]);
+
+        let bad_cast = conn.execute("SELECT CAST(label AS INTEGER) FROM test WHERE id = 2;");
+        assert!(bad_cast.is_err());
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_limit_applies_after_order_by() -> Result<()> {
         let db = TestDbFile::new("_test_limit_applies_after_order_by");
         let mut conn = Connection::new(db.path())?;

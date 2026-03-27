@@ -10,6 +10,17 @@ pub enum SqlTypeName {
     Float,
 }
 
+impl SqlTypeName {
+    pub fn to_sql(self) -> &'static str {
+        match self {
+            SqlTypeName::Integer => "INTEGER",
+            SqlTypeName::Text => "TEXT",
+            SqlTypeName::Boolean => "BOOLEAN",
+            SqlTypeName::Float => "FLOAT",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum LiteralValue {
     Integer(i32),

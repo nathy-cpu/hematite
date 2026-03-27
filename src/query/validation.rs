@@ -700,6 +700,9 @@ fn validate_expression(
                 validate_column_reference_with_outer(select, name, catalog, from, outer_bindings)?;
             }
         }
+        Expression::Cast { expr, .. } => {
+            validate_expression(select, expr, catalog, from, outer_bindings)?;
+        }
         Expression::UnaryMinus(expr) | Expression::UnaryNot(expr) => {
             validate_expression(select, expr, catalog, from, outer_bindings)?;
         }
@@ -1250,6 +1253,7 @@ fn expression_contains_aggregate(expr: &Expression) -> bool {
         Expression::ScalarFunctionCall { args, .. } => {
             args.iter().any(expression_contains_aggregate)
         }
+        Expression::Cast { expr, .. } => expression_contains_aggregate(expr),
         Expression::UnaryMinus(expr)
         | Expression::UnaryNot(expr)
         | Expression::NullCheck { expr, .. } => expression_contains_aggregate(expr),

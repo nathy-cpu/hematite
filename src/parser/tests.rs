@@ -1058,6 +1058,24 @@ mod parser_tests {
     }
 
     #[test]
+    fn test_parse_cast_and_modulo_expression() -> Result<()> {
+        let select = parse_select("SELECT CAST(score % 2 AS INTEGER) AS bucket FROM users;")?;
+        assert!(matches!(
+            &select.columns[0],
+            SelectItem::Expression(Expression::Cast { expr, target_type })
+                if matches!(
+                    expr.as_ref(),
+                    Expression::Binary {
+                        operator: ArithmeticOperator::Modulo,
+                        ..
+                    }
+                ) && *target_type == SqlTypeName::Integer
+        ));
+        assert_eq!(select.column_aliases[0].as_deref(), Some("bucket"));
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_order_by() -> Result<()> {
         let select = parse_select("SELECT id FROM users ORDER BY name DESC, id ASC;")?;
         assert_eq!(select.order_by.len(), 2);

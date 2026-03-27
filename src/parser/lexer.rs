@@ -42,6 +42,7 @@ pub enum Token {
     On,
     As,
     Distinct,
+    Cast,
     Table,
     Column,
     Where,
@@ -121,6 +122,7 @@ pub enum Token {
     Minus,
     Asterisk,
     Slash,
+    Percent,
     Placeholder,
 
     // Literals
@@ -261,6 +263,7 @@ impl Lexer {
             "ON" => Token::On,
             "AS" => Token::As,
             "DISTINCT" => Token::Distinct,
+            "CAST" => Token::Cast,
             "TABLE" => Token::Table,
             "COLUMN" => Token::Column,
             "WHERE" => Token::Where,
@@ -484,6 +487,7 @@ impl Lexer {
             '-' => Token::Minus,
             '*' => Token::Asterisk,
             '/' => Token::Slash,
+            '%' => Token::Percent,
             '?' => Token::Placeholder,
             _ => {
                 return Err(HematiteError::ParseError(format!(

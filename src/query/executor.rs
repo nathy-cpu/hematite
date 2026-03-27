@@ -243,6 +243,10 @@ impl SelectExecutor {
                 "Unbound parameter {} reached execution",
                 index + 1
             ))),
+            Expression::Cast { expr, target_type } => cast_value_to_type(
+                self.evaluate_expression(ctx, cache, sources, expr, row)?,
+                lower_type_name(*target_type),
+            ),
             Expression::Case {
                 branches,
                 else_expr,
@@ -700,6 +704,9 @@ impl SelectExecutor {
                 for arg in args {
                     self.bind_expression_outer_references(ctx, from, arg, scopes)?;
                 }
+            }
+            Expression::Cast { expr, .. } => {
+                self.bind_expression_outer_references(ctx, from, expr, scopes)?;
             }
             Expression::UnaryMinus(inner) => {
                 self.bind_expression_outer_references(ctx, from, inner, scopes)?;
@@ -1768,6 +1775,18 @@ impl SelectExecutor {
                 "Unbound parameter {} reached execution",
                 index + 1
             ))),
+            Expression::Cast { expr, target_type } => cast_value_to_type(
+                self.evaluate_projected_expression(
+                    ctx,
+                    cache,
+                    sources,
+                    expr,
+                    row,
+                    output_columns,
+                    group_rows,
+                )?,
+                lower_type_name(*target_type),
+            ),
             Expression::Case {
                 branches,
                 else_expr,
@@ -2763,6 +2782,10 @@ impl InsertExecutor {
                 "Unbound parameter {} reached execution",
                 index + 1
             ))),
+            Expression::Cast { expr, target_type } => cast_value_to_type(
+                self.evaluate_value_expression(expr)?,
+                lower_type_name(*target_type),
+            ),
             Expression::Case {
                 branches,
                 else_expr,
@@ -4562,6 +4585,13 @@ fn evaluate_arithmetic_values(
                     Ok(Value::Float(left as f64 / right as f64))
                 }
             }
+            ArithmeticOperator::Modulo => {
+                if right == 0 {
+                    Err(HematiteError::ParseError("Division by zero".to_string()))
+                } else {
+                    Ok(Value::Integer(left % right))
+                }
+            }
         },
         (Value::Integer(left), Value::Float(right)) => {
             evaluate_float_arithmetic(operator, left as f64, right)
@@ -4594,8 +4624,52 @@ fn evaluate_float_arithmetic(
             }
             left / right
         }
+        ArithmeticOperator::Modulo => {
+            if right == 0.0 {
+                return Err(HematiteError::ParseError("Division by zero".to_string()));
+            }
+            left % right
+        }
     };
     Ok(Value::Float(value))
+}
+
+fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
+    match (data_type, value) {
+        (_, Value::Null) => Ok(Value::Null),
+        (DataType::Integer, Value::Integer(value)) => Ok(Value::Integer(value)),
+        (DataType::Integer, Value::Float(value)) => Ok(Value::Integer(value as i32)),
+        (DataType::Integer, Value::Boolean(true)) => Ok(Value::Integer(1)),
+        (DataType::Integer, Value::Boolean(false)) => Ok(Value::Integer(0)),
+        (DataType::Integer, Value::Text(value)) => value
+            .parse::<i32>()
+            .map(Value::Integer)
+            .map_err(|_| HematiteError::ParseError(format!("Cannot CAST '{}' AS INTEGER", value))),
+        (DataType::Text, Value::Integer(value)) => Ok(Value::Text(value.to_string())),
+        (DataType::Text, Value::Float(value)) => Ok(Value::Text(value.to_string())),
+        (DataType::Text, Value::Boolean(true)) => Ok(Value::Text("TRUE".to_string())),
+        (DataType::Text, Value::Boolean(false)) => Ok(Value::Text("FALSE".to_string())),
+        (DataType::Text, Value::Text(value)) => Ok(Value::Text(value)),
+        (DataType::Boolean, Value::Boolean(value)) => Ok(Value::Boolean(value)),
+        (DataType::Boolean, Value::Integer(value)) => Ok(Value::Boolean(value != 0)),
+        (DataType::Boolean, Value::Float(value)) => Ok(Value::Boolean(value != 0.0)),
+        (DataType::Boolean, Value::Text(value)) => match value.to_ascii_uppercase().as_str() {
+            "TRUE" | "1" => Ok(Value::Boolean(true)),
+            "FALSE" | "0" => Ok(Value::Boolean(false)),
+            _ => Err(HematiteError::ParseError(format!(
+                "Cannot CAST '{}' AS BOOLEAN",
+                value
+            ))),
+        },
+        (DataType::Float, Value::Float(value)) => Ok(Value::Float(value)),
+        (DataType::Float, Value::Integer(value)) => Ok(Value::Float(value as f64)),
+        (DataType::Float, Value::Boolean(true)) => Ok(Value::Float(1.0)),
+        (DataType::Float, Value::Boolean(false)) => Ok(Value::Float(0.0)),
+        (DataType::Float, Value::Text(value)) => value
+            .parse::<f64>()
+            .map(Value::Float)
+            .map_err(|_| HematiteError::ParseError(format!("Cannot CAST '{}' AS FLOAT", value))),
+    }
 }
 
 fn evaluate_scalar_function(function: ScalarFunction, args: Vec<Value>) -> Result<Value> {

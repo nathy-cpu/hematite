@@ -300,6 +300,7 @@ impl Parser {
                     | Token::Placeholder
                     | Token::LeftParen
                     | Token::Case
+                    | Token::Cast
                     | Token::Left
                     | Token::Right
                     | Token::Minus => {
@@ -986,7 +987,9 @@ impl Parser {
             match operator {
                 ArithmeticOperator::Add => self.consume_token(&Token::Plus)?,
                 ArithmeticOperator::Subtract => self.consume_token(&Token::Minus)?,
-                ArithmeticOperator::Multiply | ArithmeticOperator::Divide => unreachable!(),
+                ArithmeticOperator::Multiply
+                | ArithmeticOperator::Divide
+                | ArithmeticOperator::Modulo => unreachable!(),
             }
 
             let right = self.parse_multiplicative_expression()?;
@@ -1007,12 +1010,14 @@ impl Parser {
             let operator = match self.peek_token() {
                 Ok(Token::Asterisk) => ArithmeticOperator::Multiply,
                 Ok(Token::Slash) => ArithmeticOperator::Divide,
+                Ok(Token::Percent) => ArithmeticOperator::Modulo,
                 _ => break,
             };
 
             match operator {
                 ArithmeticOperator::Multiply => self.consume_token(&Token::Asterisk)?,
                 ArithmeticOperator::Divide => self.consume_token(&Token::Slash)?,
+                ArithmeticOperator::Modulo => self.consume_token(&Token::Percent)?,
                 ArithmeticOperator::Add | ArithmeticOperator::Subtract => unreachable!(),
             }
 
@@ -1041,6 +1046,7 @@ impl Parser {
     fn parse_primary_expression(&mut self) -> Result<Expression> {
         let token = self.peek_token()?;
         match token {
+            Token::Cast => self.parse_cast_expression(),
             Token::Case => self.parse_case_expression(),
             Token::Left | Token::Right if self.next_token_is(&Token::LeftParen) => {
                 self.parse_scalar_function_expression()
@@ -1130,6 +1136,19 @@ impl Parser {
         Ok(Expression::Case {
             branches,
             else_expr,
+        })
+    }
+
+    fn parse_cast_expression(&mut self) -> Result<Expression> {
+        self.consume_token(&Token::Cast)?;
+        self.consume_token(&Token::LeftParen)?;
+        let expr = self.parse_expression()?;
+        self.consume_token(&Token::As)?;
+        let target_type = self.parse_data_type()?;
+        self.consume_token(&Token::RightParen)?;
+        Ok(Expression::Cast {
+            expr: Box::new(expr),
+            target_type,
         })
     }
 
