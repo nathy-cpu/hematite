@@ -2,6 +2,7 @@ use crate::catalog::Value;
 use crate::parser::ast::{
     ComparisonOperator, Condition, Expression, LogicalOperator, SelectStatement, WhereClause,
 };
+use crate::query::lowering::lower_literal_value;
 use std::collections::HashMap;
 
 pub(crate) fn extract_literal_equalities(
@@ -27,11 +28,11 @@ fn collect_literal_equalities(
             let (column_name, value) = match (left, right) {
                 (Expression::Column(column_name), Expression::Literal(value)) => (
                     SelectStatement::column_reference_name(column_name),
-                    value.clone(),
+                    lower_literal_value(value),
                 ),
                 (Expression::Literal(value), Expression::Column(column_name)) => (
                     SelectStatement::column_reference_name(column_name),
-                    value.clone(),
+                    lower_literal_value(value),
                 ),
                 _ => return None,
             };

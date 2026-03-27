@@ -77,7 +77,6 @@ fn production_imports_match_layer_matrix_or_temporary_exceptions() {
     ]);
 
     let temporary_exceptions: BTreeSet<(&str, &str)> = BTreeSet::from([
-        ("src/parser/ast.rs", "catalog"),
         ("src/catalog/engine.rs", "storage"),
         ("src/catalog/engine_metadata.rs", "storage"),
         ("src/sql/interface.rs", "catalog"),

@@ -1,6 +1,7 @@
 //! Query processing module
 
 pub mod executor;
+pub(crate) mod lowering;
 pub mod optimizer;
 pub mod plan;
 pub mod planner;

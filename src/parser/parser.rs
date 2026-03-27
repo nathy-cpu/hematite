@@ -21,6 +21,7 @@
 use crate::error::{HematiteError, Result};
 use crate::parser::ast::*;
 use crate::parser::lexer::{Lexer, Token};
+use crate::parser::types::{LiteralValue, SqlTypeName};
 
 pub struct Parser {
     tokens: Vec<Token>,
@@ -1021,27 +1022,19 @@ impl Parser {
             Token::Identifier(_) => Ok(Expression::Column(self.parse_identifier_reference()?)),
             Token::StringLiteral(value) => {
                 self.consume_token(&Token::StringLiteral(value.clone()))?;
-                Ok(Expression::Literal(crate::catalog::types::Value::Text(
-                    value,
-                )))
+                Ok(Expression::Literal(LiteralValue::Text(value)))
             }
             Token::NumberLiteral(value) => {
                 self.consume_token(&Token::NumberLiteral(value.clone()))?;
                 if value.fract() == 0.0 {
-                    Ok(Expression::Literal(crate::catalog::types::Value::Integer(
-                        value as i32,
-                    )))
+                    Ok(Expression::Literal(LiteralValue::Integer(value as i32)))
                 } else {
-                    Ok(Expression::Literal(crate::catalog::types::Value::Float(
-                        value,
-                    )))
+                    Ok(Expression::Literal(LiteralValue::Float(value)))
                 }
             }
             Token::BooleanLiteral(value) => {
                 self.consume_token(&Token::BooleanLiteral(value.clone()))?;
-                Ok(Expression::Literal(crate::catalog::types::Value::Boolean(
-                    value,
-                )))
+                Ok(Expression::Literal(LiteralValue::Boolean(value)))
             }
             Token::NullLiteral | Token::Null => {
                 // `NULL` appears both as a constraint keyword and as an expression literal.
@@ -1050,7 +1043,7 @@ impl Parser {
                 } else {
                     self.consume_token(&Token::Null)?;
                 }
-                Ok(Expression::Literal(crate::catalog::types::Value::Null))
+                Ok(Expression::Literal(LiteralValue::Null))
             }
             Token::Placeholder => {
                 self.consume_token(&Token::Placeholder)?;
@@ -1978,21 +1971,21 @@ impl Parser {
         }
     }
 
-    fn parse_data_type(&mut self) -> Result<crate::catalog::DataType> {
+    fn parse_data_type(&mut self) -> Result<SqlTypeName> {
         let token = self.peek_token()?;
         let data_type = match token {
             Token::Integer | Token::Int | Token::TinyInt | Token::SmallInt | Token::BigInt => {
-                crate::catalog::DataType::Integer
+                SqlTypeName::Integer
             }
-            Token::Text => crate::catalog::DataType::Text,
-            Token::Boolean | Token::Bool => crate::catalog::DataType::Boolean,
+            Token::Text => SqlTypeName::Text,
+            Token::Boolean | Token::Bool => SqlTypeName::Boolean,
             Token::Float | Token::Double | Token::Real | Token::Decimal | Token::Numeric => {
-                crate::catalog::DataType::Float
+                SqlTypeName::Float
             }
             Token::Varchar | Token::Char => {
                 self.consume_token(&token)?;
                 self.parse_type_length()?;
-                return Ok(crate::catalog::DataType::Text);
+                return Ok(SqlTypeName::Text);
             }
             _ => {
                 return Err(HematiteError::ParseError(format!(
@@ -2068,24 +2061,24 @@ impl Parser {
         Ok(())
     }
 
-    fn parse_default_value(&mut self) -> Result<crate::catalog::types::Value> {
+    fn parse_default_value(&mut self) -> Result<LiteralValue> {
         let token = self.peek_token()?;
         match token {
             Token::StringLiteral(value) => {
                 self.consume_token(&Token::StringLiteral(value.clone()))?;
-                Ok(crate::catalog::types::Value::Text(value))
+                Ok(LiteralValue::Text(value))
             }
             Token::NumberLiteral(value) => {
                 self.consume_token(&Token::NumberLiteral(value.clone()))?;
                 if value.fract() == 0.0 {
-                    Ok(crate::catalog::types::Value::Integer(value as i32))
+                    Ok(LiteralValue::Integer(value as i32))
                 } else {
-                    Ok(crate::catalog::types::Value::Float(value))
+                    Ok(LiteralValue::Float(value))
                 }
             }
             Token::BooleanLiteral(value) => {
                 self.consume_token(&Token::BooleanLiteral(value.clone()))?;
-                Ok(crate::catalog::types::Value::Boolean(value))
+                Ok(LiteralValue::Boolean(value))
             }
             Token::NullLiteral | Token::Null => {
                 if token == Token::NullLiteral {
@@ -2093,7 +2086,7 @@ impl Parser {
                 } else {
                     self.consume_token(&Token::Null)?;
                 }
-                Ok(crate::catalog::types::Value::Null)
+                Ok(LiteralValue::Null)
             }
             _ => Err(HematiteError::ParseError(format!(
                 "Expected DEFAULT literal (NULL, number, string, boolean), found: {:?}",

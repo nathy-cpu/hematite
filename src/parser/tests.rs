@@ -1,10 +1,10 @@
 //! Centralized tests for the parser module
 
 mod ast_tests {
-    use crate::catalog::types::DataType;
-    use crate::catalog::Value;
+    use crate::catalog::types::DataType as CatalogDataType;
     use crate::error::Result;
     use crate::parser::ast::*;
+    use crate::parser::LiteralValue;
 
     #[test]
     fn test_select_statement_validation() -> Result<()> {
@@ -15,13 +15,13 @@ mod ast_tests {
             crate::catalog::Column::new(
                 crate::catalog::ColumnId::new(1),
                 "id".to_string(),
-                DataType::Integer,
+                CatalogDataType::Integer,
             )
             .primary_key(true),
             crate::catalog::Column::new(
                 crate::catalog::ColumnId::new(2),
                 "name".to_string(),
-                DataType::Text,
+                CatalogDataType::Text,
             ),
         ];
         catalog.create_table("users".to_string(), columns)?;
@@ -52,7 +52,7 @@ mod ast_tests {
         let columns = vec![crate::catalog::Column::new(
             crate::catalog::ColumnId::new(1),
             "id".to_string(),
-            DataType::Integer,
+            CatalogDataType::Integer,
         )
         .primary_key(true)];
         catalog.create_table("users".to_string(), columns).unwrap();
@@ -82,7 +82,7 @@ mod ast_tests {
         let columns = vec![crate::catalog::Column::new(
             crate::catalog::ColumnId::new(1),
             "id".to_string(),
-            DataType::Integer,
+            CatalogDataType::Integer,
         )
         .primary_key(true)];
         catalog.create_table("users".to_string(), columns).unwrap();
@@ -97,7 +97,7 @@ mod ast_tests {
                 conditions: vec![Condition::Comparison {
                     left: Expression::Column("missing".to_string()),
                     operator: ComparisonOperator::Equal,
-                    right: Expression::Literal(Value::Integer(1)),
+                    right: Expression::Literal(LiteralValue::Integer(1)),
                 }],
             }),
             group_by: Vec::new(),
@@ -119,13 +119,13 @@ mod ast_tests {
             crate::catalog::Column::new(
                 crate::catalog::ColumnId::new(1),
                 "id".to_string(),
-                DataType::Integer,
+                CatalogDataType::Integer,
             )
             .primary_key(true),
             crate::catalog::Column::new(
                 crate::catalog::ColumnId::new(2),
                 "name".to_string(),
-                DataType::Text,
+                CatalogDataType::Text,
             ),
         ];
         catalog.create_table("users".to_string(), columns).unwrap();
@@ -163,13 +163,13 @@ mod ast_tests {
                 crate::catalog::Column::new(
                     crate::catalog::ColumnId::new(1),
                     "id".to_string(),
-                    DataType::Integer,
+                    CatalogDataType::Integer,
                 )
                 .primary_key(true),
                 crate::catalog::Column::new(
                     crate::catalog::ColumnId::new(2),
                     "name".to_string(),
-                    DataType::Text,
+                    CatalogDataType::Text,
                 ),
             ],
         )?;
@@ -179,13 +179,13 @@ mod ast_tests {
                 crate::catalog::Column::new(
                     crate::catalog::ColumnId::new(3),
                     "id".to_string(),
-                    DataType::Integer,
+                    CatalogDataType::Integer,
                 )
                 .primary_key(true),
                 crate::catalog::Column::new(
                     crate::catalog::ColumnId::new(4),
                     "user_id".to_string(),
-                    DataType::Integer,
+                    CatalogDataType::Integer,
                 ),
             ],
         )?;
@@ -777,11 +777,11 @@ mod lexer_tests {
 }
 
 mod parser_tests {
-    use crate::catalog::types::DataType;
     use crate::error::Result;
     use crate::parser::ast::*;
     use crate::parser::lexer::*;
     use crate::parser::parser::*;
+    use crate::parser::{LiteralValue, SqlTypeName};
 
     fn parse_statement(sql: &str) -> Result<Statement> {
         let mut lexer = Lexer::new(sql.to_string());
@@ -1276,7 +1276,7 @@ mod parser_tests {
         assert_eq!(create.columns[1].name, "name");
         assert_eq!(
             create.columns[1].default_value,
-            Some(crate::catalog::types::Value::Text("x".to_string()))
+            Some(LiteralValue::Text("x".to_string()))
         );
 
         Ok(())
@@ -1359,19 +1359,19 @@ mod parser_tests {
         assert_eq!(create.table, "user data");
         assert_eq!(create.columns.len(), 4);
         assert_eq!(create.columns[0].name, "id");
-        assert_eq!(create.columns[0].data_type, DataType::Integer);
+        assert_eq!(create.columns[0].data_type, SqlTypeName::Integer);
         assert!(create.columns[0].unique);
-        assert_eq!(create.columns[1].data_type, DataType::Boolean);
+        assert_eq!(create.columns[1].data_type, SqlTypeName::Boolean);
         assert!(!create.columns[1].nullable);
-        assert_eq!(create.columns[2].data_type, DataType::Float);
+        assert_eq!(create.columns[2].data_type, SqlTypeName::Float);
         assert_eq!(
             create.columns[2].default_value,
-            Some(crate::catalog::Value::Float(1.5))
+            Some(LiteralValue::Float(1.5))
         );
-        assert_eq!(create.columns[3].data_type, DataType::Text);
+        assert_eq!(create.columns[3].data_type, SqlTypeName::Text);
         assert_eq!(
             create.columns[3].default_value,
-            Some(crate::catalog::Value::Text("x".to_string()))
+            Some(LiteralValue::Text("x".to_string()))
         );
         assert!(create.constraints.is_empty());
 
@@ -1383,13 +1383,13 @@ mod parser_tests {
         let create = parse_create(
             "CREATE TABLE metrics (id BIGINT UNSIGNED PRIMARY KEY, ratio REAL, amount DECIMAL(10, 2), code CHAR(8), tiny TINYINT, small SMALLINT, exact NUMERIC(6));",
         )?;
-        assert_eq!(create.columns[0].data_type, DataType::Integer);
-        assert_eq!(create.columns[1].data_type, DataType::Float);
-        assert_eq!(create.columns[2].data_type, DataType::Float);
-        assert_eq!(create.columns[3].data_type, DataType::Text);
-        assert_eq!(create.columns[4].data_type, DataType::Integer);
-        assert_eq!(create.columns[5].data_type, DataType::Integer);
-        assert_eq!(create.columns[6].data_type, DataType::Float);
+        assert_eq!(create.columns[0].data_type, SqlTypeName::Integer);
+        assert_eq!(create.columns[1].data_type, SqlTypeName::Float);
+        assert_eq!(create.columns[2].data_type, SqlTypeName::Float);
+        assert_eq!(create.columns[3].data_type, SqlTypeName::Text);
+        assert_eq!(create.columns[4].data_type, SqlTypeName::Integer);
+        assert_eq!(create.columns[5].data_type, SqlTypeName::Integer);
+        assert_eq!(create.columns[6].data_type, SqlTypeName::Float);
         Ok(())
     }
 
@@ -1501,12 +1501,12 @@ mod parser_tests {
             alter.operation,
             AlterOperation::AddColumn(ColumnDefinition {
                 name,
-                data_type: DataType::Boolean,
+                data_type: SqlTypeName::Boolean,
                 nullable: false,
                 primary_key: false,
                 auto_increment: false,
                 unique: false,
-                default_value: Some(crate::catalog::Value::Boolean(true)),
+                default_value: Some(LiteralValue::Boolean(true)),
                 check_constraint: None,
                 references: None,
             }) if name == "active"
@@ -1535,7 +1535,7 @@ mod parser_tests {
             alter.operation,
             AlterOperation::AlterColumnSetDefault {
                 ref column_name,
-                default_value: crate::catalog::Value::Boolean(true),
+                default_value: LiteralValue::Boolean(true),
             } if column_name == "active"
         ));
 

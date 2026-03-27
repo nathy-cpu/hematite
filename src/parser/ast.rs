@@ -1,8 +1,7 @@
 //! Abstract syntax tree for SQL statements
 
-use crate::catalog::types::Value;
-use crate::catalog::DataType;
 use crate::error::{HematiteError, Result};
+use crate::parser::types::{LiteralValue, SqlTypeName};
 
 #[derive(Debug, Clone)]
 pub enum Statement {
@@ -186,7 +185,7 @@ pub enum Condition {
 #[derive(Debug, Clone)]
 pub enum Expression {
     Column(String),
-    Literal(Value),
+    Literal(LiteralValue),
     Parameter(usize),
     ScalarSubquery(Box<SelectStatement>),
     Case {
@@ -385,7 +384,7 @@ pub enum AlterOperation {
     DropColumn(String),
     AlterColumnSetDefault {
         column_name: String,
-        default_value: Value,
+        default_value: LiteralValue,
     },
     AlterColumnDropDefault {
         column_name: String,
@@ -401,12 +400,12 @@ pub enum AlterOperation {
 #[derive(Debug, Clone)]
 pub struct ColumnDefinition {
     pub name: String,
-    pub data_type: DataType,
+    pub data_type: SqlTypeName,
     pub nullable: bool,
     pub primary_key: bool,
     pub auto_increment: bool,
     pub unique: bool,
-    pub default_value: Option<Value>,
+    pub default_value: Option<LiteralValue>,
     pub check_constraint: Option<CheckConstraintDefinition>,
     pub references: Option<ForeignKeyDefinition>,
 }
@@ -495,7 +494,7 @@ impl Statement {
         max_index.map_or(0, |index| index + 1)
     }
 
-    pub fn bind_parameters(&self, parameters: &[Value]) -> Result<Statement> {
+    pub fn bind_parameters(&self, parameters: &[LiteralValue]) -> Result<Statement> {
         self.bind_statement(parameters)
     }
 
@@ -536,7 +535,7 @@ impl Statement {
         }
     }
 
-    fn bind_statement(&self, parameters: &[Value]) -> Result<Statement> {
+    fn bind_statement(&self, parameters: &[LiteralValue]) -> Result<Statement> {
         match self {
             Statement::Begin => Ok(Statement::Begin),
             Statement::Commit => Ok(Statement::Commit),
@@ -658,7 +657,7 @@ impl WhereClause {
         }
     }
 
-    fn bind(&self, parameters: &[Value]) -> Result<WhereClause> {
+    fn bind(&self, parameters: &[LiteralValue]) -> Result<WhereClause> {
         Ok(WhereClause {
             conditions: self
                 .conditions
@@ -710,7 +709,7 @@ impl Condition {
         }
     }
 
-    fn bind(&self, parameters: &[Value]) -> Result<Condition> {
+    fn bind(&self, parameters: &[LiteralValue]) -> Result<Condition> {
         match self {
             Condition::Comparison {
                 left,
@@ -806,7 +805,7 @@ impl SelectItem {
         }
     }
 
-    fn bind(&self, parameters: &[Value]) -> Result<SelectItem> {
+    fn bind(&self, parameters: &[LiteralValue]) -> Result<SelectItem> {
         match self {
             SelectItem::Wildcard => Ok(SelectItem::Wildcard),
             SelectItem::Column(name) => Ok(SelectItem::Column(name.clone())),
@@ -887,7 +886,7 @@ impl Expression {
         }
     }
 
-    fn bind(&self, parameters: &[Value]) -> Result<Expression> {
+    fn bind(&self, parameters: &[LiteralValue]) -> Result<Expression> {
         match self {
             Expression::Column(name) => Ok(Expression::Column(name.clone())),
             Expression::Literal(value) => Ok(Expression::Literal(value.clone())),
@@ -2072,7 +2071,7 @@ impl CreateStatement {
             ));
         }
         if let Some(column) = auto_increment_columns.first() {
-            if column.data_type != DataType::Integer {
+            if column.data_type != SqlTypeName::Integer {
                 return Err(HematiteError::ParseError(format!(
                     "AUTO_INCREMENT column '{}' must use an integer type",
                     column.name
@@ -2411,7 +2410,7 @@ impl AlterStatement {
         &self,
         catalog: &crate::catalog::Schema,
         column_name: &str,
-        default_value: &Value,
+        default_value: &LiteralValue,
     ) -> Result<()> {
         let table = self.require_table(catalog)?;
         let column = table.get_column_by_name(column_name).ok_or_else(|| {
@@ -2426,7 +2425,9 @@ impl AlterStatement {
                 column_name
             )));
         }
-        if !default_value.is_null() && !default_value.is_compatible_with(column.data_type) {
+        if !default_value.is_null()
+            && !default_value.is_compatible_with(sql_type_name_for_catalog_type(column.data_type))
+        {
             return Err(HematiteError::ParseError(format!(
                 "DEFAULT value for column '{}' is incompatible with {:?}",
                 column_name, column.data_type
@@ -2922,12 +2923,12 @@ impl Expression {
         match self {
             Expression::Column(name) => name.clone(),
             Expression::Literal(value) => match value {
-                Value::Integer(i) => i.to_string(),
-                Value::Text(s) => format!("'{}'", s.replace('\'', "''")),
-                Value::Boolean(true) => "TRUE".to_string(),
-                Value::Boolean(false) => "FALSE".to_string(),
-                Value::Float(f) => f.to_string(),
-                Value::Null => "NULL".to_string(),
+                LiteralValue::Integer(i) => i.to_string(),
+                LiteralValue::Text(s) => format!("'{}'", s.replace('\'', "''")),
+                LiteralValue::Boolean(true) => "TRUE".to_string(),
+                LiteralValue::Boolean(false) => "FALSE".to_string(),
+                LiteralValue::Float(f) => f.to_string(),
+                LiteralValue::Null => "NULL".to_string(),
             },
             Expression::Parameter(index) => format!("?{}", index + 1),
             Expression::ScalarSubquery(_) => "(<subquery>)".to_string(),
@@ -3195,6 +3196,15 @@ fn require_table<'a>(
     catalog
         .get_table_by_name(table_name)
         .ok_or_else(|| HematiteError::ParseError(format!("Table '{}' does not exist", table_name)))
+}
+
+fn sql_type_name_for_catalog_type(data_type: crate::catalog::DataType) -> SqlTypeName {
+    match data_type {
+        crate::catalog::DataType::Integer => SqlTypeName::Integer,
+        crate::catalog::DataType::Text => SqlTypeName::Text,
+        crate::catalog::DataType::Boolean => SqlTypeName::Boolean,
+        crate::catalog::DataType::Float => SqlTypeName::Float,
+    }
 }
 
 fn validate_named_columns<F>(

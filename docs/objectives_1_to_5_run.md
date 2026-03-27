@@ -74,9 +74,9 @@ Current lower-stack status that should be preserved:
 
 #### Block 2A — Parser Independence
 
-- [ ] Move parser AST literals and type names off catalog-owned types.
-- [ ] Add query-owned lowering from parser types into catalog/runtime types.
-- [ ] Re-run parser and query validation after the split.
+- [x] Move parser AST literals and type names off catalog-owned types.
+- [x] Add query-owned lowering from parser types into catalog/runtime types.
+- [x] Re-run parser and query validation after the split.
 
 #### Block 2B — Catalog Over B-Tree Only
 

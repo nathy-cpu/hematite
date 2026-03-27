@@ -28,6 +28,7 @@ use crate::catalog::JournalMode;
 use crate::catalog::Value;
 use crate::error::{HematiteError, Result};
 use crate::parser::{Lexer, Parser};
+use crate::query::lowering::raise_literal_value;
 use crate::query::{ExecutionContext, QueryExecutor, QueryPlanner, QueryResult};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -381,8 +382,12 @@ impl PreparedStatement {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+        let bound_literals = bound_values
+            .iter()
+            .map(raise_literal_value)
+            .collect::<Vec<_>>();
 
-        self.statement.bind_parameters(&bound_values)
+        self.statement.bind_parameters(&bound_literals)
     }
 }
 

@@ -26,6 +26,7 @@ use crate::catalog::StoredRow;
 use crate::catalog::{Column, DataType, Table, Value};
 use crate::error::{HematiteError, Result};
 use crate::parser::ast::*;
+use crate::query::lowering::{lower_literal_value, lower_type_name, raise_literal_value};
 use crate::query::plan::{ExecutionProgram, QueryPlan, SelectAccessPath};
 use crate::query::predicate::extract_literal_equalities;
 pub use crate::query::runtime::{ExecutionContext, QueryExecutor, QueryResult};
@@ -236,7 +237,7 @@ impl SelectExecutor {
         row: &[Value],
     ) -> Result<Value> {
         match expr {
-            Expression::Literal(value) => Ok(value.clone()),
+            Expression::Literal(value) => Ok(lower_literal_value(value)),
             Expression::Parameter(index) => Err(HematiteError::ParseError(format!(
                 "Unbound parameter {} reached execution",
                 index + 1
@@ -674,7 +675,7 @@ impl SelectExecutor {
                     return Ok(());
                 }
                 if let Some(value) = self.lookup_outer_scope_value(scopes, name)? {
-                    *expr = Expression::Literal(value);
+                    *expr = Expression::Literal(raise_literal_value(&value));
                 }
             }
             Expression::Case {
@@ -1764,7 +1765,7 @@ impl SelectExecutor {
         group_rows: &[Vec<Value>],
     ) -> Result<Value> {
         match expr {
-            Expression::Literal(value) => Ok(value.clone()),
+            Expression::Literal(value) => Ok(lower_literal_value(value)),
             Expression::Parameter(index) => Err(HematiteError::ParseError(format!(
                 "Unbound parameter {} reached execution",
                 index + 1
@@ -2759,7 +2760,7 @@ impl InsertExecutor {
 
     fn evaluate_value_expression(&self, expr: &Expression) -> Result<Value> {
         match expr {
-            Expression::Literal(value) => Ok(value.clone()),
+            Expression::Literal(value) => Ok(lower_literal_value(value)),
             Expression::Parameter(index) => Err(HematiteError::ParseError(format!(
                 "Unbound parameter {} reached execution",
                 index + 1
@@ -3404,14 +3405,14 @@ impl CreateExecutor {
             let mut column = Column::new(
                 crate::catalog::ColumnId::new(next_id),
                 col_def.name.clone(),
-                col_def.data_type.clone(),
+                lower_type_name(col_def.data_type),
             )
             .nullable(col_def.nullable)
             .primary_key(col_def.primary_key)
             .auto_increment(col_def.auto_increment);
 
             if let Some(default_val) = &col_def.default_value {
-                column = column.default_value(default_val.clone());
+                column = column.default_value(lower_literal_value(default_val));
             }
 
             columns.push(column);
@@ -3679,12 +3680,12 @@ impl QueryExecutor for AlterExecutor {
                 let column = Column::new(
                     crate::catalog::ColumnId::new(ctx.catalog.next_column_id()),
                     column_def.name.clone(),
-                    column_def.data_type,
+                    lower_type_name(column_def.data_type),
                 )
                 .nullable(column_def.nullable)
                 .primary_key(column_def.primary_key);
                 let column = if let Some(default_value) = &column_def.default_value {
-                    column.default_value(default_value.clone())
+                    column.default_value(lower_literal_value(default_value))
                 } else {
                     column
                 };
@@ -3722,7 +3723,7 @@ impl QueryExecutor for AlterExecutor {
                 ctx.catalog.set_column_default(
                     table.id,
                     column_name,
-                    Some(default_value.clone()),
+                    Some(lower_literal_value(default_value)),
                 )?;
             }
             AlterOperation::AlterColumnDropDefault { column_name } => {

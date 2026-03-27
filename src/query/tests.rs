@@ -6,6 +6,7 @@ mod executor_tests {
     use crate::catalog::{Column, Schema};
     use crate::error::Result;
     use crate::parser::ast::*;
+    use crate::parser::{LiteralValue, SqlTypeName};
     use crate::query::executor::*;
     use crate::test_utils::TestDbFile;
 
@@ -164,7 +165,7 @@ mod executor_tests {
                 conditions: vec![Condition::Comparison {
                     left: Expression::Column("email".to_string()),
                     operator: ComparisonOperator::Equal,
-                    right: Expression::Literal(Value::Text("b@example.com".to_string())),
+                    right: Expression::Literal(LiteralValue::Text("b@example.com".to_string())),
                 }],
             }),
             group_by: Vec::new(),
@@ -255,7 +256,7 @@ mod executor_tests {
                 conditions: vec![Condition::Comparison {
                     left: Expression::Column("id".to_string()),
                     operator: ComparisonOperator::Equal,
-                    right: Expression::Literal(Value::Integer(2)),
+                    right: Expression::Literal(LiteralValue::Integer(2)),
                 }],
             }),
             group_by: Vec::new(),
@@ -319,7 +320,7 @@ mod executor_tests {
                 conditions: vec![Condition::Comparison {
                     left: Expression::Column("rowid".to_string()),
                     operator: ComparisonOperator::Equal,
-                    right: Expression::Literal(Value::Integer(rowid_1 as i32)),
+                    right: Expression::Literal(LiteralValue::Integer(rowid_1 as i32)),
                 }],
             }),
             group_by: Vec::new(),
@@ -372,8 +373,8 @@ mod executor_tests {
             table: "users".to_string(),
             columns: vec!["id".to_string(), "name".to_string()],
             values: vec![vec![
-                Expression::Literal(Value::Integer(4)),
-                Expression::Literal(Value::Text("Dave".to_string())),
+                Expression::Literal(LiteralValue::Integer(4)),
+                Expression::Literal(LiteralValue::Text("Dave".to_string())),
             ]],
         };
 
@@ -443,7 +444,7 @@ mod executor_tests {
                 conditions: vec![Condition::Comparison {
                     left: Expression::Column("id".to_string()),
                     operator: ComparisonOperator::Equal,
-                    right: Expression::Literal(Value::Integer(2)),
+                    right: Expression::Literal(LiteralValue::Integer(2)),
                 }],
             }),
         };
@@ -519,13 +520,13 @@ mod executor_tests {
             table: "users".to_string(),
             assignments: vec![UpdateAssignment {
                 column: "name".to_string(),
-                value: Expression::Literal(Value::Text("Bobby".to_string())),
+                value: Expression::Literal(LiteralValue::Text("Bobby".to_string())),
             }],
             where_clause: Some(WhereClause {
                 conditions: vec![Condition::Comparison {
                     left: Expression::Column("id".to_string()),
                     operator: ComparisonOperator::Equal,
-                    right: Expression::Literal(Value::Integer(2)),
+                    right: Expression::Literal(LiteralValue::Integer(2)),
                 }],
             }),
         };
@@ -560,7 +561,7 @@ mod executor_tests {
             table: "test_table".to_string(),
             columns: vec![ColumnDefinition {
                 name: "id".to_string(),
-                data_type: DataType::Integer,
+                data_type: SqlTypeName::Integer,
                 nullable: false,
                 primary_key: true,
                 auto_increment: false,
@@ -605,7 +606,7 @@ mod executor_tests {
             columns: vec![
                 ColumnDefinition {
                     name: "id".to_string(),
-                    data_type: DataType::Integer,
+                    data_type: SqlTypeName::Integer,
                     nullable: false,
                     primary_key: true,
                     auto_increment: false,
@@ -616,7 +617,7 @@ mod executor_tests {
                 },
                 ColumnDefinition {
                     name: "parent_id".to_string(),
-                    data_type: DataType::Integer,
+                    data_type: SqlTypeName::Integer,
                     nullable: true,
                     primary_key: false,
                     auto_increment: false,
@@ -751,10 +752,11 @@ mod optimizer_tests {
 }
 
 mod planner_tests {
-    use crate::catalog::types::{DataType, Value};
+    use crate::catalog::types::DataType;
     use crate::catalog::Schema;
     use crate::error::Result;
     use crate::parser::ast::*;
+    use crate::parser::{LiteralValue, SqlTypeName};
     use crate::query::planner::*;
     use std::collections::HashMap;
 
@@ -825,7 +827,7 @@ mod planner_tests {
                 conditions: vec![Condition::Comparison {
                     left: Expression::Column("id".to_string()),
                     operator: ComparisonOperator::Equal,
-                    right: Expression::Literal(Value::Integer(1)),
+                    right: Expression::Literal(LiteralValue::Integer(1)),
                 }],
             }),
             group_by: Vec::new(),
@@ -897,7 +899,7 @@ mod planner_tests {
                 conditions: vec![Condition::Comparison {
                     left: Expression::Column("email".to_string()),
                     operator: ComparisonOperator::Equal,
-                    right: Expression::Literal(Value::Text("a@example.com".to_string())),
+                    right: Expression::Literal(LiteralValue::Text("a@example.com".to_string())),
                 }],
             }),
             group_by: Vec::new(),
@@ -1021,7 +1023,7 @@ mod planner_tests {
                 conditions: vec![Condition::Comparison {
                     left: Expression::Column("id".to_string()),
                     operator: ComparisonOperator::Equal,
-                    right: Expression::Literal(Value::Integer(1)),
+                    right: Expression::Literal(LiteralValue::Integer(1)),
                 }],
             }),
         };
@@ -1059,13 +1061,13 @@ mod planner_tests {
             table: "users".to_string(),
             assignments: vec![UpdateAssignment {
                 column: "name".to_string(),
-                value: Expression::Literal(Value::Text("Updated".to_string())),
+                value: Expression::Literal(LiteralValue::Text("Updated".to_string())),
             }],
             where_clause: Some(WhereClause {
                 conditions: vec![Condition::Comparison {
                     left: Expression::Column("id".to_string()),
                     operator: ComparisonOperator::Equal,
-                    right: Expression::Literal(Value::Integer(1)),
+                    right: Expression::Literal(LiteralValue::Integer(1)),
                 }],
             }),
         };
@@ -1117,13 +1119,13 @@ mod planner_tests {
                     left: Box::new(Condition::Comparison {
                         left: Expression::Column("src".to_string()),
                         operator: ComparisonOperator::Equal,
-                        right: Expression::Literal(Value::Integer(1)),
+                        right: Expression::Literal(LiteralValue::Integer(1)),
                     }),
                     operator: LogicalOperator::And,
                     right: Box::new(Condition::Comparison {
                         left: Expression::Column("dst".to_string()),
                         operator: ComparisonOperator::Equal,
-                        right: Expression::Literal(Value::Integer(2)),
+                        right: Expression::Literal(LiteralValue::Integer(2)),
                     }),
                 }],
             }),
@@ -1187,13 +1189,13 @@ mod planner_tests {
                     left: Box::new(Condition::Comparison {
                         left: Expression::Column("user_id".to_string()),
                         operator: ComparisonOperator::Equal,
-                        right: Expression::Literal(Value::Integer(10)),
+                        right: Expression::Literal(LiteralValue::Integer(10)),
                     }),
                     operator: LogicalOperator::And,
                     right: Box::new(Condition::Comparison {
                         left: Expression::Column("org_id".to_string()),
                         operator: ComparisonOperator::Equal,
-                        right: Expression::Literal(Value::Integer(20)),
+                        right: Expression::Literal(LiteralValue::Integer(20)),
                     }),
                 }],
             }),
@@ -1269,12 +1271,12 @@ mod planner_tests {
                     Condition::Comparison {
                         left: Expression::Column("email".to_string()),
                         operator: ComparisonOperator::Equal,
-                        right: Expression::Literal(Value::Text("a@example.com".to_string())),
+                        right: Expression::Literal(LiteralValue::Text("a@example.com".to_string())),
                     },
                     Condition::Comparison {
                         left: Expression::Column("active".to_string()),
                         operator: ComparisonOperator::Equal,
-                        right: Expression::Literal(Value::Boolean(true)),
+                        right: Expression::Literal(LiteralValue::Boolean(true)),
                     },
                 ],
             }),
@@ -1423,7 +1425,7 @@ mod planner_tests {
                 conditions: vec![Condition::Comparison {
                     left: Expression::Column("rowid".to_string()),
                     operator: ComparisonOperator::Equal,
-                    right: Expression::Literal(Value::Integer(7)),
+                    right: Expression::Literal(LiteralValue::Integer(7)),
                 }],
             }),
             group_by: Vec::new(),
@@ -1443,7 +1445,7 @@ mod planner_tests {
                 conditions: vec![Condition::Comparison {
                     left: Expression::Column("id".to_string()),
                     operator: ComparisonOperator::Equal,
-                    right: Expression::Literal(Value::Integer(1)),
+                    right: Expression::Literal(LiteralValue::Integer(1)),
                 }],
             }),
         }))?;
@@ -1484,7 +1486,7 @@ mod planner_tests {
                 conditions: vec![Condition::Comparison {
                     left: Expression::Column("rowid".to_string()),
                     operator: ComparisonOperator::Equal,
-                    right: Expression::Literal(Value::Integer(7)),
+                    right: Expression::Literal(LiteralValue::Integer(7)),
                 }],
             }),
             group_by: Vec::new(),
@@ -1574,8 +1576,8 @@ mod planner_tests {
             table: "users".to_string(),
             columns: vec!["id".to_string(), "name".to_string()],
             values: vec![vec![
-                Expression::Literal(Value::Integer(1)),
-                Expression::Literal(Value::Text("Alice".to_string())),
+                Expression::Literal(LiteralValue::Integer(1)),
+                Expression::Literal(LiteralValue::Text("Alice".to_string())),
             ]],
         };
 
@@ -1597,7 +1599,7 @@ mod planner_tests {
             table: "test_table".to_string(),
             columns: vec![ColumnDefinition {
                 name: "id".to_string(),
-                data_type: DataType::Integer,
+                data_type: SqlTypeName::Integer,
                 nullable: false,
                 primary_key: true,
                 auto_increment: false,
