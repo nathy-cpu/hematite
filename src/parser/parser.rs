@@ -626,7 +626,7 @@ impl Parser {
     }
 
     fn parse_condition(&mut self) -> Result<Condition> {
-        let left = self.parse_expression()?;
+        let left = self.parse_value_expression()?;
 
         if matches!(self.peek_token(), Ok(Token::Not)) {
             self.consume_token(&Token::Not)?;
@@ -638,8 +638,12 @@ impl Parser {
                 self.consume_token(&Token::Like)?;
                 return self.parse_like_condition(left, true);
             }
+            if matches!(self.peek_token(), Ok(Token::Between)) {
+                self.consume_token(&Token::Between)?;
+                return self.parse_between_condition(left, true);
+            }
             return Err(HematiteError::ParseError(
-                "Expected IN or LIKE after NOT in predicate".to_string(),
+                "Expected IN, LIKE, or BETWEEN after NOT in predicate".to_string(),
             ));
         }
 
@@ -672,7 +676,7 @@ impl Parser {
 
         let operator = self.parse_comparison_operator()?;
 
-        let right = self.parse_expression()?;
+        let right = self.parse_value_expression()?;
 
         Ok(Condition::Comparison {
             left,
@@ -729,9 +733,9 @@ impl Parser {
     }
 
     fn parse_between_condition(&mut self, expr: Expression, is_not: bool) -> Result<Condition> {
-        let lower = self.parse_expression()?;
+        let lower = self.parse_value_expression()?;
         self.consume_token(&Token::And)?;
-        let upper = self.parse_expression()?;
+        let upper = self.parse_value_expression()?;
         Ok(Condition::Between {
             expr,
             lower,
@@ -741,7 +745,7 @@ impl Parser {
     }
 
     fn parse_like_condition(&mut self, expr: Expression, is_not: bool) -> Result<Condition> {
-        let pattern = self.parse_expression()?;
+        let pattern = self.parse_value_expression()?;
         Ok(Condition::Like {
             expr,
             pattern,
@@ -750,7 +754,190 @@ impl Parser {
     }
 
     fn parse_expression(&mut self) -> Result<Expression> {
+        self.parse_or_expression()
+    }
+
+    fn parse_or_expression(&mut self) -> Result<Expression> {
+        let mut expr = self.parse_and_expression()?;
+
+        while matches!(self.peek_token(), Ok(Token::Or)) {
+            self.consume_token(&Token::Or)?;
+            let right = self.parse_and_expression()?;
+            expr = Expression::Logical {
+                left: Box::new(expr),
+                operator: LogicalOperator::Or,
+                right: Box::new(right),
+            };
+        }
+
+        Ok(expr)
+    }
+
+    fn parse_and_expression(&mut self) -> Result<Expression> {
+        let mut expr = self.parse_not_expression()?;
+
+        while matches!(self.peek_token(), Ok(Token::And)) {
+            self.consume_token(&Token::And)?;
+            let right = self.parse_not_expression()?;
+            expr = Expression::Logical {
+                left: Box::new(expr),
+                operator: LogicalOperator::And,
+                right: Box::new(right),
+            };
+        }
+
+        Ok(expr)
+    }
+
+    fn parse_not_expression(&mut self) -> Result<Expression> {
+        if matches!(self.peek_token(), Ok(Token::Not)) {
+            self.consume_token(&Token::Not)?;
+            return Ok(Expression::UnaryNot(Box::new(self.parse_not_expression()?)));
+        }
+
+        self.parse_predicate_expression()
+    }
+
+    fn parse_predicate_expression(&mut self) -> Result<Expression> {
+        if matches!(self.peek_token(), Ok(Token::Exists)) {
+            self.consume_token(&Token::Exists)?;
+            return self.parse_exists_expression(false);
+        }
+
+        let left = self.parse_value_expression()?;
+
+        if matches!(self.peek_token(), Ok(Token::Not)) {
+            self.consume_token(&Token::Not)?;
+            if matches!(self.peek_token(), Ok(Token::In)) {
+                self.consume_token(&Token::In)?;
+                return self.parse_in_list_expression(left, true);
+            }
+            if matches!(self.peek_token(), Ok(Token::Like)) {
+                self.consume_token(&Token::Like)?;
+                return self.parse_like_expression(left, true);
+            }
+            if matches!(self.peek_token(), Ok(Token::Between)) {
+                self.consume_token(&Token::Between)?;
+                return self.parse_between_expression(left, true);
+            }
+            return Err(HematiteError::ParseError(
+                "Expected IN, LIKE, or BETWEEN after NOT in expression".to_string(),
+            ));
+        }
+
+        if matches!(self.peek_token(), Ok(Token::In)) {
+            self.consume_token(&Token::In)?;
+            return self.parse_in_list_expression(left, false);
+        }
+
+        if matches!(self.peek_token(), Ok(Token::Between)) {
+            self.consume_token(&Token::Between)?;
+            return self.parse_between_expression(left, false);
+        }
+
+        if matches!(self.peek_token(), Ok(Token::Like)) {
+            self.consume_token(&Token::Like)?;
+            return self.parse_like_expression(left, false);
+        }
+
+        if matches!(self.peek_token(), Ok(Token::Is)) {
+            self.consume_token(&Token::Is)?;
+            let is_not = if matches!(self.peek_token(), Ok(Token::Not)) {
+                self.consume_token(&Token::Not)?;
+                true
+            } else {
+                false
+            };
+            self.consume_token(&Token::Null)?;
+            return Ok(Expression::NullCheck {
+                expr: Box::new(left),
+                is_not,
+            });
+        }
+
+        if self.peek_token_starts_comparison() {
+            let operator = self.parse_comparison_operator()?;
+            let right = self.parse_value_expression()?;
+            return Ok(Expression::Comparison {
+                left: Box::new(left),
+                operator,
+                right: Box::new(right),
+            });
+        }
+
+        Ok(left)
+    }
+
+    fn parse_value_expression(&mut self) -> Result<Expression> {
         self.parse_additive_expression()
+    }
+
+    fn parse_in_list_expression(&mut self, expr: Expression, is_not: bool) -> Result<Expression> {
+        self.consume_token(&Token::LeftParen)?;
+        if matches!(self.peek_token(), Ok(Token::Select | Token::With)) {
+            let subquery = self.parse_query_statement(false)?;
+            self.consume_token(&Token::RightParen)?;
+            return Ok(Expression::InSubquery {
+                expr: Box::new(expr),
+                subquery: Box::new(subquery),
+                is_not,
+            });
+        }
+
+        let mut values = Vec::new();
+
+        loop {
+            values.push(self.parse_expression()?);
+            if matches!(self.peek_token(), Ok(Token::Comma)) {
+                self.consume_token(&Token::Comma)?;
+                continue;
+            }
+            break;
+        }
+
+        if values.is_empty() {
+            return Err(HematiteError::ParseError(
+                "IN list must contain at least one expression".to_string(),
+            ));
+        }
+
+        self.consume_token(&Token::RightParen)?;
+        Ok(Expression::InList {
+            expr: Box::new(expr),
+            values,
+            is_not,
+        })
+    }
+
+    fn parse_exists_expression(&mut self, is_not: bool) -> Result<Expression> {
+        self.consume_token(&Token::LeftParen)?;
+        let subquery = self.parse_query_statement(false)?;
+        self.consume_token(&Token::RightParen)?;
+        Ok(Expression::Exists {
+            subquery: Box::new(subquery),
+            is_not,
+        })
+    }
+
+    fn parse_between_expression(&mut self, expr: Expression, is_not: bool) -> Result<Expression> {
+        let lower = self.parse_value_expression()?;
+        self.consume_token(&Token::And)?;
+        let upper = self.parse_value_expression()?;
+        Ok(Expression::Between {
+            expr: Box::new(expr),
+            lower: Box::new(lower),
+            upper: Box::new(upper),
+            is_not,
+        })
+    }
+
+    fn parse_like_expression(&mut self, expr: Expression, is_not: bool) -> Result<Expression> {
+        let pattern = self.parse_value_expression()?;
+        Ok(Expression::Like {
+            expr: Box::new(expr),
+            pattern: Box::new(pattern),
+            is_not,
+        })
     }
 
     fn parse_additive_expression(&mut self) -> Result<Expression> {
@@ -895,7 +1082,7 @@ impl Parser {
 
         while matches!(self.peek_token(), Ok(Token::When)) {
             self.consume_token(&Token::When)?;
-            let condition = self.parse_or_condition()?;
+            let condition = self.parse_expression()?;
             self.consume_token(&Token::Then)?;
             let result = self.parse_expression()?;
             branches.push(CaseWhenClause { condition, result });
@@ -915,7 +1102,10 @@ impl Parser {
         };
 
         self.consume_token(&Token::End)?;
-        Ok(Expression::Case { branches, else_expr })
+        Ok(Expression::Case {
+            branches,
+            else_expr,
+        })
     }
 
     fn parse_scalar_function_expression(&mut self) -> Result<Expression> {
@@ -1132,6 +1322,18 @@ impl Parser {
                 token
             ))),
         }
+    }
+
+    fn peek_token_starts_comparison(&self) -> bool {
+        matches!(
+            self.peek_token(),
+            Ok(Token::Equal
+                | Token::NotEqual
+                | Token::LessThan
+                | Token::LessThanOrEqual
+                | Token::GreaterThan
+                | Token::GreaterThanOrEqual)
+        )
     }
 
     fn parse_drop(&mut self) -> Result<Statement> {

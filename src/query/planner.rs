@@ -506,9 +506,12 @@ impl QueryPlanner {
                     }
                 }
             }
-            Expression::Case { branches, else_expr } => {
+            Expression::Case {
+                branches,
+                else_expr,
+            } => {
                 for branch in branches {
-                    self.collect_condition_columns(&branch.condition, table, accessed_columns);
+                    self.collect_expression_columns(&branch.condition, table, accessed_columns);
                     self.collect_expression_columns(&branch.result, table, accessed_columns);
                 }
                 if let Some(else_expr) = else_expr {
@@ -524,56 +527,46 @@ impl QueryPlanner {
             Expression::UnaryMinus(expr) => {
                 self.collect_expression_columns(expr, table, accessed_columns);
             }
+            Expression::UnaryNot(expr) => {
+                self.collect_expression_columns(expr, table, accessed_columns);
+            }
             Expression::Binary { left, right, .. } => {
                 self.collect_expression_columns(left, table, accessed_columns);
                 self.collect_expression_columns(right, table, accessed_columns);
             }
-            Expression::Literal(_) | Expression::Parameter(_) => {}
-        }
-    }
-
-    fn collect_condition_columns(
-        &self,
-        condition: &Condition,
-        table: &Table,
-        accessed_columns: &mut Vec<ColumnAccess>,
-    ) {
-        match condition {
-            Condition::Comparison { left, right, .. } => {
+            Expression::Comparison { left, right, .. } => {
                 self.collect_expression_columns(left, table, accessed_columns);
                 self.collect_expression_columns(right, table, accessed_columns);
             }
-            Condition::InList { expr, values, .. } => {
+            Expression::InList { expr, values, .. } => {
                 self.collect_expression_columns(expr, table, accessed_columns);
                 for value in values {
                     self.collect_expression_columns(value, table, accessed_columns);
                 }
             }
-            Condition::InSubquery { expr, .. } => {
+            Expression::InSubquery { expr, .. } => {
                 self.collect_expression_columns(expr, table, accessed_columns);
             }
-            Condition::Between {
+            Expression::Between {
                 expr, lower, upper, ..
             } => {
                 self.collect_expression_columns(expr, table, accessed_columns);
                 self.collect_expression_columns(lower, table, accessed_columns);
                 self.collect_expression_columns(upper, table, accessed_columns);
             }
-            Condition::Like { expr, pattern, .. } => {
+            Expression::Like { expr, pattern, .. } => {
                 self.collect_expression_columns(expr, table, accessed_columns);
                 self.collect_expression_columns(pattern, table, accessed_columns);
             }
-            Condition::Exists { .. } => {}
-            Condition::NullCheck { expr, .. } => {
+            Expression::Exists { .. } => {}
+            Expression::NullCheck { expr, .. } => {
                 self.collect_expression_columns(expr, table, accessed_columns);
             }
-            Condition::Not(inner) => {
-                self.collect_condition_columns(inner, table, accessed_columns);
+            Expression::Logical { left, right, .. } => {
+                self.collect_expression_columns(left, table, accessed_columns);
+                self.collect_expression_columns(right, table, accessed_columns);
             }
-            Condition::Logical { left, right, .. } => {
-                self.collect_condition_columns(left, table, accessed_columns);
-                self.collect_condition_columns(right, table, accessed_columns);
-            }
+            Expression::Literal(_) | Expression::Parameter(_) => {}
         }
     }
 

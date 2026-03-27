@@ -973,8 +973,7 @@ mod parser_tests {
 
     #[test]
     fn test_parse_scalar_function_expression() -> Result<()> {
-        let select =
-            parse_select("SELECT COALESCE(name, 'unknown') AS display_name FROM users;")?;
+        let select = parse_select("SELECT COALESCE(name, 'unknown') AS display_name FROM users;")?;
         assert!(matches!(
             &select.columns[0],
             SelectItem::Expression(Expression::ScalarFunctionCall {
@@ -1010,6 +1009,50 @@ mod parser_tests {
                 if branches.len() == 2 && else_expr.is_some()
         ));
         assert_eq!(select.column_aliases[0].as_deref(), Some("grade"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_boolean_expression_projection() -> Result<()> {
+        let select = parse_select("SELECT (score > 1 AND NOT active) AS keep_row FROM users;")?;
+        assert!(matches!(
+            &select.columns[0],
+            SelectItem::Expression(Expression::Logical {
+                operator: LogicalOperator::And,
+                ..
+            })
+        ));
+        assert_eq!(select.column_aliases[0].as_deref(), Some("keep_row"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_case_expression_with_boolean_condition_expression() -> Result<()> {
+        let select = parse_select(
+            "SELECT CASE WHEN score > 10 AND NOT active THEN 'high' ELSE 'low' END FROM users;",
+        )?;
+        assert!(matches!(
+            &select.columns[0],
+            SelectItem::Expression(Expression::Case { branches, .. })
+                if matches!(
+                    &branches[0].condition,
+                    Expression::Logical {
+                        operator: LogicalOperator::And,
+                        ..
+                    }
+                )
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_not_between_expression() -> Result<()> {
+        let select = parse_select("SELECT score NOT BETWEEN 1 AND 3 AS outside_range FROM users;")?;
+        assert!(matches!(
+            &select.columns[0],
+            SelectItem::Expression(Expression::Between { is_not: true, .. })
+        ));
+        assert_eq!(select.column_aliases[0].as_deref(), Some("outside_range"));
         Ok(())
     }
 
@@ -1661,8 +1704,7 @@ mod parser_tests {
 
     #[test]
     fn test_parse_select_with_intersect_and_except() -> Result<()> {
-        let intersect =
-            parse_select("SELECT id FROM users INTERSECT SELECT user_id FROM posts;")?;
+        let intersect = parse_select("SELECT id FROM users INTERSECT SELECT user_id FROM posts;")?;
         assert_eq!(
             intersect
                 .set_operation

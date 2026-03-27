@@ -202,9 +202,49 @@ pub enum Expression {
         target: AggregateTarget,
     },
     UnaryMinus(Box<Expression>),
+    UnaryNot(Box<Expression>),
     Binary {
         left: Box<Expression>,
         operator: ArithmeticOperator,
+        right: Box<Expression>,
+    },
+    Comparison {
+        left: Box<Expression>,
+        operator: ComparisonOperator,
+        right: Box<Expression>,
+    },
+    InList {
+        expr: Box<Expression>,
+        values: Vec<Expression>,
+        is_not: bool,
+    },
+    InSubquery {
+        expr: Box<Expression>,
+        subquery: Box<SelectStatement>,
+        is_not: bool,
+    },
+    Between {
+        expr: Box<Expression>,
+        lower: Box<Expression>,
+        upper: Box<Expression>,
+        is_not: bool,
+    },
+    Like {
+        expr: Box<Expression>,
+        pattern: Box<Expression>,
+        is_not: bool,
+    },
+    Exists {
+        subquery: Box<SelectStatement>,
+        is_not: bool,
+    },
+    NullCheck {
+        expr: Box<Expression>,
+        is_not: bool,
+    },
+    Logical {
+        left: Box<Expression>,
+        operator: LogicalOperator,
         right: Box<Expression>,
     },
 }
@@ -246,7 +286,7 @@ pub enum ScalarFunction {
 
 #[derive(Debug, Clone)]
 pub struct CaseWhenClause {
-    pub condition: Condition,
+    pub condition: Expression,
     pub result: Expression,
 }
 
@@ -788,7 +828,10 @@ impl Expression {
         match self {
             Expression::Parameter(index) => f(*index),
             Expression::ScalarSubquery(subquery) => subquery.visit_parameters(f),
-            Expression::Case { branches, else_expr } => {
+            Expression::Case {
+                branches,
+                else_expr,
+            } => {
                 for branch in branches {
                     branch.condition.visit_parameters(f);
                     branch.result.visit_parameters(f);
@@ -804,7 +847,39 @@ impl Expression {
             }
             Expression::AggregateCall { .. } => {}
             Expression::UnaryMinus(expr) => expr.visit_parameters(f),
+            Expression::UnaryNot(expr) => expr.visit_parameters(f),
             Expression::Binary { left, right, .. } => {
+                left.visit_parameters(f);
+                right.visit_parameters(f);
+            }
+            Expression::Comparison { left, right, .. } => {
+                left.visit_parameters(f);
+                right.visit_parameters(f);
+            }
+            Expression::InList { expr, values, .. } => {
+                expr.visit_parameters(f);
+                for value in values {
+                    value.visit_parameters(f);
+                }
+            }
+            Expression::InSubquery { expr, subquery, .. } => {
+                expr.visit_parameters(f);
+                subquery.visit_parameters(f);
+            }
+            Expression::Between {
+                expr, lower, upper, ..
+            } => {
+                expr.visit_parameters(f);
+                lower.visit_parameters(f);
+                upper.visit_parameters(f);
+            }
+            Expression::Like { expr, pattern, .. } => {
+                expr.visit_parameters(f);
+                pattern.visit_parameters(f);
+            }
+            Expression::Exists { subquery, .. } => subquery.visit_parameters(f),
+            Expression::NullCheck { expr, .. } => expr.visit_parameters(f),
+            Expression::Logical { left, right, .. } => {
                 left.visit_parameters(f);
                 right.visit_parameters(f);
             }
@@ -831,7 +906,10 @@ impl Expression {
                     .bind_parameters(parameters)?
                     .into_select()?,
             ))),
-            Expression::Case { branches, else_expr } => Ok(Expression::Case {
+            Expression::Case {
+                branches,
+                else_expr,
+            } => Ok(Expression::Case {
                 branches: branches
                     .iter()
                     .map(|branch| {
@@ -863,6 +941,9 @@ impl Expression {
             Expression::UnaryMinus(expr) => {
                 Ok(Expression::UnaryMinus(Box::new(expr.bind(parameters)?)))
             }
+            Expression::UnaryNot(expr) => {
+                Ok(Expression::UnaryNot(Box::new(expr.bind(parameters)?)))
+            }
             Expression::Binary {
                 left,
                 operator,
@@ -870,6 +951,81 @@ impl Expression {
             } => Ok(Expression::Binary {
                 left: Box::new(left.bind(parameters)?),
                 operator: *operator,
+                right: Box::new(right.bind(parameters)?),
+            }),
+            Expression::Comparison {
+                left,
+                operator,
+                right,
+            } => Ok(Expression::Comparison {
+                left: Box::new(left.bind(parameters)?),
+                operator: operator.clone(),
+                right: Box::new(right.bind(parameters)?),
+            }),
+            Expression::InList {
+                expr,
+                values,
+                is_not,
+            } => Ok(Expression::InList {
+                expr: Box::new(expr.bind(parameters)?),
+                values: values
+                    .iter()
+                    .map(|value| value.bind(parameters))
+                    .collect::<Result<Vec<_>>>()?,
+                is_not: *is_not,
+            }),
+            Expression::InSubquery {
+                expr,
+                subquery,
+                is_not,
+            } => Ok(Expression::InSubquery {
+                expr: Box::new(expr.bind(parameters)?),
+                subquery: Box::new(
+                    Statement::Select((**subquery).clone())
+                        .bind_parameters(parameters)?
+                        .into_select()?,
+                ),
+                is_not: *is_not,
+            }),
+            Expression::Between {
+                expr,
+                lower,
+                upper,
+                is_not,
+            } => Ok(Expression::Between {
+                expr: Box::new(expr.bind(parameters)?),
+                lower: Box::new(lower.bind(parameters)?),
+                upper: Box::new(upper.bind(parameters)?),
+                is_not: *is_not,
+            }),
+            Expression::Like {
+                expr,
+                pattern,
+                is_not,
+            } => Ok(Expression::Like {
+                expr: Box::new(expr.bind(parameters)?),
+                pattern: Box::new(pattern.bind(parameters)?),
+                is_not: *is_not,
+            }),
+            Expression::Exists { subquery, is_not } => Ok(Expression::Exists {
+                subquery: Box::new(
+                    Statement::Select((**subquery).clone())
+                        .bind_parameters(parameters)?
+                        .into_select()?,
+                ),
+                is_not: *is_not,
+            }),
+            Expression::NullCheck { expr, is_not } => Ok(Expression::NullCheck {
+                expr: Box::new(expr.bind(parameters)?),
+                is_not: *is_not,
+            }),
+            Expression::Logical {
+                left,
+                operator,
+                right,
+            } => Ok(Expression::Logical {
+                left: Box::new(left.bind(parameters)?),
+                operator: operator.clone(),
                 right: Box::new(right.bind(parameters)?),
             }),
         }
@@ -934,28 +1090,22 @@ impl SelectStatement {
 
     pub(crate) fn references_source_name(&self, name: &str) -> bool {
         self.from.references_source_name(name)
-            || self
-                .where_clause
-                .as_ref()
-                .is_some_and(|where_clause| {
-                    where_clause
-                        .conditions
-                        .iter()
-                        .any(|condition| condition.references_source_name(name))
-                })
+            || self.where_clause.as_ref().is_some_and(|where_clause| {
+                where_clause
+                    .conditions
+                    .iter()
+                    .any(|condition| condition.references_source_name(name))
+            })
             || self
                 .group_by
                 .iter()
                 .any(|expr| expr.references_source_name(name))
-            || self
-                .having_clause
-                .as_ref()
-                .is_some_and(|having_clause| {
-                    having_clause
-                        .conditions
-                        .iter()
-                        .any(|condition| condition.references_source_name(name))
-                })
+            || self.having_clause.as_ref().is_some_and(|having_clause| {
+                having_clause
+                    .conditions
+                    .iter()
+                    .any(|condition| condition.references_source_name(name))
+            })
             || self
                 .set_operation
                 .as_ref()
@@ -1275,7 +1425,10 @@ impl SelectStatement {
                         cte.name
                     ))
                 })?;
-                if !matches!(set_operation.operator, SetOperator::Union | SetOperator::UnionAll) {
+                if !matches!(
+                    set_operation.operator,
+                    SetOperator::Union | SetOperator::UnionAll
+                ) {
                     return Err(HematiteError::ParseError(format!(
                         "Recursive CTE '{}' requires UNION or UNION ALL",
                         cte.name
@@ -1343,14 +1496,12 @@ impl SelectStatement {
 
         for item in &self.columns {
             match item {
-                SelectItem::Column(name) => {
-                    self.validate_column_reference_with_outer(
-                        name,
-                        catalog,
-                        &self.from,
-                        outer_bindings,
-                    )?
-                }
+                SelectItem::Column(name) => self.validate_column_reference_with_outer(
+                    name,
+                    catalog,
+                    &self.from,
+                    outer_bindings,
+                )?,
                 SelectItem::Expression(expr) => {
                     self.validate_expression(expr, catalog, &self.from, outer_bindings)?;
                 }
@@ -1546,9 +1697,12 @@ impl SelectStatement {
                     ));
                 }
             }
-            Expression::Case { branches, else_expr } => {
+            Expression::Case {
+                branches,
+                else_expr,
+            } => {
                 for branch in branches {
-                    self.validate_condition(&branch.condition, catalog, from, outer_bindings)?;
+                    self.validate_expression(&branch.condition, catalog, from, outer_bindings)?;
                     self.validate_expression(&branch.result, catalog, from, outer_bindings)?;
                 }
                 if let Some(else_expr) = else_expr {
@@ -1568,7 +1722,56 @@ impl SelectStatement {
             Expression::UnaryMinus(expr) => {
                 self.validate_expression(expr, catalog, from, outer_bindings)?
             }
+            Expression::UnaryNot(expr) => {
+                self.validate_expression(expr, catalog, from, outer_bindings)?
+            }
             Expression::Binary { left, right, .. } => {
+                self.validate_expression(left, catalog, from, outer_bindings)?;
+                self.validate_expression(right, catalog, from, outer_bindings)?;
+            }
+            Expression::Comparison { left, right, .. } => {
+                self.validate_expression(left, catalog, from, outer_bindings)?;
+                self.validate_expression(right, catalog, from, outer_bindings)?;
+            }
+            Expression::InList { expr, values, .. } => {
+                self.validate_expression(expr, catalog, from, outer_bindings)?;
+                for value in values {
+                    self.validate_expression(value, catalog, from, outer_bindings)?;
+                }
+            }
+            Expression::InSubquery { expr, subquery, .. } => {
+                self.validate_expression(expr, catalog, from, outer_bindings)?;
+                subquery.validate_with_outer_bindings(
+                    catalog,
+                    &self.combined_outer_bindings(catalog, from, outer_bindings)?,
+                )?;
+                if subquery.columns.len() != 1 {
+                    return Err(HematiteError::ParseError(
+                        "Subquery predicates require exactly one selected column".to_string(),
+                    ));
+                }
+            }
+            Expression::Between {
+                expr, lower, upper, ..
+            } => {
+                self.validate_expression(expr, catalog, from, outer_bindings)?;
+                self.validate_expression(lower, catalog, from, outer_bindings)?;
+                self.validate_expression(upper, catalog, from, outer_bindings)?;
+            }
+            Expression::Like { expr, pattern, .. } => {
+                self.validate_expression(expr, catalog, from, outer_bindings)?;
+                self.validate_expression(pattern, catalog, from, outer_bindings)?;
+            }
+            Expression::Exists { subquery, .. } => {
+                subquery.validate_with_outer_bindings(
+                    catalog,
+                    &self.combined_outer_bindings(catalog, from, outer_bindings)?,
+                )?;
+            }
+            Expression::NullCheck { expr, .. } => {
+                self.validate_expression(expr, catalog, from, outer_bindings)?;
+            }
+            Expression::Logical { left, right, .. } => {
                 self.validate_expression(left, catalog, from, outer_bindings)?;
                 self.validate_expression(right, catalog, from, outer_bindings)?;
             }
@@ -1582,9 +1785,12 @@ impl SelectStatement {
         match expr {
             Expression::AggregateCall { .. } => true,
             Expression::ScalarSubquery(_) => false,
-            Expression::Case { branches, else_expr } => {
+            Expression::Case {
+                branches,
+                else_expr,
+            } => {
                 branches.iter().any(|branch| {
-                    Self::condition_contains_aggregate(&branch.condition)
+                    Self::expression_contains_aggregate(&branch.condition)
                         || Self::expression_contains_aggregate(&branch.result)
                 }) || else_expr
                     .as_ref()
@@ -1594,7 +1800,49 @@ impl SelectStatement {
                 args.iter().any(Self::expression_contains_aggregate)
             }
             Expression::UnaryMinus(expr) => Self::expression_contains_aggregate(expr),
+            Expression::UnaryNot(expr) => Self::expression_contains_aggregate(expr),
             Expression::Binary { left, right, .. } => {
+                Self::expression_contains_aggregate(left)
+                    || Self::expression_contains_aggregate(right)
+            }
+            Expression::Comparison { left, right, .. } => {
+                Self::expression_contains_aggregate(left)
+                    || Self::expression_contains_aggregate(right)
+            }
+            Expression::InList { expr, values, .. } => {
+                Self::expression_contains_aggregate(expr)
+                    || values.iter().any(Self::expression_contains_aggregate)
+            }
+            Expression::InSubquery { expr, subquery, .. } => {
+                Self::expression_contains_aggregate(expr)
+                    || subquery.where_clause.as_ref().is_some_and(|where_clause| {
+                        where_clause
+                            .conditions
+                            .iter()
+                            .any(Self::condition_contains_aggregate)
+                    })
+            }
+            Expression::Between {
+                expr, lower, upper, ..
+            } => {
+                Self::expression_contains_aggregate(expr)
+                    || Self::expression_contains_aggregate(lower)
+                    || Self::expression_contains_aggregate(upper)
+            }
+            Expression::Like { expr, pattern, .. } => {
+                Self::expression_contains_aggregate(expr)
+                    || Self::expression_contains_aggregate(pattern)
+            }
+            Expression::Exists { subquery, .. } => {
+                subquery.where_clause.as_ref().is_some_and(|where_clause| {
+                    where_clause
+                        .conditions
+                        .iter()
+                        .any(Self::condition_contains_aggregate)
+                })
+            }
+            Expression::NullCheck { expr, .. } => Self::expression_contains_aggregate(expr),
+            Expression::Logical { left, right, .. } => {
                 Self::expression_contains_aggregate(left)
                     || Self::expression_contains_aggregate(right)
             }
@@ -1614,15 +1862,12 @@ impl SelectStatement {
             }
             Condition::InSubquery { expr, subquery, .. } => {
                 Self::expression_contains_aggregate(expr)
-                    || subquery
-                        .where_clause
-                        .as_ref()
-                        .is_some_and(|where_clause| {
-                            where_clause
-                                .conditions
-                                .iter()
-                                .any(Self::condition_contains_aggregate)
-                        })
+                    || subquery.where_clause.as_ref().is_some_and(|where_clause| {
+                        where_clause
+                            .conditions
+                            .iter()
+                            .any(Self::condition_contains_aggregate)
+                    })
             }
             Condition::Between {
                 expr, lower, upper, ..
@@ -1635,15 +1880,14 @@ impl SelectStatement {
                 Self::expression_contains_aggregate(expr)
                     || Self::expression_contains_aggregate(pattern)
             }
-            Condition::Exists { subquery, .. } => subquery
-                .where_clause
-                .as_ref()
-                .is_some_and(|where_clause| {
+            Condition::Exists { subquery, .. } => {
+                subquery.where_clause.as_ref().is_some_and(|where_clause| {
                     where_clause
                         .conditions
                         .iter()
                         .any(Self::condition_contains_aggregate)
-                }),
+                })
+            }
             Condition::NullCheck { expr, .. } => Self::expression_contains_aggregate(expr),
             Condition::Not(condition) => Self::condition_contains_aggregate(condition),
             Condition::Logical { left, right, .. } => {
@@ -2298,7 +2542,9 @@ impl Condition {
             }
             Condition::InList { expr, values, .. } => {
                 expr.references_source_name(name)
-                    || values.iter().any(|value| value.references_source_name(name))
+                    || values
+                        .iter()
+                        .any(|value| value.references_source_name(name))
             }
             Condition::InSubquery { expr, subquery, .. } => {
                 expr.references_source_name(name) || subquery.references_source_name(name)
@@ -2476,7 +2722,10 @@ impl Expression {
     pub(crate) fn references_source_name(&self, name: &str) -> bool {
         match self {
             Expression::ScalarSubquery(subquery) => subquery.references_source_name(name),
-            Expression::Case { branches, else_expr } => {
+            Expression::Case {
+                branches,
+                else_expr,
+            } => {
                 branches.iter().any(|branch| {
                     branch.condition.references_source_name(name)
                         || branch.result.references_source_name(name)
@@ -2488,7 +2737,35 @@ impl Expression {
                 args.iter().any(|arg| arg.references_source_name(name))
             }
             Expression::UnaryMinus(expr) => expr.references_source_name(name),
+            Expression::UnaryNot(expr) => expr.references_source_name(name),
             Expression::Binary { left, right, .. } => {
+                left.references_source_name(name) || right.references_source_name(name)
+            }
+            Expression::Comparison { left, right, .. } => {
+                left.references_source_name(name) || right.references_source_name(name)
+            }
+            Expression::InList { expr, values, .. } => {
+                expr.references_source_name(name)
+                    || values
+                        .iter()
+                        .any(|value| value.references_source_name(name))
+            }
+            Expression::InSubquery { expr, subquery, .. } => {
+                expr.references_source_name(name) || subquery.references_source_name(name)
+            }
+            Expression::Between {
+                expr, lower, upper, ..
+            } => {
+                expr.references_source_name(name)
+                    || lower.references_source_name(name)
+                    || upper.references_source_name(name)
+            }
+            Expression::Like { expr, pattern, .. } => {
+                expr.references_source_name(name) || pattern.references_source_name(name)
+            }
+            Expression::Exists { subquery, .. } => subquery.references_source_name(name),
+            Expression::NullCheck { expr, .. } => expr.references_source_name(name),
+            Expression::Logical { left, right, .. } => {
                 left.references_source_name(name) || right.references_source_name(name)
             }
             Expression::Column(_)
@@ -2502,7 +2779,10 @@ impl Expression {
         match self {
             Expression::Column(name) => column_name_matches(name, column_name, table_name),
             Expression::ScalarSubquery(_) => false,
-            Expression::Case { branches, else_expr } => {
+            Expression::Case {
+                branches,
+                else_expr,
+            } => {
                 branches.iter().any(|branch| {
                     branch.condition.references_column(column_name, table_name)
                         || branch.result.references_column(column_name, table_name)
@@ -2518,7 +2798,36 @@ impl Expression {
                 AggregateTarget::Column(name) => column_name_matches(name, column_name, table_name),
             },
             Expression::UnaryMinus(expr) => expr.references_column(column_name, table_name),
+            Expression::UnaryNot(expr) => expr.references_column(column_name, table_name),
             Expression::Binary { left, right, .. } => {
+                left.references_column(column_name, table_name)
+                    || right.references_column(column_name, table_name)
+            }
+            Expression::Comparison { left, right, .. } => {
+                left.references_column(column_name, table_name)
+                    || right.references_column(column_name, table_name)
+            }
+            Expression::InList { expr, values, .. } => {
+                expr.references_column(column_name, table_name)
+                    || values
+                        .iter()
+                        .any(|value| value.references_column(column_name, table_name))
+            }
+            Expression::InSubquery { expr, .. } => expr.references_column(column_name, table_name),
+            Expression::Between {
+                expr, lower, upper, ..
+            } => {
+                expr.references_column(column_name, table_name)
+                    || lower.references_column(column_name, table_name)
+                    || upper.references_column(column_name, table_name)
+            }
+            Expression::Like { expr, pattern, .. } => {
+                expr.references_column(column_name, table_name)
+                    || pattern.references_column(column_name, table_name)
+            }
+            Expression::Exists { .. } => false,
+            Expression::NullCheck { expr, .. } => expr.references_column(column_name, table_name),
+            Expression::Logical { left, right, .. } => {
                 left.references_column(column_name, table_name)
                     || right.references_column(column_name, table_name)
             }
@@ -2537,7 +2846,10 @@ impl Expression {
                 rename_column_name(name, old_name, new_name, table_name);
             }
             Expression::ScalarSubquery(_) => {}
-            Expression::Case { branches, else_expr } => {
+            Expression::Case {
+                branches,
+                else_expr,
+            } => {
                 for branch in branches {
                     branch
                         .condition
@@ -2563,7 +2875,42 @@ impl Expression {
             Expression::UnaryMinus(expr) => {
                 expr.rename_column_references(old_name, new_name, table_name);
             }
+            Expression::UnaryNot(expr) => {
+                expr.rename_column_references(old_name, new_name, table_name);
+            }
             Expression::Binary { left, right, .. } => {
+                left.rename_column_references(old_name, new_name, table_name);
+                right.rename_column_references(old_name, new_name, table_name);
+            }
+            Expression::Comparison { left, right, .. } => {
+                left.rename_column_references(old_name, new_name, table_name);
+                right.rename_column_references(old_name, new_name, table_name);
+            }
+            Expression::InList { expr, values, .. } => {
+                expr.rename_column_references(old_name, new_name, table_name);
+                for value in values {
+                    value.rename_column_references(old_name, new_name, table_name);
+                }
+            }
+            Expression::InSubquery { expr, .. } => {
+                expr.rename_column_references(old_name, new_name, table_name);
+            }
+            Expression::Between {
+                expr, lower, upper, ..
+            } => {
+                expr.rename_column_references(old_name, new_name, table_name);
+                lower.rename_column_references(old_name, new_name, table_name);
+                upper.rename_column_references(old_name, new_name, table_name);
+            }
+            Expression::Like { expr, pattern, .. } => {
+                expr.rename_column_references(old_name, new_name, table_name);
+                pattern.rename_column_references(old_name, new_name, table_name);
+            }
+            Expression::Exists { .. } => {}
+            Expression::NullCheck { expr, .. } => {
+                expr.rename_column_references(old_name, new_name, table_name);
+            }
+            Expression::Logical { left, right, .. } => {
                 left.rename_column_references(old_name, new_name, table_name);
                 right.rename_column_references(old_name, new_name, table_name);
             }
@@ -2584,7 +2931,10 @@ impl Expression {
             },
             Expression::Parameter(index) => format!("?{}", index + 1),
             Expression::ScalarSubquery(_) => "(<subquery>)".to_string(),
-            Expression::Case { branches, else_expr } => {
+            Expression::Case {
+                branches,
+                else_expr,
+            } => {
                 let mut parts = vec!["CASE".to_string()];
                 for branch in branches {
                     parts.push(format!(
@@ -2611,12 +2961,77 @@ impl Expression {
                 format!("{}({})", function.to_sql(), target.to_sql())
             }
             Expression::UnaryMinus(expr) => format!("-{}", expr.to_sql()),
+            Expression::UnaryNot(expr) => format!("NOT {}", expr.to_sql()),
             Expression::Binary {
                 left,
                 operator,
                 right,
             } => format!(
                 "({} {} {})",
+                left.to_sql(),
+                operator.to_sql(),
+                right.to_sql()
+            ),
+            Expression::Comparison {
+                left,
+                operator,
+                right,
+            } => format!("{} {} {}", left.to_sql(), operator.to_sql(), right.to_sql()),
+            Expression::InList {
+                expr,
+                values,
+                is_not,
+            } => format!(
+                "{} {}IN ({})",
+                expr.to_sql(),
+                if *is_not { "NOT " } else { "" },
+                values
+                    .iter()
+                    .map(Expression::to_sql)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Expression::InSubquery { expr, is_not, .. } => format!(
+                "{} {}IN (<subquery>)",
+                expr.to_sql(),
+                if *is_not { "NOT " } else { "" }
+            ),
+            Expression::Between {
+                expr,
+                lower,
+                upper,
+                is_not,
+            } => format!(
+                "{} {}BETWEEN {} AND {}",
+                expr.to_sql(),
+                if *is_not { "NOT " } else { "" },
+                lower.to_sql(),
+                upper.to_sql()
+            ),
+            Expression::Like {
+                expr,
+                pattern,
+                is_not,
+            } => format!(
+                "{} {}LIKE {}",
+                expr.to_sql(),
+                if *is_not { "NOT " } else { "" },
+                pattern.to_sql()
+            ),
+            Expression::Exists { is_not, .. } => {
+                format!("{}EXISTS (<subquery>)", if *is_not { "NOT " } else { "" })
+            }
+            Expression::NullCheck { expr, is_not } => format!(
+                "{} IS {}NULL",
+                expr.to_sql(),
+                if *is_not { "NOT " } else { "" }
+            ),
+            Expression::Logical {
+                left,
+                operator,
+                right,
+            } => format!(
+                "({}) {} ({})",
                 left.to_sql(),
                 operator.to_sql(),
                 right.to_sql()

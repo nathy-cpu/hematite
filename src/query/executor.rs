@@ -241,9 +241,18 @@ impl SelectExecutor {
                 "Unbound parameter {} reached execution",
                 index + 1
             ))),
-            Expression::Case { branches, else_expr } => {
+            Expression::Case {
+                branches,
+                else_expr,
+            } => {
                 for branch in branches {
-                    match self.evaluate_condition(ctx, cache, sources, &branch.condition, row)? {
+                    match self.evaluate_boolean_expression(
+                        ctx,
+                        cache,
+                        sources,
+                        &branch.condition,
+                        row,
+                    )? {
                         Some(true) => {
                             return self.evaluate_expression(
                                 ctx,
@@ -293,6 +302,17 @@ impl SelectExecutor {
                     value
                 ))),
             },
+            Expression::UnaryNot(_)
+            | Expression::Comparison { .. }
+            | Expression::InList { .. }
+            | Expression::InSubquery { .. }
+            | Expression::Between { .. }
+            | Expression::Like { .. }
+            | Expression::Exists { .. }
+            | Expression::NullCheck { .. }
+            | Expression::Logical { .. } => Ok(nullable_bool_to_value(
+                self.evaluate_boolean_expression(ctx, cache, sources, expr, row)?,
+            )),
             Expression::Binary {
                 left,
                 operator,
@@ -302,6 +322,113 @@ impl SelectExecutor {
                 let right = self.evaluate_expression(ctx, cache, sources, right, row)?;
                 self.evaluate_arithmetic(operator, left, right)
             }
+        }
+    }
+
+    fn evaluate_boolean_expression(
+        &self,
+        ctx: &mut ExecutionContext<'_>,
+        cache: &mut SubqueryCache,
+        sources: &[ResolvedSource],
+        expr: &Expression,
+        row: &[Value],
+    ) -> Result<Option<bool>> {
+        match expr {
+            Expression::Comparison {
+                left,
+                operator,
+                right,
+            } => {
+                let left_val = self.evaluate_expression(ctx, cache, sources, left, row)?;
+                let right_val = self.evaluate_expression(ctx, cache, sources, right, row)?;
+                Ok(self.compare_values(&left_val, operator, &right_val))
+            }
+            Expression::InList {
+                expr,
+                values,
+                is_not,
+            } => {
+                let probe = self.evaluate_expression(ctx, cache, sources, expr, row)?;
+                let candidates = values
+                    .iter()
+                    .map(|value_expr| {
+                        self.evaluate_expression(ctx, cache, sources, value_expr, row)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(self.evaluate_in_candidates(probe, candidates, *is_not))
+            }
+            Expression::InSubquery {
+                expr,
+                subquery,
+                is_not,
+            } => {
+                let probe = self.evaluate_expression(ctx, cache, sources, expr, row)?;
+                let subquery_result =
+                    self.execute_subquery_cached(ctx, cache, subquery, Some(sources), Some(row))?;
+                let candidates = subquery_result
+                    .rows
+                    .into_iter()
+                    .map(|row| row.into_iter().next().unwrap_or(Value::Null))
+                    .collect::<Vec<_>>();
+                Ok(self.evaluate_in_candidates(probe, candidates, *is_not))
+            }
+            Expression::Between {
+                expr,
+                lower,
+                upper,
+                is_not,
+            } => {
+                let value = self.evaluate_expression(ctx, cache, sources, expr, row)?;
+                let lower_value = self.evaluate_expression(ctx, cache, sources, lower, row)?;
+                let upper_value = self.evaluate_expression(ctx, cache, sources, upper, row)?;
+                Ok(evaluate_between_values(
+                    value,
+                    lower_value,
+                    upper_value,
+                    *is_not,
+                ))
+            }
+            Expression::Like {
+                expr,
+                pattern,
+                is_not,
+            } => {
+                let value = self.evaluate_expression(ctx, cache, sources, expr, row)?;
+                let pattern_value = self.evaluate_expression(ctx, cache, sources, pattern, row)?;
+                Ok(evaluate_like_values(value, pattern_value, *is_not))
+            }
+            Expression::Exists { subquery, is_not } => {
+                let subquery_result =
+                    self.execute_subquery_cached(ctx, cache, subquery, Some(sources), Some(row))?;
+                let exists = !subquery_result.rows.is_empty();
+                Ok(Some(if *is_not { !exists } else { exists }))
+            }
+            Expression::NullCheck { expr, is_not } => {
+                let value = self.evaluate_expression(ctx, cache, sources, expr, row)?;
+                let is_null = value.is_null();
+                Ok(Some(if *is_not { !is_null } else { is_null }))
+            }
+            Expression::UnaryNot(expr) => Ok(self
+                .evaluate_boolean_expression(ctx, cache, sources, expr, row)?
+                .map(|value| !value)),
+            Expression::Logical {
+                left,
+                operator,
+                right,
+            } => {
+                let left_result =
+                    self.evaluate_boolean_expression(ctx, cache, sources, left, row)?;
+                let right_result =
+                    self.evaluate_boolean_expression(ctx, cache, sources, right, row)?;
+                match operator {
+                    LogicalOperator::And => Ok(self.logical_and(left_result, right_result)),
+                    LogicalOperator::Or => Ok(self.logical_or(left_result, right_result)),
+                }
+            }
+            _ => coerce_value_to_nullable_bool(
+                self.evaluate_expression(ctx, cache, sources, expr, row)?,
+                "Boolean expression",
+            ),
         }
     }
 
@@ -375,7 +502,8 @@ impl SelectExecutor {
         current_sources: Option<&[ResolvedSource]>,
         current_row: Option<&[Value]>,
     ) -> Result<QueryResult> {
-        let effective_subquery = if let (Some(sources), Some(row)) = (current_sources, current_row) {
+        let effective_subquery = if let (Some(sources), Some(row)) = (current_sources, current_row)
+        {
             self.bind_correlated_subquery(ctx, subquery, sources, row)?
         } else {
             subquery.clone()
@@ -549,9 +677,17 @@ impl SelectExecutor {
                     *expr = Expression::Literal(value);
                 }
             }
-            Expression::Case { branches, else_expr } => {
+            Expression::Case {
+                branches,
+                else_expr,
+            } => {
                 for branch in branches {
-                    self.bind_condition_outer_references(ctx, from, &mut branch.condition, scopes)?;
+                    self.bind_expression_outer_references(
+                        ctx,
+                        from,
+                        &mut branch.condition,
+                        scopes,
+                    )?;
                     self.bind_expression_outer_references(ctx, from, &mut branch.result, scopes)?;
                 }
                 if let Some(else_expr) = else_expr {
@@ -569,11 +705,51 @@ impl SelectExecutor {
             Expression::UnaryMinus(inner) => {
                 self.bind_expression_outer_references(ctx, from, inner, scopes)?;
             }
+            Expression::UnaryNot(inner) => {
+                self.bind_expression_outer_references(ctx, from, inner, scopes)?;
+            }
             Expression::Binary { left, right, .. } => {
                 self.bind_expression_outer_references(ctx, from, left, scopes)?;
                 self.bind_expression_outer_references(ctx, from, right, scopes)?;
             }
-            Expression::AggregateCall { .. } | Expression::Literal(_) | Expression::Parameter(_) => {}
+            Expression::Comparison { left, right, .. } => {
+                self.bind_expression_outer_references(ctx, from, left, scopes)?;
+                self.bind_expression_outer_references(ctx, from, right, scopes)?;
+            }
+            Expression::InList { expr, values, .. } => {
+                self.bind_expression_outer_references(ctx, from, expr, scopes)?;
+                for value in values {
+                    self.bind_expression_outer_references(ctx, from, value, scopes)?;
+                }
+            }
+            Expression::InSubquery { expr, subquery, .. } => {
+                self.bind_expression_outer_references(ctx, from, expr, scopes)?;
+                self.bind_select_outer_references(ctx, subquery, scopes)?;
+            }
+            Expression::Between {
+                expr, lower, upper, ..
+            } => {
+                self.bind_expression_outer_references(ctx, from, expr, scopes)?;
+                self.bind_expression_outer_references(ctx, from, lower, scopes)?;
+                self.bind_expression_outer_references(ctx, from, upper, scopes)?;
+            }
+            Expression::Like { expr, pattern, .. } => {
+                self.bind_expression_outer_references(ctx, from, expr, scopes)?;
+                self.bind_expression_outer_references(ctx, from, pattern, scopes)?;
+            }
+            Expression::Exists { subquery, .. } => {
+                self.bind_select_outer_references(ctx, subquery, scopes)?;
+            }
+            Expression::NullCheck { expr, .. } => {
+                self.bind_expression_outer_references(ctx, from, expr, scopes)?;
+            }
+            Expression::Logical { left, right, .. } => {
+                self.bind_expression_outer_references(ctx, from, left, scopes)?;
+                self.bind_expression_outer_references(ctx, from, right, scopes)?;
+            }
+            Expression::AggregateCall { .. }
+            | Expression::Literal(_)
+            | Expression::Parameter(_) => {}
         }
 
         Ok(())
@@ -664,7 +840,9 @@ impl SelectExecutor {
                 let probe = self.evaluate_expression(ctx, cache, sources, expr, row)?;
                 let candidates = values
                     .iter()
-                    .map(|value_expr| self.evaluate_expression(ctx, cache, sources, value_expr, row))
+                    .map(|value_expr| {
+                        self.evaluate_expression(ctx, cache, sources, value_expr, row)
+                    })
                     .collect::<Result<Vec<_>>>()?;
                 Ok(self.evaluate_in_candidates(probe, candidates, *is_not))
             }
@@ -674,13 +852,8 @@ impl SelectExecutor {
                 is_not,
             } => {
                 let probe = self.evaluate_expression(ctx, cache, sources, expr, row)?;
-                let subquery_result = self.execute_subquery_cached(
-                    ctx,
-                    cache,
-                    subquery,
-                    Some(sources),
-                    Some(row),
-                )?;
+                let subquery_result =
+                    self.execute_subquery_cached(ctx, cache, subquery, Some(sources), Some(row))?;
                 let candidates = subquery_result
                     .rows
                     .into_iter()
@@ -702,10 +875,10 @@ impl SelectExecutor {
                     return Ok(None);
                 }
 
-                let lower_ok = sql_partial_cmp(&value, &lower_value)
-                    .map(|ordering| !ordering.is_lt());
-                let upper_ok = sql_partial_cmp(&value, &upper_value)
-                    .map(|ordering| !ordering.is_gt());
+                let lower_ok =
+                    sql_partial_cmp(&value, &lower_value).map(|ordering| !ordering.is_lt());
+                let upper_ok =
+                    sql_partial_cmp(&value, &upper_value).map(|ordering| !ordering.is_gt());
 
                 match (lower_ok, upper_ok) {
                     (Some(true), Some(true)) => Ok(Some(!is_not)),
@@ -731,13 +904,8 @@ impl SelectExecutor {
                 }
             }
             Condition::Exists { subquery, is_not } => {
-                let subquery_result = self.execute_subquery_cached(
-                    ctx,
-                    cache,
-                    subquery,
-                    Some(sources),
-                    Some(row),
-                )?;
+                let subquery_result =
+                    self.execute_subquery_cached(ctx, cache, subquery, Some(sources), Some(row))?;
                 let exists = !subquery_result.rows.is_empty();
                 Ok(Some(if *is_not { !exists } else { exists }))
             }
@@ -1311,11 +1479,8 @@ impl SelectExecutor {
                 None,
             )?;
 
-            left_result.rows = apply_set_operation(
-                set_operation.operator,
-                left_result.rows,
-                right_result.rows,
-            );
+            left_result.rows =
+                apply_set_operation(set_operation.operator, left_result.rows, right_result.rows);
             left_result.affected_rows = left_result.rows.len();
             return Ok(left_result);
         }
@@ -1604,9 +1769,12 @@ impl SelectExecutor {
                 "Unbound parameter {} reached execution",
                 index + 1
             ))),
-            Expression::Case { branches, else_expr } => {
+            Expression::Case {
+                branches,
+                else_expr,
+            } => {
                 for branch in branches {
-                    match self.evaluate_projected_condition(
+                    match self.evaluate_projected_boolean_expression(
                         ctx,
                         cache,
                         sources,
@@ -1644,13 +1812,7 @@ impl SelectExecutor {
                 }
             }
             Expression::ScalarSubquery(subquery) => {
-                self.execute_scalar_subquery_cached(
-                    ctx,
-                    cache,
-                    subquery,
-                    Some(sources),
-                    Some(row),
-                )
+                self.execute_scalar_subquery_cached(ctx, cache, subquery, Some(sources), Some(row))
             }
             Expression::AggregateCall { function, target } => self
                 .evaluate_aggregate_value(sources, *function, target, group_rows)?
@@ -1715,6 +1877,25 @@ impl SelectExecutor {
                     ))),
                 }
             }
+            Expression::UnaryNot(_)
+            | Expression::Comparison { .. }
+            | Expression::InList { .. }
+            | Expression::InSubquery { .. }
+            | Expression::Between { .. }
+            | Expression::Like { .. }
+            | Expression::Exists { .. }
+            | Expression::NullCheck { .. }
+            | Expression::Logical { .. } => Ok(nullable_bool_to_value(
+                self.evaluate_projected_boolean_expression(
+                    ctx,
+                    cache,
+                    sources,
+                    expr,
+                    row,
+                    output_columns,
+                    group_rows,
+                )?,
+            )),
             Expression::Binary {
                 left,
                 operator,
@@ -1739,6 +1920,233 @@ impl SelectExecutor {
                     output_columns,
                     group_rows,
                 )?,
+            ),
+        }
+    }
+
+    fn evaluate_projected_boolean_expression(
+        &self,
+        ctx: &mut ExecutionContext<'_>,
+        cache: &mut SubqueryCache,
+        sources: &[ResolvedSource],
+        expr: &Expression,
+        row: &[Value],
+        output_columns: &[String],
+        group_rows: &[Vec<Value>],
+    ) -> Result<Option<bool>> {
+        match expr {
+            Expression::Comparison {
+                left,
+                operator,
+                right,
+            } => {
+                let left_val = self.evaluate_projected_expression(
+                    ctx,
+                    cache,
+                    sources,
+                    left,
+                    row,
+                    output_columns,
+                    group_rows,
+                )?;
+                let right_val = self.evaluate_projected_expression(
+                    ctx,
+                    cache,
+                    sources,
+                    right,
+                    row,
+                    output_columns,
+                    group_rows,
+                )?;
+                Ok(compare_condition_values(&left_val, operator, &right_val))
+            }
+            Expression::InList {
+                expr,
+                values,
+                is_not,
+            } => {
+                let probe = self.evaluate_projected_expression(
+                    ctx,
+                    cache,
+                    sources,
+                    expr,
+                    row,
+                    output_columns,
+                    group_rows,
+                )?;
+                let candidates = values
+                    .iter()
+                    .map(|value_expr| {
+                        self.evaluate_projected_expression(
+                            ctx,
+                            cache,
+                            sources,
+                            value_expr,
+                            row,
+                            output_columns,
+                            group_rows,
+                        )
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(evaluate_in_candidates(probe, candidates, *is_not))
+            }
+            Expression::InSubquery {
+                expr,
+                subquery,
+                is_not,
+            } => {
+                let probe = self.evaluate_projected_expression(
+                    ctx,
+                    cache,
+                    sources,
+                    expr,
+                    row,
+                    output_columns,
+                    group_rows,
+                )?;
+                let subquery_result =
+                    self.execute_subquery_cached(ctx, cache, subquery, Some(sources), Some(row))?;
+                let candidates = subquery_result
+                    .rows
+                    .into_iter()
+                    .map(|row| row.into_iter().next().unwrap_or(Value::Null))
+                    .collect::<Vec<_>>();
+                Ok(evaluate_in_candidates(probe, candidates, *is_not))
+            }
+            Expression::Between {
+                expr,
+                lower,
+                upper,
+                is_not,
+            } => {
+                let value = self.evaluate_projected_expression(
+                    ctx,
+                    cache,
+                    sources,
+                    expr,
+                    row,
+                    output_columns,
+                    group_rows,
+                )?;
+                let lower_value = self.evaluate_projected_expression(
+                    ctx,
+                    cache,
+                    sources,
+                    lower,
+                    row,
+                    output_columns,
+                    group_rows,
+                )?;
+                let upper_value = self.evaluate_projected_expression(
+                    ctx,
+                    cache,
+                    sources,
+                    upper,
+                    row,
+                    output_columns,
+                    group_rows,
+                )?;
+                Ok(evaluate_between_values(
+                    value,
+                    lower_value,
+                    upper_value,
+                    *is_not,
+                ))
+            }
+            Expression::Like {
+                expr,
+                pattern,
+                is_not,
+            } => {
+                let value = self.evaluate_projected_expression(
+                    ctx,
+                    cache,
+                    sources,
+                    expr,
+                    row,
+                    output_columns,
+                    group_rows,
+                )?;
+                let pattern_value = self.evaluate_projected_expression(
+                    ctx,
+                    cache,
+                    sources,
+                    pattern,
+                    row,
+                    output_columns,
+                    group_rows,
+                )?;
+                Ok(evaluate_like_values(value, pattern_value, *is_not))
+            }
+            Expression::Exists { subquery, is_not } => {
+                let subquery_result =
+                    self.execute_subquery_cached(ctx, cache, subquery, Some(sources), Some(row))?;
+                let exists = !subquery_result.rows.is_empty();
+                Ok(Some(if *is_not { !exists } else { exists }))
+            }
+            Expression::NullCheck { expr, is_not } => {
+                let value = self.evaluate_projected_expression(
+                    ctx,
+                    cache,
+                    sources,
+                    expr,
+                    row,
+                    output_columns,
+                    group_rows,
+                )?;
+                let is_null = value.is_null();
+                Ok(Some(if *is_not { !is_null } else { is_null }))
+            }
+            Expression::UnaryNot(expr) => Ok(self
+                .evaluate_projected_boolean_expression(
+                    ctx,
+                    cache,
+                    sources,
+                    expr,
+                    row,
+                    output_columns,
+                    group_rows,
+                )?
+                .map(|value| !value)),
+            Expression::Logical {
+                left,
+                operator,
+                right,
+            } => {
+                let left_result = self.evaluate_projected_boolean_expression(
+                    ctx,
+                    cache,
+                    sources,
+                    left,
+                    row,
+                    output_columns,
+                    group_rows,
+                )?;
+                let right_result = self.evaluate_projected_boolean_expression(
+                    ctx,
+                    cache,
+                    sources,
+                    right,
+                    row,
+                    output_columns,
+                    group_rows,
+                )?;
+                Ok(match operator {
+                    LogicalOperator::And => logical_and_values(left_result, right_result),
+                    LogicalOperator::Or => logical_or_values(left_result, right_result),
+                })
+            }
+            _ => coerce_value_to_nullable_bool(
+                self.evaluate_projected_expression(
+                    ctx,
+                    cache,
+                    sources,
+                    expr,
+                    row,
+                    output_columns,
+                    group_rows,
+                )?,
+                "Boolean expression",
             ),
         }
     }
@@ -1823,13 +2231,8 @@ impl SelectExecutor {
                     output_columns,
                     group_rows,
                 )?;
-                let subquery_result = self.execute_subquery_cached(
-                    ctx,
-                    cache,
-                    subquery,
-                    Some(sources),
-                    Some(row),
-                )?;
+                let subquery_result =
+                    self.execute_subquery_cached(ctx, cache, subquery, Some(sources), Some(row))?;
                 let candidates = subquery_result
                     .rows
                     .into_iter()
@@ -1875,10 +2278,10 @@ impl SelectExecutor {
                     return Ok(None);
                 }
 
-                let lower_ok = sql_partial_cmp(&value, &lower_value)
-                    .map(|ordering| !ordering.is_lt());
-                let upper_ok = sql_partial_cmp(&value, &upper_value)
-                    .map(|ordering| !ordering.is_gt());
+                let lower_ok =
+                    sql_partial_cmp(&value, &lower_value).map(|ordering| !ordering.is_lt());
+                let upper_ok =
+                    sql_partial_cmp(&value, &upper_value).map(|ordering| !ordering.is_gt());
 
                 match (lower_ok, upper_ok) {
                     (Some(true), Some(true)) => Ok(Some(!is_not)),
@@ -1920,13 +2323,8 @@ impl SelectExecutor {
                 }
             }
             Condition::Exists { subquery, is_not } => {
-                let subquery_result = self.execute_subquery_cached(
-                    ctx,
-                    cache,
-                    subquery,
-                    Some(sources),
-                    Some(row),
-                )?;
+                let subquery_result =
+                    self.execute_subquery_cached(ctx, cache, subquery, Some(sources), Some(row))?;
                 let exists = !subquery_result.rows.is_empty();
                 Ok(Some(if *is_not { !exists } else { exists }))
             }
@@ -2366,9 +2764,12 @@ impl InsertExecutor {
                 "Unbound parameter {} reached execution",
                 index + 1
             ))),
-            Expression::Case { branches, else_expr } => {
+            Expression::Case {
+                branches,
+                else_expr,
+            } => {
                 for branch in branches {
-                    match self.evaluate_value_condition(&branch.condition)? {
+                    match self.evaluate_boolean_value_expression(&branch.condition)? {
                         Some(true) => return self.evaluate_value_expression(&branch.result),
                         Some(false) | None => {}
                     }
@@ -2405,6 +2806,17 @@ impl InsertExecutor {
                     value
                 ))),
             },
+            Expression::UnaryNot(_)
+            | Expression::Comparison { .. }
+            | Expression::InList { .. }
+            | Expression::InSubquery { .. }
+            | Expression::Between { .. }
+            | Expression::Like { .. }
+            | Expression::Exists { .. }
+            | Expression::NullCheck { .. }
+            | Expression::Logical { .. } => Ok(nullable_bool_to_value(
+                self.evaluate_boolean_value_expression(expr)?,
+            )),
             Expression::Binary {
                 left,
                 operator,
@@ -2421,9 +2833,9 @@ impl InsertExecutor {
         }
     }
 
-    fn evaluate_value_condition(&self, condition: &Condition) -> Result<Option<bool>> {
-        match condition {
-            Condition::Comparison {
+    fn evaluate_boolean_value_expression(&self, expr: &Expression) -> Result<Option<bool>> {
+        match expr {
+            Expression::Comparison {
                 left,
                 operator,
                 right,
@@ -2432,7 +2844,7 @@ impl InsertExecutor {
                 let right_val = self.evaluate_value_expression(right)?;
                 Ok(compare_condition_values(&left_val, operator, &right_val))
             }
-            Condition::InList {
+            Expression::InList {
                 expr,
                 values,
                 is_not,
@@ -2444,10 +2856,10 @@ impl InsertExecutor {
                     .collect::<Result<Vec<_>>>()?;
                 Ok(evaluate_in_candidates(probe, candidates, *is_not))
             }
-            Condition::InSubquery { .. } => Err(HematiteError::ParseError(
-                "INSERT expressions cannot use subqueries in CASE conditions".to_string(),
+            Expression::InSubquery { .. } => Err(HematiteError::ParseError(
+                "INSERT expressions cannot use subqueries in boolean expressions".to_string(),
             )),
-            Condition::Between {
+            Expression::Between {
                 expr,
                 lower,
                 upper,
@@ -2456,9 +2868,14 @@ impl InsertExecutor {
                 let value = self.evaluate_value_expression(expr)?;
                 let lower_value = self.evaluate_value_expression(lower)?;
                 let upper_value = self.evaluate_value_expression(upper)?;
-                Ok(evaluate_between_values(value, lower_value, upper_value, *is_not))
+                Ok(evaluate_between_values(
+                    value,
+                    lower_value,
+                    upper_value,
+                    *is_not,
+                ))
             }
-            Condition::Like {
+            Expression::Like {
                 expr,
                 pattern,
                 is_not,
@@ -2467,29 +2884,33 @@ impl InsertExecutor {
                 let pattern_value = self.evaluate_value_expression(pattern)?;
                 Ok(evaluate_like_values(value, pattern_value, *is_not))
             }
-            Condition::Exists { .. } => Err(HematiteError::ParseError(
-                "INSERT expressions cannot use EXISTS in CASE conditions".to_string(),
+            Expression::Exists { .. } => Err(HematiteError::ParseError(
+                "INSERT expressions cannot use EXISTS in boolean expressions".to_string(),
             )),
-            Condition::NullCheck { expr, is_not } => {
+            Expression::NullCheck { expr, is_not } => {
                 let value = self.evaluate_value_expression(expr)?;
                 let is_null = value.is_null();
                 Ok(Some(if *is_not { !is_null } else { is_null }))
             }
-            Condition::Not(condition) => Ok(self
-                .evaluate_value_condition(condition)?
+            Expression::UnaryNot(expr) => Ok(self
+                .evaluate_boolean_value_expression(expr)?
                 .map(|value| !value)),
-            Condition::Logical {
+            Expression::Logical {
                 left,
                 operator,
                 right,
             } => {
-                let left_result = self.evaluate_value_condition(left)?;
-                let right_result = self.evaluate_value_condition(right)?;
+                let left_result = self.evaluate_boolean_value_expression(left)?;
+                let right_result = self.evaluate_boolean_value_expression(right)?;
                 Ok(match operator {
                     LogicalOperator::And => logical_and_values(left_result, right_result),
                     LogicalOperator::Or => logical_or_values(left_result, right_result),
                 })
             }
+            _ => coerce_value_to_nullable_bool(
+                self.evaluate_value_expression(expr)?,
+                "Boolean expression",
+            ),
         }
     }
 
@@ -4260,15 +4681,11 @@ fn evaluate_nullif(args: Vec<Value>) -> Result<Value> {
 }
 
 fn evaluate_lower(args: Vec<Value>) -> Result<Value> {
-    expect_unary_text_function("LOWER", args, |text| {
-        Ok(Value::Text(text.to_lowercase()))
-    })
+    expect_unary_text_function("LOWER", args, |text| Ok(Value::Text(text.to_lowercase())))
 }
 
 fn evaluate_upper(args: Vec<Value>) -> Result<Value> {
-    expect_unary_text_function("UPPER", args, |text| {
-        Ok(Value::Text(text.to_uppercase()))
-    })
+    expect_unary_text_function("UPPER", args, |text| Ok(Value::Text(text.to_uppercase())))
 }
 
 fn evaluate_length(args: Vec<Value>) -> Result<Value> {
@@ -4559,7 +4976,9 @@ fn substring_chars(text: &str, start: i32, len: Option<i32>) -> Result<Value> {
             return Ok(Value::Text(String::new()));
         }
         let end = start_index.saturating_add(len as usize).min(chars.len());
-        return Ok(Value::Text(chars[start_index.min(chars.len())..end].iter().collect()));
+        return Ok(Value::Text(
+            chars[start_index.min(chars.len())..end].iter().collect(),
+        ));
     }
 
     Ok(Value::Text(
@@ -4753,9 +5172,8 @@ fn round_integer(value: i32, precision: i32) -> Result<Value> {
     }
 
     let rounded = round_float(value as f64, precision);
-    let rounded = i32::try_from(rounded as i64).map_err(|_| {
-        HematiteError::ParseError("ROUND overflowed INTEGER".to_string())
-    })?;
+    let rounded = i32::try_from(rounded as i64)
+        .map_err(|_| HematiteError::ParseError("ROUND overflowed INTEGER".to_string()))?;
     Ok(Value::Integer(rounded))
 }
 
@@ -4863,12 +5281,7 @@ fn evaluate_in_candidates(
     }
 }
 
-fn evaluate_between_values(
-    value: Value,
-    lower: Value,
-    upper: Value,
-    is_not: bool,
-) -> Option<bool> {
+fn evaluate_between_values(value: Value, lower: Value, upper: Value, is_not: bool) -> Option<bool> {
     if value.is_null() || lower.is_null() || upper.is_null() {
         return None;
     }
@@ -4891,6 +5304,24 @@ fn evaluate_like_values(value: Value, pattern: Value, is_not: bool) -> Option<bo
         }
         (left, right) if left.is_null() || right.is_null() => None,
         _ => None,
+    }
+}
+
+fn nullable_bool_to_value(value: Option<bool>) -> Value {
+    match value {
+        Some(value) => Value::Boolean(value),
+        None => Value::Null,
+    }
+}
+
+fn coerce_value_to_nullable_bool(value: Value, context: &str) -> Result<Option<bool>> {
+    match value {
+        Value::Boolean(value) => Ok(Some(value)),
+        Value::Null => Ok(None),
+        value => Err(HematiteError::ParseError(format!(
+            "{} requires a boolean value, found {:?}",
+            context, value
+        ))),
     }
 }
 

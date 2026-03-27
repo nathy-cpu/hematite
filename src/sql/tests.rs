@@ -378,9 +378,8 @@ mod connection_tests {
             "UPDATE users SET nickname = UPPER(TRIM(name)) WHERE LENGTH(TRIM(name)) = 5;",
         )?;
 
-        let result = conn.execute(
-            "SELECT nickname FROM users WHERE LOWER(TRIM(name)) = 'alice';",
-        )?;
+        let result =
+            conn.execute("SELECT nickname FROM users WHERE LOWER(TRIM(name)) = 'alice';")?;
         assert_eq!(
             result.rows,
             vec![vec![crate::catalog::Value::Text("ALICE".to_string())]]
@@ -395,7 +394,9 @@ mod connection_tests {
         let db = TestDbFile::new("_test_scalar_numeric_functions");
         let mut conn = Connection::new(db.path())?;
 
-        conn.execute("CREATE TABLE metrics (id INTEGER PRIMARY KEY, amount FLOAT, delta INTEGER);")?;
+        conn.execute(
+            "CREATE TABLE metrics (id INTEGER PRIMARY KEY, amount FLOAT, delta INTEGER);",
+        )?;
         conn.execute(
             "INSERT INTO metrics (id, amount, delta) VALUES (1, -12.345, -7), (2, NULL, NULL);",
         )?;
@@ -431,7 +432,9 @@ mod connection_tests {
         let db = TestDbFile::new("_test_scalar_numeric_functions_in_updates_and_filters");
         let mut conn = Connection::new(db.path())?;
 
-        conn.execute("CREATE TABLE metrics (id INTEGER PRIMARY KEY, amount FLOAT, delta INTEGER);")?;
+        conn.execute(
+            "CREATE TABLE metrics (id INTEGER PRIMARY KEY, amount FLOAT, delta INTEGER);",
+        )?;
         conn.execute("INSERT INTO metrics (id, amount, delta) VALUES (1, 1.26, -4);")?;
         conn.execute(
             "UPDATE metrics SET amount = ROUND(amount, 1), delta = ABS(delta) WHERE ROUND(amount, 1) = 1.3;",
@@ -452,15 +455,15 @@ mod connection_tests {
 
     #[test]
     fn test_scalar_function_numeric_comparisons_coerce_integer_and_float() -> Result<()> {
-        let db = TestDbFile::new("_test_scalar_function_numeric_comparisons_coerce_integer_and_float");
+        let db =
+            TestDbFile::new("_test_scalar_function_numeric_comparisons_coerce_integer_and_float");
         let mut conn = Connection::new(db.path())?;
 
         conn.execute("CREATE TABLE metrics (id INTEGER PRIMARY KEY, amount FLOAT);")?;
         conn.execute("INSERT INTO metrics (id, amount) VALUES (1, 1.26), (2, 2.49);")?;
 
-        let result = conn.execute(
-            "SELECT id FROM metrics WHERE ROUND(amount) IN (1, 2) ORDER BY id ASC;",
-        )?;
+        let result =
+            conn.execute("SELECT id FROM metrics WHERE ROUND(amount) IN (1, 2) ORDER BY id ASC;")?;
         assert_eq!(
             result.rows,
             vec![
@@ -483,7 +486,9 @@ mod connection_tests {
 
         assert!(conn.execute("SELECT COALESCE() FROM metrics;").is_err());
         assert!(conn.execute("SELECT LOWER(id) FROM metrics;").is_err());
-        assert!(conn.execute("SELECT ROUND(amount, 1.5) FROM metrics;").is_err());
+        assert!(conn
+            .execute("SELECT ROUND(amount, 1.5) FROM metrics;")
+            .is_err());
 
         conn.close()?;
         Ok(())
@@ -494,7 +499,9 @@ mod connection_tests {
         let db = TestDbFile::new("_test_case_expression_in_select_and_where");
         let mut conn = Connection::new(db.path())?;
 
-        conn.execute("CREATE TABLE grades (id INTEGER PRIMARY KEY, score INTEGER, nickname TEXT);")?;
+        conn.execute(
+            "CREATE TABLE grades (id INTEGER PRIMARY KEY, score INTEGER, nickname TEXT);",
+        )?;
         conn.execute(
             "INSERT INTO grades (id, score, nickname) VALUES (1, 95, 'ace'), (2, 82, NULL), (3, 70, 'steady');",
         )?;
@@ -521,9 +528,7 @@ mod connection_tests {
         let mut conn = Connection::new(db.path())?;
 
         conn.execute("CREATE TABLE grades (id INTEGER PRIMARY KEY, score INTEGER, label TEXT);")?;
-        conn.execute(
-            "INSERT INTO grades (id, score, label) VALUES (1, 95, NULL), (2, 72, NULL);",
-        )?;
+        conn.execute("INSERT INTO grades (id, score, label) VALUES (1, 95, NULL), (2, 72, NULL);")?;
         conn.execute(
             "UPDATE grades SET label = CASE WHEN score >= 90 THEN 'top' WHEN score >= 80 THEN 'mid' ELSE 'base' END;",
         )?;
@@ -536,6 +541,90 @@ mod connection_tests {
                 vec![crate::catalog::Value::Text("base".to_string())],
             ]
         );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_boolean_expressions_in_projection_and_case() -> Result<()> {
+        let db = TestDbFile::new("_test_boolean_expressions_in_projection_and_case");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute(
+            "CREATE TABLE flags (id INTEGER PRIMARY KEY, score INTEGER, active BOOLEAN);",
+        )?;
+        conn.execute(
+            "INSERT INTO flags (id, score, active) VALUES (1, 1, FALSE), (2, 2, FALSE), (3, 3, TRUE);",
+        )?;
+
+        let result = conn.execute(
+            "SELECT (score > 1 AND NOT active) AS flagged, CASE WHEN (score > 1 AND NOT active) OR active THEN 'yes' ELSE 'no' END AS verdict FROM flags ORDER BY id ASC;",
+        )?;
+
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![
+                    crate::catalog::Value::Boolean(false),
+                    crate::catalog::Value::Text("no".to_string()),
+                ],
+                vec![
+                    crate::catalog::Value::Boolean(true),
+                    crate::catalog::Value::Text("yes".to_string()),
+                ],
+                vec![
+                    crate::catalog::Value::Boolean(false),
+                    crate::catalog::Value::Text("yes".to_string()),
+                ],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_insert_and_update_with_boolean_expressions() -> Result<()> {
+        let db = TestDbFile::new("_test_insert_and_update_with_boolean_expressions");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute(
+            "CREATE TABLE flags (id INTEGER PRIMARY KEY, enabled BOOLEAN, score INTEGER);",
+        )?;
+        conn.execute(
+            "INSERT INTO flags (id, enabled, score) VALUES (1, 1 < 2 AND NOT FALSE, 4), (2, 3 NOT BETWEEN 1 AND 2 OR FALSE, 7);",
+        )?;
+        conn.execute("UPDATE flags SET enabled = (enabled AND score >= 5) OR id = 1;")?;
+
+        let result = conn.execute("SELECT id, enabled FROM flags ORDER BY id ASC;")?;
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![
+                    crate::catalog::Value::Integer(1),
+                    crate::catalog::Value::Boolean(true),
+                ],
+                vec![
+                    crate::catalog::Value::Integer(2),
+                    crate::catalog::Value::Boolean(true),
+                ],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_boolean_expression_rejects_non_boolean_operands() -> Result<()> {
+        let db = TestDbFile::new("_test_boolean_expression_rejects_non_boolean_operands");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE flags (id INTEGER PRIMARY KEY, active BOOLEAN);")?;
+        conn.execute("INSERT INTO flags (id, active) VALUES (1, TRUE);")?;
+
+        assert!(conn.execute("SELECT 1 AND active FROM flags;").is_err());
 
         conn.close()?;
         Ok(())
@@ -581,9 +670,8 @@ mod connection_tests {
         conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, nickname TEXT);")?;
         conn.execute("INSERT INTO users (id, name, nickname) VALUES (1, 'Ada', NULL);")?;
 
-        let result = conn.execute(
-            "SELECT CONCAT(name, nickname), CONCAT_WS(':', name, nickname) FROM users;",
-        )?;
+        let result = conn
+            .execute("SELECT CONCAT(name, nickname), CONCAT_WS(':', name, nickname) FROM users;")?;
         assert_eq!(
             result.rows,
             vec![vec![
@@ -632,9 +720,8 @@ mod connection_tests {
             "UPDATE docs SET short_code = RIGHT(title, 3) WHERE LEFT(title, 4) = 'hema';",
         )?;
 
-        let result = conn.execute(
-            "SELECT short_code FROM docs WHERE SUBSTRING(title, 5) = 'tite';",
-        )?;
+        let result =
+            conn.execute("SELECT short_code FROM docs WHERE SUBSTRING(title, 5) = 'tite';")?;
         assert_eq!(
             result.rows,
             vec![vec![crate::catalog::Value::Text("ite".to_string())]]
@@ -662,10 +749,7 @@ mod connection_tests {
                     crate::catalog::Value::Integer(8),
                     crate::catalog::Value::Integer(6),
                 ],
-                vec![
-                    crate::catalog::Value::Null,
-                    crate::catalog::Value::Null,
-                ],
+                vec![crate::catalog::Value::Null, crate::catalog::Value::Null,],
             ]
         );
 
@@ -692,8 +776,12 @@ mod connection_tests {
             ]]
         );
 
-        assert!(conn.execute("SELECT GREATEST(score) FROM metrics;").is_err());
-        assert!(conn.execute("SELECT LEAST(score, name) FROM metrics;").is_err());
+        assert!(conn
+            .execute("SELECT GREATEST(score) FROM metrics;")
+            .is_err());
+        assert!(conn
+            .execute("SELECT LEAST(score, name) FROM metrics;")
+            .is_err());
 
         conn.close()?;
         Ok(())
@@ -785,11 +873,9 @@ mod connection_tests {
         conn.execute("CREATE TABLE docs (id INTEGER PRIMARY KEY, title TEXT);")?;
         conn.execute("INSERT INTO docs (id, title) VALUES (1, 'hematite'), (2, 'metal');")?;
 
-        let result = conn.execute("SELECT id FROM docs WHERE LOCATE('ta', title) > 0 ORDER BY id ASC;")?;
-        assert_eq!(
-            result.rows,
-            vec![vec![crate::catalog::Value::Integer(2)]]
-        );
+        let result =
+            conn.execute("SELECT id FROM docs WHERE LOCATE('ta', title) > 0 ORDER BY id ASC;")?;
+        assert_eq!(result.rows, vec![vec![crate::catalog::Value::Integer(2)]]);
 
         conn.close()?;
         Ok(())
@@ -800,7 +886,9 @@ mod connection_tests {
         let db = TestDbFile::new("_test_ceil_floor_and_power_functions");
         let mut conn = Connection::new(db.path())?;
 
-        conn.execute("CREATE TABLE metrics (id INTEGER PRIMARY KEY, score FLOAT, exponent INTEGER);")?;
+        conn.execute(
+            "CREATE TABLE metrics (id INTEGER PRIMARY KEY, score FLOAT, exponent INTEGER);",
+        )?;
         conn.execute("INSERT INTO metrics (id, score, exponent) VALUES (1, 2.25, 3);")?;
 
         let result = conn.execute(
@@ -830,13 +918,9 @@ mod connection_tests {
         conn.execute("INSERT INTO metrics (id, score, bucket) VALUES (1, 2.25, NULL);")?;
         conn.execute("UPDATE metrics SET bucket = CEIL(score) WHERE FLOOR(score) = 2;")?;
 
-        let result = conn.execute(
-            "SELECT bucket FROM metrics WHERE POWER(FLOOR(score), 2) = 4;",
-        )?;
-        assert_eq!(
-            result.rows,
-            vec![vec![crate::catalog::Value::Float(3.0)]]
-        );
+        let result =
+            conn.execute("SELECT bucket FROM metrics WHERE POWER(FLOOR(score), 2) = 4;")?;
+        assert_eq!(result.rows, vec![vec![crate::catalog::Value::Float(3.0)]]);
 
         conn.close()?;
         Ok(())
@@ -2242,9 +2326,8 @@ mod connection_tests {
         conn.execute("INSERT INTO posts (id, user_id) VALUES (11, 3);")?;
         conn.execute("INSERT INTO posts (id, user_id) VALUES (12, 3);")?;
 
-        let intersect = conn.execute(
-            "SELECT id FROM users INTERSECT SELECT user_id FROM posts ORDER BY id ASC;",
-        )?;
+        let intersect = conn
+            .execute("SELECT id FROM users INTERSECT SELECT user_id FROM posts ORDER BY id ASC;")?;
         assert_eq!(
             intersect.rows,
             vec![
@@ -2276,11 +2359,13 @@ mod connection_tests {
         let projected = conn.execute(
             "SELECT (SELECT COUNT(*) FROM posts) AS post_count FROM users ORDER BY id ASC LIMIT 1;",
         )?;
-        assert_eq!(projected.rows, vec![vec![crate::catalog::Value::Integer(2)]]);
+        assert_eq!(
+            projected.rows,
+            vec![vec![crate::catalog::Value::Integer(2)]]
+        );
 
-        let filtered = conn.execute(
-            "SELECT name FROM users WHERE id = (SELECT MIN(user_id) FROM posts);",
-        )?;
+        let filtered =
+            conn.execute("SELECT name FROM users WHERE id = (SELECT MIN(user_id) FROM posts);")?;
         assert_eq!(
             filtered.rows,
             vec![vec![crate::catalog::Value::Text("alice".to_string())]]
@@ -2431,9 +2516,7 @@ mod connection_tests {
         conn.execute("INSERT INTO seeds (n) VALUES (1);")?;
 
         let err = conn
-            .execute(
-                "WITH RECURSIVE nums AS (SELECT n FROM seeds) SELECT n FROM nums;",
-            )
+            .execute("WITH RECURSIVE nums AS (SELECT n FROM seeds) SELECT n FROM nums;")
             .expect_err("recursive CTE without UNION should be rejected");
         assert!(
             err.to_string().contains("requires UNION or UNION ALL"),
