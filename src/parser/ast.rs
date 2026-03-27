@@ -233,6 +233,8 @@ pub enum ScalarFunction {
     Substring,
     LeftFn,
     RightFn,
+    Greatest,
+    Least,
 }
 
 #[derive(Debug, Clone)]
@@ -2645,6 +2647,8 @@ impl ScalarFunction {
             "SUBSTRING" | "SUBSTR" => Some(Self::Substring),
             "LEFT" => Some(Self::LeftFn),
             "RIGHT" => Some(Self::RightFn),
+            "GREATEST" => Some(Self::Greatest),
+            "LEAST" => Some(Self::Least),
             _ => None,
         }
     }
@@ -2665,6 +2669,8 @@ impl ScalarFunction {
             ScalarFunction::Substring => "SUBSTRING",
             ScalarFunction::LeftFn => "LEFT",
             ScalarFunction::RightFn => "RIGHT",
+            ScalarFunction::Greatest => "GREATEST",
+            ScalarFunction::Least => "LEAST",
         }
     }
 }

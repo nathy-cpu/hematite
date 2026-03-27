@@ -4191,6 +4191,8 @@ fn evaluate_scalar_function(function: ScalarFunction, args: Vec<Value>) -> Resul
         ScalarFunction::Substring => evaluate_substring(args),
         ScalarFunction::LeftFn => evaluate_left(args),
         ScalarFunction::RightFn => evaluate_right(args),
+        ScalarFunction::Greatest => evaluate_extremum("GREATEST", args, true),
+        ScalarFunction::Least => evaluate_extremum("LEAST", args, false),
     }
 }
 
@@ -4545,6 +4547,40 @@ fn substring_chars(text: &str, start: i32, len: Option<i32>) -> Result<Value> {
     Ok(Value::Text(
         chars[start_index.min(chars.len())..].iter().collect(),
     ))
+}
+
+fn evaluate_extremum(function_name: &str, args: Vec<Value>, pick_greater: bool) -> Result<Value> {
+    if args.len() < 2 {
+        return Err(HematiteError::ParseError(format!(
+            "{} requires at least two arguments",
+            function_name
+        )));
+    }
+
+    if args.iter().any(Value::is_null) {
+        return Ok(Value::Null);
+    }
+
+    let mut values = args.into_iter();
+    let mut best = values.next().expect("validated extremum arity");
+    for value in values {
+        let ordering = sql_partial_cmp(&value, &best).ok_or_else(|| {
+            HematiteError::ParseError(format!(
+                "{} requires mutually comparable arguments",
+                function_name
+            ))
+        })?;
+        let should_replace = if pick_greater {
+            ordering.is_gt()
+        } else {
+            ordering.is_lt()
+        };
+        if should_replace {
+            best = value;
+        }
+    }
+
+    Ok(best)
 }
 
 fn round_integer(value: i32, precision: i32) -> Result<Value> {

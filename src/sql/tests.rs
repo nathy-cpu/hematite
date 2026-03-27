@@ -645,6 +645,61 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_greatest_and_least_functions() -> Result<()> {
+        let db = TestDbFile::new("_test_greatest_and_least_functions");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE metrics (id INTEGER PRIMARY KEY, score FLOAT, floor INTEGER);")?;
+        conn.execute("INSERT INTO metrics (id, score, floor) VALUES (1, 7.5, 8), (2, NULL, 3);")?;
+
+        let result = conn.execute(
+            "SELECT GREATEST(score, floor, 6), LEAST(score, floor, 6) FROM metrics ORDER BY id ASC;",
+        )?;
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![
+                    crate::catalog::Value::Integer(8),
+                    crate::catalog::Value::Integer(6),
+                ],
+                vec![
+                    crate::catalog::Value::Null,
+                    crate::catalog::Value::Null,
+                ],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_case_without_else_and_extremum_errors() -> Result<()> {
+        let db = TestDbFile::new("_test_case_without_else_and_extremum_errors");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE metrics (id INTEGER PRIMARY KEY, score INTEGER, name TEXT);")?;
+        conn.execute("INSERT INTO metrics (id, score, name) VALUES (1, 5, 'five');")?;
+
+        let result = conn.execute(
+            "SELECT CASE WHEN score > 10 THEN 'high' END, LEAST(score, 7) FROM metrics;",
+        )?;
+        assert_eq!(
+            result.rows,
+            vec![vec![
+                crate::catalog::Value::Null,
+                crate::catalog::Value::Integer(5),
+            ]]
+        );
+
+        assert!(conn.execute("SELECT GREATEST(score) FROM metrics;").is_err());
+        assert!(conn.execute("SELECT LEAST(score, name) FROM metrics;").is_err());
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_check_constraint_rejects_invalid_insert() -> Result<()> {
         let db = TestDbFile::new("_test_check_constraint_rejects_invalid_insert");
         let mut conn = Connection::new(db.path())?;
