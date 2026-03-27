@@ -334,6 +334,63 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_scalar_string_functions() -> Result<()> {
+        let db = TestDbFile::new("_test_scalar_string_functions");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, nickname TEXT);")?;
+        conn.execute(
+            "INSERT INTO users (id, name, nickname) VALUES (1, '  Alice  ', 'ally'), (2, NULL, 'BOB');",
+        )?;
+
+        let result = conn.execute(
+            "SELECT LOWER(TRIM(name)) AS lowered_name, UPPER(nickname) AS loud_nick, LENGTH(TRIM(name)) AS trimmed_len FROM users ORDER BY id ASC;",
+        )?;
+
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![
+                    crate::catalog::Value::Text("alice".to_string()),
+                    crate::catalog::Value::Text("ALLY".to_string()),
+                    crate::catalog::Value::Integer(5),
+                ],
+                vec![
+                    crate::catalog::Value::Null,
+                    crate::catalog::Value::Text("BOB".to_string()),
+                    crate::catalog::Value::Null,
+                ],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_scalar_string_functions_in_filters_and_updates() -> Result<()> {
+        let db = TestDbFile::new("_test_scalar_string_functions_in_filters_and_updates");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, nickname TEXT);")?;
+        conn.execute("INSERT INTO users (id, name, nickname) VALUES (1, '  Alice  ', 'ally');")?;
+        conn.execute(
+            "UPDATE users SET nickname = UPPER(TRIM(name)) WHERE LENGTH(TRIM(name)) = 5;",
+        )?;
+
+        let result = conn.execute(
+            "SELECT nickname FROM users WHERE LOWER(TRIM(name)) = 'alice';",
+        )?;
+        assert_eq!(
+            result.rows,
+            vec![vec![crate::catalog::Value::Text("ALICE".to_string())]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_check_constraint_rejects_invalid_insert() -> Result<()> {
         let db = TestDbFile::new("_test_check_constraint_rejects_invalid_insert");
         let mut conn = Connection::new(db.path())?;

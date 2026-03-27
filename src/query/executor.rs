@@ -4076,6 +4076,10 @@ fn evaluate_scalar_function(function: ScalarFunction, args: Vec<Value>) -> Resul
         ScalarFunction::Coalesce => evaluate_coalesce(args),
         ScalarFunction::IfNull => evaluate_ifnull(args),
         ScalarFunction::NullIf => evaluate_nullif(args),
+        ScalarFunction::Lower => evaluate_lower(args),
+        ScalarFunction::Upper => evaluate_upper(args),
+        ScalarFunction::Length => evaluate_length(args),
+        ScalarFunction::Trim => evaluate_trim(args),
         function => Err(HematiteError::ParseError(format!(
             "Scalar function {} is not implemented yet",
             function.to_sql()
@@ -4136,6 +4140,55 @@ fn evaluate_nullif(args: Vec<Value>) -> Result<Value> {
         Ok(Value::Null)
     } else {
         Ok(left)
+    }
+}
+
+fn evaluate_lower(args: Vec<Value>) -> Result<Value> {
+    expect_unary_text_function("LOWER", args, |text| {
+        Ok(Value::Text(text.to_lowercase()))
+    })
+}
+
+fn evaluate_upper(args: Vec<Value>) -> Result<Value> {
+    expect_unary_text_function("UPPER", args, |text| {
+        Ok(Value::Text(text.to_uppercase()))
+    })
+}
+
+fn evaluate_length(args: Vec<Value>) -> Result<Value> {
+    expect_unary_text_function("LENGTH", args, |text| {
+        let len = i32::try_from(text.chars().count()).map_err(|_| {
+            HematiteError::ParseError("LENGTH result overflowed INTEGER".to_string())
+        })?;
+        Ok(Value::Integer(len))
+    })
+}
+
+fn evaluate_trim(args: Vec<Value>) -> Result<Value> {
+    expect_unary_text_function("TRIM", args, |text| {
+        Ok(Value::Text(text.trim().to_string()))
+    })
+}
+
+fn expect_unary_text_function<F>(name: &str, args: Vec<Value>, f: F) -> Result<Value>
+where
+    F: FnOnce(&str) -> Result<Value>,
+{
+    if args.len() != 1 {
+        return Err(HematiteError::ParseError(format!(
+            "{} requires exactly one argument",
+            name
+        )));
+    }
+
+    let value = args.into_iter().next().expect("validated unary arity");
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Text(text) => f(&text),
+        value => Err(HematiteError::ParseError(format!(
+            "{} requires a text value, found {:?}",
+            name, value
+        ))),
     }
 }
 
