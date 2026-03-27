@@ -34,6 +34,7 @@
 //! catalog or table code.
 
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::btree::codec::RawBytesCodec;
@@ -49,18 +50,34 @@ use crate::btree::value_store::{
 use crate::btree::NodeType;
 use crate::error::{HematiteError, Result};
 use crate::storage::overflow::{collect_overflow_page_ids, validate_overflow_chain};
-use crate::storage::{PageId, Pager};
+use crate::storage::{
+    JournalMode, Page, PageId, Pager, PagerIntegrityReport, DB_HEADER_PAGE_ID, INVALID_PAGE_ID,
+    PAGE_SIZE, STORAGE_METADATA_PAGE_ID,
+};
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ByteTreeStore {
     storage: Arc<Mutex<Pager>>,
 }
 
 impl ByteTreeStore {
+    pub const PAGE_SIZE: usize = PAGE_SIZE;
+    pub const INVALID_PAGE_ID: PageId = INVALID_PAGE_ID;
+    pub const DB_HEADER_PAGE_ID: PageId = DB_HEADER_PAGE_ID;
+    pub const RESERVED_METADATA_PAGE_ID: PageId = STORAGE_METADATA_PAGE_ID;
+
     fn lock_storage(&self) -> Result<MutexGuard<'_, Pager>> {
         self.storage.lock().map_err(|_| {
             HematiteError::InternalError("ByteTreeStore storage mutex is poisoned".to_string())
         })
+    }
+
+    pub fn open_path<P: AsRef<Path>>(path: P, cache_capacity: usize) -> Result<Self> {
+        Ok(Self::new(Pager::new(path, cache_capacity)?))
+    }
+
+    pub fn new_in_memory(cache_capacity: usize) -> Result<Self> {
+        Ok(Self::new(Pager::new_in_memory(cache_capacity)?))
     }
 
     pub fn new(storage: Pager) -> Self {
@@ -75,6 +92,91 @@ impl ByteTreeStore {
 
     pub fn shared_storage(&self) -> Arc<Mutex<Pager>> {
         self.storage.clone()
+    }
+
+    pub fn read_reserved_blob(&self, page_id: PageId) -> Result<Option<Vec<u8>>> {
+        let mut pager = self.lock_storage()?;
+        match pager.read_page(page_id) {
+            Ok(page) => Ok(Some(page.data)),
+            Err(_) => Ok(None),
+        }
+    }
+
+    pub fn write_reserved_blob(&self, page_id: PageId, bytes: &[u8]) -> Result<()> {
+        if bytes.len() > PAGE_SIZE {
+            return Err(HematiteError::StorageError(format!(
+                "Reserved page payload exceeds page size: {} > {}",
+                bytes.len(),
+                PAGE_SIZE
+            )));
+        }
+        let mut page = Page::new(page_id);
+        page.data[..bytes.len()].copy_from_slice(bytes);
+        self.lock_storage()?.write_page(page)
+    }
+
+    pub fn flush(&self) -> Result<()> {
+        self.lock_storage()?.flush()
+    }
+
+    pub fn begin_transaction(&self) -> Result<()> {
+        self.lock_storage()?.begin_transaction()
+    }
+
+    pub fn commit_transaction(&self) -> Result<()> {
+        self.lock_storage()?.commit_transaction()
+    }
+
+    pub fn rollback_transaction(&self) -> Result<()> {
+        self.lock_storage()?.rollback_transaction()
+    }
+
+    pub fn transaction_active(&self) -> Result<bool> {
+        Ok(self.lock_storage()?.transaction_active())
+    }
+
+    pub fn begin_read(&self) -> Result<()> {
+        self.lock_storage()?.begin_read()
+    }
+
+    pub fn end_read(&self) -> Result<()> {
+        self.lock_storage()?.end_read()
+    }
+
+    pub fn journal_mode(&self) -> Result<JournalMode> {
+        Ok(self.lock_storage()?.journal_mode())
+    }
+
+    pub fn set_journal_mode(&self, journal_mode: JournalMode) -> Result<()> {
+        self.lock_storage()?.set_journal_mode(journal_mode)
+    }
+
+    pub fn checkpoint_wal(&self) -> Result<()> {
+        self.lock_storage()?.checkpoint_wal()
+    }
+
+    pub fn file_len(&self) -> Result<u64> {
+        self.lock_storage()?.file_len()
+    }
+
+    pub fn allocated_page_count(&self) -> Result<usize> {
+        Ok(self.lock_storage()?.allocated_page_count())
+    }
+
+    pub fn free_page_ids(&self) -> Result<Vec<PageId>> {
+        Ok(self.lock_storage()?.free_pages().to_vec())
+    }
+
+    pub fn fragmented_free_page_count(&self) -> Result<usize> {
+        Ok(self.lock_storage()?.fragmented_free_page_count())
+    }
+
+    pub fn trailing_free_page_count(&self) -> Result<usize> {
+        Ok(self.lock_storage()?.trailing_free_page_count())
+    }
+
+    pub fn validate_storage(&self) -> Result<PagerIntegrityReport> {
+        self.lock_storage()?.validate_integrity()
     }
 
     pub fn create_tree(&self) -> Result<PageId> {

@@ -1,37 +1,33 @@
 //! Catalog engine metadata persistence codec.
 
+use crate::btree::ByteTreeStore;
 use crate::error::{HematiteError, Result};
-use crate::storage::{Page, STORAGE_METADATA_PAGE_ID};
 
 use super::engine::CatalogEngine;
 use super::runtime_metadata;
 
 pub(crate) fn load_table_metadata(engine: &mut CatalogEngine) -> Result<()> {
-    let maybe_page = engine.lock_pager()?.read_page(STORAGE_METADATA_PAGE_ID);
-    match maybe_page {
-        Ok(page) => {
-            if page.data.len() >= 4 {
-                if page.data.len() >= 9 && &page.data[0..4] == b"BTRE" {
-                    return Ok(());
-                }
-                if page.data.iter().all(|&b| b == 0) {
-                    return Ok(());
-                }
-                let metadata_size =
-                    u32::from_le_bytes([page.data[0], page.data[1], page.data[2], page.data[3]])
-                        as usize;
+    if let Some(page) = engine
+        .tree_store()
+        .read_reserved_blob(ByteTreeStore::RESERVED_METADATA_PAGE_ID)?
+    {
+        if page.len() >= 4 {
+            if page.len() >= 9 && &page[0..4] == b"BTRE" {
+                return Ok(());
+            }
+            if page.iter().all(|&b| b == 0) {
+                return Ok(());
+            }
+            let metadata_size = u32::from_le_bytes([page[0], page[1], page[2], page[3]]) as usize;
 
-                if metadata_size > 0 && metadata_size + 4 <= crate::storage::PAGE_SIZE {
-                    let metadata_bytes = &page.data[4..4 + metadata_size];
-                    let metadata_str =
-                        String::from_utf8(metadata_bytes.to_vec()).map_err(|_| {
-                            HematiteError::StorageError("Invalid metadata encoding".to_string())
-                        })?;
-                    parse_storage_metadata(engine, &metadata_str)?;
-                }
+            if metadata_size > 0 && metadata_size + 4 <= ByteTreeStore::PAGE_SIZE {
+                let metadata_bytes = &page[4..4 + metadata_size];
+                let metadata_str = String::from_utf8(metadata_bytes.to_vec()).map_err(|_| {
+                    HematiteError::StorageError("Invalid metadata encoding".to_string())
+                })?;
+                parse_storage_metadata(engine, &metadata_str)?;
             }
         }
-        Err(_) => {}
     }
 
     Ok(())
@@ -41,16 +37,18 @@ pub(crate) fn save_table_metadata(engine: &mut CatalogEngine) -> Result<()> {
     let metadata_str = serialize_storage_metadata(engine)?;
     let metadata_bytes = metadata_str.as_bytes();
 
-    if metadata_bytes.len() > crate::storage::PAGE_SIZE - 4 {
+    if metadata_bytes.len() > ByteTreeStore::PAGE_SIZE - 4 {
         return Err(HematiteError::StorageError(
             "Table metadata too large".to_string(),
         ));
     }
 
-    let mut page = Page::new(STORAGE_METADATA_PAGE_ID);
-    page.data[0..4].copy_from_slice(&(metadata_bytes.len() as u32).to_le_bytes());
-    page.data[4..4 + metadata_bytes.len()].copy_from_slice(metadata_bytes);
-    engine.lock_pager()?.write_page(page)?;
+    let mut page = vec![0; ByteTreeStore::PAGE_SIZE];
+    page[0..4].copy_from_slice(&(metadata_bytes.len() as u32).to_le_bytes());
+    page[4..4 + metadata_bytes.len()].copy_from_slice(metadata_bytes);
+    engine
+        .tree_store()
+        .write_reserved_blob(ByteTreeStore::RESERVED_METADATA_PAGE_ID, &page)?;
     Ok(())
 }
 

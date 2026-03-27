@@ -80,9 +80,9 @@ Current lower-stack status that should be preserved:
 
 #### Block 2B — Catalog Over B-Tree Only
 
-- [ ] Add a B-tree-owned metadata/blob persistence interface.
-- [ ] Move catalog metadata persistence off direct storage usage.
-- [ ] Remove remaining direct storage imports from catalog production files.
+- [x] Add a B-tree-owned metadata/blob persistence interface.
+- [x] Move catalog metadata persistence off direct storage usage.
+- [x] Remove remaining direct storage imports from catalog production files.
 
 #### Block 2C — Upper-Layer Facades
 
@@ -149,4 +149,6 @@ Current lower-stack status that should be preserved:
 
 ## Commit Log
 
-- _pending_
+- `665209e` Add architecture tracker and import guard
+- `e59d7aa` Decouple parser literal and type AST nodes
+- `ffec849` Move statement validation into query

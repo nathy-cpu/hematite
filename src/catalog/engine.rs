@@ -27,15 +27,14 @@
 //! This file should coordinate access methods, not define relational byte formats. Row codecs and
 //! index-key codecs live beside the catalog model so the generic lower layers remain reusable.
 
-use crate::btree::{ByteTree, ByteTreeStore, KeyValueCodec, TreeSpaceStats, TypedTreeStore};
+use crate::btree::{
+    ByteTree, ByteTreeStore, JournalMode as BTreeJournalMode, KeyValueCodec, PageId,
+    PagerIntegrityReport, TreeSpaceStats, TypedTreeStore,
+};
 use crate::catalog::{DatabaseHeader, JournalMode, Table, TableId, Value};
 use crate::error::{HematiteError, Result};
-use crate::storage::{
-    JournalMode as PagerJournalMode, Page, PageId, Pager, PagerIntegrityReport, DB_HEADER_PAGE_ID,
-};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard};
 
 use super::cursor::{IndexCursor, TableCursor};
 use super::{
@@ -84,34 +83,26 @@ pub struct CatalogEngineSnapshot {
 
 #[derive(Debug)]
 pub struct CatalogEngine {
-    pub(crate) pager: Arc<Mutex<Pager>>,
+    pub(crate) tree_store: ByteTreeStore,
     pub(crate) table_metadata: HashMap<String, TableRuntimeMetadata>,
 }
 
 impl CatalogEngine {
-    pub(crate) const PAGE_SIZE: usize = crate::storage::PAGE_SIZE;
-    pub(crate) const INVALID_PAGE_ID: PageId = crate::storage::INVALID_PAGE_ID;
+    pub(crate) const PAGE_SIZE: usize = ByteTreeStore::PAGE_SIZE;
+    pub(crate) const INVALID_PAGE_ID: PageId = ByteTreeStore::INVALID_PAGE_ID;
     pub(crate) const STORAGE_METADATA_VERSION: u32 = 3;
 
-    pub(crate) fn lock_pager(&self) -> Result<MutexGuard<'_, Pager>> {
-        self.pager.lock().map_err(|_| {
-            HematiteError::InternalError("Catalog engine pager mutex is poisoned".to_string())
-        })
-    }
-
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let pager = Arc::new(Mutex::new(Pager::new(path, 100)?));
-        Self::from_shared_pager(pager)
+        Self::from_tree_store(ByteTreeStore::open_path(path, 100)?)
     }
 
     pub fn new_in_memory() -> Result<Self> {
-        let pager = Arc::new(Mutex::new(Pager::new_in_memory(100)?));
-        Self::from_shared_pager(pager)
+        Self::from_tree_store(ByteTreeStore::new_in_memory(100)?)
     }
 
-    pub(crate) fn from_shared_pager(pager: Arc<Mutex<Pager>>) -> Result<Self> {
+    pub(crate) fn from_tree_store(tree_store: ByteTreeStore) -> Result<Self> {
         let mut engine = Self {
-            pager,
+            tree_store,
             table_metadata: HashMap::new(),
         };
         engine_metadata::load_table_metadata(&mut engine)?;
@@ -119,33 +110,34 @@ impl CatalogEngine {
     }
 
     pub fn read_database_header(&self) -> Result<Option<DatabaseHeader>> {
-        let mut pager = self.lock_pager()?;
-        match pager.read_page(DB_HEADER_PAGE_ID) {
-            Ok(page) => Ok(Some(DatabaseHeader::deserialize(&page.data)?)),
-            Err(_) => Ok(None),
-        }
+        self.tree_store()
+            .read_reserved_blob(ByteTreeStore::DB_HEADER_PAGE_ID)?
+            .map(|page| DatabaseHeader::deserialize(&page))
+            .transpose()
     }
 
     pub fn initialize_database_header(&mut self, schema_root_page: u32) -> Result<DatabaseHeader> {
         let header = DatabaseHeader::new(schema_root_page);
-        let mut page = Page::new(DB_HEADER_PAGE_ID);
-        header.serialize(&mut page.data)?;
-
-        let mut pager = self.lock_pager()?;
-        pager.write_page(page)?;
-        pager.flush()?;
+        let mut page = vec![0; ByteTreeStore::PAGE_SIZE];
+        header.serialize(&mut page)?;
+        self.tree_store()
+            .write_reserved_blob(ByteTreeStore::DB_HEADER_PAGE_ID, &page)?;
+        self.tree_store().flush()?;
         Ok(header)
     }
 
     pub fn allocate_table_id(&mut self) -> Result<TableId> {
-        let mut pager = self.lock_pager()?;
-        let header_page = pager.read_page(DB_HEADER_PAGE_ID)?;
-        let mut header = DatabaseHeader::deserialize(&header_page.data)?;
+        let header_page = self
+            .tree_store()
+            .read_reserved_blob(ByteTreeStore::DB_HEADER_PAGE_ID)?
+            .ok_or_else(|| HematiteError::StorageError("Database header is missing".to_string()))?;
+        let mut header = DatabaseHeader::deserialize(&header_page)?;
         let table_id = header.increment_table_id();
 
-        let mut updated_page = Page::new(DB_HEADER_PAGE_ID);
-        header.serialize(&mut updated_page.data)?;
-        pager.write_page(updated_page)?;
+        let mut updated_page = vec![0; ByteTreeStore::PAGE_SIZE];
+        header.serialize(&mut updated_page)?;
+        self.tree_store()
+            .write_reserved_blob(ByteTreeStore::DB_HEADER_PAGE_ID, &updated_page)?;
         Ok(table_id)
     }
 
@@ -166,31 +158,48 @@ impl CatalogEngine {
     where
         F: FnOnce(&mut DatabaseHeader),
     {
-        let mut pager = self.lock_pager()?;
-        let header_page = pager.read_page(DB_HEADER_PAGE_ID)?;
-        let mut header = DatabaseHeader::deserialize(&header_page.data)?;
+        let header_page = self
+            .tree_store()
+            .read_reserved_blob(ByteTreeStore::DB_HEADER_PAGE_ID)?
+            .ok_or_else(|| HematiteError::StorageError("Database header is missing".to_string()))?;
+        let mut header = DatabaseHeader::deserialize(&header_page)?;
         update(&mut header);
         header.checksum = header.calculate_checksum();
 
-        let mut updated_page = Page::new(DB_HEADER_PAGE_ID);
-        header.serialize(&mut updated_page.data)?;
-        pager.write_page(updated_page)
+        let mut updated_page = vec![0; ByteTreeStore::PAGE_SIZE];
+        header.serialize(&mut updated_page)?;
+        self.tree_store()
+            .write_reserved_blob(ByteTreeStore::DB_HEADER_PAGE_ID, &updated_page)
     }
 
     #[cfg(test)]
-    pub(crate) fn read_page(&self, page_id: PageId) -> Result<Page> {
-        self.lock_pager()?.read_page(page_id)
+    pub(crate) fn read_page(&self, page_id: PageId) -> Result<crate::storage::Page> {
+        let storage = self.tree_store().shared_storage();
+        let mut pager = storage.lock().map_err(|_| {
+            HematiteError::InternalError("Catalog engine pager mutex is poisoned".to_string())
+        })?;
+        pager.read_page(page_id)
     }
 
     #[cfg(test)]
-    pub(crate) fn write_page(&self, page: Page) -> Result<()> {
-        self.lock_pager()?.write_page(page)
+    pub(crate) fn write_page(&self, page: crate::storage::Page) -> Result<()> {
+        let storage = self.tree_store().shared_storage();
+        let mut pager = storage.lock().map_err(|_| {
+            HematiteError::InternalError("Catalog engine pager mutex is poisoned".to_string())
+        })?;
+        pager.write_page(page)
     }
 
     #[cfg(test)]
     pub(crate) fn allocate_page(&self) -> Result<PageId> {
-        let page_id = self.lock_pager()?.allocate_page()?;
-        if page_id == DB_HEADER_PAGE_ID || page_id == crate::storage::STORAGE_METADATA_PAGE_ID {
+        let storage = self.tree_store().shared_storage();
+        let page_id = storage
+            .lock()
+            .map_err(|_| {
+                HematiteError::InternalError("Catalog engine pager mutex is poisoned".to_string())
+            })?
+            .allocate_page()?;
+        if Self::is_reserved_page(page_id) {
             return self.allocate_page();
         }
         Ok(page_id)
@@ -198,61 +207,77 @@ impl CatalogEngine {
 
     #[cfg(test)]
     pub(crate) fn deallocate_page(&self, page_id: PageId) -> Result<()> {
-        if page_id == DB_HEADER_PAGE_ID || page_id == crate::storage::STORAGE_METADATA_PAGE_ID {
+        if Self::is_reserved_page(page_id) {
             return Err(HematiteError::StorageError(
                 "Cannot deallocate reserved page".to_string(),
             ));
         }
-        self.lock_pager()?.deallocate_page(page_id)
+        let storage = self.tree_store().shared_storage();
+        let mut pager = storage.lock().map_err(|_| {
+            HematiteError::InternalError("Catalog engine pager mutex is poisoned".to_string())
+        })?;
+        pager.deallocate_page(page_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_pager<T>(
+        &self,
+        callback: impl FnOnce(&mut crate::storage::Pager) -> Result<T>,
+    ) -> Result<T> {
+        let storage = self.tree_store().shared_storage();
+        let mut pager = storage.lock().map_err(|_| {
+            HematiteError::InternalError("Catalog engine pager mutex is poisoned".to_string())
+        })?;
+        callback(&mut pager)
     }
 
     pub fn flush(&mut self) -> Result<()> {
         engine_metadata::save_table_metadata(self)?;
-        self.lock_pager()?.flush()
+        self.tree_store().flush()
     }
 
     pub fn journal_mode(&self) -> Result<JournalMode> {
-        Ok(match self.lock_pager()?.journal_mode() {
-            PagerJournalMode::Rollback => JournalMode::Rollback,
-            PagerJournalMode::Wal => JournalMode::Wal,
+        Ok(match self.tree_store().journal_mode()? {
+            BTreeJournalMode::Rollback => JournalMode::Rollback,
+            BTreeJournalMode::Wal => JournalMode::Wal,
         })
     }
 
     pub fn set_journal_mode(&mut self, journal_mode: JournalMode) -> Result<()> {
         let mode = match journal_mode {
-            JournalMode::Rollback => PagerJournalMode::Rollback,
-            JournalMode::Wal => PagerJournalMode::Wal,
+            JournalMode::Rollback => BTreeJournalMode::Rollback,
+            JournalMode::Wal => BTreeJournalMode::Wal,
         };
-        self.lock_pager()?.set_journal_mode(mode)
+        self.tree_store().set_journal_mode(mode)
     }
 
     pub fn checkpoint_wal(&mut self) -> Result<()> {
-        self.lock_pager()?.checkpoint_wal()
+        self.tree_store().checkpoint_wal()
     }
 
     pub fn begin_transaction(&mut self) -> Result<()> {
-        self.lock_pager()?.begin_transaction()
+        self.tree_store().begin_transaction()
     }
 
     pub fn commit_transaction(&mut self) -> Result<()> {
         engine_metadata::save_table_metadata(self)?;
-        self.lock_pager()?.commit_transaction()
+        self.tree_store().commit_transaction()
     }
 
     pub fn rollback_transaction(&mut self) -> Result<()> {
-        self.lock_pager()?.rollback_transaction()
+        self.tree_store().rollback_transaction()
     }
 
     pub fn transaction_active(&self) -> Result<bool> {
-        Ok(self.lock_pager()?.transaction_active())
+        self.tree_store().transaction_active()
     }
 
     pub(crate) fn begin_read(&mut self) -> Result<()> {
-        self.lock_pager()?.begin_read()
+        self.tree_store().begin_read()
     }
 
     pub(crate) fn end_read(&mut self) -> Result<()> {
-        self.lock_pager()?.end_read()
+        self.tree_store().end_read()
     }
 
     pub fn snapshot(&self) -> CatalogEngineSnapshot {
@@ -282,11 +307,11 @@ impl CatalogEngine {
     }
 
     pub(crate) fn tree_store(&self) -> ByteTreeStore {
-        ByteTreeStore::from_shared_storage(self.pager.clone())
+        self.tree_store.clone()
     }
 
     pub(crate) fn typed_tree_store<C: KeyValueCodec>(&self) -> TypedTreeStore<C> {
-        TypedTreeStore::from_shared_storage(self.pager.clone())
+        TypedTreeStore::new(self.tree_store())
     }
 
     pub(crate) fn open_tree(&self, root_page_id: PageId) -> Result<ByteTree> {
@@ -337,15 +362,16 @@ impl CatalogEngine {
     }
 
     pub(crate) fn pager_integrity_report(&mut self) -> Result<PagerIntegrityReport> {
-        self.lock_pager()?.validate_integrity()
+        self.tree_store().validate_storage()
     }
 
     pub(crate) fn free_page_ids(&self) -> Result<Vec<PageId>> {
-        Ok(self.lock_pager()?.free_pages().to_vec())
+        self.tree_store().free_page_ids()
     }
 
     pub(crate) fn is_reserved_page(page_id: PageId) -> bool {
-        page_id == DB_HEADER_PAGE_ID || page_id == crate::storage::STORAGE_METADATA_PAGE_ID
+        page_id == ByteTreeStore::DB_HEADER_PAGE_ID
+            || page_id == ByteTreeStore::RESERVED_METADATA_PAGE_ID
     }
 
     pub fn get_storage_stats(&self) -> Result<CatalogStorageStats> {

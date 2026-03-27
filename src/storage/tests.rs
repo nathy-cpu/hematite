@@ -1292,10 +1292,9 @@ mod mod_tests {
         let root_page = storage.read_page(root_page_id)?;
         let root_node = BTreeNode::from_page(root_page)?;
         let layout = StoredValueLayout::decode(root_node.values[0].as_bytes())?;
-        let overflow_ids = collect_overflow_page_ids(
-            &mut storage.pager.lock().unwrap(),
-            Some(layout.overflow_first_page),
-        )?;
+        let overflow_ids = storage.with_pager(|pager| {
+            collect_overflow_page_ids(pager, Some(layout.overflow_first_page))
+        })?;
         assert!(!overflow_ids.is_empty());
 
         assert!(storage.delete_from_table_by_rowid("docs", rowid)?);
@@ -1321,10 +1320,9 @@ mod mod_tests {
         let root_page = storage.read_page(root_page_id)?;
         let root_node = BTreeNode::from_page(root_page)?;
         let layout = StoredValueLayout::decode(root_node.values[0].as_bytes())?;
-        let overflow_ids = collect_overflow_page_ids(
-            &mut storage.pager.lock().unwrap(),
-            Some(layout.overflow_first_page),
-        )?;
+        let overflow_ids = storage.with_pager(|pager| {
+            collect_overflow_page_ids(pager, Some(layout.overflow_first_page))
+        })?;
 
         storage.replace_table_rows(
             "docs",
@@ -1355,10 +1353,9 @@ mod mod_tests {
         let root_page = storage.read_page(root_page_id)?;
         let root_node = BTreeNode::from_page(root_page)?;
         let layout = StoredValueLayout::decode(root_node.values[0].as_bytes())?;
-        let overflow_ids = collect_overflow_page_ids(
-            &mut storage.pager.lock().unwrap(),
-            Some(layout.overflow_first_page),
-        )?;
+        let overflow_ids = storage.with_pager(|pager| {
+            collect_overflow_page_ids(pager, Some(layout.overflow_first_page))
+        })?;
 
         storage.drop_table("docs")?;
         assert_eq!(storage.get_storage_stats()?.table_count, 0);

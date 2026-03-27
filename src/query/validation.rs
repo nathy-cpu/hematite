@@ -119,12 +119,10 @@ fn validate_select_with_outer_bindings(
         SelectItem::CountAll | SelectItem::Aggregate { .. } => true,
         SelectItem::Expression(expr) => expression_contains_aggregate(expr),
         SelectItem::Wildcard | SelectItem::Column(_) => false,
-    }) || select.having_clause.as_ref().is_some_and(|having| {
-        having
-            .conditions
-            .iter()
-            .any(condition_contains_aggregate)
-    });
+    }) || select
+        .having_clause
+        .as_ref()
+        .is_some_and(|having| having.conditions.iter().any(condition_contains_aggregate));
     if select.distinct && has_aggregate {
         return Err(HematiteError::ParseError(
             "DISTINCT cannot be combined with aggregate select items yet".to_string(),
@@ -373,10 +371,14 @@ fn validate_create(create: &CreateStatement, catalog: &Schema) -> Result<()> {
         }
     }
 
-    for unique_constraint in create.constraints.iter().filter_map(|constraint| match constraint {
-        TableConstraint::Unique(unique) => Some(unique),
-        TableConstraint::Check(_) | TableConstraint::ForeignKey(_) => None,
-    }) {
+    for unique_constraint in create
+        .constraints
+        .iter()
+        .filter_map(|constraint| match constraint {
+            TableConstraint::Unique(unique) => Some(unique),
+            TableConstraint::Check(_) | TableConstraint::ForeignKey(_) => None,
+        })
+    {
         validate_unique_constraint(create, unique_constraint)?;
     }
 
@@ -523,7 +525,10 @@ fn validate_create_index(create_index: &CreateIndexStatement, catalog: &Schema) 
         }
     })?;
 
-    if table.get_secondary_index(&create_index.index_name).is_some() {
+    if table
+        .get_secondary_index(&create_index.index_name)
+        .is_some()
+    {
         if create_index.if_not_exists {
             return Ok(());
         }
@@ -820,7 +825,11 @@ fn collect_source_bindings_into(
 fn projected_column_names(select: &SelectStatement, catalog: &Schema) -> Result<Vec<String>> {
     let mut names = Vec::with_capacity(select.columns.len());
     for (index, item) in select.columns.iter().enumerate() {
-        if let Some(alias) = select.column_aliases.get(index).and_then(|alias| alias.clone()) {
+        if let Some(alias) = select
+            .column_aliases
+            .get(index)
+            .and_then(|alias| alias.clone())
+        {
             names.push(alias);
             continue;
         }
@@ -861,8 +870,7 @@ fn validate_column_reference_with_outer(
 ) -> Result<()> {
     let (qualifier, column_name) = SelectStatement::split_column_reference(name);
     let local_bindings = collect_source_bindings(select, catalog, from)?;
-    let local_matches =
-        collect_matching_source_names(qualifier, column_name, &local_bindings)?;
+    let local_matches = collect_matching_source_names(qualifier, column_name, &local_bindings)?;
     if !local_matches.is_empty() {
         return match local_matches.len() {
             1 => Ok(()),
@@ -979,7 +987,11 @@ fn validate_local_constraint_columns(
     constraint_label: &str,
 ) -> Result<()> {
     validate_named_columns(columns, constraint_label, |column| {
-        if create.columns.iter().any(|candidate| candidate.name == column) {
+        if create
+            .columns
+            .iter()
+            .any(|candidate| candidate.name == column)
+        {
             Ok(())
         } else {
             Err(HematiteError::ParseError(format!(
@@ -1016,8 +1028,7 @@ fn validate_foreign_key(
                 foreign_key.referenced_table
             ))
         })?;
-    let referenced_column_indices =
-        referenced_column_indices(referenced_table, foreign_key)?;
+    let referenced_column_indices = referenced_column_indices(referenced_table, foreign_key)?;
     let references_primary_key = referenced_table.primary_key_columns == referenced_column_indices;
     let references_unique_index = referenced_table
         .secondary_indexes
@@ -1151,11 +1162,7 @@ fn validate_drop_not_null(
     Ok(())
 }
 
-fn validate_drop_column(
-    alter: &AlterStatement,
-    catalog: &Schema,
-    column_name: &str,
-) -> Result<()> {
+fn validate_drop_column(alter: &AlterStatement, catalog: &Schema, column_name: &str) -> Result<()> {
     let table = require_table(catalog, &alter.table)?;
     let column_index = table.get_column_index(column_name).ok_or_else(|| {
         HematiteError::ParseError(format!(
@@ -1195,7 +1202,8 @@ fn validate_drop_column(
         )));
     }
     for constraint in &table.check_constraints {
-        let condition = crate::parser::parser::parse_condition_fragment(&constraint.expression_sql)?;
+        let condition =
+            crate::parser::parser::parse_condition_fragment(&constraint.expression_sql)?;
         if condition.references_column(column_name, Some(&table.name)) {
             return Err(HematiteError::ParseError(format!(
                 "Cannot drop column '{}' because it is used by a CHECK constraint",
@@ -1248,8 +1256,7 @@ fn expression_contains_aggregate(expr: &Expression) -> bool {
             expression_contains_aggregate(left) || expression_contains_aggregate(right)
         }
         Expression::InList { expr, values, .. } => {
-            expression_contains_aggregate(expr)
-                || values.iter().any(expression_contains_aggregate)
+            expression_contains_aggregate(expr) || values.iter().any(expression_contains_aggregate)
         }
         Expression::InSubquery { expr, subquery, .. } => {
             expression_contains_aggregate(expr)
@@ -1270,14 +1277,14 @@ fn expression_contains_aggregate(expr: &Expression) -> bool {
         Expression::Like { expr, pattern, .. } => {
             expression_contains_aggregate(expr) || expression_contains_aggregate(pattern)
         }
-        Expression::Exists { subquery, .. } => subquery.where_clause.as_ref().is_some_and(
-            |where_clause| {
+        Expression::Exists { subquery, .. } => {
+            subquery.where_clause.as_ref().is_some_and(|where_clause| {
                 where_clause
                     .conditions
                     .iter()
                     .any(condition_contains_aggregate)
-            },
-        ),
+            })
+        }
         Expression::Column(_) | Expression::Literal(_) | Expression::Parameter(_) => false,
     }
 }
@@ -1288,8 +1295,7 @@ fn condition_contains_aggregate(condition: &Condition) -> bool {
             expression_contains_aggregate(left) || expression_contains_aggregate(right)
         }
         Condition::InList { expr, values, .. } => {
-            expression_contains_aggregate(expr)
-                || values.iter().any(expression_contains_aggregate)
+            expression_contains_aggregate(expr) || values.iter().any(expression_contains_aggregate)
         }
         Condition::InSubquery { expr, subquery, .. } => {
             expression_contains_aggregate(expr)
@@ -1310,14 +1316,14 @@ fn condition_contains_aggregate(condition: &Condition) -> bool {
         Condition::Like { expr, pattern, .. } => {
             expression_contains_aggregate(expr) || expression_contains_aggregate(pattern)
         }
-        Condition::Exists { subquery, .. } => subquery.where_clause.as_ref().is_some_and(
-            |where_clause| {
+        Condition::Exists { subquery, .. } => {
+            subquery.where_clause.as_ref().is_some_and(|where_clause| {
                 where_clause
                     .conditions
                     .iter()
                     .any(condition_contains_aggregate)
-            },
-        ),
+            })
+        }
         Condition::NullCheck { expr, .. } => expression_contains_aggregate(expr),
         Condition::Not(condition) => condition_contains_aggregate(condition),
         Condition::Logical { left, right, .. } => {

@@ -70,15 +70,16 @@ fn production_imports_match_layer_matrix_or_temporary_exceptions() {
         ("storage", BTreeSet::from(["storage", "error"])),
         ("btree", BTreeSet::from(["btree", "storage", "error"])),
         ("catalog", BTreeSet::from(["catalog", "btree", "error"])),
-        ("query", BTreeSet::from(["query", "parser", "catalog", "error"])),
+        (
+            "query",
+            BTreeSet::from(["query", "parser", "catalog", "error"]),
+        ),
         ("parser", BTreeSet::from(["parser", "error"])),
         ("sql", BTreeSet::from(["sql", "query", "parser", "error"])),
         ("main", BTreeSet::from(["sql", "error"])),
     ]);
 
     let temporary_exceptions: BTreeSet<(&str, &str)> = BTreeSet::from([
-        ("src/catalog/engine.rs", "storage"),
-        ("src/catalog/engine_metadata.rs", "storage"),
         ("src/sql/interface.rs", "catalog"),
         ("src/sql/connection.rs", "catalog"),
         ("src/sql/result.rs", "catalog"),

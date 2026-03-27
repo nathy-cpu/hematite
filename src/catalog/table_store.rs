@@ -9,16 +9,16 @@ use super::record::StoredRow;
 use super::serialization::RowCodec;
 
 pub(crate) fn get_storage_stats(engine: &CatalogEngine) -> Result<CatalogStorageStats> {
-    let pager = engine.lock_pager()?;
-    let file_bytes = pager.file_len().unwrap_or(0);
-    let allocated_page_count = pager.allocated_page_count();
-    let free_page_count = pager.free_pages().len();
-    let fragmented_free_page_count = pager.fragmented_free_page_count();
-    let trailing_free_page_count = pager.trailing_free_page_count();
+    let tree_store = engine.tree_store();
+    let file_bytes = tree_store.file_len().unwrap_or(0);
+    let allocated_page_count = tree_store.allocated_page_count()?;
+    let free_page_ids = tree_store.free_page_ids()?;
+    let free_page_count = free_page_ids.len();
+    let fragmented_free_page_count = tree_store.fragmented_free_page_count()?;
+    let trailing_free_page_count = tree_store.trailing_free_page_count()?;
     let mut live_table_page_count = 0usize;
     let mut overflow_page_count = 0usize;
     let mut table_used_bytes = 0usize;
-    drop(pager);
     for metadata in engine.table_metadata.values() {
         if let Ok(space_stats) = engine.collect_tree_space_stats(metadata.root_page_id) {
             live_table_page_count += space_stats.page_ids.len();

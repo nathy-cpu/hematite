@@ -3778,7 +3778,10 @@ impl CreateIndexExecutor {
 
 impl QueryExecutor for CreateIndexExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext<'_>) -> Result<QueryResult> {
-        validate_statement(&Statement::CreateIndex(self.statement.clone()), &ctx.catalog)?;
+        validate_statement(
+            &Statement::CreateIndex(self.statement.clone()),
+            &ctx.catalog,
+        )?;
         if self.statement.if_not_exists {
             if let Some(table) = ctx.catalog.get_table_by_name(&self.statement.table) {
                 if table

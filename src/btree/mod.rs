@@ -25,6 +25,7 @@ pub(crate) mod tree;
 pub mod typed;
 pub(crate) mod value_store;
 
+pub use crate::storage::{JournalMode, PageId, PagerIntegrityReport};
 pub use bytes::{ByteTree, ByteTreeCursor, ByteTreeStore};
 pub use codec::{KeyValueCodec, RawBytesCodec};
 pub use tree::TreeSpaceStats;
