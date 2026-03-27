@@ -1382,9 +1382,14 @@ fn require_table<'a>(catalog: &'a Schema, table_name: &str) -> Result<&'a Table>
 fn sql_type_name_for_catalog_type(data_type: crate::catalog::DataType) -> SqlTypeName {
     match data_type {
         crate::catalog::DataType::Integer => SqlTypeName::Integer,
+        crate::catalog::DataType::BigInt => SqlTypeName::BigInt,
         crate::catalog::DataType::Text => SqlTypeName::Text,
         crate::catalog::DataType::Boolean => SqlTypeName::Boolean,
         crate::catalog::DataType::Float => SqlTypeName::Float,
+        crate::catalog::DataType::Decimal => SqlTypeName::Decimal,
+        crate::catalog::DataType::Blob => SqlTypeName::Blob,
+        crate::catalog::DataType::Date => SqlTypeName::Date,
+        crate::catalog::DataType::DateTime => SqlTypeName::DateTime,
     }
 }
 

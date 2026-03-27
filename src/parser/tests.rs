@@ -1436,13 +1436,26 @@ mod parser_tests {
         let create = parse_create(
             "CREATE TABLE metrics (id BIGINT UNSIGNED PRIMARY KEY, ratio REAL, amount DECIMAL(10, 2), code CHAR(8), tiny TINYINT, small SMALLINT, exact NUMERIC(6));",
         )?;
-        assert_eq!(create.columns[0].data_type, SqlTypeName::Integer);
+        assert_eq!(create.columns[0].data_type, SqlTypeName::BigInt);
         assert_eq!(create.columns[1].data_type, SqlTypeName::Float);
-        assert_eq!(create.columns[2].data_type, SqlTypeName::Float);
+        assert_eq!(create.columns[2].data_type, SqlTypeName::Decimal);
         assert_eq!(create.columns[3].data_type, SqlTypeName::Text);
         assert_eq!(create.columns[4].data_type, SqlTypeName::Integer);
         assert_eq!(create.columns[5].data_type, SqlTypeName::Integer);
-        assert_eq!(create.columns[6].data_type, SqlTypeName::Float);
+        assert_eq!(create.columns[6].data_type, SqlTypeName::Decimal);
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_practical_core_type_names() -> Result<()> {
+        let create = parse_create(
+            "CREATE TABLE events (id BIGINT PRIMARY KEY, amount DECIMAL(12, 4), payload BLOB, start_date DATE, created_at DATETIME);",
+        )?;
+        assert_eq!(create.columns[0].data_type, SqlTypeName::BigInt);
+        assert_eq!(create.columns[1].data_type, SqlTypeName::Decimal);
+        assert_eq!(create.columns[2].data_type, SqlTypeName::Blob);
+        assert_eq!(create.columns[3].data_type, SqlTypeName::Date);
+        assert_eq!(create.columns[4].data_type, SqlTypeName::DateTime);
         Ok(())
     }
 

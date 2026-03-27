@@ -93,7 +93,7 @@ Current lower-stack status that should be preserved:
 #### Block 2D — Concrete Guardrails
 
 - [x] Add automated dependency-lint coverage.
-- [ ] Add or update short architectural comments only where they explain non-obvious boundaries.
+- [x] Add or update short architectural comments only where they explain non-obvious boundaries.
 
 ### Phase 3 — SQL Interface
 
@@ -125,27 +125,27 @@ Current lower-stack status that should be preserved:
 
 #### Block 5A — Richer Types
 
-- [ ] Add `BIGINT`, `DECIMAL`, `BLOB`, `DATE`, and `DATETIME`.
-- [ ] Extend runtime values, schema persistence, and row encoding for those types.
-- [ ] Add binding, result access, comparison, and ordering support.
+- [x] Add `BIGINT`, `DECIMAL`, `BLOB`, `DATE`, and `DATETIME`.
+- [x] Extend runtime values, schema persistence, and row encoding for those types.
+- [x] Add binding, result access, comparison, and ordering support.
 
 #### Block 5B — Expression Completion
 
-- [ ] Add `CAST(expr AS type)`.
-- [ ] Add `%` modulo and finish numeric coercion behavior.
+- [x] Add `CAST(expr AS type)`.
+- [x] Add `%` modulo and finish numeric coercion behavior.
 
 #### Block 5C — Important Missing SQL
 
-- [ ] Add `INSERT ... SELECT`.
-- [ ] Add `INSERT ... ON DUPLICATE KEY UPDATE`.
-- [ ] Add `EXPLAIN`.
-- [ ] Add `DESCRIBE`.
-- [ ] Add `SHOW TABLES`.
+- [x] Add `INSERT ... SELECT`.
+- [x] Add `INSERT ... ON DUPLICATE KEY UPDATE`.
+- [x] Add `EXPLAIN`.
+- [x] Add `DESCRIBE`.
+- [x] Add `SHOW TABLES`.
 
 #### Block 5D — Stabilization
 
-- [ ] Expand regression coverage for new types and statements.
-- [ ] Re-run architecture and full-suite validation.
+- [x] Expand regression coverage for new types and statements.
+- [x] Re-run architecture and full-suite validation.
 
 ## Commit Log
 
@@ -155,3 +155,8 @@ Current lower-stack status that should be preserved:
 - `cedbf37` Route catalog metadata through B-tree interfaces
 - `96a0f4d` Route SQL through parser and query facades
 - `1f59a7f` Add stepped SQL script execution
+- `0f48fc1` Route the CLI through the SQL facade
+- `748f353` Add SQL explain and schema introspection
+- `b98651f` Add cast expressions and modulo arithmetic
+- `7de1342` Add insert select support
+- `8f718b0` Add on duplicate key update support

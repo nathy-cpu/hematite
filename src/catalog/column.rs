@@ -73,9 +73,16 @@ impl Column {
                     // Provide default values for non-nullable columns
                     match self.data_type {
                         DataType::Integer => Value::Integer(0),
+                        DataType::BigInt => Value::BigInt(0),
                         DataType::Text => Value::Text(String::new()),
                         DataType::Boolean => Value::Boolean(false),
                         DataType::Float => Value::Float(0.0),
+                        DataType::Decimal => Value::Decimal("0".to_string()),
+                        DataType::Blob => Value::Blob(Vec::new()),
+                        DataType::Date => Value::Date("1970-01-01".to_string()),
+                        DataType::DateTime => {
+                            Value::DateTime("1970-01-01 00:00:00".to_string())
+                        }
                     }
                 }
             }
@@ -101,6 +108,11 @@ impl Column {
             DataType::Text => 1,
             DataType::Boolean => 2,
             DataType::Float => 3,
+            DataType::BigInt => 4,
+            DataType::Decimal => 5,
+            DataType::Blob => 6,
+            DataType::Date => 7,
+            DataType::DateTime => 8,
         });
 
         // Flags (1 byte): bit 0 = nullable, bit 1 = primary_key, bit 2 = auto_increment
@@ -123,6 +135,10 @@ impl Column {
                     buffer.push(0);
                     buffer.extend_from_slice(&i.to_le_bytes());
                 }
+                Value::BigInt(i) => {
+                    buffer.push(4);
+                    buffer.extend_from_slice(&i.to_le_bytes());
+                }
                 Value::Text(s) => {
                     buffer.push(1);
                     let bytes = s.as_bytes();
@@ -137,8 +153,24 @@ impl Column {
                     buffer.push(3);
                     buffer.extend_from_slice(&f.to_le_bytes());
                 }
+                Value::Decimal(s) | Value::Date(s) | Value::DateTime(s) => {
+                    buffer.push(match value {
+                        Value::Decimal(_) => 5,
+                        Value::Date(_) => 7,
+                        Value::DateTime(_) => 8,
+                        _ => unreachable!(),
+                    });
+                    let bytes = s.as_bytes();
+                    buffer.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                    buffer.extend_from_slice(bytes);
+                }
+                Value::Blob(bytes) => {
+                    buffer.push(6);
+                    buffer.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                    buffer.extend_from_slice(bytes);
+                }
                 Value::Null => {
-                    buffer.push(4);
+                    buffer.push(9);
                 }
             },
             None => {
@@ -206,6 +238,11 @@ impl Column {
             1 => DataType::Text,
             2 => DataType::Boolean,
             3 => DataType::Float,
+            4 => DataType::BigInt,
+            5 => DataType::Decimal,
+            6 => DataType::Blob,
+            7 => DataType::Date,
+            8 => DataType::DateTime,
             _ => {
                 return Err(crate::error::HematiteError::CorruptedData(
                     "Invalid data type".to_string(),
@@ -310,6 +347,83 @@ impl Column {
                 Some(Value::Float(val))
             }
             4 => {
+                *offset += 1;
+                if *offset + 8 > buffer.len() {
+                    return Err(crate::error::HematiteError::CorruptedData(
+                        "Invalid default bigint".to_string(),
+                    ));
+                }
+                let val = i64::from_le_bytes([
+                    buffer[*offset],
+                    buffer[*offset + 1],
+                    buffer[*offset + 2],
+                    buffer[*offset + 3],
+                    buffer[*offset + 4],
+                    buffer[*offset + 5],
+                    buffer[*offset + 6],
+                    buffer[*offset + 7],
+                ]);
+                *offset += 8;
+                Some(Value::BigInt(val))
+            }
+            5 | 7 | 8 => {
+                let tag = buffer[*offset];
+                *offset += 1;
+                if *offset + 4 > buffer.len() {
+                    return Err(crate::error::HematiteError::CorruptedData(
+                        "Invalid default text-like length".to_string(),
+                    ));
+                }
+                let text_len = u32::from_le_bytes([
+                    buffer[*offset],
+                    buffer[*offset + 1],
+                    buffer[*offset + 2],
+                    buffer[*offset + 3],
+                ]) as usize;
+                *offset += 4;
+                if *offset + text_len > buffer.len() {
+                    return Err(crate::error::HematiteError::CorruptedData(
+                        "Invalid default text-like value".to_string(),
+                    ));
+                }
+                let text = String::from_utf8(buffer[*offset..*offset + text_len].to_vec())
+                    .map_err(|_| {
+                        crate::error::HematiteError::CorruptedData(
+                            "Invalid UTF-8 in default value".to_string(),
+                        )
+                    })?;
+                *offset += text_len;
+                Some(match tag {
+                    5 => Value::Decimal(text),
+                    7 => Value::Date(text),
+                    8 => Value::DateTime(text),
+                    _ => unreachable!(),
+                })
+            }
+            6 => {
+                *offset += 1;
+                if *offset + 4 > buffer.len() {
+                    return Err(crate::error::HematiteError::CorruptedData(
+                        "Invalid default blob length".to_string(),
+                    ));
+                }
+                let len = u32::from_le_bytes([
+                    buffer[*offset],
+                    buffer[*offset + 1],
+                    buffer[*offset + 2],
+                    buffer[*offset + 3],
+                ]) as usize;
+                *offset += 4;
+                if *offset + len > buffer.len() {
+                    return Err(crate::error::HematiteError::CorruptedData(
+                        "Invalid default blob".to_string(),
+                    ));
+                }
+                let bytes = buffer[*offset..*offset + len].to_vec();
+                *offset += len;
+                Some(Value::Blob(bytes))
+            }
+            9 => {
                 *offset += 1;
                 Some(Value::Null)
             }

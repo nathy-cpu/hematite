@@ -3557,7 +3557,8 @@ impl CreateExecutor {
             .auto_increment(col_def.auto_increment);
 
             if let Some(default_val) = &col_def.default_value {
-                column = column.default_value(lower_literal_value(default_val));
+                let coerced_default = coerce_column_value(&column, lower_literal_value(default_val))?;
+                column = column.default_value(coerced_default);
             }
 
             columns.push(column);
@@ -3830,7 +3831,9 @@ impl QueryExecutor for AlterExecutor {
                 .nullable(column_def.nullable)
                 .primary_key(column_def.primary_key);
                 let column = if let Some(default_value) = &column_def.default_value {
-                    column.default_value(lower_literal_value(default_value))
+                    let coerced_default =
+                        coerce_column_value(&column, lower_literal_value(default_value))?;
+                    column.default_value(coerced_default)
                 } else {
                     column
                 };
@@ -3865,10 +3868,16 @@ impl QueryExecutor for AlterExecutor {
                 default_value,
             } => {
                 let table = catalog_table(ctx, &self.statement.table)?;
+                let column = table.get_column_by_name(column_name).ok_or_else(|| {
+                    HematiteError::ParseError(format!(
+                        "Column '{}' does not exist in table '{}'",
+                        column_name, self.statement.table
+                    ))
+                })?;
                 ctx.catalog.set_column_default(
                     table.id,
                     column_name,
-                    Some(lower_literal_value(default_value)),
+                    Some(coerce_column_value(column, lower_literal_value(default_value))?),
                 )?;
             }
             AlterOperation::AlterColumnDropDefault { column_name } => {
@@ -4086,10 +4095,36 @@ fn primary_key_values(table: &Table, row: &[Value]) -> Result<Vec<Value>> {
 fn coerce_column_value(column: &Column, value: Value) -> Result<Value> {
     match (&column.data_type, value) {
         (DataType::Integer, Value::Integer(i)) => Ok(Value::Integer(i)),
+        (DataType::Integer, Value::BigInt(i)) => i32::try_from(i)
+            .map(Value::Integer)
+            .map_err(|_| {
+                HematiteError::ParseError(format!(
+                    "Type mismatch: column '{}' expects INTEGER, got out-of-range BIGINT",
+                    column.name
+                ))
+            }),
+        (DataType::BigInt, Value::Integer(i)) => Ok(Value::BigInt(i as i64)),
+        (DataType::BigInt, Value::BigInt(i)) => Ok(Value::BigInt(i)),
         (DataType::Text, Value::Text(s)) => Ok(Value::Text(s)),
         (DataType::Boolean, Value::Boolean(b)) => Ok(Value::Boolean(b)),
         (DataType::Float, Value::Float(f)) => Ok(Value::Float(f)),
         (DataType::Float, Value::Integer(i)) => Ok(Value::Float(i as f64)),
+        (DataType::Float, Value::BigInt(i)) => Ok(Value::Float(i as f64)),
+        (DataType::Decimal, Value::Decimal(s)) => Ok(Value::Decimal(normalize_decimal_string(&s)?)),
+        (DataType::Decimal, Value::Integer(i)) => Ok(Value::Decimal(i.to_string())),
+        (DataType::Decimal, Value::BigInt(i)) => Ok(Value::Decimal(i.to_string())),
+        (DataType::Decimal, Value::Float(f)) => Ok(Value::Decimal(normalize_decimal_string(
+            &f.to_string(),
+        )?)),
+        (DataType::Decimal, Value::Text(s)) => Ok(Value::Decimal(normalize_decimal_string(&s)?)),
+        (DataType::Blob, Value::Blob(bytes)) => Ok(Value::Blob(bytes)),
+        (DataType::Blob, Value::Text(s)) => Ok(Value::Blob(s.into_bytes())),
+        (DataType::Date, Value::Date(s)) => Ok(Value::Date(validate_date_string(&s)?)),
+        (DataType::Date, Value::Text(s)) => Ok(Value::Date(validate_date_string(&s)?)),
+        (DataType::DateTime, Value::DateTime(s)) => {
+            Ok(Value::DateTime(validate_datetime_string(&s)?))
+        }
+        (DataType::DateTime, Value::Text(s)) => Ok(Value::DateTime(validate_datetime_string(&s)?)),
         (_, Value::Null) if column.nullable => Ok(Value::Null),
         (_, Value::Null) => Err(HematiteError::ParseError(format!(
             "Column '{}' cannot be NULL",
@@ -4762,6 +4797,11 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
     match (data_type, value) {
         (_, Value::Null) => Ok(Value::Null),
         (DataType::Integer, Value::Integer(value)) => Ok(Value::Integer(value)),
+        (DataType::Integer, Value::BigInt(value)) => i32::try_from(value)
+            .map(Value::Integer)
+            .map_err(|_| {
+                HematiteError::ParseError("Cannot CAST out-of-range BIGINT AS INTEGER".to_string())
+            }),
         (DataType::Integer, Value::Float(value)) => Ok(Value::Integer(value as i32)),
         (DataType::Integer, Value::Boolean(true)) => Ok(Value::Integer(1)),
         (DataType::Integer, Value::Boolean(false)) => Ok(Value::Integer(0)),
@@ -4769,13 +4809,30 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
             .parse::<i32>()
             .map(Value::Integer)
             .map_err(|_| HematiteError::ParseError(format!("Cannot CAST '{}' AS INTEGER", value))),
+        (DataType::BigInt, Value::Integer(value)) => Ok(Value::BigInt(value as i64)),
+        (DataType::BigInt, Value::BigInt(value)) => Ok(Value::BigInt(value)),
+        (DataType::BigInt, Value::Float(value)) => Ok(Value::BigInt(value as i64)),
+        (DataType::BigInt, Value::Boolean(true)) => Ok(Value::BigInt(1)),
+        (DataType::BigInt, Value::Boolean(false)) => Ok(Value::BigInt(0)),
+        (DataType::BigInt, Value::Text(value)) => value
+            .parse::<i64>()
+            .map(Value::BigInt)
+            .map_err(|_| HematiteError::ParseError(format!("Cannot CAST '{}' AS BIGINT", value))),
         (DataType::Text, Value::Integer(value)) => Ok(Value::Text(value.to_string())),
+        (DataType::Text, Value::BigInt(value)) => Ok(Value::Text(value.to_string())),
         (DataType::Text, Value::Float(value)) => Ok(Value::Text(value.to_string())),
         (DataType::Text, Value::Boolean(true)) => Ok(Value::Text("TRUE".to_string())),
         (DataType::Text, Value::Boolean(false)) => Ok(Value::Text("FALSE".to_string())),
         (DataType::Text, Value::Text(value)) => Ok(Value::Text(value)),
+        (DataType::Text, Value::Decimal(value)) => Ok(Value::Text(value)),
+        (DataType::Text, Value::Date(value)) => Ok(Value::Text(value)),
+        (DataType::Text, Value::DateTime(value)) => Ok(Value::Text(value)),
+        (DataType::Text, Value::Blob(value)) => {
+            Ok(Value::Text(String::from_utf8_lossy(&value).into_owned()))
+        }
         (DataType::Boolean, Value::Boolean(value)) => Ok(Value::Boolean(value)),
         (DataType::Boolean, Value::Integer(value)) => Ok(Value::Boolean(value != 0)),
+        (DataType::Boolean, Value::BigInt(value)) => Ok(Value::Boolean(value != 0)),
         (DataType::Boolean, Value::Float(value)) => Ok(Value::Boolean(value != 0.0)),
         (DataType::Boolean, Value::Text(value)) => match value.to_ascii_uppercase().as_str() {
             "TRUE" | "1" => Ok(Value::Boolean(true)),
@@ -4787,12 +4844,41 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
         },
         (DataType::Float, Value::Float(value)) => Ok(Value::Float(value)),
         (DataType::Float, Value::Integer(value)) => Ok(Value::Float(value as f64)),
+        (DataType::Float, Value::BigInt(value)) => Ok(Value::Float(value as f64)),
         (DataType::Float, Value::Boolean(true)) => Ok(Value::Float(1.0)),
         (DataType::Float, Value::Boolean(false)) => Ok(Value::Float(0.0)),
         (DataType::Float, Value::Text(value)) => value
             .parse::<f64>()
             .map(Value::Float)
             .map_err(|_| HematiteError::ParseError(format!("Cannot CAST '{}' AS FLOAT", value))),
+        (DataType::Decimal, Value::Decimal(value)) => {
+            Ok(Value::Decimal(normalize_decimal_string(&value)?))
+        }
+        (DataType::Decimal, Value::Integer(value)) => Ok(Value::Decimal(value.to_string())),
+        (DataType::Decimal, Value::BigInt(value)) => Ok(Value::Decimal(value.to_string())),
+        (DataType::Decimal, Value::Float(value)) => Ok(Value::Decimal(normalize_decimal_string(
+            &value.to_string(),
+        )?)),
+        (DataType::Decimal, Value::Text(value)) => Ok(Value::Decimal(normalize_decimal_string(
+            &value,
+        )?)),
+        (DataType::Blob, Value::Blob(value)) => Ok(Value::Blob(value)),
+        (DataType::Blob, Value::Text(value)) => Ok(Value::Blob(value.into_bytes())),
+        (DataType::Blob, Value::Integer(value)) => Ok(Value::Blob(value.to_le_bytes().to_vec())),
+        (DataType::Blob, Value::BigInt(value)) => Ok(Value::Blob(value.to_le_bytes().to_vec())),
+        (DataType::Date, Value::Date(value)) => Ok(Value::Date(validate_date_string(&value)?)),
+        (DataType::Date, Value::Text(value)) => Ok(Value::Date(validate_date_string(&value)?)),
+        (DataType::DateTime, Value::DateTime(value)) => {
+            Ok(Value::DateTime(validate_datetime_string(&value)?))
+        }
+        (DataType::DateTime, Value::Text(value)) => {
+            Ok(Value::DateTime(validate_datetime_string(&value)?))
+        }
+        (data_type, value) => Err(HematiteError::ParseError(format!(
+            "Cannot CAST {:?} AS {}",
+            value,
+            data_type.name()
+        ))),
     }
 }
 
@@ -5115,7 +5201,15 @@ where
 fn expect_numeric_argument(function_name: &str, value: Value) -> Result<f64> {
     match value {
         Value::Integer(value) => Ok(value as f64),
+        Value::BigInt(value) => Ok(value as f64),
         Value::Float(value) => Ok(value),
+        Value::Decimal(value) => value.parse::<f64>().map_err(|_| {
+            HematiteError::ParseError(format!(
+                "{} requires a numeric value, found {:?}",
+                function_name,
+                Value::Decimal(value.clone())
+            ))
+        }),
         value => Err(HematiteError::ParseError(format!(
             "{} requires a numeric value, found {:?}",
             function_name, value
@@ -5125,11 +5219,15 @@ fn expect_numeric_argument(function_name: &str, value: Value) -> Result<f64> {
 
 fn coerce_value_to_string(function_name: &str, value: Value) -> Result<String> {
     match value {
-        Value::Text(text) => Ok(text),
+        Value::Text(text) | Value::Decimal(text) | Value::Date(text) | Value::DateTime(text) => {
+            Ok(text)
+        }
         Value::Integer(value) => Ok(value.to_string()),
+        Value::BigInt(value) => Ok(value.to_string()),
         Value::Float(value) => Ok(value.to_string()),
         Value::Boolean(true) => Ok("TRUE".to_string()),
         Value::Boolean(false) => Ok("FALSE".to_string()),
+        Value::Blob(value) => Ok(String::from_utf8_lossy(&value).into_owned()),
         Value::Null => Err(HematiteError::ParseError(format!(
             "{} cannot stringify NULL directly",
             function_name
@@ -5139,7 +5237,9 @@ fn coerce_value_to_string(function_name: &str, value: Value) -> Result<String> {
 
 fn expect_text_argument(function_name: &str, value: Value) -> Result<String> {
     match value {
-        Value::Text(text) => Ok(text),
+        Value::Text(text) | Value::Decimal(text) | Value::Date(text) | Value::DateTime(text) => {
+            Ok(text)
+        }
         value => Err(HematiteError::ParseError(format!(
             "{} requires a text value, found {:?}",
             function_name, value
@@ -5388,6 +5488,9 @@ fn round_float(value: f64, precision: i32) -> f64 {
 }
 
 fn sql_values_equal(left: &Value, right: &Value) -> bool {
+    if let Some(ordering) = sql_decimal_cmp(left, right) {
+        return ordering == Ordering::Equal;
+    }
     if let Some((left, right)) = sql_numeric_pair(left, right) {
         return left == right;
     }
@@ -5396,6 +5499,9 @@ fn sql_values_equal(left: &Value, right: &Value) -> bool {
 }
 
 fn sql_partial_cmp(left: &Value, right: &Value) -> Option<Ordering> {
+    if let Some(ordering) = sql_decimal_cmp(left, right) {
+        return Some(ordering);
+    }
     if let Some((left, right)) = sql_numeric_pair(left, right) {
         return left.partial_cmp(&right);
     }
@@ -5406,11 +5512,223 @@ fn sql_partial_cmp(left: &Value, right: &Value) -> Option<Ordering> {
 fn sql_numeric_pair(left: &Value, right: &Value) -> Option<(f64, f64)> {
     match (left, right) {
         (Value::Integer(left), Value::Integer(right)) => Some((*left as f64, *right as f64)),
+        (Value::Integer(left), Value::BigInt(right)) => Some((*left as f64, *right as f64)),
         (Value::Integer(left), Value::Float(right)) => Some((*left as f64, *right)),
+        (Value::BigInt(left), Value::Integer(right)) => Some((*left as f64, *right as f64)),
+        (Value::BigInt(left), Value::BigInt(right)) => Some((*left as f64, *right as f64)),
+        (Value::BigInt(left), Value::Float(right)) => Some((*left as f64, *right)),
         (Value::Float(left), Value::Integer(right)) => Some((*left, *right as f64)),
+        (Value::Float(left), Value::BigInt(right)) => Some((*left, *right as f64)),
         (Value::Float(left), Value::Float(right)) => Some((*left, *right)),
         _ => None,
     }
+}
+
+fn sql_decimal_cmp(left: &Value, right: &Value) -> Option<Ordering> {
+    let left = decimal_compare_key(left)?;
+    let right = decimal_compare_key(right)?;
+    Some(compare_decimal_keys(&left, &right))
+}
+
+fn decimal_compare_key(value: &Value) -> Option<DecimalCompareKey> {
+    match value {
+        Value::Decimal(value) => Some(parse_decimal_compare_key(value).ok()?),
+        Value::Integer(value) => Some(parse_decimal_compare_key(&value.to_string()).ok()?),
+        Value::BigInt(value) => Some(parse_decimal_compare_key(&value.to_string()).ok()?),
+        Value::Float(value) => Some(parse_decimal_compare_key(&value.to_string()).ok()?),
+        _ => None,
+    }
+}
+
+#[derive(Debug)]
+struct DecimalCompareKey {
+    negative: bool,
+    integer: String,
+    fraction: String,
+}
+
+fn normalize_decimal_string(input: &str) -> Result<String> {
+    let key = parse_decimal_compare_key(input)?;
+    let mut out = String::new();
+    if key.negative && !(key.integer == "0" && key.fraction.is_empty()) {
+        out.push('-');
+    }
+    out.push_str(&key.integer);
+    if !key.fraction.is_empty() {
+        out.push('.');
+        out.push_str(&key.fraction);
+    }
+    Ok(out)
+}
+
+fn parse_decimal_compare_key(input: &str) -> Result<DecimalCompareKey> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err(HematiteError::ParseError(
+            "Decimal value cannot be empty".to_string(),
+        ));
+    }
+
+    let (negative, digits) = match trimmed.as_bytes()[0] {
+        b'+' => (false, &trimmed[1..]),
+        b'-' => (true, &trimmed[1..]),
+        _ => (false, trimmed),
+    };
+
+    if digits.is_empty() {
+        return Err(HematiteError::ParseError(format!(
+            "Invalid decimal value '{}'",
+            input
+        )));
+    }
+
+    let mut parts = digits.split('.');
+    let integer_part = parts.next().unwrap_or_default();
+    let fraction_part = parts.next();
+    if parts.next().is_some()
+        || !integer_part.chars().all(|ch| ch.is_ascii_digit())
+        || fraction_part
+            .is_some_and(|part| !part.chars().all(|ch| ch.is_ascii_digit()))
+    {
+        return Err(HematiteError::ParseError(format!(
+            "Invalid decimal value '{}'",
+            input
+        )));
+    }
+
+    let integer = integer_part.trim_start_matches('0');
+    let mut integer = if integer.is_empty() { "0" } else { integer }.to_string();
+    let mut fraction = fraction_part.unwrap_or_default().to_string();
+    while fraction.ends_with('0') {
+        fraction.pop();
+    }
+    if integer == "0" && fraction.is_empty() {
+        integer = "0".to_string();
+        return Ok(DecimalCompareKey {
+            negative: false,
+            integer,
+            fraction,
+        });
+    }
+    Ok(DecimalCompareKey {
+        negative,
+        integer,
+        fraction,
+    })
+}
+
+fn compare_decimal_keys(left: &DecimalCompareKey, right: &DecimalCompareKey) -> Ordering {
+    if left.negative != right.negative {
+        return if left.negative {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        };
+    }
+
+    let positive_ordering = left
+        .integer
+        .len()
+        .cmp(&right.integer.len())
+        .then_with(|| left.integer.cmp(&right.integer))
+        .then_with(|| {
+            let max_len = left.fraction.len().max(right.fraction.len());
+            let mut left_fraction = left.fraction.clone();
+            let mut right_fraction = right.fraction.clone();
+            left_fraction.extend(std::iter::repeat_n('0', max_len - left_fraction.len()));
+            right_fraction.extend(std::iter::repeat_n('0', max_len - right_fraction.len()));
+            left_fraction.cmp(&right_fraction)
+        });
+
+    if left.negative {
+        positive_ordering.reverse()
+    } else {
+        positive_ordering
+    }
+}
+
+fn validate_date_string(input: &str) -> Result<String> {
+    let value = input.trim();
+    let parts = value.split('-').collect::<Vec<_>>();
+    if parts.len() != 3
+        || parts[0].len() != 4
+        || parts[1].len() != 2
+        || parts[2].len() != 2
+        || !parts.iter().all(|part| part.chars().all(|ch| ch.is_ascii_digit()))
+    {
+        return Err(HematiteError::ParseError(format!(
+            "Invalid DATE value '{}'",
+            input
+        )));
+    }
+    let year = parts[0].parse::<i32>().unwrap_or(0);
+    let month = parts[1].parse::<u32>().unwrap_or(0);
+    let day = parts[2].parse::<u32>().unwrap_or(0);
+    validate_date_components(year, month, day, input)?;
+    Ok(format!("{year:04}-{month:02}-{day:02}"))
+}
+
+fn validate_datetime_string(input: &str) -> Result<String> {
+    let value = input.trim();
+    let mut parts = value.split(' ');
+    let date = parts.next().unwrap_or_default();
+    let time = parts.next().unwrap_or_default();
+    if parts.next().is_some() {
+        return Err(HematiteError::ParseError(format!(
+            "Invalid DATETIME value '{}'",
+            input
+        )));
+    }
+    let date = validate_date_string(date)?;
+    let time_parts = time.split(':').collect::<Vec<_>>();
+    if time_parts.len() != 3
+        || time_parts.iter().any(|part| part.len() != 2)
+        || !time_parts
+            .iter()
+            .all(|part| part.chars().all(|ch| ch.is_ascii_digit()))
+    {
+        return Err(HematiteError::ParseError(format!(
+            "Invalid DATETIME value '{}'",
+            input
+        )));
+    }
+    let hour = time_parts[0].parse::<u32>().unwrap_or(99);
+    let minute = time_parts[1].parse::<u32>().unwrap_or(99);
+    let second = time_parts[2].parse::<u32>().unwrap_or(99);
+    if hour > 23 || minute > 59 || second > 59 {
+        return Err(HematiteError::ParseError(format!(
+            "Invalid DATETIME value '{}'",
+            input
+        )));
+    }
+    Ok(format!("{date} {hour:02}:{minute:02}:{second:02}"))
+}
+
+fn validate_date_components(year: i32, month: u32, day: u32, input: &str) -> Result<()> {
+    if !(1..=12).contains(&month) {
+        return Err(HematiteError::ParseError(format!(
+            "Invalid DATE value '{}'",
+            input
+        )));
+    }
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => unreachable!(),
+    };
+    if day == 0 || day > max_day {
+        return Err(HematiteError::ParseError(format!(
+            "Invalid DATE value '{}'",
+            input
+        )));
+    }
+    Ok(())
+}
+
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
 fn compare_condition_values(

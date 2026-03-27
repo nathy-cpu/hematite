@@ -5,18 +5,28 @@ use std::cmp::Ordering;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SqlTypeName {
     Integer,
+    BigInt,
     Text,
     Boolean,
     Float,
+    Decimal,
+    Blob,
+    Date,
+    DateTime,
 }
 
 impl SqlTypeName {
     pub fn to_sql(self) -> &'static str {
         match self {
             SqlTypeName::Integer => "INTEGER",
+            SqlTypeName::BigInt => "BIGINT",
             SqlTypeName::Text => "TEXT",
             SqlTypeName::Boolean => "BOOLEAN",
             SqlTypeName::Float => "FLOAT",
+            SqlTypeName::Decimal => "DECIMAL",
+            SqlTypeName::Blob => "BLOB",
+            SqlTypeName::Date => "DATE",
+            SqlTypeName::DateTime => "DATETIME",
         }
     }
 }

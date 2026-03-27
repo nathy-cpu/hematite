@@ -2049,14 +2049,15 @@ impl Parser {
     fn parse_data_type(&mut self) -> Result<SqlTypeName> {
         let token = self.peek_token()?;
         let data_type = match token {
-            Token::Integer | Token::Int | Token::TinyInt | Token::SmallInt | Token::BigInt => {
-                SqlTypeName::Integer
-            }
+            Token::Integer | Token::Int | Token::TinyInt | Token::SmallInt => SqlTypeName::Integer,
+            Token::BigInt => SqlTypeName::BigInt,
             Token::Text => SqlTypeName::Text,
             Token::Boolean | Token::Bool => SqlTypeName::Boolean,
-            Token::Float | Token::Double | Token::Real | Token::Decimal | Token::Numeric => {
-                SqlTypeName::Float
-            }
+            Token::Float | Token::Double | Token::Real => SqlTypeName::Float,
+            Token::Decimal | Token::Numeric => SqlTypeName::Decimal,
+            Token::Blob => SqlTypeName::Blob,
+            Token::Date => SqlTypeName::Date,
+            Token::DateTime => SqlTypeName::DateTime,
             Token::Varchar | Token::Char => {
                 self.consume_token(&token)?;
                 self.parse_type_length()?;

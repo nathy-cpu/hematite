@@ -27,6 +27,10 @@ impl RowCodec {
                     buffer.push(1);
                     buffer.extend_from_slice(&i.to_le_bytes());
                 }
+                Value::BigInt(i) => {
+                    buffer.push(6);
+                    buffer.extend_from_slice(&i.to_le_bytes());
+                }
                 Value::Text(s) => {
                     buffer.push(2);
                     let bytes = s.as_bytes();
@@ -40,6 +44,29 @@ impl RowCodec {
                 Value::Float(f) => {
                     buffer.push(4);
                     buffer.extend_from_slice(&f.to_le_bytes());
+                }
+                Value::Decimal(s) => {
+                    buffer.push(7);
+                    let bytes = s.as_bytes();
+                    buffer.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                    buffer.extend_from_slice(bytes);
+                }
+                Value::Blob(bytes) => {
+                    buffer.push(8);
+                    buffer.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                    buffer.extend_from_slice(bytes);
+                }
+                Value::Date(s) => {
+                    buffer.push(9);
+                    let bytes = s.as_bytes();
+                    buffer.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                    buffer.extend_from_slice(bytes);
+                }
+                Value::DateTime(s) => {
+                    buffer.push(10);
+                    let bytes = s.as_bytes();
+                    buffer.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                    buffer.extend_from_slice(bytes);
                 }
                 Value::Null => buffer.push(5),
             }
@@ -192,6 +219,77 @@ impl RowCodec {
                     Value::Float(value)
                 }
                 5 => Value::Null,
+                6 => {
+                    if offset + 8 > payload_end {
+                        return Err(HematiteError::CorruptedData(
+                            "BigInt value is truncated".to_string(),
+                        ));
+                    }
+                    let value = i64::from_le_bytes([
+                        data[offset],
+                        data[offset + 1],
+                        data[offset + 2],
+                        data[offset + 3],
+                        data[offset + 4],
+                        data[offset + 5],
+                        data[offset + 6],
+                        data[offset + 7],
+                    ]);
+                    offset += 8;
+                    Value::BigInt(value)
+                }
+                7 | 9 | 10 => {
+                    if offset + 4 > payload_end {
+                        return Err(HematiteError::CorruptedData(
+                            "Text-like value length is truncated".to_string(),
+                        ));
+                    }
+                    let len = u32::from_le_bytes([
+                        data[offset],
+                        data[offset + 1],
+                        data[offset + 2],
+                        data[offset + 3],
+                    ]) as usize;
+                    offset += 4;
+                    if offset + len > payload_end {
+                        return Err(HematiteError::CorruptedData(
+                            "Text-like value is truncated".to_string(),
+                        ));
+                    }
+                    let value =
+                        String::from_utf8(data[offset..offset + len].to_vec()).map_err(|_| {
+                            HematiteError::CorruptedData("Invalid UTF-8 in text value".to_string())
+                        })?;
+                    offset += len;
+                    match tag {
+                        7 => Value::Decimal(value),
+                        9 => Value::Date(value),
+                        10 => Value::DateTime(value),
+                        _ => unreachable!(),
+                    }
+                }
+                8 => {
+                    if offset + 4 > payload_end {
+                        return Err(HematiteError::CorruptedData(
+                            "Blob length is truncated".to_string(),
+                        ));
+                    }
+                    let len = u32::from_le_bytes([
+                        data[offset],
+                        data[offset + 1],
+                        data[offset + 2],
+                        data[offset + 3],
+                    ]) as usize;
+                    offset += 4;
+                    if offset + len > payload_end {
+                        return Err(HematiteError::CorruptedData(
+                            "Blob value is truncated".to_string(),
+                        ));
+                    }
+                    let value = data[offset..offset + len].to_vec();
+                    offset += len;
+                    Value::Blob(value)
+                }
                 _ => {
                     return Err(HematiteError::CorruptedData(format!(
                         "Unknown value tag {} in stored row",

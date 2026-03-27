@@ -261,13 +261,13 @@ mod connection_tests {
         assert_eq!(
             result.rows,
             vec![vec![
-                crate::catalog::Value::Integer(1),
+                crate::catalog::Value::BigInt(1),
                 crate::catalog::Value::Float(1.5),
-                crate::catalog::Value::Float(2.5),
+                crate::catalog::Value::Decimal("2.5".to_string()),
                 crate::catalog::Value::Text("AB".to_string()),
                 crate::catalog::Value::Integer(3),
                 crate::catalog::Value::Integer(4),
-                crate::catalog::Value::Float(5.5),
+                crate::catalog::Value::Decimal("5.5".to_string()),
             ]]
         );
 
@@ -2866,6 +2866,48 @@ mod connection_tests {
 
         let bad_cast = conn.execute("SELECT CAST(label AS INTEGER) FROM test WHERE id = 2;");
         assert!(bad_cast.is_err());
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_practical_core_runtime_types_round_trip() -> Result<()> {
+        let db = TestDbFile::new("_test_practical_core_runtime_types_round_trip");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute(
+            "CREATE TABLE typed (\
+                id BIGINT PRIMARY KEY,\
+                amount DECIMAL(10, 2),\
+                payload BLOB,\
+                event_date DATE,\
+                created_at DATETIME\
+            );",
+        )?;
+        conn.execute(
+            "INSERT INTO typed (id, amount, payload, event_date, created_at) VALUES (\
+                CAST('5000000000' AS BIGINT),\
+                CAST('12.3400' AS DECIMAL),\
+                CAST('abc' AS BLOB),\
+                '2026-03-27',\
+                '2026-03-27 10:11:12'\
+            );",
+        )?;
+
+        let result = conn.execute(
+            "SELECT id, amount, payload, event_date, created_at FROM typed;",
+        )?;
+        assert_eq!(
+            result.rows,
+            vec![vec![
+                crate::catalog::Value::BigInt(5_000_000_000),
+                crate::catalog::Value::Decimal("12.34".to_string()),
+                crate::catalog::Value::Blob(b"abc".to_vec()),
+                crate::catalog::Value::Date("2026-03-27".to_string()),
+                crate::catalog::Value::DateTime("2026-03-27 10:11:12".to_string()),
+            ]]
+        );
 
         conn.close()?;
         Ok(())
