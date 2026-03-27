@@ -4186,6 +4186,8 @@ fn evaluate_scalar_function(function: ScalarFunction, args: Vec<Value>) -> Resul
         ScalarFunction::Trim => evaluate_trim(args),
         ScalarFunction::Abs => evaluate_abs(args),
         ScalarFunction::Round => evaluate_round(args),
+        ScalarFunction::Concat => evaluate_concat(args),
+        ScalarFunction::ConcatWs => evaluate_concat_ws(args),
     }
 }
 
@@ -4341,6 +4343,48 @@ fn evaluate_round(args: Vec<Value>) -> Result<Value> {
     }
 }
 
+fn evaluate_concat(args: Vec<Value>) -> Result<Value> {
+    if args.is_empty() {
+        return Err(HematiteError::ParseError(
+            "CONCAT requires at least one argument".to_string(),
+        ));
+    }
+
+    let mut out = String::new();
+    for arg in args {
+        if arg.is_null() {
+            return Ok(Value::Null);
+        }
+        out.push_str(&coerce_value_to_string("CONCAT", arg)?);
+    }
+    Ok(Value::Text(out))
+}
+
+fn evaluate_concat_ws(args: Vec<Value>) -> Result<Value> {
+    if args.len() < 2 {
+        return Err(HematiteError::ParseError(
+            "CONCAT_WS requires at least two arguments".to_string(),
+        ));
+    }
+
+    let mut args = args.into_iter();
+    let separator = args.next().expect("concat_ws validated arity");
+    if separator.is_null() {
+        return Ok(Value::Null);
+    }
+    let separator = coerce_value_to_string("CONCAT_WS", separator)?;
+
+    let mut parts = Vec::new();
+    for arg in args {
+        if arg.is_null() {
+            continue;
+        }
+        parts.push(coerce_value_to_string("CONCAT_WS", arg)?);
+    }
+
+    Ok(Value::Text(parts.join(&separator)))
+}
+
 fn expect_unary_numeric_function<F>(name: &str, args: Vec<Value>, f: F) -> Result<Value>
 where
     F: FnOnce(Value) -> Result<Value>,
@@ -4359,6 +4403,20 @@ where
         value => Err(HematiteError::ParseError(format!(
             "{} requires a numeric value, found {:?}",
             name, value
+        ))),
+    }
+}
+
+fn coerce_value_to_string(function_name: &str, value: Value) -> Result<String> {
+    match value {
+        Value::Text(text) => Ok(text),
+        Value::Integer(value) => Ok(value.to_string()),
+        Value::Float(value) => Ok(value.to_string()),
+        Value::Boolean(true) => Ok("TRUE".to_string()),
+        Value::Boolean(false) => Ok("FALSE".to_string()),
+        Value::Null => Err(HematiteError::ParseError(format!(
+            "{} cannot stringify NULL directly",
+            function_name
         ))),
     }
 }

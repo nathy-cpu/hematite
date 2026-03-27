@@ -228,6 +228,8 @@ pub enum ScalarFunction {
     Trim,
     Abs,
     Round,
+    Concat,
+    ConcatWs,
 }
 
 #[derive(Debug, Clone)]
@@ -2635,6 +2637,8 @@ impl ScalarFunction {
             "TRIM" => Some(Self::Trim),
             "ABS" => Some(Self::Abs),
             "ROUND" => Some(Self::Round),
+            "CONCAT" => Some(Self::Concat),
+            "CONCAT_WS" => Some(Self::ConcatWs),
             _ => None,
         }
     }
@@ -2650,6 +2654,8 @@ impl ScalarFunction {
             ScalarFunction::Trim => "TRIM",
             ScalarFunction::Abs => "ABS",
             ScalarFunction::Round => "ROUND",
+            ScalarFunction::Concat => "CONCAT",
+            ScalarFunction::ConcatWs => "CONCAT_WS",
         }
     }
 }

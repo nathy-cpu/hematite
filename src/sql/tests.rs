@@ -542,6 +542,61 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_concat_and_concat_ws_functions() -> Result<()> {
+        let db = TestDbFile::new("_test_concat_and_concat_ws_functions");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, first_name TEXT, last_name TEXT, nickname TEXT);")?;
+        conn.execute(
+            "INSERT INTO users (id, first_name, last_name, nickname) VALUES (1, 'Ada', 'Lovelace', NULL), (2, 'Linus', 'Torvalds', 'LT');",
+        )?;
+
+        let result = conn.execute(
+            "SELECT CONCAT(first_name, ' ', last_name), CONCAT_WS('-', first_name, nickname, last_name) FROM users ORDER BY id ASC;",
+        )?;
+
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![
+                    crate::catalog::Value::Text("Ada Lovelace".to_string()),
+                    crate::catalog::Value::Text("Ada-Lovelace".to_string()),
+                ],
+                vec![
+                    crate::catalog::Value::Text("Linus Torvalds".to_string()),
+                    crate::catalog::Value::Text("Linus-LT-Torvalds".to_string()),
+                ],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_concat_function_null_propagation() -> Result<()> {
+        let db = TestDbFile::new("_test_concat_function_null_propagation");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, nickname TEXT);")?;
+        conn.execute("INSERT INTO users (id, name, nickname) VALUES (1, 'Ada', NULL);")?;
+
+        let result = conn.execute(
+            "SELECT CONCAT(name, nickname), CONCAT_WS(':', name, nickname) FROM users;",
+        )?;
+        assert_eq!(
+            result.rows,
+            vec![vec![
+                crate::catalog::Value::Null,
+                crate::catalog::Value::Text("Ada".to_string()),
+            ]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_check_constraint_rejects_invalid_insert() -> Result<()> {
         let db = TestDbFile::new("_test_check_constraint_rejects_invalid_insert");
         let mut conn = Connection::new(db.path())?;
