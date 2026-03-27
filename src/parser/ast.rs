@@ -239,6 +239,9 @@ pub enum ScalarFunction {
     Repeat,
     Reverse,
     Locate,
+    Ceil,
+    Floor,
+    Power,
 }
 
 #[derive(Debug, Clone)]
@@ -2657,6 +2660,9 @@ impl ScalarFunction {
             "REPEAT" => Some(Self::Repeat),
             "REVERSE" => Some(Self::Reverse),
             "LOCATE" => Some(Self::Locate),
+            "CEIL" | "CEILING" => Some(Self::Ceil),
+            "FLOOR" => Some(Self::Floor),
+            "POWER" | "POW" => Some(Self::Power),
             _ => None,
         }
     }
@@ -2683,6 +2689,9 @@ impl ScalarFunction {
             ScalarFunction::Repeat => "REPEAT",
             ScalarFunction::Reverse => "REVERSE",
             ScalarFunction::Locate => "LOCATE",
+            ScalarFunction::Ceil => "CEIL",
+            ScalarFunction::Floor => "FLOOR",
+            ScalarFunction::Power => "POWER",
         }
     }
 }

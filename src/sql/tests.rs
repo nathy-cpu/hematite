@@ -796,6 +796,53 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_ceil_floor_and_power_functions() -> Result<()> {
+        let db = TestDbFile::new("_test_ceil_floor_and_power_functions");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE metrics (id INTEGER PRIMARY KEY, score FLOAT, exponent INTEGER);")?;
+        conn.execute("INSERT INTO metrics (id, score, exponent) VALUES (1, 2.25, 3);")?;
+
+        let result = conn.execute(
+            "SELECT CEIL(score), CEILING(score), FLOOR(score), POWER(score, exponent), POW(2, exponent) FROM metrics;",
+        )?;
+        assert_eq!(
+            result.rows,
+            vec![vec![
+                crate::catalog::Value::Float(3.0),
+                crate::catalog::Value::Float(3.0),
+                crate::catalog::Value::Float(2.0),
+                crate::catalog::Value::Float(11.390625),
+                crate::catalog::Value::Float(8.0),
+            ]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_numeric_helper_functions_in_updates_and_filters() -> Result<()> {
+        let db = TestDbFile::new("_test_numeric_helper_functions_in_updates_and_filters");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE metrics (id INTEGER PRIMARY KEY, score FLOAT, bucket FLOAT);")?;
+        conn.execute("INSERT INTO metrics (id, score, bucket) VALUES (1, 2.25, NULL);")?;
+        conn.execute("UPDATE metrics SET bucket = CEIL(score) WHERE FLOOR(score) = 2;")?;
+
+        let result = conn.execute(
+            "SELECT bucket FROM metrics WHERE POWER(FLOOR(score), 2) = 4;",
+        )?;
+        assert_eq!(
+            result.rows,
+            vec![vec![crate::catalog::Value::Float(3.0)]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_check_constraint_rejects_invalid_insert() -> Result<()> {
         let db = TestDbFile::new("_test_check_constraint_rejects_invalid_insert");
         let mut conn = Connection::new(db.path())?;

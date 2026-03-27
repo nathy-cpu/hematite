@@ -4197,6 +4197,9 @@ fn evaluate_scalar_function(function: ScalarFunction, args: Vec<Value>) -> Resul
         ScalarFunction::Repeat => evaluate_repeat(args),
         ScalarFunction::Reverse => evaluate_reverse(args),
         ScalarFunction::Locate => evaluate_locate(args),
+        ScalarFunction::Ceil => evaluate_ceil(args),
+        ScalarFunction::Floor => evaluate_floor(args),
+        ScalarFunction::Power => evaluate_power(args),
     }
 }
 
@@ -4492,6 +4495,17 @@ where
     }
 }
 
+fn expect_numeric_argument(function_name: &str, value: Value) -> Result<f64> {
+    match value {
+        Value::Integer(value) => Ok(value as f64),
+        Value::Float(value) => Ok(value),
+        value => Err(HematiteError::ParseError(format!(
+            "{} requires a numeric value, found {:?}",
+            function_name, value
+        ))),
+    }
+}
+
 fn coerce_value_to_string(function_name: &str, value: Value) -> Result<String> {
     match value {
         Value::Text(text) => Ok(text),
@@ -4689,6 +4703,48 @@ fn evaluate_locate(args: Vec<Value>) -> Result<Value> {
     }
 
     Ok(Value::Integer(0))
+}
+
+fn evaluate_ceil(args: Vec<Value>) -> Result<Value> {
+    expect_unary_numeric_function("CEIL", args, |value| match value {
+        Value::Integer(value) => Ok(Value::Integer(value)),
+        Value::Float(value) => Ok(Value::Float(value.ceil())),
+        _ => unreachable!("validated numeric input"),
+    })
+}
+
+fn evaluate_floor(args: Vec<Value>) -> Result<Value> {
+    expect_unary_numeric_function("FLOOR", args, |value| match value {
+        Value::Integer(value) => Ok(Value::Integer(value)),
+        Value::Float(value) => Ok(Value::Float(value.floor())),
+        _ => unreachable!("validated numeric input"),
+    })
+}
+
+fn evaluate_power(args: Vec<Value>) -> Result<Value> {
+    if args.len() != 2 {
+        return Err(HematiteError::ParseError(
+            "POWER requires exactly two arguments".to_string(),
+        ));
+    }
+
+    let mut args = args.into_iter();
+    let base = args.next().expect("validated power arity");
+    let exponent = args.next().expect("validated power arity");
+    if base.is_null() || exponent.is_null() {
+        return Ok(Value::Null);
+    }
+
+    let base = expect_numeric_argument("POWER", base)?;
+    let exponent = expect_numeric_argument("POWER", exponent)?;
+    let value = base.powf(exponent);
+    if !value.is_finite() {
+        return Err(HematiteError::ParseError(
+            "POWER produced a non-finite result".to_string(),
+        ));
+    }
+
+    Ok(Value::Float(value))
 }
 
 fn round_integer(value: i32, precision: i32) -> Result<Value> {
