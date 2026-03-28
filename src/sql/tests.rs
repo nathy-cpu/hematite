@@ -3761,6 +3761,198 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_window_functions_over_view_source() -> Result<()> {
+        let db = TestDbFile::new("_test_window_functions_over_view_source");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute(
+            "CREATE TABLE scores (id INTEGER PRIMARY KEY, team TEXT, player TEXT, score INTEGER);",
+        )?;
+        conn.execute(
+            "INSERT INTO scores (id, team, player, score) VALUES \
+             (1, 'A', 'alice', 10), \
+             (2, 'A', 'amy', 8), \
+             (3, 'B', 'bob', 7);",
+        )?;
+        conn.execute(
+            "CREATE VIEW ranked_source AS SELECT team, player, score FROM scores WHERE score >= 7;",
+        )?;
+
+        let result = conn.execute(
+            "SELECT team, player, \
+                ROW_NUMBER() OVER (PARTITION BY team ORDER BY score DESC) AS row_num, \
+                COUNT(*) OVER (PARTITION BY team) AS team_count \
+             FROM ranked_source \
+             ORDER BY team ASC, score DESC;",
+        )?;
+
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![
+                    crate::catalog::Value::Text("A".to_string()),
+                    crate::catalog::Value::Text("alice".to_string()),
+                    crate::catalog::Value::Integer(1),
+                    crate::catalog::Value::Integer(2),
+                ],
+                vec![
+                    crate::catalog::Value::Text("A".to_string()),
+                    crate::catalog::Value::Text("amy".to_string()),
+                    crate::catalog::Value::Integer(2),
+                    crate::catalog::Value::Integer(2),
+                ],
+                vec![
+                    crate::catalog::Value::Text("B".to_string()),
+                    crate::catalog::Value::Text("bob".to_string()),
+                    crate::catalog::Value::Integer(1),
+                    crate::catalog::Value::Integer(1),
+                ],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_trigger_on_table_referenced_by_view() -> Result<()> {
+        let db = TestDbFile::new("_test_trigger_on_table_referenced_by_view");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, active BOOLEAN);")?;
+        conn.execute("CREATE TABLE audit_log (id INTEGER PRIMARY KEY, entry TEXT);")?;
+        conn.execute(
+            "CREATE VIEW active_users AS SELECT id, name FROM users WHERE active = TRUE;",
+        )?;
+        conn.execute(
+            "CREATE TRIGGER audit_users AFTER INSERT ON users AS INSERT INTO audit_log (id, entry) VALUES (NEW.id, NEW.name);",
+        )?;
+
+        conn.execute("INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")?;
+
+        let view_rows = conn.execute("SELECT id, name FROM active_users;")?;
+        assert_eq!(
+            view_rows.rows,
+            vec![vec![
+                crate::catalog::Value::Integer(1),
+                crate::catalog::Value::Text("Ada".to_string()),
+            ]]
+        );
+
+        let audit_rows = conn.execute("SELECT id, entry FROM audit_log;")?;
+        assert_eq!(
+            audit_rows.rows,
+            vec![vec![
+                crate::catalog::Value::Integer(1),
+                crate::catalog::Value::Text("Ada".to_string()),
+            ]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_joined_update_respects_unique_constraints() -> Result<()> {
+        let db = TestDbFile::new("_test_joined_update_respects_unique_constraints");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE orgs (id INTEGER PRIMARY KEY, active BOOLEAN);")?;
+        conn.execute(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, org_id INTEGER, email TEXT UNIQUE);",
+        )?;
+        conn.execute("INSERT INTO orgs (id, active) VALUES (1, TRUE), (2, FALSE);")?;
+        conn.execute(
+            "INSERT INTO users (id, org_id, email) VALUES (1, 1, 'a@example.com'), (2, 2, 'b@example.com');",
+        )?;
+
+        let result = conn.execute(
+            "UPDATE users u \
+             JOIN orgs o ON u.org_id = o.id \
+             SET email = 'b@example.com' \
+             WHERE o.active = TRUE;",
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("UNIQUE"));
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_joined_delete_respects_foreign_key_restrict() -> Result<()> {
+        let db = TestDbFile::new("_test_joined_delete_respects_foreign_key_restrict");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE parents (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute(
+            "CREATE TABLE children (id INTEGER PRIMARY KEY, parent_id INTEGER, \
+             CONSTRAINT fk_parent FOREIGN KEY (parent_id) REFERENCES parents (id) ON DELETE RESTRICT ON UPDATE RESTRICT);",
+        )?;
+        conn.execute("INSERT INTO parents (id, name) VALUES (1, 'root');")?;
+        conn.execute("INSERT INTO children (id, parent_id) VALUES (10, 1);")?;
+
+        let result = conn.execute(
+            "DELETE p FROM parents p \
+             JOIN children c ON p.id = c.parent_id \
+             WHERE c.id = 10;",
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("foreign key"));
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_introspection_after_schema_churn_and_reopen() -> Result<()> {
+        let db = TestDbFile::new("_test_introspection_after_schema_churn_and_reopen");
+
+        {
+            let mut conn = Connection::new(db.path())?;
+            conn.execute(
+                "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT, org_id INTEGER);",
+            )?;
+            conn.execute("ALTER TABLE users ADD CONSTRAINT uq_users_email UNIQUE (email);")?;
+            conn.execute(
+                "ALTER TABLE users ADD CONSTRAINT fk_users_org FOREIGN KEY (org_id) REFERENCES users (id) ON DELETE RESTRICT ON UPDATE RESTRICT;",
+            )?;
+            conn.execute("ALTER TABLE users DROP CONSTRAINT uq_users_email;")?;
+            conn.execute("CREATE INDEX idx_users_org ON users (org_id);")?;
+            conn.execute("CREATE VIEW user_ids AS SELECT id FROM users;")?;
+            conn.execute("CREATE TABLE audit_log (id INTEGER PRIMARY KEY, entry TEXT);")?;
+            conn.execute(
+                "CREATE TRIGGER audit_users AFTER INSERT ON users AS INSERT INTO audit_log (id, entry) VALUES (NEW.id, NEW.email);",
+            )?;
+            conn.close()?;
+        }
+
+        let mut reopened = Connection::new(db.path())?;
+
+        let describe = reopened.execute("DESCRIBE users;")?;
+        let email_constraints = match &describe.rows[1][7] {
+            crate::catalog::Value::Text(value) => value.clone(),
+            crate::catalog::Value::Null => String::new(),
+            other => panic!("expected text or null, found {other:?}"),
+        };
+        assert!(!email_constraints.contains("uq_users_email"));
+
+        let show_indexes = reopened.execute("SHOW INDEXES FROM users;")?;
+        assert!(show_indexes.rows.iter().any(
+            |row| row[1] == crate::catalog::Value::Text("idx_users_org".to_string())
+        ));
+
+        let show_views = reopened.execute("SHOW VIEWS;")?;
+        assert_eq!(show_views.rows.len(), 1);
+
+        let show_triggers = reopened.execute("SHOW TRIGGERS FROM users;")?;
+        assert_eq!(show_triggers.rows.len(), 1);
+
+        reopened.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_where_between() -> Result<()> {
         let db = TestDbFile::new("_test_where_between");
         let mut conn = Connection::new(db.path())?;
