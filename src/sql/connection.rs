@@ -31,8 +31,8 @@ use crate::parser::{Lexer, Parser};
 use crate::query::lowering::raise_literal_value;
 use crate::query::validation::validate_statement;
 use crate::query::{
-    Catalog, CatalogEngine, ExecutionContext, JournalMode, QueryCatalogSnapshot, QueryExecutor,
-    QueryPlanner, QueryResult, Schema, Value,
+    Catalog, CatalogEngine, ExecutionContext, JournalMode, MutationEvent,
+    QueryCatalogSnapshot, QueryExecutor, QueryPlanner, QueryResult, Schema, Value,
 };
 use crate::sql::result::ExecutedStatement;
 use crate::sql::script::{split_script_tokens, ScriptIter};
@@ -100,6 +100,7 @@ impl ImplicitMutation {
 pub struct Connection {
     catalog: Arc<Mutex<Catalog>>,
     transaction: Option<ConnectionTransaction>,
+    trigger_depth: usize,
 }
 
 impl Connection {
@@ -130,6 +131,7 @@ impl Connection {
         Ok(Self {
             catalog: Arc::new(Mutex::new(catalog)),
             transaction: None,
+            trigger_depth: 0,
         })
     }
 
@@ -138,6 +140,7 @@ impl Connection {
         Ok(Self {
             catalog: Arc::new(Mutex::new(catalog)),
             transaction: None,
+            trigger_depth: 0,
         })
     }
 
@@ -897,48 +900,61 @@ impl Connection {
         &mut self,
         statement: crate::parser::ast::Statement,
     ) -> Result<QueryResult> {
+        self.execute_mutating_statement_in_scope(statement, true)
+    }
+
+    fn execute_mutating_statement_in_scope(
+        &mut self,
+        statement: crate::parser::ast::Statement,
+        use_implicit_mutation: bool,
+    ) -> Result<QueryResult> {
         let persists_schema = statement.mutates_schema();
         let (schema, mut executor) = self.plan_executor(statement)?;
-        let mut implicit_mutation = Some(ImplicitMutation::begin(self)?);
+        let mut implicit_mutation = if use_implicit_mutation {
+            Some(ImplicitMutation::begin(self)?)
+        } else {
+            None
+        };
 
         let execution_result = {
             let mut catalog_guard = self.lock_catalog()?;
             catalog_guard.with_engine(|engine| {
                 let mut ctx = ExecutionContext::for_mutation(&schema, engine);
                 let result = executor.execute(&mut ctx)?;
-                Ok((result, ctx.catalog))
+                Ok((result, ctx.catalog, ctx.mutation_events))
             })
         };
 
         match execution_result {
-            Ok((result, updated_schema)) => {
+            Ok((result, updated_schema, mutation_events)) => {
                 if persists_schema {
                     let mut catalog_guard = self.lock_catalog()?;
                     if let Err(err) = catalog_guard.replace_schema(updated_schema) {
                         drop(catalog_guard);
-                        implicit_mutation
-                            .take()
-                            .expect("implicit mutation should be present")
-                            .rollback(self)?;
+                        if let Some(implicit_mutation) = implicit_mutation.take() {
+                            implicit_mutation.rollback(self)?;
+                        }
                         return Err(err);
                     }
                 }
 
-                if let Err(err) = implicit_mutation
-                    .take()
-                    .expect("implicit mutation should be present")
-                    .commit(self)
-                {
+                if let Err(err) = self.fire_triggers(mutation_events) {
+                    if let Some(implicit_mutation) = implicit_mutation.take() {
+                        implicit_mutation.rollback(self)?;
+                    }
                     return Err(err);
+                }
+
+                if let Some(implicit_mutation) = implicit_mutation.take() {
+                    implicit_mutation.commit(self)?;
                 }
 
                 Ok(result)
             }
             Err(err) => {
-                implicit_mutation
-                    .take()
-                    .expect("implicit mutation should be present")
-                    .rollback(self)?;
+                if let Some(implicit_mutation) = implicit_mutation.take() {
+                    implicit_mutation.rollback(self)?;
+                }
                 Err(err)
             }
         }
@@ -978,6 +994,89 @@ impl Connection {
             .map(|&column_index| table.columns[column_index].name.clone())
             .collect::<Vec<_>>()
             .join(", ")
+    }
+
+    fn fire_triggers(&mut self, mutation_events: Vec<MutationEvent>) -> Result<()> {
+        if mutation_events.is_empty() {
+            return Ok(());
+        }
+
+        if self.trigger_depth >= 32 {
+            return Err(HematiteError::ParseError(
+                "Trigger recursion limit exceeded".to_string(),
+            ));
+        }
+
+        self.trigger_depth += 1;
+        let result = (|| {
+            for event in mutation_events {
+                let (table_name, event_kind, old_row, new_row) = match event {
+                    MutationEvent::Insert { table_name, new_row } => (
+                        table_name,
+                        crate::catalog::TriggerEvent::Insert,
+                        None,
+                        Some(new_row),
+                    ),
+                    MutationEvent::Update {
+                        table_name,
+                        old_row,
+                        new_row,
+                    } => (
+                        table_name,
+                        crate::catalog::TriggerEvent::Update,
+                        Some(old_row),
+                        Some(new_row),
+                    ),
+                    MutationEvent::Delete { table_name, old_row } => (
+                        table_name,
+                        crate::catalog::TriggerEvent::Delete,
+                        Some(old_row),
+                        None,
+                    ),
+                };
+
+                let (table, triggers) = {
+                    let catalog_guard = self.lock_catalog()?;
+                    let table = catalog_guard
+                        .get_table_by_name(&table_name)?
+                        .ok_or_else(|| {
+                            HematiteError::InternalError(format!(
+                                "Table '{}' disappeared while firing triggers",
+                                table_name
+                            ))
+                        })?;
+                    let mut triggers = catalog_guard
+                        .list_triggers()?
+                        .into_iter()
+                        .filter_map(|name| catalog_guard.get_trigger(&name).ok().flatten())
+                        .filter(|trigger| {
+                            trigger.table_name == table_name && trigger.event == event_kind
+                        })
+                        .collect::<Vec<_>>();
+                    triggers.sort_by(|left, right| left.name.cmp(&right.name));
+                    (table, triggers)
+                };
+
+                for trigger in triggers {
+                    let trigger_statement =
+                        Self::parse_statement(&format!("{};", trigger.body_sql))?;
+                    let trigger_statement = substitute_trigger_statement(
+                        trigger_statement,
+                        &table,
+                        old_row.as_ref(),
+                        new_row.as_ref(),
+                    );
+                    if trigger_statement.is_read_only() {
+                        let _ = self.execute_read_statement(trigger_statement)?;
+                    } else {
+                        let _ = self.execute_mutating_statement_in_scope(trigger_statement, false)?;
+                    }
+                }
+            }
+            Ok(())
+        })();
+        self.trigger_depth -= 1;
+        result
     }
 
     pub fn close(&mut self) -> Result<()> {
@@ -1227,6 +1326,399 @@ fn render_foreign_key_action(action: crate::catalog::table::ForeignKeyAction) ->
         crate::catalog::table::ForeignKeyAction::Restrict => "RESTRICT",
         crate::catalog::table::ForeignKeyAction::Cascade => "CASCADE",
         crate::catalog::table::ForeignKeyAction::SetNull => "SET NULL",
+    }
+}
+
+fn substitute_trigger_statement(
+    statement: Statement,
+    table: &crate::catalog::Table,
+    old_row: Option<&crate::catalog::StoredRow>,
+    new_row: Option<&crate::catalog::StoredRow>,
+) -> Statement {
+    let mut bindings = HashMap::new();
+    if let Some(old_row) = old_row {
+        for (column, value) in table.columns.iter().zip(old_row.values.iter()) {
+            bindings.insert(
+                format!("OLD.{}", column.name),
+                raise_literal_value(value),
+            );
+        }
+    }
+    if let Some(new_row) = new_row {
+        for (column, value) in table.columns.iter().zip(new_row.values.iter()) {
+            bindings.insert(
+                format!("NEW.{}", column.name),
+                raise_literal_value(value),
+            );
+        }
+    }
+
+    substitute_statement_bindings(statement, &bindings)
+}
+
+fn substitute_statement_bindings(
+    statement: Statement,
+    bindings: &HashMap<String, crate::parser::types::LiteralValue>,
+) -> Statement {
+    match statement {
+        Statement::Select(select) => Statement::Select(substitute_select_bindings(select, bindings)),
+        Statement::Insert(insert) => Statement::Insert(crate::parser::ast::InsertStatement {
+            table: insert.table,
+            columns: insert.columns,
+            source: match insert.source {
+                InsertSource::Values(rows) => InsertSource::Values(
+                    rows.into_iter()
+                        .map(|row| {
+                            row.into_iter()
+                                .map(|expr| substitute_expression_bindings(expr, bindings))
+                                .collect()
+                        })
+                        .collect(),
+                ),
+                InsertSource::Select(select) => {
+                    InsertSource::Select(Box::new(substitute_select_bindings(*select, bindings)))
+                }
+            },
+            on_duplicate: insert.on_duplicate.map(|assignments| {
+                assignments
+                    .into_iter()
+                    .map(|assignment| crate::parser::ast::UpdateAssignment {
+                        column: assignment.column,
+                        value: substitute_expression_bindings(assignment.value, bindings),
+                    })
+                    .collect()
+            }),
+        }),
+        Statement::Update(update) => Statement::Update(crate::parser::ast::UpdateStatement {
+            table: update.table,
+            assignments: update
+                .assignments
+                .into_iter()
+                .map(|assignment| crate::parser::ast::UpdateAssignment {
+                    column: assignment.column,
+                    value: substitute_expression_bindings(assignment.value, bindings),
+                })
+                .collect(),
+            where_clause: update
+                .where_clause
+                .map(|where_clause| substitute_where_clause_bindings(where_clause, bindings)),
+        }),
+        Statement::Delete(delete) => Statement::Delete(crate::parser::ast::DeleteStatement {
+            table: delete.table,
+            where_clause: delete
+                .where_clause
+                .map(|where_clause| substitute_where_clause_bindings(where_clause, bindings)),
+        }),
+        other => other,
+    }
+}
+
+fn substitute_select_bindings(
+    select: SelectStatement,
+    bindings: &HashMap<String, crate::parser::types::LiteralValue>,
+) -> SelectStatement {
+    SelectStatement {
+        with_clause: select
+            .with_clause
+            .into_iter()
+            .map(|cte| crate::parser::ast::CommonTableExpression {
+                name: cte.name,
+                recursive: cte.recursive,
+                query: Box::new(substitute_select_bindings(*cte.query, bindings)),
+            })
+            .collect(),
+        distinct: select.distinct,
+        columns: select
+            .columns
+            .into_iter()
+            .map(|item| match item {
+                crate::parser::ast::SelectItem::Expression(expr) => {
+                    crate::parser::ast::SelectItem::Expression(
+                        substitute_expression_bindings(expr, bindings),
+                    )
+                }
+                crate::parser::ast::SelectItem::Column(name) => bindings
+                    .get(&name)
+                    .cloned()
+                    .map(crate::parser::ast::Expression::Literal)
+                    .map(crate::parser::ast::SelectItem::Expression)
+                    .unwrap_or(crate::parser::ast::SelectItem::Column(name)),
+                other => other,
+            })
+            .collect(),
+        column_aliases: select.column_aliases,
+        from: substitute_table_reference_bindings(select.from, bindings),
+        where_clause: select
+            .where_clause
+            .map(|where_clause| substitute_where_clause_bindings(where_clause, bindings)),
+        group_by: select
+            .group_by
+            .into_iter()
+            .map(|expr| substitute_expression_bindings(expr, bindings))
+            .collect(),
+        having_clause: select
+            .having_clause
+            .map(|where_clause| substitute_where_clause_bindings(where_clause, bindings)),
+        order_by: select.order_by,
+        limit: select.limit,
+        offset: select.offset,
+        set_operation: select.set_operation.map(|set_operation| crate::parser::ast::SetOperation {
+            operator: set_operation.operator,
+            right: Box::new(substitute_select_bindings(*set_operation.right, bindings)),
+        }),
+    }
+}
+
+fn substitute_table_reference_bindings(
+    table_reference: TableReference,
+    bindings: &HashMap<String, crate::parser::types::LiteralValue>,
+) -> TableReference {
+    match table_reference {
+        TableReference::Table(name, alias) => TableReference::Table(name, alias),
+        TableReference::Derived { subquery, alias } => TableReference::Derived {
+            subquery: Box::new(substitute_select_bindings(*subquery, bindings)),
+            alias,
+        },
+        TableReference::CrossJoin(left, right) => TableReference::CrossJoin(
+            Box::new(substitute_table_reference_bindings(*left, bindings)),
+            Box::new(substitute_table_reference_bindings(*right, bindings)),
+        ),
+        TableReference::InnerJoin { left, right, on } => TableReference::InnerJoin {
+            left: Box::new(substitute_table_reference_bindings(*left, bindings)),
+            right: Box::new(substitute_table_reference_bindings(*right, bindings)),
+            on: substitute_condition_bindings(on, bindings),
+        },
+        TableReference::LeftJoin { left, right, on } => TableReference::LeftJoin {
+            left: Box::new(substitute_table_reference_bindings(*left, bindings)),
+            right: Box::new(substitute_table_reference_bindings(*right, bindings)),
+            on: substitute_condition_bindings(on, bindings),
+        },
+        TableReference::RightJoin { left, right, on } => TableReference::RightJoin {
+            left: Box::new(substitute_table_reference_bindings(*left, bindings)),
+            right: Box::new(substitute_table_reference_bindings(*right, bindings)),
+            on: substitute_condition_bindings(on, bindings),
+        },
+        TableReference::FullOuterJoin { left, right, on } => TableReference::FullOuterJoin {
+            left: Box::new(substitute_table_reference_bindings(*left, bindings)),
+            right: Box::new(substitute_table_reference_bindings(*right, bindings)),
+            on: substitute_condition_bindings(on, bindings),
+        },
+    }
+}
+
+fn substitute_where_clause_bindings(
+    where_clause: WhereClause,
+    bindings: &HashMap<String, crate::parser::types::LiteralValue>,
+) -> WhereClause {
+    WhereClause {
+        conditions: where_clause
+            .conditions
+            .into_iter()
+            .map(|condition| substitute_condition_bindings(condition, bindings))
+            .collect(),
+    }
+}
+
+fn substitute_condition_bindings(
+    condition: Condition,
+    bindings: &HashMap<String, crate::parser::types::LiteralValue>,
+) -> Condition {
+    match condition {
+        Condition::Comparison {
+            left,
+            operator,
+            right,
+        } => Condition::Comparison {
+            left: substitute_expression_bindings(left, bindings),
+            operator,
+            right: substitute_expression_bindings(right, bindings),
+        },
+        Condition::InList {
+            expr,
+            values,
+            is_not,
+        } => Condition::InList {
+            expr: substitute_expression_bindings(expr, bindings),
+            values: values
+                .into_iter()
+                .map(|expr| substitute_expression_bindings(expr, bindings))
+                .collect(),
+            is_not,
+        },
+        Condition::InSubquery {
+            expr,
+            subquery,
+            is_not,
+        } => Condition::InSubquery {
+            expr: substitute_expression_bindings(expr, bindings),
+            subquery: Box::new(substitute_select_bindings(*subquery, bindings)),
+            is_not,
+        },
+        Condition::Between {
+            expr,
+            lower,
+            upper,
+            is_not,
+        } => Condition::Between {
+            expr: substitute_expression_bindings(expr, bindings),
+            lower: substitute_expression_bindings(lower, bindings),
+            upper: substitute_expression_bindings(upper, bindings),
+            is_not,
+        },
+        Condition::Like {
+            expr,
+            pattern,
+            is_not,
+        } => Condition::Like {
+            expr: substitute_expression_bindings(expr, bindings),
+            pattern: substitute_expression_bindings(pattern, bindings),
+            is_not,
+        },
+        Condition::Exists { subquery, is_not } => Condition::Exists {
+            subquery: Box::new(substitute_select_bindings(*subquery, bindings)),
+            is_not,
+        },
+        Condition::NullCheck { expr, is_not } => Condition::NullCheck {
+            expr: substitute_expression_bindings(expr, bindings),
+            is_not,
+        },
+        Condition::Not(condition) => {
+            Condition::Not(Box::new(substitute_condition_bindings(*condition, bindings)))
+        }
+        Condition::Logical {
+            left,
+            operator,
+            right,
+        } => Condition::Logical {
+            left: Box::new(substitute_condition_bindings(*left, bindings)),
+            operator,
+            right: Box::new(substitute_condition_bindings(*right, bindings)),
+        },
+    }
+}
+
+fn substitute_expression_bindings(
+    expression: Expression,
+    bindings: &HashMap<String, crate::parser::types::LiteralValue>,
+) -> Expression {
+    match expression {
+        Expression::Column(name) => bindings
+            .get(&name)
+            .cloned()
+            .map(Expression::Literal)
+            .unwrap_or(Expression::Column(name)),
+        Expression::Literal(_) | Expression::Parameter(_) => expression,
+        Expression::ScalarSubquery(subquery) => {
+            Expression::ScalarSubquery(Box::new(substitute_select_bindings(*subquery, bindings)))
+        }
+        Expression::Cast { expr, target_type } => Expression::Cast {
+            expr: Box::new(substitute_expression_bindings(*expr, bindings)),
+            target_type,
+        },
+        Expression::Case {
+            branches,
+            else_expr,
+        } => Expression::Case {
+            branches: branches
+                .into_iter()
+                .map(|branch| crate::parser::ast::CaseWhenClause {
+                    condition: substitute_expression_bindings(branch.condition, bindings),
+                    result: substitute_expression_bindings(branch.result, bindings),
+                })
+                .collect(),
+            else_expr: else_expr
+                .map(|expr| Box::new(substitute_expression_bindings(*expr, bindings))),
+        },
+        Expression::ScalarFunctionCall { function, args } => Expression::ScalarFunctionCall {
+            function,
+            args: args
+                .into_iter()
+                .map(|expr| substitute_expression_bindings(expr, bindings))
+                .collect(),
+        },
+        Expression::AggregateCall { function, target } => Expression::AggregateCall { function, target },
+        Expression::UnaryMinus(expr) => {
+            Expression::UnaryMinus(Box::new(substitute_expression_bindings(*expr, bindings)))
+        }
+        Expression::UnaryNot(expr) => {
+            Expression::UnaryNot(Box::new(substitute_expression_bindings(*expr, bindings)))
+        }
+        Expression::Binary {
+            left,
+            operator,
+            right,
+        } => Expression::Binary {
+            left: Box::new(substitute_expression_bindings(*left, bindings)),
+            operator,
+            right: Box::new(substitute_expression_bindings(*right, bindings)),
+        },
+        Expression::Comparison {
+            left,
+            operator,
+            right,
+        } => Expression::Comparison {
+            left: Box::new(substitute_expression_bindings(*left, bindings)),
+            operator,
+            right: Box::new(substitute_expression_bindings(*right, bindings)),
+        },
+        Expression::InList {
+            expr,
+            values,
+            is_not,
+        } => Expression::InList {
+            expr: Box::new(substitute_expression_bindings(*expr, bindings)),
+            values: values
+                .into_iter()
+                .map(|expr| substitute_expression_bindings(expr, bindings))
+                .collect(),
+            is_not,
+        },
+        Expression::InSubquery {
+            expr,
+            subquery,
+            is_not,
+        } => Expression::InSubquery {
+            expr: Box::new(substitute_expression_bindings(*expr, bindings)),
+            subquery: Box::new(substitute_select_bindings(*subquery, bindings)),
+            is_not,
+        },
+        Expression::Between {
+            expr,
+            lower,
+            upper,
+            is_not,
+        } => Expression::Between {
+            expr: Box::new(substitute_expression_bindings(*expr, bindings)),
+            lower: Box::new(substitute_expression_bindings(*lower, bindings)),
+            upper: Box::new(substitute_expression_bindings(*upper, bindings)),
+            is_not,
+        },
+        Expression::Like {
+            expr,
+            pattern,
+            is_not,
+        } => Expression::Like {
+            expr: Box::new(substitute_expression_bindings(*expr, bindings)),
+            pattern: Box::new(substitute_expression_bindings(*pattern, bindings)),
+            is_not,
+        },
+        Expression::Exists { subquery, is_not } => Expression::Exists {
+            subquery: Box::new(substitute_select_bindings(*subquery, bindings)),
+            is_not,
+        },
+        Expression::NullCheck { expr, is_not } => Expression::NullCheck {
+            expr: Box::new(substitute_expression_bindings(*expr, bindings)),
+            is_not,
+        },
+        Expression::Logical {
+            left,
+            operator,
+            right,
+        } => Expression::Logical {
+            left: Box::new(substitute_expression_bindings(*left, bindings)),
+            operator,
+            right: Box::new(substitute_expression_bindings(*right, bindings)),
+        },
     }
 }
 

@@ -686,6 +686,130 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_insert_update_delete_triggers_fire_with_old_and_new_values() -> Result<()> {
+        let db = TestDbFile::new("_test_insert_update_delete_triggers_fire_with_old_and_new_values");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("CREATE TABLE audit_log (id INTEGER PRIMARY KEY, entry TEXT);")?;
+        conn.execute(
+            "CREATE TRIGGER audit_insert AFTER INSERT ON users AS INSERT INTO audit_log (id, entry) VALUES (NEW.id, NEW.name);",
+        )?;
+        conn.execute(
+            "CREATE TRIGGER audit_update AFTER UPDATE ON users AS INSERT INTO audit_log (id, entry) VALUES (NEW.id + 10, OLD.name);",
+        )?;
+        conn.execute(
+            "CREATE TRIGGER audit_delete AFTER DELETE ON users AS INSERT INTO audit_log (id, entry) VALUES (OLD.id + 20, OLD.name);",
+        )?;
+
+        conn.execute("INSERT INTO users (id, name) VALUES (1, 'Ada');")?;
+        conn.execute("UPDATE users SET name = 'Ada Lovelace' WHERE id = 1;")?;
+        conn.execute("DELETE FROM users WHERE id = 1;")?;
+
+        let audit = conn.execute("SELECT id, entry FROM audit_log ORDER BY id ASC;")?;
+        assert_eq!(
+            audit.rows,
+            vec![
+                vec![
+                    crate::catalog::Value::Integer(1),
+                    crate::catalog::Value::Text("Ada".to_string()),
+                ],
+                vec![
+                    crate::catalog::Value::Integer(11),
+                    crate::catalog::Value::Text("Ada".to_string()),
+                ],
+                vec![
+                    crate::catalog::Value::Integer(21),
+                    crate::catalog::Value::Text("Ada Lovelace".to_string()),
+                ],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_trigger_failure_aborts_outer_statement() -> Result<()> {
+        let db = TestDbFile::new("_test_trigger_failure_aborts_outer_statement");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("CREATE TABLE audit_log (id INTEGER PRIMARY KEY, entry TEXT);")?;
+        conn.execute(
+            "CREATE TRIGGER audit_insert AFTER INSERT ON users AS INSERT INTO audit_log (id, entry) VALUES (1, NEW.name);",
+        )?;
+
+        conn.execute("INSERT INTO users (id, name) VALUES (1, 'Ada');")?;
+        let result = conn.execute("INSERT INTO users (id, name) VALUES (2, 'Bob');");
+        assert!(result.is_err());
+
+        let users = conn.execute("SELECT id, name FROM users ORDER BY id ASC;")?;
+        assert_eq!(
+            users.rows,
+            vec![vec![
+                crate::catalog::Value::Integer(1),
+                crate::catalog::Value::Text("Ada".to_string()),
+            ]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "trigger side effects do not yet roll back with savepoint snapshots"]
+    fn test_trigger_effects_rollback_with_savepoint() -> Result<()> {
+        let db = TestDbFile::new("_test_trigger_effects_rollback_with_savepoint");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("CREATE TABLE audit_log (id INTEGER PRIMARY KEY, entry TEXT);")?;
+        conn.execute(
+            "CREATE TRIGGER audit_insert AFTER INSERT ON users AS INSERT INTO audit_log (id, entry) VALUES (NEW.id, NEW.name);",
+        )?;
+
+        conn.execute("BEGIN;")?;
+        conn.execute("SAVEPOINT before_insert;")?;
+        conn.execute("INSERT INTO users (id, name) VALUES (1, 'Ada');")?;
+        conn.execute("ROLLBACK TO SAVEPOINT before_insert;")?;
+        conn.execute("COMMIT;")?;
+
+        let users = conn.execute("SELECT id, name FROM users;")?;
+        assert!(users.rows.is_empty());
+        let audit = conn.execute("SELECT id, entry FROM audit_log;")?;
+        assert!(audit.rows.is_empty());
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_trigger_recursion_limit_is_enforced() -> Result<()> {
+        let db = TestDbFile::new("_test_trigger_recursion_limit_is_enforced");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("CREATE TABLE audit_log (id INTEGER PRIMARY KEY, entry TEXT);")?;
+        conn.execute(
+            "CREATE TRIGGER audit_users AFTER INSERT ON users AS INSERT INTO audit_log (id, entry) VALUES (NEW.id, NEW.name);",
+        )?;
+        conn.execute(
+            "CREATE TRIGGER audit_log_loop AFTER INSERT ON audit_log AS INSERT INTO users (id, name) VALUES (NEW.id + 100, NEW.entry);",
+        )?;
+
+        let result = conn.execute("INSERT INTO users (id, name) VALUES (1, 'Ada');");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Trigger recursion limit exceeded"));
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_savepoint_requires_active_transaction_and_rejects_duplicates() -> Result<()> {
         let db = TestDbFile::new("_test_savepoint_requires_active_transaction_and_rejects_duplicates");
         let mut conn = Connection::new(db.path())?;

@@ -1,6 +1,6 @@
 //! Query execution runtime context and executor trait.
 
-use crate::catalog::{CatalogEngine, Schema, Value};
+use crate::catalog::{CatalogEngine, Schema, StoredRow, Value};
 use crate::error::Result;
 
 #[derive(Debug, Clone)]
@@ -14,6 +14,24 @@ pub struct QueryResult {
 pub struct ExecutionContext<'a> {
     pub catalog: Schema,
     pub engine: &'a mut CatalogEngine,
+    pub mutation_events: Vec<MutationEvent>,
+}
+
+#[derive(Debug, Clone)]
+pub enum MutationEvent {
+    Insert {
+        table_name: String,
+        new_row: StoredRow,
+    },
+    Update {
+        table_name: String,
+        old_row: StoredRow,
+        new_row: StoredRow,
+    },
+    Delete {
+        table_name: String,
+        old_row: StoredRow,
+    },
 }
 
 impl<'a> ExecutionContext<'a> {
@@ -21,6 +39,7 @@ impl<'a> ExecutionContext<'a> {
         Self {
             catalog: catalog.clone(),
             engine,
+            mutation_events: Vec::new(),
         }
     }
 
@@ -28,6 +47,7 @@ impl<'a> ExecutionContext<'a> {
         Self {
             catalog: catalog.clone(),
             engine,
+            mutation_events: Vec::new(),
         }
     }
 }

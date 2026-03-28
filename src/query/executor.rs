@@ -32,7 +32,7 @@ use crate::parser::ast::*;
 use crate::query::lowering::{lower_literal_value, lower_type_name, raise_literal_value};
 use crate::query::plan::{ExecutionProgram, QueryPlan, SelectAccessPath};
 use crate::query::predicate::extract_literal_equalities;
-pub use crate::query::runtime::{ExecutionContext, QueryExecutor, QueryResult};
+pub use crate::query::runtime::{ExecutionContext, MutationEvent, QueryExecutor, QueryResult};
 use crate::query::validation::{validate_column_reference, validate_statement};
 use crate::query::QueryPlanner;
 use std::cmp::Ordering;
@@ -3195,16 +3195,26 @@ impl QueryExecutor for InsertExecutor {
             validate_row_constraints(ctx, &table, &row_values)?;
             self.ensure_primary_key_is_unique(ctx, &table, &[], &row_values)?;
             self.ensure_unique_secondary_indexes_are_unique(ctx, &table, &row_values)?;
+            let inserted_row = StoredRow {
+                row_id: 0,
+                values: row_values,
+            };
             write_stored_row(
                 ctx,
                 &self.statement.table,
                 &table,
-                StoredRow {
-                    row_id: 0,
-                    values: row_values,
-                },
+                inserted_row.clone(),
                 false,
             )?;
+            if let Some(new_row) = ctx
+                .engine
+                .lookup_row_by_primary_key(&table, &primary_key_values(&table, &inserted_row.values)?)?
+            {
+                ctx.mutation_events.push(MutationEvent::Insert {
+                    table_name: self.statement.table.clone(),
+                    new_row,
+                });
+            }
         }
 
         Ok(mutation_result(input_rows.len()))
@@ -3330,6 +3340,7 @@ impl QueryExecutor for UpdateExecutor {
             &self.access_path,
             &select_executor,
         )?;
+        let original_rows = rows_to_update.clone();
         let mut updated_rows_data = Vec::with_capacity(rows_to_update.len());
         let mut updated_rows = 0usize;
         let sources = select_executor.resolve_sources(ctx)?;
@@ -3381,8 +3392,16 @@ impl QueryExecutor for UpdateExecutor {
             remove_stored_row(ctx, &self.statement.table, &table, original_row.row_id)?;
         }
 
-        for row in updated_rows_data {
-            write_stored_row(ctx, &self.statement.table, &table, row, true)?;
+        for row in &updated_rows_data {
+            write_stored_row(ctx, &self.statement.table, &table, row.clone(), true)?;
+        }
+
+        for (old_row, new_row) in original_rows.into_iter().zip(updated_rows_data.into_iter()) {
+            ctx.mutation_events.push(MutationEvent::Update {
+                table_name: self.statement.table.clone(),
+                old_row,
+                new_row,
+            });
         }
 
         Ok(mutation_result(updated_rows))
@@ -3536,6 +3555,10 @@ impl QueryExecutor for DeleteExecutor {
 
         for row in &rows_to_delete {
             apply_parent_delete_foreign_key_actions(ctx, &table, &row.values)?;
+            ctx.mutation_events.push(MutationEvent::Delete {
+                table_name: self.statement.table.clone(),
+                old_row: row.clone(),
+            });
             remove_stored_row(ctx, &self.statement.table, &table, row.row_id)?;
         }
 
