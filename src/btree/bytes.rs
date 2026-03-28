@@ -60,6 +60,11 @@ pub struct ByteTreeStore {
     storage: Arc<Mutex<Pager>>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ByteTreeStoreSnapshot {
+    pager: crate::storage::pager::PagerSnapshot,
+}
+
 impl ByteTreeStore {
     pub const PAGE_SIZE: usize = PAGE_SIZE;
     pub const INVALID_PAGE_ID: PageId = INVALID_PAGE_ID;
@@ -133,6 +138,16 @@ impl ByteTreeStore {
 
     pub fn transaction_active(&self) -> Result<bool> {
         Ok(self.lock_storage()?.transaction_active())
+    }
+
+    pub(crate) fn snapshot(&self) -> Result<ByteTreeStoreSnapshot> {
+        Ok(ByteTreeStoreSnapshot {
+            pager: self.lock_storage()?.snapshot()?,
+        })
+    }
+
+    pub(crate) fn restore_snapshot(&self, snapshot: ByteTreeStoreSnapshot) -> Result<()> {
+        self.lock_storage()?.restore_snapshot(snapshot.pager)
     }
 
     pub fn begin_read(&self) -> Result<()> {

@@ -747,9 +747,10 @@ mod connection_tests {
         );
 
         let show_indexes = reopened.execute("SHOW INDEXES FROM users;")?;
-        assert!(show_indexes.rows.iter().any(
-            |row| row[1] == crate::catalog::Value::Text("idx_users_org".to_string())
-        ));
+        assert!(show_indexes
+            .rows
+            .iter()
+            .any(|row| row[1] == crate::catalog::Value::Text("idx_users_org".to_string())));
 
         let show_triggers = reopened.execute("SHOW TRIGGERS FROM users;")?;
         assert_eq!(
@@ -901,7 +902,6 @@ mod connection_tests {
     }
 
     #[test]
-    #[ignore = "trigger side effects do not yet roll back with savepoint snapshots"]
     fn test_trigger_effects_rollback_with_savepoint() -> Result<()> {
         let db = TestDbFile::new("_test_trigger_effects_rollback_with_savepoint");
         let mut conn = Connection::new(db.path())?;
@@ -3938,9 +3938,10 @@ mod connection_tests {
         assert!(!email_constraints.contains("uq_users_email"));
 
         let show_indexes = reopened.execute("SHOW INDEXES FROM users;")?;
-        assert!(show_indexes.rows.iter().any(
-            |row| row[1] == crate::catalog::Value::Text("idx_users_org".to_string())
-        ));
+        assert!(show_indexes
+            .rows
+            .iter()
+            .any(|row| row[1] == crate::catalog::Value::Text("idx_users_org".to_string())));
 
         let show_views = reopened.execute("SHOW VIEWS;")?;
         assert_eq!(show_views.rows.len(), 1);

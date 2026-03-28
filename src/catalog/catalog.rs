@@ -398,20 +398,20 @@ impl Catalog {
         }
     }
 
-    pub(crate) fn snapshot(&self) -> CatalogSnapshot {
-        CatalogSnapshot {
+    pub(crate) fn snapshot(&self) -> Result<CatalogSnapshot> {
+        Ok(CatalogSnapshot {
             schema: self.schema.clone(),
             schema_root: self.schema_root,
             schema_dirty: self.schema_dirty,
-            engine: self.engine.snapshot(),
-        }
+            engine: self.engine.snapshot()?,
+        })
     }
 
-    pub(crate) fn restore_snapshot(&mut self, snapshot: CatalogSnapshot) {
+    pub(crate) fn restore_snapshot(&mut self, snapshot: CatalogSnapshot) -> Result<()> {
         self.schema = snapshot.schema;
         self.schema_root = snapshot.schema_root;
         self.schema_dirty = snapshot.schema_dirty;
-        self.engine.restore_snapshot(snapshot.engine);
+        self.engine.restore_snapshot(snapshot.engine)
     }
 
     pub(crate) fn begin_transaction(&mut self) -> Result<()> {

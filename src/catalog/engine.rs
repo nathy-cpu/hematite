@@ -28,8 +28,8 @@
 //! index-key codecs live beside the catalog model so the generic lower layers remain reusable.
 
 use crate::btree::{
-    ByteTree, ByteTreeStore, JournalMode as BTreeJournalMode, KeyValueCodec, PageId,
-    PagerIntegrityReport, TreeSpaceStats, TypedTreeStore,
+    ByteTree, ByteTreeStore, ByteTreeStoreSnapshot, JournalMode as BTreeJournalMode, KeyValueCodec,
+    PageId, PagerIntegrityReport, TreeSpaceStats, TypedTreeStore,
 };
 use crate::catalog::{DatabaseHeader, JournalMode, Table, TableId, Value};
 use crate::error::{HematiteError, Result};
@@ -79,6 +79,7 @@ pub struct CatalogIntegrityReport {
 #[derive(Debug, Clone)]
 pub struct CatalogEngineSnapshot {
     table_metadata: HashMap<String, TableRuntimeMetadata>,
+    tree_store: ByteTreeStoreSnapshot,
 }
 
 #[derive(Debug)]
@@ -280,14 +281,16 @@ impl CatalogEngine {
         self.tree_store().end_read()
     }
 
-    pub fn snapshot(&self) -> CatalogEngineSnapshot {
-        CatalogEngineSnapshot {
+    pub fn snapshot(&self) -> Result<CatalogEngineSnapshot> {
+        Ok(CatalogEngineSnapshot {
             table_metadata: self.table_metadata.clone(),
-        }
+            tree_store: self.tree_store.snapshot()?,
+        })
     }
 
-    pub fn restore_snapshot(&mut self, snapshot: CatalogEngineSnapshot) {
+    pub fn restore_snapshot(&mut self, snapshot: CatalogEngineSnapshot) -> Result<()> {
         self.table_metadata = snapshot.table_metadata;
+        self.tree_store.restore_snapshot(snapshot.tree_store)
     }
 
     pub(crate) fn create_empty_btree(&self) -> Result<PageId> {

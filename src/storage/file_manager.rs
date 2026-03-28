@@ -40,6 +40,12 @@ pub struct FileManager {
     free_list: FreeList,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct FileManagerSnapshot {
+    file_len: u64,
+    free_pages: Vec<PageId>,
+}
+
 #[derive(Debug)]
 enum FileBackend {
     Disk(File),
@@ -220,6 +226,19 @@ impl FileManager {
 
     pub(crate) fn compact_free_pages(&mut self) -> Result<()> {
         self.compact_trailing_free_pages()
+    }
+
+    pub(crate) fn snapshot(&self) -> Result<FileManagerSnapshot> {
+        Ok(FileManagerSnapshot {
+            file_len: self.file_len()?,
+            free_pages: self.free_pages().to_vec(),
+        })
+    }
+
+    pub(crate) fn restore_snapshot(&mut self, snapshot: FileManagerSnapshot) -> Result<()> {
+        self.restore_file_len(snapshot.file_len)?;
+        self.set_free_pages(snapshot.free_pages);
+        Ok(())
     }
 
     fn compact_trailing_free_pages(&mut self) -> Result<()> {

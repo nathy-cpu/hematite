@@ -79,8 +79,9 @@ use crate::error::Result;
 use crate::storage::journal::{JournalRecord, JournalState, RollbackJournal};
 use crate::storage::wal::{VisibleWalState, WalFrame, WalRecord};
 use crate::storage::{
-    buffer_pool::BufferPool, file_manager::FileManager, Page, PageId, PagerIntegrityReport,
-    DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID,
+    buffer_pool::BufferPool,
+    file_manager::{FileManager, FileManagerSnapshot},
+    Page, PageId, PagerIntegrityReport, DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID,
 };
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -125,6 +126,15 @@ struct PagerTransaction {
     wal_free_pages: Vec<PageId>,
     journaled_pages: HashSet<PageId>,
     page_records: Vec<JournalRecord>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PagerSnapshot {
+    file_manager: FileManagerSnapshot,
+    buffer_pool: BufferPool,
+    dirty_pages: HashSet<PageId>,
+    page_checksums: HashMap<PageId, u32>,
+    transaction: Option<PagerTransaction>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -451,6 +461,25 @@ impl Pager {
 
     pub fn transaction_active(&self) -> bool {
         self.transaction.is_some()
+    }
+
+    pub(crate) fn snapshot(&self) -> Result<PagerSnapshot> {
+        Ok(PagerSnapshot {
+            file_manager: self.file_manager.snapshot()?,
+            buffer_pool: self.buffer_pool.clone(),
+            dirty_pages: self.dirty_pages.clone(),
+            page_checksums: self.page_checksums.clone(),
+            transaction: self.transaction.clone(),
+        })
+    }
+
+    pub(crate) fn restore_snapshot(&mut self, snapshot: PagerSnapshot) -> Result<()> {
+        self.file_manager.restore_snapshot(snapshot.file_manager)?;
+        self.buffer_pool = snapshot.buffer_pool;
+        self.dirty_pages = snapshot.dirty_pages;
+        self.page_checksums = snapshot.page_checksums;
+        self.transaction = snapshot.transaction;
+        Ok(())
     }
 
     pub fn begin_read(&mut self) -> Result<()> {

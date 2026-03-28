@@ -64,7 +64,7 @@ impl ImplicitMutation {
         }
 
         let mut catalog_guard = connection.lock_catalog()?;
-        let snapshot = catalog_guard.snapshot();
+        let snapshot = catalog_guard.snapshot()?;
         catalog_guard.begin_transaction()?;
         Ok(Self {
             snapshot: Some(snapshot),
@@ -75,7 +75,7 @@ impl ImplicitMutation {
         if let Some(snapshot) = self.snapshot.take() {
             let mut catalog_guard = connection.lock_catalog()?;
             let _ = catalog_guard.rollback_transaction();
-            catalog_guard.restore_snapshot(snapshot);
+            catalog_guard.restore_snapshot(snapshot)?;
         }
         Ok(())
     }
@@ -90,7 +90,7 @@ impl ImplicitMutation {
             Ok(()) => Ok(()),
             Err(err) => {
                 let _ = catalog_guard.rollback_transaction();
-                catalog_guard.restore_snapshot(snapshot);
+                catalog_guard.restore_snapshot(snapshot)?;
                 Err(err)
             }
         }
@@ -1053,7 +1053,7 @@ impl Connection {
         }
 
         let mut catalog_guard = self.lock_catalog()?;
-        let snapshot = catalog_guard.snapshot();
+        let snapshot = catalog_guard.snapshot()?;
         catalog_guard.begin_transaction()?;
         drop(catalog_guard);
         self.transaction = Some(ConnectionTransaction {
@@ -1093,7 +1093,7 @@ impl Connection {
         let snapshot = {
             let catalog_guard = self.lock_catalog()?;
             catalog_guard.snapshot()
-        };
+        }?;
 
         let transaction = self.active_transaction_mut("SAVEPOINT")?;
         transaction.savepoints.push(SavepointState {
@@ -1122,7 +1122,7 @@ impl Connection {
 
         {
             let mut catalog_guard = self.lock_catalog()?;
-            catalog_guard.restore_snapshot(snapshot);
+            catalog_guard.restore_snapshot(snapshot)?;
         }
 
         let transaction = self.active_transaction_mut("ROLLBACK TO SAVEPOINT")?;
@@ -1695,7 +1695,7 @@ impl Connection {
             Ok(()) => Ok(()),
             Err(err) => {
                 let _ = catalog_guard.rollback_transaction();
-                catalog_guard.restore_snapshot(state.snapshot);
+                catalog_guard.restore_snapshot(state.snapshot)?;
                 Err(err)
             }
         }
@@ -1705,7 +1705,7 @@ impl Connection {
         let state = self.take_active_transaction("roll back")?;
         let mut catalog_guard = self.lock_catalog()?;
         catalog_guard.rollback_transaction()?;
-        catalog_guard.restore_snapshot(state.snapshot);
+        catalog_guard.restore_snapshot(state.snapshot)?;
         Ok(())
     }
 }
