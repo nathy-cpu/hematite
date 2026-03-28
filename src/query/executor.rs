@@ -3859,6 +3859,85 @@ impl QueryExecutor for AlterExecutor {
                 ctx.catalog.add_column(table.id, column)?;
                 ctx.engine.replace_table_rows(&self.statement.table, rows)?;
             }
+            AlterOperation::AddConstraint(constraint) => {
+                let table = catalog_table(ctx, &self.statement.table)?;
+                match constraint {
+                    TableConstraint::Check(check) => {
+                        ctx.catalog.add_check_constraint(
+                            table.id,
+                            CheckConstraint {
+                                name: check.name.clone(),
+                                expression_sql: check.expression_sql.clone(),
+                            },
+                        )?;
+                    }
+                    TableConstraint::Unique(unique) => {
+                        let root_page_id = ctx.engine.create_empty_btree()?;
+                        let column_indices = unique
+                            .columns
+                            .iter()
+                            .map(|column_name| {
+                                table.get_column_index(column_name).ok_or_else(|| {
+                                    HematiteError::ParseError(format!(
+                                        "UNIQUE constraint column '{}' does not exist in table '{}'",
+                                        column_name, self.statement.table
+                                    ))
+                                })
+                            })
+                            .collect::<Result<Vec<_>>>()?;
+                        ctx.catalog.add_secondary_index(
+                            table.id,
+                            crate::catalog::SecondaryIndex {
+                                name: unique.name.clone().ok_or_else(|| {
+                                    HematiteError::InternalError(
+                                        "validated UNIQUE constraint lost its name".to_string(),
+                                    )
+                                })?,
+                                column_indices,
+                                root_page_id,
+                                unique: true,
+                            },
+                        )?;
+                        let updated_table = ctx
+                            .catalog
+                            .get_table(table.id)
+                            .ok_or_else(|| {
+                                table_disappeared_internal_error(
+                                    &self.statement.table,
+                                    "adding unique constraint",
+                                )
+                            })?
+                            .clone();
+                        let rows = ctx.engine.read_rows_with_ids(&self.statement.table)?;
+                        ctx.engine.rebuild_secondary_indexes(&updated_table, &rows)?;
+                    }
+                    TableConstraint::ForeignKey(foreign_key) => {
+                        let column_indices = foreign_key
+                            .columns
+                            .iter()
+                            .map(|column_name| {
+                                table.get_column_index(column_name).ok_or_else(|| {
+                                    HematiteError::ParseError(format!(
+                                        "Foreign key column '{}' does not exist in table '{}'",
+                                        column_name, self.statement.table
+                                    ))
+                                })
+                            })
+                            .collect::<Result<Vec<_>>>()?;
+                        ctx.catalog.add_foreign_key(
+                            table.id,
+                            ForeignKeyConstraint {
+                                name: foreign_key.name.clone(),
+                                column_indices,
+                                referenced_table: foreign_key.referenced_table.clone(),
+                                referenced_columns: foreign_key.referenced_columns.clone(),
+                                on_delete: convert_foreign_key_action(foreign_key.on_delete),
+                                on_update: convert_foreign_key_action(foreign_key.on_update),
+                            },
+                        )?;
+                    }
+                }
+            }
             AlterOperation::DropColumn(column_name) => {
                 let table = catalog_table(ctx, &self.statement.table)?;
                 let column_index = table.get_column_index(column_name).ok_or_else(|| {
@@ -3874,6 +3953,23 @@ impl QueryExecutor for AlterExecutor {
 
                 ctx.catalog.drop_column(table.id, column_name)?;
                 ctx.engine.replace_table_rows(&self.statement.table, rows)?;
+            }
+            AlterOperation::DropConstraint(constraint_name) => {
+                let table = catalog_table(ctx, &self.statement.table)?;
+                if let Some(index) = table.get_secondary_index(constraint_name) {
+                    if index.unique {
+                        ctx.engine.delete_tree(index.root_page_id)?;
+                        ctx.catalog
+                            .drop_secondary_index(table.id, constraint_name)?;
+                    } else {
+                        return Err(HematiteError::ParseError(format!(
+                            "Constraint '{}' is not a droppable UNIQUE constraint",
+                            constraint_name
+                        )));
+                    }
+                } else {
+                    ctx.catalog.drop_named_constraint(table.id, constraint_name)?;
+                }
             }
             AlterOperation::AlterColumnSetDefault {
                 column_name,

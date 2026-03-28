@@ -1208,8 +1208,24 @@ fn validate_alter(alter: &AlterStatement, catalog: &Schema) -> Result<()> {
                 }
             }
         }
+        AlterOperation::AddConstraint(constraint) => {
+            validate_add_constraint(alter, catalog, constraint)?;
+        }
         AlterOperation::DropColumn(column_name) => {
             validate_drop_column(alter, catalog, column_name)?;
+        }
+        AlterOperation::DropConstraint(constraint_name) => {
+            let table = require_table(catalog, &alter.table)?;
+            if !table
+                .list_named_constraints()
+                .iter()
+                .any(|constraint| constraint.name == *constraint_name)
+            {
+                return Err(HematiteError::ParseError(format!(
+                    "Constraint '{}' does not exist on table '{}'",
+                    constraint_name, alter.table
+                )));
+            }
         }
         AlterOperation::AlterColumnSetDefault {
             column_name,
@@ -1228,6 +1244,129 @@ fn validate_alter(alter: &AlterStatement, catalog: &Schema) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn validate_add_constraint(
+    alter: &AlterStatement,
+    catalog: &Schema,
+    constraint: &TableConstraint,
+) -> Result<()> {
+    let table = require_table(catalog, &alter.table)?;
+    match constraint {
+        TableConstraint::Check(check) => {
+            let Some(name) = &check.name else {
+                return Err(HematiteError::ParseError(
+                    "ALTER TABLE ADD CONSTRAINT requires a constraint name".to_string(),
+                ));
+            };
+            if table
+                .list_named_constraints()
+                .iter()
+                .any(|constraint| constraint.name == *name)
+            {
+                return Err(HematiteError::ParseError(format!(
+                    "Constraint '{}' already exists on table '{}'",
+                    name, alter.table
+                )));
+            }
+        }
+        TableConstraint::Unique(unique) => {
+            let Some(name) = &unique.name else {
+                return Err(HematiteError::ParseError(
+                    "ALTER TABLE ADD CONSTRAINT requires a constraint name".to_string(),
+                ));
+            };
+            if unique.columns.is_empty() {
+                return Err(HematiteError::ParseError(
+                    "UNIQUE constraint must reference at least one column".to_string(),
+                ));
+            }
+            validate_named_columns(&unique.columns, "UNIQUE constraint", |column| {
+                if table.get_column_by_name(column).is_some() {
+                    Ok(())
+                } else {
+                    Err(HematiteError::ParseError(format!(
+                        "UNIQUE constraint column '{}' does not exist in table '{}'",
+                        column, alter.table
+                    )))
+                }
+            })?;
+            if table
+                .list_named_constraints()
+                .iter()
+                .any(|constraint| constraint.name == *name)
+            {
+                return Err(HematiteError::ParseError(format!(
+                    "Constraint '{}' already exists on table '{}'",
+                    name, alter.table
+                )));
+            }
+        }
+        TableConstraint::ForeignKey(foreign_key) => {
+            let Some(name) = &foreign_key.name else {
+                return Err(HematiteError::ParseError(
+                    "ALTER TABLE ADD CONSTRAINT requires a constraint name".to_string(),
+                ));
+            };
+            if foreign_key.columns.is_empty() {
+                return Err(HematiteError::ParseError(
+                    "Foreign key must reference at least one local column".to_string(),
+                ));
+            }
+            if foreign_key.columns.len() != foreign_key.referenced_columns.len() {
+                return Err(HematiteError::ParseError(format!(
+                    "Foreign key on table '{}' must reference the same number of local and parent columns",
+                    alter.table
+                )));
+            }
+            validate_named_columns(&foreign_key.columns, "Foreign key", |column| {
+                if table.get_column_by_name(column).is_some() {
+                    Ok(())
+                } else {
+                    Err(HematiteError::ParseError(format!(
+                        "Foreign key column '{}' does not exist in table '{}'",
+                        column, alter.table
+                    )))
+                }
+            })?;
+            let referenced_table = require_table(catalog, &foreign_key.referenced_table)?;
+            let referenced_column_indices = foreign_key
+                .referenced_columns
+                .iter()
+                .map(|column| {
+                    referenced_table.get_column_index(column).ok_or_else(|| {
+                        HematiteError::ParseError(format!(
+                            "Referenced column '{}.{}' does not exist",
+                            foreign_key.referenced_table, column
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let references_primary_key =
+                referenced_table.primary_key_columns == referenced_column_indices;
+            let references_unique_index = referenced_table.secondary_indexes.iter().any(|index| {
+                index.unique && index.column_indices == referenced_column_indices
+            });
+            if !references_primary_key && !references_unique_index {
+                return Err(HematiteError::ParseError(format!(
+                    "Foreign key '{}.{}' must reference a PRIMARY KEY or UNIQUE index with the same column list",
+                    foreign_key.referenced_table,
+                    foreign_key.referenced_columns.join(", ")
+                )));
+            }
+            if table
+                .list_named_constraints()
+                .iter()
+                .any(|constraint| constraint.name == *name)
+            {
+                return Err(HematiteError::ParseError(format!(
+                    "Constraint '{}' already exists on table '{}'",
+                    name, alter.table
+                )));
+            }
+        }
+    }
     Ok(())
 }
 

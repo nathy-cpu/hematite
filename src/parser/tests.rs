@@ -2071,6 +2071,20 @@ mod parser_tests {
             parse_statement("SHOW CREATE VIEW user_names;")?,
             Statement::ShowCreateView(ref view) if view == "user_names"
         ));
+        assert!(matches!(
+            parse_statement("ALTER TABLE users ADD CONSTRAINT uq_users_email UNIQUE (email);")?,
+            Statement::Alter(AlterStatement {
+                table,
+                operation: AlterOperation::AddConstraint(TableConstraint::Unique(_))
+            }) if table == "users"
+        ));
+        assert!(matches!(
+            parse_statement("ALTER TABLE users DROP CONSTRAINT uq_users_email;")?,
+            Statement::Alter(AlterStatement {
+                table,
+                operation: AlterOperation::DropConstraint(ref name)
+            }) if table == "users" && name == "uq_users_email"
+        ));
         Ok(())
     }
 }

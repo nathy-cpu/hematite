@@ -772,6 +772,47 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_alter_table_add_and_drop_constraints() -> Result<()> {
+        let db = TestDbFile::new("_test_alter_table_add_and_drop_constraints");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE orgs (id INTEGER PRIMARY KEY, code TEXT UNIQUE);")?;
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT, org_id INTEGER);")?;
+
+        conn.execute(
+            "ALTER TABLE users ADD CONSTRAINT uq_users_email UNIQUE (email);",
+        )?;
+        conn.execute(
+            "ALTER TABLE users ADD CONSTRAINT chk_users_email CHECK (email IS NOT NULL);",
+        )?;
+        conn.execute(
+            "ALTER TABLE users ADD CONSTRAINT fk_users_org FOREIGN KEY (org_id) REFERENCES orgs (id);",
+        )?;
+
+        let describe = conn.execute("DESCRIBE users;")?;
+        assert!(describe.rows.iter().any(|row| row[0] == crate::catalog::Value::Text("email".to_string())));
+
+        conn.execute(
+            "INSERT INTO orgs (id, code) VALUES (1, 'eng');",
+        )?;
+        conn.execute(
+            "INSERT INTO users (id, email, org_id) VALUES (1, 'ada@example.com', 1);",
+        )?;
+
+        let dup = conn.execute(
+            "INSERT INTO users (id, email, org_id) VALUES (2, 'ada@example.com', 1);",
+        );
+        assert!(dup.is_err());
+
+        conn.execute("ALTER TABLE users DROP CONSTRAINT uq_users_email;")?;
+        conn.execute("ALTER TABLE users DROP CONSTRAINT chk_users_email;")?;
+        conn.execute("ALTER TABLE users DROP CONSTRAINT fk_users_org;")?;
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_insert_into_view_is_rejected() -> Result<()> {
         let db = TestDbFile::new("_test_insert_into_view_is_rejected");
         let mut conn = Connection::new(db.path())?;

@@ -464,7 +464,9 @@ pub enum AlterOperation {
         new_name: String,
     },
     AddColumn(ColumnDefinition),
+    AddConstraint(TableConstraint),
     DropColumn(String),
+    DropConstraint(String),
     AlterColumnSetDefault {
         column_name: String,
         default_value: LiteralValue,
@@ -2975,8 +2977,44 @@ impl AlterStatement {
                     }
                 }
             }
+            AlterOperation::AddConstraint(constraint) => match constraint {
+                TableConstraint::Check(check) => {
+                    if check.name.is_none() {
+                        return Err(HematiteError::ParseError(
+                            "ALTER TABLE ADD CONSTRAINT requires a constraint name".to_string(),
+                        ));
+                    }
+                }
+                TableConstraint::Unique(unique) => {
+                    if unique.name.is_none() {
+                        return Err(HematiteError::ParseError(
+                            "ALTER TABLE ADD CONSTRAINT requires a constraint name".to_string(),
+                        ));
+                    }
+                }
+                TableConstraint::ForeignKey(foreign_key) => {
+                    if foreign_key.name.is_none() {
+                        return Err(HematiteError::ParseError(
+                            "ALTER TABLE ADD CONSTRAINT requires a constraint name".to_string(),
+                        ));
+                    }
+                }
+            },
             AlterOperation::DropColumn(column_name) => {
                 self.validate_drop_column(catalog, column_name)?;
+            }
+            AlterOperation::DropConstraint(constraint_name) => {
+                let table = self.require_table(catalog)?;
+                if !table
+                    .list_named_constraints()
+                    .iter()
+                    .any(|constraint| constraint.name == *constraint_name)
+                {
+                    return Err(HematiteError::ParseError(format!(
+                        "Constraint '{}' does not exist on table '{}'",
+                        constraint_name, self.table
+                    )));
+                }
             }
             AlterOperation::AlterColumnSetDefault {
                 column_name,

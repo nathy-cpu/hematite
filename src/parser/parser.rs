@@ -1628,27 +1628,48 @@ impl Parser {
             }
             Token::Add => {
                 self.consume_token(&Token::Add)?;
-                if matches!(self.peek_token(), Ok(Token::Column)) {
-                    self.consume_token(&Token::Column)?;
-                }
-                let column = self.parse_column_definition()?;
+                let operation = match self.peek_token()? {
+                    Token::Column => {
+                        self.consume_token(&Token::Column)?;
+                        AlterOperation::AddColumn(self.parse_column_definition()?)
+                    }
+                    Token::Constraint | Token::Check | Token::Unique | Token::Foreign => {
+                        AlterOperation::AddConstraint(self.parse_table_constraint()?)
+                    }
+                    Token::Identifier(_) => {
+                        AlterOperation::AddColumn(self.parse_column_definition()?)
+                    }
+                    token => {
+                        return Err(HematiteError::ParseError(format!(
+                            "Expected COLUMN or constraint after ADD, found: {:?}",
+                            token
+                        )))
+                    }
+                };
                 self.consume_token(&Token::Semicolon)?;
-                Ok(Statement::Alter(AlterStatement {
-                    table,
-                    operation: AlterOperation::AddColumn(column),
-                }))
+                Ok(Statement::Alter(AlterStatement { table, operation }))
             }
             Token::Drop => {
                 self.consume_token(&Token::Drop)?;
-                if matches!(self.peek_token(), Ok(Token::Column)) {
-                    self.consume_token(&Token::Column)?;
-                }
-                let column_name = self.parse_identifier()?;
+                let operation = match self.peek_token()? {
+                    Token::Column => {
+                        self.consume_token(&Token::Column)?;
+                        AlterOperation::DropColumn(self.parse_identifier()?)
+                    }
+                    Token::Constraint => {
+                        self.consume_token(&Token::Constraint)?;
+                        AlterOperation::DropConstraint(self.parse_identifier()?)
+                    }
+                    Token::Identifier(_) => AlterOperation::DropColumn(self.parse_identifier()?),
+                    token => {
+                        return Err(HematiteError::ParseError(format!(
+                            "Expected COLUMN or CONSTRAINT after DROP, found: {:?}",
+                            token
+                        )))
+                    }
+                };
                 self.consume_token(&Token::Semicolon)?;
-                Ok(Statement::Alter(AlterStatement {
-                    table,
-                    operation: AlterOperation::DropColumn(column_name),
-                }))
+                Ok(Statement::Alter(AlterStatement { table, operation }))
             }
             Token::Alter => {
                 self.consume_token(&Token::Alter)?;
