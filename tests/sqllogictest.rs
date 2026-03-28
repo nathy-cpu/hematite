@@ -98,7 +98,7 @@ fn render_value(value: Value) -> String {
 
 #[test]
 fn sqllogictest_corpus() {
-    let files = collect_slt_files("tests/sqllogictest");
+    let files = collect_slt_files_from_manifest("tests/sqllogictest");
     assert!(!files.is_empty(), "sqllogictest corpus should not be empty");
 
     for file in files {
@@ -109,23 +109,29 @@ fn sqllogictest_corpus() {
     }
 }
 
-fn collect_slt_files(root: &str) -> Vec<String> {
+fn collect_slt_files_from_manifest(root: &str) -> Vec<String> {
+    let root_path = std::path::Path::new(root);
+    let manifest_path = root_path.join("manifest.txt");
+    let manifest = std::fs::read_to_string(&manifest_path)
+        .unwrap_or_else(|err| panic!("sqllogictest manifest {} should be readable: {err}", manifest_path.display()));
+
     let mut files = Vec::new();
-    collect_slt_files_recursive(std::path::Path::new(root), &mut files);
+    for line in manifest.lines() {
+        let entry = line.trim();
+        if entry.is_empty() || entry.starts_with('#') {
+            continue;
+        }
+
+        let path = root_path.join(entry);
+        collect_slt_files_recursive(&path, &mut files);
+    }
+
     files.sort();
+    files.dedup();
     files
 }
 
 fn collect_slt_files_recursive(path: &std::path::Path, files: &mut Vec<String>) {
-    if path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| name == "unsupported")
-        .unwrap_or(false)
-    {
-        return;
-    }
-
     let entries = std::fs::read_dir(path).expect("sqllogictest directory should exist");
     for entry in entries {
         let entry = entry.expect("sqllogictest entry should be readable");
