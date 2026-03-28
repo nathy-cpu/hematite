@@ -25,7 +25,7 @@
 use crate::error::{HematiteError, Result};
 use crate::parser::ast::{
     Condition, CreateViewStatement, Expression, InsertSource, SelectStatement, Statement,
-    TableReference, WhereClause,
+    TableReference, TriggerEvent, WhereClause,
 };
 use crate::parser::{Lexer, Parser};
 use crate::query::lowering::raise_literal_value;
@@ -418,11 +418,12 @@ impl Connection {
             crate::parser::ast::Statement::DropView(drop_view) => {
                 return self.execute_drop_view_statement(&drop_view.view, drop_view.if_exists);
             }
-            crate::parser::ast::Statement::CreateTrigger(_)
-            | crate::parser::ast::Statement::DropTrigger(_) => {
-                return Err(HematiteError::ParseError(
-                    "View and trigger statements are not implemented yet".to_string(),
-                ));
+            crate::parser::ast::Statement::CreateTrigger(create_trigger) => {
+                return self.execute_create_trigger_statement(create_trigger);
+            }
+            crate::parser::ast::Statement::DropTrigger(drop_trigger) => {
+                return self
+                    .execute_drop_trigger_statement(&drop_trigger.trigger, drop_trigger.if_exists);
             }
             _ => {}
         }
@@ -538,7 +539,7 @@ impl Connection {
         statement: crate::parser::ast::CreateViewStatement,
     ) -> Result<QueryResult> {
         let mut implicit_mutation = Some(ImplicitMutation::begin(self)?);
-        let result = {
+        let result: Result<QueryResult> = (|| {
             let mut catalog_guard = self.lock_catalog()?;
             let schema = catalog_guard.clone_schema();
             let dependencies = statement.query.dependency_names();
@@ -588,7 +589,7 @@ impl Connection {
                 })?;
                 Ok(Self::mutation_result(0))
             }
-        };
+        })();
 
         match result {
             Ok(result) => {
@@ -614,7 +615,7 @@ impl Connection {
         if_exists: bool,
     ) -> Result<QueryResult> {
         let mut implicit_mutation = Some(ImplicitMutation::begin(self)?);
-        let result = {
+        let result: Result<QueryResult> = (|| {
             let mut catalog_guard = self.lock_catalog()?;
             if if_exists && catalog_guard.get_view(view_name)?.is_none() {
                 Ok(Self::mutation_result(0))
@@ -622,7 +623,93 @@ impl Connection {
                 catalog_guard.drop_view(view_name)?;
                 Ok(Self::mutation_result(0))
             }
-        };
+        })();
+
+        match result {
+            Ok(result) => {
+                implicit_mutation
+                    .take()
+                    .expect("implicit mutation should be present")
+                    .commit(self)?;
+                Ok(result)
+            }
+            Err(err) => {
+                implicit_mutation
+                    .take()
+                    .expect("implicit mutation should be present")
+                    .rollback(self)?;
+                Err(err)
+            }
+        }
+    }
+
+    fn execute_create_trigger_statement(
+        &mut self,
+        statement: crate::parser::ast::CreateTriggerStatement,
+    ) -> Result<QueryResult> {
+        let mut implicit_mutation = Some(ImplicitMutation::begin(self)?);
+        let result: Result<QueryResult> = (|| {
+            let mut catalog_guard = self.lock_catalog()?;
+            let schema = catalog_guard.clone_schema();
+            validate_statement(
+                &crate::parser::ast::Statement::CreateTrigger(statement.clone()),
+                &schema,
+            )?;
+
+            catalog_guard.create_trigger(crate::catalog::Trigger {
+                name: statement.trigger.clone(),
+                table_name: statement.table.clone(),
+                event: match statement.event {
+                    TriggerEvent::Insert => crate::catalog::TriggerEvent::Insert,
+                    TriggerEvent::Update => crate::catalog::TriggerEvent::Update,
+                    TriggerEvent::Delete => crate::catalog::TriggerEvent::Delete,
+                },
+                body_sql: statement.body.to_sql(),
+                old_alias: match statement.event {
+                    TriggerEvent::Insert => None,
+                    TriggerEvent::Update | TriggerEvent::Delete => Some("OLD".to_string()),
+                },
+                new_alias: match statement.event {
+                    TriggerEvent::Delete => None,
+                    TriggerEvent::Insert | TriggerEvent::Update => Some("NEW".to_string()),
+                },
+            })?;
+            Ok(Self::mutation_result(0))
+        })();
+
+        match result {
+            Ok(result) => {
+                implicit_mutation
+                    .take()
+                    .expect("implicit mutation should be present")
+                    .commit(self)?;
+                Ok(result)
+            }
+            Err(err) => {
+                implicit_mutation
+                    .take()
+                    .expect("implicit mutation should be present")
+                    .rollback(self)?;
+                Err(err)
+            }
+        }
+    }
+
+    fn execute_drop_trigger_statement(
+        &mut self,
+        trigger_name: &str,
+        if_exists: bool,
+    ) -> Result<QueryResult> {
+        let mut implicit_mutation = Some(ImplicitMutation::begin(self)?);
+        let result: Result<QueryResult> = (|| {
+            let mut catalog_guard = self.lock_catalog()?;
+            if if_exists && catalog_guard.get_trigger(trigger_name)?.is_none() {
+                Ok(Self::mutation_result(0))
+            } else {
+                catalog_guard.drop_trigger(trigger_name)?;
+                Ok(Self::mutation_result(0))
+            }
+        })();
 
         match result {
             Ok(result) => {

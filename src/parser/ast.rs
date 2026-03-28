@@ -526,6 +526,113 @@ pub enum ForeignKeyAction {
 }
 
 impl Statement {
+    pub(crate) fn to_sql(&self) -> String {
+        match self {
+            Statement::Select(select) => select.to_sql(),
+            Statement::Insert(insert) => {
+                let mut sql = format!(
+                    "INSERT INTO {} ({}) ",
+                    insert.table,
+                    insert.columns.join(", ")
+                );
+                match &insert.source {
+                    InsertSource::Values(rows) => {
+                        let rows_sql = rows
+                            .iter()
+                            .map(|row| {
+                                format!(
+                                    "({})",
+                                    row.iter()
+                                        .map(Expression::to_sql)
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        sql.push_str(&format!("VALUES {rows_sql}"));
+                    }
+                    InsertSource::Select(select) => {
+                        sql.push_str(&select.to_sql());
+                    }
+                }
+                if let Some(assignments) = &insert.on_duplicate {
+                    sql.push_str(" ON DUPLICATE KEY UPDATE ");
+                    sql.push_str(
+                        &assignments
+                            .iter()
+                            .map(|assignment| {
+                                format!("{} = {}", assignment.column, assignment.value.to_sql())
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    );
+                }
+                sql
+            }
+            Statement::Update(update) => {
+                let mut sql = format!(
+                    "UPDATE {} SET {}",
+                    update.table,
+                    update
+                        .assignments
+                        .iter()
+                        .map(|assignment| {
+                            format!("{} = {}", assignment.column, assignment.value.to_sql())
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                if let Some(where_clause) = &update.where_clause {
+                    sql.push_str(&format!(
+                        " WHERE {}",
+                        where_clause
+                            .conditions
+                            .iter()
+                            .map(Condition::to_sql)
+                            .collect::<Vec<_>>()
+                            .join(" AND ")
+                    ));
+                }
+                sql
+            }
+            Statement::Delete(delete) => {
+                let mut sql = format!("DELETE FROM {}", delete.table);
+                if let Some(where_clause) = &delete.where_clause {
+                    sql.push_str(&format!(
+                        " WHERE {}",
+                        where_clause
+                            .conditions
+                            .iter()
+                            .map(Condition::to_sql)
+                            .collect::<Vec<_>>()
+                            .join(" AND ")
+                    ));
+                }
+                sql
+            }
+            Statement::Explain(explain) => format!("EXPLAIN {}", explain.statement.to_sql()),
+            Statement::Describe(describe) => format!("DESCRIBE {}", describe.table),
+            Statement::ShowTables => "SHOW TABLES".to_string(),
+            Statement::ShowViews => "SHOW VIEWS".to_string(),
+            Statement::Begin => "BEGIN".to_string(),
+            Statement::Commit => "COMMIT".to_string(),
+            Statement::Rollback => "ROLLBACK".to_string(),
+            Statement::Savepoint(name) => format!("SAVEPOINT {name}"),
+            Statement::RollbackToSavepoint(name) => format!("ROLLBACK TO SAVEPOINT {name}"),
+            Statement::ReleaseSavepoint(name) => format!("RELEASE SAVEPOINT {name}"),
+            Statement::Create(_)
+            | Statement::CreateView(_)
+            | Statement::CreateTrigger(_)
+            | Statement::CreateIndex(_)
+            | Statement::Alter(_)
+            | Statement::Drop(_)
+            | Statement::DropView(_)
+            | Statement::DropTrigger(_)
+            | Statement::DropIndex(_) => format!("{self:?}"),
+        }
+    }
+
     #[cfg(test)]
     pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
         match self {

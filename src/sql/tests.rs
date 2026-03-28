@@ -546,6 +546,80 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_create_drop_trigger_persists_across_reopen() -> Result<()> {
+        let db = TestDbFile::new("_test_create_drop_trigger_persists_across_reopen");
+
+        {
+            let mut conn = Connection::new(db.path())?;
+            conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+            conn.execute("CREATE TABLE audit_log (id INTEGER PRIMARY KEY, entry TEXT);")?;
+            conn.execute(
+                "CREATE TRIGGER audit_users AFTER INSERT ON users AS INSERT INTO audit_log (id, entry) VALUES (1, NEW.name);",
+            )?;
+            assert!(conn.schema_snapshot()?.trigger("audit_users").is_some());
+            conn.close()?;
+        }
+
+        {
+            let mut reopened = Connection::new(db.path())?;
+            let trigger = reopened
+                .schema_snapshot()?
+                .trigger("audit_users")
+                .cloned()
+                .expect("trigger should persist across reopen");
+            assert_eq!(trigger.table_name, "users");
+            assert_eq!(trigger.body_sql, "INSERT INTO audit_log (id, entry) VALUES (1, NEW.name)");
+
+            reopened.execute("DROP TRIGGER audit_users;")?;
+            assert!(reopened.schema_snapshot()?.trigger("audit_users").is_none());
+            reopened.close()?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_trigger_validation_rejects_invalid_old_new_usage() -> Result<()> {
+        let db = TestDbFile::new("_test_trigger_validation_rejects_invalid_old_new_usage");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("CREATE TABLE audit_log (id INTEGER PRIMARY KEY, entry TEXT);")?;
+
+        let insert_result = conn.execute(
+            "CREATE TRIGGER bad_insert AFTER INSERT ON users AS INSERT INTO audit_log (id, entry) VALUES (1, OLD.name);",
+        );
+        assert!(insert_result.is_err());
+        assert!(insert_result.unwrap_err().to_string().contains("cannot reference OLD"));
+
+        let delete_result = conn.execute(
+            "CREATE TRIGGER bad_delete AFTER DELETE ON users AS INSERT INTO audit_log (id, entry) VALUES (1, NEW.name);",
+        );
+        assert!(delete_result.is_err());
+        assert!(delete_result.unwrap_err().to_string().contains("cannot reference NEW"));
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_trigger_validation_rejects_self_targeting_body() -> Result<()> {
+        let db = TestDbFile::new("_test_trigger_validation_rejects_self_targeting_body");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+
+        let result = conn.execute(
+            "CREATE TRIGGER audit_users AFTER INSERT ON users AS INSERT INTO users (id, name) VALUES (2, NEW.name);",
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("cannot target its own table"));
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_insert_into_view_is_rejected() -> Result<()> {
         let db = TestDbFile::new("_test_insert_into_view_is_rejected");
         let mut conn = Connection::new(db.path())?;
