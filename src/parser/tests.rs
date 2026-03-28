@@ -1289,6 +1289,20 @@ mod parser_tests {
     }
 
     #[test]
+    fn test_parse_interval_literals() -> Result<()> {
+        let select = parse_select(
+            "SELECT DATE('2026-03-28') + INTERVAL '1-02' YEAR TO MONTH, \
+             CAST('2026-03-28 10:00:00' AS DATETIME) - INTERVAL '2 03:04:05' DAY TO SECOND \
+             FROM users;",
+        )?;
+
+        assert_eq!(select.columns.len(), 2);
+        assert!(matches!(select.columns[0], SelectItem::Expression(_)));
+        assert!(matches!(select.columns[1], SelectItem::Expression(_)));
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_group_by_having() -> Result<()> {
         let select = parse_select(
             "SELECT name, COUNT(id) AS total_count FROM users GROUP BY name HAVING total_count > 1;",

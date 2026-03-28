@@ -402,8 +402,10 @@ impl Parser {
             | Token::LeftParen
             | Token::Case
             | Token::Cast
+            | Token::Interval
             | Token::Date
             | Token::Time
+            | Token::DateTime
             | Token::Timestamp
             | Token::Left
             | Token::Right
@@ -1202,7 +1204,8 @@ impl Parser {
         match token {
             Token::Cast => self.parse_cast_expression(),
             Token::Case => self.parse_case_expression(),
-            Token::Date | Token::Time | Token::Timestamp
+            Token::Interval => self.parse_interval_literal(),
+            Token::Date | Token::Time | Token::DateTime | Token::Timestamp
                 if self.next_token_is(&Token::LeftParen) =>
             {
                 self.parse_scalar_function_expression()
@@ -1264,6 +1267,38 @@ impl Parser {
                 token
             ))),
         }
+    }
+
+    fn parse_interval_literal(&mut self) -> Result<Expression> {
+        self.consume_token(&Token::Interval)?;
+        let value = match self.peek_token()? {
+            Token::StringLiteral(value) => {
+                self.consume_token(&Token::StringLiteral(value.clone()))?;
+                value
+            }
+            token => {
+                return Err(HematiteError::ParseError(format!(
+                    "Expected INTERVAL string literal, found: {:?}",
+                    token
+                )))
+            }
+        };
+        let leading = self.parse_identifier()?.to_ascii_uppercase();
+        self.consume_token(&Token::To)?;
+        let trailing = self.parse_identifier()?.to_ascii_uppercase();
+
+        let qualifier = match (leading.as_str(), trailing.as_str()) {
+            ("YEAR", "MONTH") => IntervalQualifier::YearToMonth,
+            ("DAY", "SECOND") => IntervalQualifier::DayToSecond,
+            _ => {
+                return Err(HematiteError::ParseError(format!(
+                    "Unsupported INTERVAL qualifier '{} TO {}'",
+                    leading, trailing
+                )))
+            }
+        };
+
+        Ok(Expression::IntervalLiteral { value, qualifier })
     }
 
     fn parse_case_expression(&mut self) -> Result<Expression> {
@@ -1348,6 +1383,10 @@ impl Parser {
             Token::Timestamp => {
                 self.consume_token(&Token::Timestamp)?;
                 Ok("TIMESTAMP".to_string())
+            }
+            Token::DateTime => {
+                self.consume_token(&Token::DateTime)?;
+                Ok("DATETIME".to_string())
             }
             Token::Left => {
                 self.consume_token(&Token::Left)?;

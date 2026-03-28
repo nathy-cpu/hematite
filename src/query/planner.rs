@@ -643,7 +643,9 @@ impl QueryPlanner {
                 self.collect_expression_columns(left, table, accessed_columns);
                 self.collect_expression_columns(right, table, accessed_columns);
             }
-            Expression::Literal(_) | Expression::Parameter(_) => {}
+            Expression::Literal(_)
+            | Expression::IntervalLiteral { .. }
+            | Expression::Parameter(_) => {}
         }
     }
 

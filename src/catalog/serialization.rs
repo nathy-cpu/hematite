@@ -78,6 +78,14 @@ impl RowCodec {
                     buffer.extend_from_slice(&value.seconds_since_midnight().to_le_bytes());
                     buffer.extend_from_slice(&value.offset_minutes().to_le_bytes());
                 }
+                Value::IntervalYearMonth(value) => {
+                    buffer.push(15);
+                    buffer.extend_from_slice(&value.total_months().to_le_bytes());
+                }
+                Value::IntervalDaySecond(value) => {
+                    buffer.push(16);
+                    buffer.extend_from_slice(&value.total_seconds().to_le_bytes());
+                }
                 Value::Null => buffer.push(5),
             }
         }
@@ -233,6 +241,20 @@ impl RowCodec {
                         offset_minutes,
                     ))
                 }
+                15 => {
+                    let bytes =
+                        read_exact(data, &mut offset, payload_end, 4, "Interval year-month")?;
+                    Value::IntervalYearMonth(crate::catalog::IntervalYearMonthValue::new(
+                        i32::from_le_bytes(bytes.try_into().unwrap()),
+                    ))
+                }
+                16 => {
+                    let bytes =
+                        read_exact(data, &mut offset, payload_end, 8, "Interval day-second")?;
+                    Value::IntervalDaySecond(crate::catalog::IntervalDaySecondValue::new(
+                        i64::from_le_bytes(bytes.try_into().unwrap()),
+                    ))
+                }
                 _ => {
                     return Err(HematiteError::CorruptedData(format!(
                         "Unknown value tag {} in stored row",
@@ -379,6 +401,14 @@ fn encode_key_value(buffer: &mut Vec<u8>, value: &Value) {
             buffer.push(14);
             buffer.extend_from_slice(&value.seconds_since_midnight().to_be_bytes());
             buffer.extend_from_slice(&(i16::to_be_bytes(value.offset_minutes() ^ i16::MIN)));
+        }
+        Value::IntervalYearMonth(value) => {
+            buffer.push(15);
+            buffer.extend_from_slice(&(i32::to_be_bytes(value.total_months() ^ i32::MIN)));
+        }
+        Value::IntervalDaySecond(value) => {
+            buffer.push(16);
+            buffer.extend_from_slice(&(i64::to_be_bytes(value.total_seconds() ^ i64::MIN)));
         }
     }
 }

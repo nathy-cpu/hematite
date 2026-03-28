@@ -24,8 +24,8 @@ use crate::catalog::table::{
 };
 use crate::catalog::StoredRow;
 use crate::catalog::{
-    Column, DataType, DateTimeValue, DateValue, DecimalValue, Table, TimeValue,
-    TimeWithTimeZoneValue, TimestampValue, Value,
+    Column, DataType, DateTimeValue, DateValue, DecimalValue, IntervalDaySecondValue,
+    IntervalYearMonthValue, Table, TimeValue, TimeWithTimeZoneValue, TimestampValue, Value,
 };
 use crate::error::{HematiteError, Result};
 use crate::parser::ast::*;
@@ -242,6 +242,14 @@ impl SelectExecutor {
     ) -> Result<Value> {
         match expr {
             Expression::Literal(value) => Ok(lower_literal_value(value)),
+            Expression::IntervalLiteral { value, qualifier } => match qualifier {
+                IntervalQualifier::YearToMonth => Ok(Value::IntervalYearMonth(
+                    IntervalYearMonthValue::parse(value)?,
+                )),
+                IntervalQualifier::DayToSecond => Ok(Value::IntervalDaySecond(
+                    IntervalDaySecondValue::parse(value)?,
+                )),
+            },
             Expression::Parameter(index) => Err(HematiteError::ParseError(format!(
                 "Unbound parameter {} reached execution",
                 index + 1
@@ -763,6 +771,7 @@ impl SelectExecutor {
             }
             Expression::AggregateCall { .. }
             | Expression::Literal(_)
+            | Expression::IntervalLiteral { .. }
             | Expression::Parameter(_) => {}
         }
 
@@ -1997,6 +2006,14 @@ impl SelectExecutor {
     ) -> Result<Value> {
         match expr {
             Expression::Literal(value) => Ok(lower_literal_value(value)),
+            Expression::IntervalLiteral { value, qualifier } => match qualifier {
+                IntervalQualifier::YearToMonth => Ok(Value::IntervalYearMonth(
+                    IntervalYearMonthValue::parse(value)?,
+                )),
+                IntervalQualifier::DayToSecond => Ok(Value::IntervalDaySecond(
+                    IntervalDaySecondValue::parse(value)?,
+                )),
+            },
             Expression::Parameter(index) => Err(HematiteError::ParseError(format!(
                 "Unbound parameter {} reached execution",
                 index + 1
@@ -3009,6 +3026,14 @@ impl InsertExecutor {
     fn evaluate_value_expression(&self, expr: &Expression) -> Result<Value> {
         match expr {
             Expression::Literal(value) => Ok(lower_literal_value(value)),
+            Expression::IntervalLiteral { value, qualifier } => match qualifier {
+                IntervalQualifier::YearToMonth => Ok(Value::IntervalYearMonth(
+                    IntervalYearMonthValue::parse(value)?,
+                )),
+                IntervalQualifier::DayToSecond => Ok(Value::IntervalDaySecond(
+                    IntervalDaySecondValue::parse(value)?,
+                )),
+            },
             Expression::Parameter(index) => Err(HematiteError::ParseError(format!(
                 "Unbound parameter {} reached execution",
                 index + 1
@@ -5353,12 +5378,46 @@ fn evaluate_temporal_arithmetic(
     right: &Value,
 ) -> Result<Option<Value>> {
     match (left, right) {
+        (Value::IntervalYearMonth(left), Value::IntervalYearMonth(right)) => {
+            let total_months = match operator {
+                ArithmeticOperator::Add => left.total_months().checked_add(right.total_months()),
+                ArithmeticOperator::Subtract => {
+                    left.total_months().checked_sub(right.total_months())
+                }
+                _ => None,
+            };
+            Ok(total_months
+                .map(|value| Value::IntervalYearMonth(IntervalYearMonthValue::new(value))))
+        }
+        (Value::IntervalDaySecond(left), Value::IntervalDaySecond(right)) => {
+            let total_seconds = match operator {
+                ArithmeticOperator::Add => left.total_seconds().checked_add(right.total_seconds()),
+                ArithmeticOperator::Subtract => {
+                    left.total_seconds().checked_sub(right.total_seconds())
+                }
+                _ => None,
+            };
+            Ok(total_seconds
+                .map(|value| Value::IntervalDaySecond(IntervalDaySecondValue::new(value))))
+        }
         (Value::Date(left), Value::Date(right))
             if matches!(operator, ArithmeticOperator::Subtract) =>
         {
             Ok(Some(Value::BigInt(
                 left.days_since_epoch() as i64 - right.days_since_epoch() as i64,
             )))
+        }
+        (Value::Date(left), Value::IntervalYearMonth(interval)) => {
+            let months = signed_interval_months(operator, *interval)?;
+            Ok(Some(Value::Date(add_months_to_date(*left, months)?)))
+        }
+        (Value::Date(left), Value::IntervalDaySecond(interval)) => {
+            let days = whole_days_from_interval(operator, *interval)?;
+            let result = left.days_since_epoch() as i64 + days;
+            let result = i32::try_from(result).map_err(|_| {
+                HematiteError::ParseError("DATE arithmetic overflowed supported range".to_string())
+            })?;
+            Ok(Some(Value::Date(DateValue::from_days_since_epoch(result))))
         }
         (Value::Date(left), right) => {
             let Some(days) = integral_rhs(right) else {
@@ -5383,6 +5442,15 @@ fn evaluate_temporal_arithmetic(
                 left.seconds_since_epoch() - right.seconds_since_epoch(),
             )))
         }
+        (Value::DateTime(left), Value::IntervalYearMonth(interval)) => Ok(Some(Value::DateTime(
+            add_months_to_datetime(*left, signed_interval_months(operator, *interval)?)?,
+        ))),
+        (Value::DateTime(left), Value::IntervalDaySecond(interval)) => {
+            let seconds = signed_interval_seconds(operator, *interval)?;
+            Ok(Some(Value::DateTime(
+                DateTimeValue::from_seconds_since_epoch(left.seconds_since_epoch() + seconds),
+            )))
+        }
         (Value::DateTime(left), right) => {
             let Some(seconds) = integral_rhs(right) else {
                 return Ok(None);
@@ -5402,6 +5470,15 @@ fn evaluate_temporal_arithmetic(
         {
             Ok(Some(Value::BigInt(
                 left.seconds_since_epoch() - right.seconds_since_epoch(),
+            )))
+        }
+        (Value::Timestamp(left), Value::IntervalYearMonth(interval)) => Ok(Some(Value::Timestamp(
+            add_months_to_timestamp(*left, signed_interval_months(operator, *interval)?)?,
+        ))),
+        (Value::Timestamp(left), Value::IntervalDaySecond(interval)) => {
+            let seconds = signed_interval_seconds(operator, *interval)?;
+            Ok(Some(Value::Timestamp(
+                TimestampValue::from_seconds_since_epoch(left.seconds_since_epoch() + seconds),
             )))
         }
         (Value::Timestamp(left), right) => {
@@ -5425,6 +5502,12 @@ fn evaluate_temporal_arithmetic(
                 left.seconds_since_midnight() as i32 - right.seconds_since_midnight() as i32,
             )))
         }
+        (Value::Time(left), Value::IntervalDaySecond(interval)) => {
+            let seconds = signed_interval_seconds(operator, *interval)?;
+            Ok(Some(Value::Time(TimeValue::from_seconds_since_midnight(
+                add_wrapped_seconds(left.seconds_since_midnight(), seconds),
+            ))))
+        }
         (Value::Time(left), right) => {
             let Some(seconds) = integral_rhs(right) else {
                 return Ok(None);
@@ -5437,6 +5520,15 @@ fn evaluate_temporal_arithmetic(
             Ok(Some(Value::Time(TimeValue::from_seconds_since_midnight(
                 add_wrapped_seconds(left.seconds_since_midnight(), delta),
             ))))
+        }
+        (Value::TimeWithTimeZone(left), Value::IntervalDaySecond(interval)) => {
+            let seconds = signed_interval_seconds(operator, *interval)?;
+            Ok(Some(Value::TimeWithTimeZone(
+                TimeWithTimeZoneValue::from_parts(
+                    add_wrapped_seconds(left.seconds_since_midnight(), seconds),
+                    left.offset_minutes(),
+                ),
+            )))
         }
         (Value::TimeWithTimeZone(left), right) => {
             let Some(seconds) = integral_rhs(right) else {
@@ -5460,6 +5552,118 @@ fn evaluate_temporal_arithmetic(
 
 fn add_wrapped_seconds(seconds_since_midnight: u32, delta: i64) -> u32 {
     (seconds_since_midnight as i64 + delta).rem_euclid(86_400) as u32
+}
+
+fn signed_interval_months(
+    operator: &ArithmeticOperator,
+    interval: IntervalYearMonthValue,
+) -> Result<i32> {
+    match operator {
+        ArithmeticOperator::Add => Ok(interval.total_months()),
+        ArithmeticOperator::Subtract => interval.total_months().checked_neg().ok_or_else(|| {
+            HematiteError::ParseError(
+                "INTERVAL YEAR TO MONTH overflowed supported range".to_string(),
+            )
+        }),
+        _ => Err(HematiteError::ParseError(
+            "INTERVAL YEAR TO MONTH only supports addition and subtraction".to_string(),
+        )),
+    }
+}
+
+fn signed_interval_seconds(
+    operator: &ArithmeticOperator,
+    interval: IntervalDaySecondValue,
+) -> Result<i64> {
+    match operator {
+        ArithmeticOperator::Add => Ok(interval.total_seconds()),
+        ArithmeticOperator::Subtract => interval.total_seconds().checked_neg().ok_or_else(|| {
+            HematiteError::ParseError(
+                "INTERVAL DAY TO SECOND overflowed supported range".to_string(),
+            )
+        }),
+        _ => Err(HematiteError::ParseError(
+            "INTERVAL DAY TO SECOND only supports addition and subtraction".to_string(),
+        )),
+    }
+}
+
+fn whole_days_from_interval(
+    operator: &ArithmeticOperator,
+    interval: IntervalDaySecondValue,
+) -> Result<i64> {
+    let seconds = signed_interval_seconds(operator, interval)?;
+    if seconds % 86_400 != 0 {
+        return Err(HematiteError::ParseError(
+            "DATE arithmetic requires INTERVAL DAY TO SECOND values aligned to whole days"
+                .to_string(),
+        ));
+    }
+    Ok(seconds / 86_400)
+}
+
+fn add_months_to_date(value: DateValue, delta_months: i32) -> Result<DateValue> {
+    let (year, month, day) = value.components();
+    let total_months = year
+        .checked_mul(12)
+        .and_then(|total| total.checked_add(month as i32 - 1))
+        .and_then(|total| total.checked_add(delta_months))
+        .ok_or_else(|| {
+            HematiteError::ParseError(
+                "Temporal month arithmetic overflowed supported range".to_string(),
+            )
+        })?;
+    let new_year = total_months.div_euclid(12);
+    let new_month = total_months.rem_euclid(12) as u32 + 1;
+    let clamped_day = day.min(executor_days_in_month(new_year, new_month));
+    Ok(DateValue::from_days_since_epoch(executor_days_from_civil(
+        new_year,
+        new_month,
+        clamped_day,
+    )))
+}
+
+fn add_months_to_datetime(value: DateTimeValue, delta_months: i32) -> Result<DateTimeValue> {
+    let (date, time) = value.components();
+    let shifted_date = add_months_to_date(date, delta_months)?;
+    Ok(DateTimeValue::from_seconds_since_epoch(
+        shifted_date.days_since_epoch() as i64 * 86_400 + time.seconds_since_midnight() as i64,
+    ))
+}
+
+fn add_months_to_timestamp(value: TimestampValue, delta_months: i32) -> Result<TimestampValue> {
+    Ok(TimestampValue::from_seconds_since_epoch(
+        add_months_to_datetime(
+            DateTimeValue::from_seconds_since_epoch(value.seconds_since_epoch()),
+            delta_months,
+        )?
+        .seconds_since_epoch(),
+    ))
+}
+
+fn executor_days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if executor_is_leap_year(year) => 29,
+        2 => 28,
+        _ => unreachable!(),
+    }
+}
+
+fn executor_is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+fn executor_days_from_civil(year: i32, month: u32, day: u32) -> i32 {
+    let year = year - if month <= 2 { 1 } else { 0 };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = year - era * 400;
+    let month = month as i32;
+    let day = day as i32;
+    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
 }
 
 fn integral_rhs(value: &Value) -> Option<i64> {
@@ -6097,6 +6301,8 @@ fn coerce_value_to_string(function_name: &str, value: Value) -> Result<String> {
         Value::DateTime(text) => Ok(text.to_string()),
         Value::Timestamp(text) => Ok(text.to_string()),
         Value::TimeWithTimeZone(text) => Ok(text.to_string()),
+        Value::IntervalYearMonth(text) => Ok(text.to_string()),
+        Value::IntervalDaySecond(text) => Ok(text.to_string()),
         Value::Integer(value) => Ok(value.to_string()),
         Value::BigInt(value) => Ok(value.to_string()),
         Value::Float(value) => Ok(value.to_string()),

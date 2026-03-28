@@ -2,8 +2,8 @@
 
 use crate::error::{HematiteError, Result};
 use crate::query::{
-    DateTimeValue, DateValue, DecimalValue, QueryResult, TimeValue, TimeWithTimeZoneValue,
-    TimestampValue, Value,
+    DateTimeValue, DateValue, DecimalValue, IntervalDaySecondValue, IntervalYearMonthValue,
+    QueryResult, TimeValue, TimeWithTimeZoneValue, TimestampValue, Value,
 };
 use std::collections::HashMap;
 
@@ -121,6 +121,8 @@ impl Row {
             Some(Value::DateTime(value)) => Ok(value.to_string()),
             Some(Value::Timestamp(value)) => Ok(value.to_string()),
             Some(Value::TimeWithTimeZone(value)) => Ok(value.to_string()),
+            Some(Value::IntervalYearMonth(value)) => Ok(value.to_string()),
+            Some(Value::IntervalDaySecond(value)) => Ok(value.to_string()),
             Some(value) => Err(HematiteError::ParseError(format!(
                 "Expected TEXT, found {:?}",
                 value
@@ -260,6 +262,32 @@ impl Row {
             Some(Value::TimeWithTimeZone(value)) => Ok(*value),
             Some(value) => Err(HematiteError::ParseError(format!(
                 "Expected TIME WITH TIME ZONE, found {:?}",
+                value
+            ))),
+            None => Err(HematiteError::ParseError(
+                "Column index out of bounds".to_string(),
+            )),
+        }
+    }
+
+    pub fn get_interval_year_month(&self, index: usize) -> Result<IntervalYearMonthValue> {
+        match self.get(index) {
+            Some(Value::IntervalYearMonth(value)) => Ok(*value),
+            Some(value) => Err(HematiteError::ParseError(format!(
+                "Expected INTERVAL YEAR TO MONTH, found {:?}",
+                value
+            ))),
+            None => Err(HematiteError::ParseError(
+                "Column index out of bounds".to_string(),
+            )),
+        }
+    }
+
+    pub fn get_interval_day_second(&self, index: usize) -> Result<IntervalDaySecondValue> {
+        match self.get(index) {
+            Some(Value::IntervalDaySecond(value)) => Ok(*value),
+            Some(value) => Err(HematiteError::ParseError(format!(
+                "Expected INTERVAL DAY TO SECOND, found {:?}",
                 value
             ))),
             None => Err(HematiteError::ParseError(

@@ -408,6 +408,14 @@ fn write_optional_value(buffer: &mut Vec<u8>, value: Option<&Value>) {
             buffer.extend_from_slice(&value.seconds_since_midnight().to_le_bytes());
             buffer.extend_from_slice(&value.offset_minutes().to_le_bytes());
         }
+        Some(Value::IntervalYearMonth(value)) => {
+            buffer.push(14);
+            buffer.extend_from_slice(&value.total_months().to_le_bytes());
+        }
+        Some(Value::IntervalDaySecond(value)) => {
+            buffer.push(15);
+            buffer.extend_from_slice(&value.total_seconds().to_le_bytes());
+        }
         Some(Value::Null) => buffer.push(9),
     }
 }
@@ -533,6 +541,26 @@ fn read_optional_value(buffer: &[u8], offset: &mut usize) -> Result<Option<Value
                 seconds,
                 offset_minutes,
             )))
+        }
+        14 => {
+            let total_months = i32::from_le_bytes(
+                read_fixed(buffer, offset, 4, "default interval year to month")?
+                    .try_into()
+                    .unwrap(),
+            );
+            Some(Value::IntervalYearMonth(
+                crate::catalog::types::IntervalYearMonthValue::new(total_months),
+            ))
+        }
+        15 => {
+            let total_seconds = i64::from_le_bytes(
+                read_fixed(buffer, offset, 8, "default interval day to second")?
+                    .try_into()
+                    .unwrap(),
+            );
+            Some(Value::IntervalDaySecond(
+                crate::catalog::types::IntervalDaySecondValue::new(total_seconds),
+            ))
         }
         9 => Some(Value::Null),
         255 => None,

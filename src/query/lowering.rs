@@ -32,6 +32,8 @@ pub(crate) fn raise_literal_value(value: &Value) -> LiteralValue {
         Value::DateTime(value) => LiteralValue::Text(value.to_string()),
         Value::Timestamp(value) => LiteralValue::Text(value.to_string()),
         Value::TimeWithTimeZone(value) => LiteralValue::Text(value.to_string()),
+        Value::IntervalYearMonth(value) => LiteralValue::Text(value.to_string()),
+        Value::IntervalDaySecond(value) => LiteralValue::Text(value.to_string()),
         Value::Null => LiteralValue::Null,
     }
 }

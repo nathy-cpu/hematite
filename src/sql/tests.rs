@@ -159,6 +159,40 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_temporal_interval_arithmetic() -> Result<()> {
+        let db = TestDbFile::new("_test_temporal_interval_arithmetic");
+        let mut conn = Connection::new(db.path())?;
+        conn.execute("CREATE TABLE seed (id INTEGER PRIMARY KEY);")?;
+        conn.execute("INSERT INTO seed (id) VALUES (1);")?;
+
+        let result = conn.execute(
+            "SELECT \
+                DATE('2026-03-28') + INTERVAL '1-02' YEAR TO MONTH, \
+                DATE('2026-03-28') - INTERVAL '2 00:00:00' DAY TO SECOND, \
+                CAST('2026-03-28 13:14:15' AS DATETIME) + INTERVAL '0-01' YEAR TO MONTH, \
+                CAST('2026-03-28 13:14:15' AS DATETIME) + INTERVAL '1 00:00:45' DAY TO SECOND, \
+                CAST('2026-03-28 13:14:15' AS TIMESTAMP) - INTERVAL '0-02' YEAR TO MONTH, \
+                TIME('10:11:12') + INTERVAL '0 01:02:03' DAY TO SECOND, \
+                INTERVAL '1-02' YEAR TO MONTH + INTERVAL '0-10' YEAR TO MONTH, \
+                INTERVAL '1 00:00:30' DAY TO SECOND - INTERVAL '0 00:00:45' DAY TO SECOND \
+             FROM seed;",
+        )?;
+
+        let row = crate::sql::result::Row::new(result.rows[0].clone());
+        assert_eq!(row.get_date(0)?.to_string(), "2027-05-28");
+        assert_eq!(row.get_date(1)?.to_string(), "2026-03-26");
+        assert_eq!(row.get_datetime(2)?.to_string(), "2026-04-28 13:14:15");
+        assert_eq!(row.get_datetime(3)?.to_string(), "2026-03-29 13:15:00");
+        assert_eq!(row.get_timestamp(4)?.to_string(), "2026-01-28 13:14:15");
+        assert_eq!(row.get_time(5)?.to_string(), "11:13:15");
+        assert_eq!(row.get_interval_year_month(6)?.to_string(), "2-00");
+        assert_eq!(row.get_interval_day_second(7)?.to_string(), "0 23:59:45");
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_prepared_statement() -> Result<()> {
         let db = TestDbFile::new("_test_prepared_statement");
         let mut conn = Connection::new(db.path())?;

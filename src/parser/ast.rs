@@ -233,6 +233,10 @@ pub enum Condition {
 pub enum Expression {
     Column(String),
     Literal(LiteralValue),
+    IntervalLiteral {
+        value: String,
+        qualifier: IntervalQualifier,
+    },
     Parameter(usize),
     ScalarSubquery(Box<SelectStatement>),
     Cast {
@@ -297,6 +301,12 @@ pub enum Expression {
         operator: LogicalOperator,
         right: Box<Expression>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntervalQualifier {
+    YearToMonth,
+    DayToSecond,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1379,7 +1389,10 @@ impl Expression {
             }
             Expression::Exists { subquery, .. } => subquery.collect_dependency_names_into(names),
             Expression::NullCheck { expr, .. } => expr.collect_dependency_names_into(names),
-            Expression::Column(_) | Expression::Literal(_) | Expression::Parameter(_) => {}
+            Expression::Column(_)
+            | Expression::Literal(_)
+            | Expression::IntervalLiteral { .. }
+            | Expression::Parameter(_) => {}
         }
     }
 
@@ -1446,7 +1459,8 @@ impl Expression {
                 left.visit_parameters(f);
                 right.visit_parameters(f);
             }
-            Expression::Column(_) | Expression::Literal(_) => {}
+            Expression::Column(_) | Expression::Literal(_) | Expression::IntervalLiteral { .. } => {
+            }
         }
     }
 
@@ -1454,6 +1468,10 @@ impl Expression {
         match self {
             Expression::Column(name) => Ok(Expression::Column(name.clone())),
             Expression::Literal(value) => Ok(Expression::Literal(value.clone())),
+            Expression::IntervalLiteral { value, qualifier } => Ok(Expression::IntervalLiteral {
+                value: value.clone(),
+                qualifier: *qualifier,
+            }),
             Expression::Parameter(index) => parameters
                 .get(*index)
                 .cloned()
@@ -1595,6 +1613,15 @@ impl Expression {
                 operator: operator.clone(),
                 right: Box::new(right.bind(parameters)?),
             }),
+        }
+    }
+}
+
+impl IntervalQualifier {
+    pub fn to_sql(self) -> &'static str {
+        match self {
+            IntervalQualifier::YearToMonth => "YEAR TO MONTH",
+            IntervalQualifier::DayToSecond => "DAY TO SECOND",
         }
     }
 }
@@ -2510,7 +2537,9 @@ impl SelectStatement {
                 self.validate_expression(left, catalog, from, outer_bindings)?;
                 self.validate_expression(right, catalog, from, outer_bindings)?;
             }
-            Expression::Literal(_) | Expression::Parameter(_) => {}
+            Expression::Literal(_)
+            | Expression::IntervalLiteral { .. }
+            | Expression::Parameter(_) => {}
         }
 
         Ok(())
@@ -2583,7 +2612,10 @@ impl SelectStatement {
                 Self::expression_contains_aggregate(left)
                     || Self::expression_contains_aggregate(right)
             }
-            Expression::Column(_) | Expression::Literal(_) | Expression::Parameter(_) => false,
+            Expression::Column(_)
+            | Expression::Literal(_)
+            | Expression::IntervalLiteral { .. }
+            | Expression::Parameter(_) => false,
         }
     }
 
@@ -3658,6 +3690,7 @@ impl Expression {
             }
             Expression::Column(_)
             | Expression::Literal(_)
+            | Expression::IntervalLiteral { .. }
             | Expression::Parameter(_)
             | Expression::AggregateCall { .. } => false,
         }
@@ -3720,7 +3753,9 @@ impl Expression {
                 left.references_column(column_name, table_name)
                     || right.references_column(column_name, table_name)
             }
-            Expression::Literal(_) | Expression::Parameter(_) => false,
+            Expression::Literal(_)
+            | Expression::IntervalLiteral { .. }
+            | Expression::Parameter(_) => false,
         }
     }
 
@@ -3806,7 +3841,9 @@ impl Expression {
                 left.rename_column_references(old_name, new_name, table_name);
                 right.rename_column_references(old_name, new_name, table_name);
             }
-            Expression::Literal(_) | Expression::Parameter(_) => {}
+            Expression::Literal(_)
+            | Expression::IntervalLiteral { .. }
+            | Expression::Parameter(_) => {}
         }
     }
 
@@ -3821,6 +3858,13 @@ impl Expression {
                 LiteralValue::Float(f) => f.to_string(),
                 LiteralValue::Null => "NULL".to_string(),
             },
+            Expression::IntervalLiteral { value, qualifier } => {
+                format!(
+                    "INTERVAL '{}' {}",
+                    value.replace('\'', "''"),
+                    qualifier.to_sql()
+                )
+            }
             Expression::Parameter(index) => format!("?{}", index + 1),
             Expression::ScalarSubquery(_) => "(<subquery>)".to_string(),
             Expression::Case {

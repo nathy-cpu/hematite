@@ -274,7 +274,9 @@ fn expression_references_prefixed_alias(
 ) -> bool {
     match expression {
         Expression::Column(name) => column_has_prefixed_alias(name, alias),
-        Expression::Literal(_) | Expression::Parameter(_) => false,
+        Expression::Literal(_) | Expression::IntervalLiteral { .. } | Expression::Parameter(_) => {
+            false
+        }
         Expression::ScalarSubquery(subquery) => {
             select_references_prefixed_alias(subquery, alias, seen_subqueries)
         }
@@ -600,6 +602,10 @@ fn mask_trigger_aliases_in_expression(expression: &Expression) -> Expression {
         }
         Expression::Column(name) => Expression::Column(name.clone()),
         Expression::Literal(value) => Expression::Literal(value.clone()),
+        Expression::IntervalLiteral { value, qualifier } => Expression::IntervalLiteral {
+            value: value.clone(),
+            qualifier: *qualifier,
+        },
         Expression::Parameter(index) => Expression::Parameter(*index),
         Expression::ScalarSubquery(subquery) => {
             Expression::ScalarSubquery(Box::new(mask_trigger_aliases_in_select(subquery)))
@@ -1745,7 +1751,7 @@ fn validate_expression(
         Expression::NullCheck { expr, .. } => {
             validate_expression(select, expr, catalog, from, outer_bindings)?;
         }
-        Expression::Literal(_) | Expression::Parameter(_) => {}
+        Expression::Literal(_) | Expression::IntervalLiteral { .. } | Expression::Parameter(_) => {}
     }
 
     Ok(())
@@ -2291,7 +2297,10 @@ fn expression_contains_aggregate(expr: &Expression) -> bool {
                     .any(condition_contains_aggregate)
             })
         }
-        Expression::Column(_) | Expression::Literal(_) | Expression::Parameter(_) => false,
+        Expression::Column(_)
+        | Expression::Literal(_)
+        | Expression::IntervalLiteral { .. }
+        | Expression::Parameter(_) => false,
     }
 }
 

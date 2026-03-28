@@ -641,6 +641,161 @@ impl fmt::Display for TimeWithTimeZoneValue {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct IntervalYearMonthValue {
+    total_months: i32,
+}
+
+impl IntervalYearMonthValue {
+    pub fn new(total_months: i32) -> Self {
+        Self { total_months }
+    }
+
+    pub fn parse(input: &str) -> Result<Self> {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Err(HematiteError::ParseError(
+                "Invalid INTERVAL YEAR TO MONTH value ''".to_string(),
+            ));
+        }
+
+        let (negative, digits) = match trimmed.as_bytes()[0] {
+            b'+' => (false, &trimmed[1..]),
+            b'-' => (true, &trimmed[1..]),
+            _ => (false, trimmed),
+        };
+        let (years, months) = digits.split_once('-').ok_or_else(|| {
+            HematiteError::ParseError(format!("Invalid INTERVAL YEAR TO MONTH value '{}'", input))
+        })?;
+        if years.is_empty()
+            || months.len() != 2
+            || !years.chars().all(|ch| ch.is_ascii_digit())
+            || !months.chars().all(|ch| ch.is_ascii_digit())
+        {
+            return Err(HematiteError::ParseError(format!(
+                "Invalid INTERVAL YEAR TO MONTH value '{}'",
+                input
+            )));
+        }
+
+        let years = years.parse::<i32>().map_err(|_| {
+            HematiteError::ParseError(format!("Invalid INTERVAL YEAR TO MONTH value '{}'", input))
+        })?;
+        let months = months.parse::<i32>().map_err(|_| {
+            HematiteError::ParseError(format!("Invalid INTERVAL YEAR TO MONTH value '{}'", input))
+        })?;
+        if !(0..12).contains(&months) {
+            return Err(HematiteError::ParseError(format!(
+                "Invalid INTERVAL YEAR TO MONTH value '{}'",
+                input
+            )));
+        }
+
+        let total_months = years
+            .checked_mul(12)
+            .and_then(|total| total.checked_add(months))
+            .ok_or_else(|| {
+                HematiteError::ParseError(
+                    "INTERVAL YEAR TO MONTH value overflowed supported range".to_string(),
+                )
+            })?;
+        Ok(Self {
+            total_months: if negative {
+                -total_months
+            } else {
+                total_months
+            },
+        })
+    }
+
+    pub fn total_months(self) -> i32 {
+        self.total_months
+    }
+}
+
+impl fmt::Display for IntervalYearMonthValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let sign = if self.total_months < 0 { "-" } else { "" };
+        let total_months = self.total_months.unsigned_abs();
+        let years = total_months / 12;
+        let months = total_months % 12;
+        write!(f, "{sign}{years}-{months:02}")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct IntervalDaySecondValue {
+    total_seconds: i64,
+}
+
+impl IntervalDaySecondValue {
+    pub fn new(total_seconds: i64) -> Self {
+        Self { total_seconds }
+    }
+
+    pub fn parse(input: &str) -> Result<Self> {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Err(HematiteError::ParseError(
+                "Invalid INTERVAL DAY TO SECOND value ''".to_string(),
+            ));
+        }
+
+        let (negative, digits) = match trimmed.as_bytes()[0] {
+            b'+' => (false, &trimmed[1..]),
+            b'-' => (true, &trimmed[1..]),
+            _ => (false, trimmed),
+        };
+        let (days, time) = digits.split_once(' ').ok_or_else(|| {
+            HematiteError::ParseError(format!("Invalid INTERVAL DAY TO SECOND value '{}'", input))
+        })?;
+        if days.is_empty() || !days.chars().all(|ch| ch.is_ascii_digit()) {
+            return Err(HematiteError::ParseError(format!(
+                "Invalid INTERVAL DAY TO SECOND value '{}'",
+                input
+            )));
+        }
+        let days = days.parse::<i64>().map_err(|_| {
+            HematiteError::ParseError(format!("Invalid INTERVAL DAY TO SECOND value '{}'", input))
+        })?;
+        let (hour, minute, second) = parse_time_components(time, "INTERVAL DAY TO SECOND")?;
+        let total_seconds = days
+            .checked_mul(86_400)
+            .and_then(|total| total.checked_add(hour as i64 * 3_600))
+            .and_then(|total| total.checked_add(minute as i64 * 60))
+            .and_then(|total| total.checked_add(second as i64))
+            .ok_or_else(|| {
+                HematiteError::ParseError(
+                    "INTERVAL DAY TO SECOND value overflowed supported range".to_string(),
+                )
+            })?;
+        Ok(Self {
+            total_seconds: if negative {
+                -total_seconds
+            } else {
+                total_seconds
+            },
+        })
+    }
+
+    pub fn total_seconds(self) -> i64 {
+        self.total_seconds
+    }
+}
+
+impl fmt::Display for IntervalDaySecondValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let sign = if self.total_seconds < 0 { "-" } else { "" };
+        let total_seconds = self.total_seconds.unsigned_abs();
+        let days = total_seconds / 86_400;
+        let remainder = total_seconds % 86_400;
+        let hours = remainder / 3_600;
+        let minutes = (remainder % 3_600) / 60;
+        let seconds = remainder % 60;
+        write!(f, "{sign}{days} {hours:02}:{minutes:02}:{seconds:02}")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Integer(i32),
@@ -656,6 +811,8 @@ pub enum Value {
     DateTime(DateTimeValue),
     Timestamp(TimestampValue),
     TimeWithTimeZone(TimeWithTimeZoneValue),
+    IntervalYearMonth(IntervalYearMonthValue),
+    IntervalDaySecond(IntervalDaySecondValue),
     Null,
 }
 
@@ -678,6 +835,7 @@ impl Value {
             Value::DateTime(_) => DataType::DateTime,
             Value::Timestamp(_) => DataType::Timestamp,
             Value::TimeWithTimeZone(_) => DataType::TimeWithTimeZone,
+            Value::IntervalYearMonth(_) | Value::IntervalDaySecond(_) => DataType::Text,
             Value::Null => DataType::Text,
         }
     }
@@ -731,6 +889,8 @@ impl Value {
             Value::DateTime(s) => Some(s.to_string()),
             Value::Timestamp(s) => Some(s.to_string()),
             Value::TimeWithTimeZone(s) => Some(s.to_string()),
+            Value::IntervalYearMonth(s) => Some(s.to_string()),
+            Value::IntervalDaySecond(s) => Some(s.to_string()),
             _ => None,
         }
     }
@@ -787,6 +947,8 @@ impl PartialOrd for Value {
             (Value::DateTime(a), Value::DateTime(b)) => a.partial_cmp(b),
             (Value::Timestamp(a), Value::Timestamp(b)) => a.partial_cmp(b),
             (Value::TimeWithTimeZone(a), Value::TimeWithTimeZone(b)) => a.partial_cmp(b),
+            (Value::IntervalYearMonth(a), Value::IntervalYearMonth(b)) => a.partial_cmp(b),
+            (Value::IntervalDaySecond(a), Value::IntervalDaySecond(b)) => a.partial_cmp(b),
             (Value::Null, _) => Some(Ordering::Less),
             (_, Value::Null) => Some(Ordering::Greater),
             _ => None,
