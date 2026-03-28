@@ -620,6 +620,92 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_savepoint_requires_active_transaction_and_rejects_duplicates() -> Result<()> {
+        let db = TestDbFile::new("_test_savepoint_requires_active_transaction_and_rejects_duplicates");
+        let mut conn = Connection::new(db.path())?;
+
+        let missing_tx = conn.execute("SAVEPOINT before_users;");
+        assert!(missing_tx.is_err());
+        assert!(missing_tx
+            .unwrap_err()
+            .to_string()
+            .contains("requires an active transaction"));
+
+        conn.execute("BEGIN;")?;
+        conn.execute("SAVEPOINT before_users;")?;
+        let duplicate = conn.execute("SAVEPOINT before_users;");
+        assert!(duplicate.is_err());
+        assert!(duplicate.unwrap_err().to_string().contains("already exists"));
+        conn.execute("ROLLBACK;")?;
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_rollback_to_savepoint_restores_state_and_keeps_outer_transaction() -> Result<()> {
+        let db = TestDbFile::new("_test_rollback_to_savepoint_restores_state_and_keeps_outer_transaction");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("BEGIN;")?;
+        conn.execute("INSERT INTO users (id, name) VALUES (1, 'Ada');")?;
+        conn.execute("SAVEPOINT after_ada;")?;
+        conn.execute("INSERT INTO users (id, name) VALUES (2, 'Bob');")?;
+        conn.execute("ROLLBACK TO SAVEPOINT after_ada;")?;
+        conn.execute("INSERT INTO users (id, name) VALUES (3, 'Cara');")?;
+        conn.execute("COMMIT;")?;
+
+        let result = conn.execute("SELECT id, name FROM users ORDER BY id ASC;")?;
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![
+                    crate::catalog::Value::Integer(1),
+                    crate::catalog::Value::Text("Ada".to_string()),
+                ],
+                vec![
+                    crate::catalog::Value::Integer(3),
+                    crate::catalog::Value::Text("Cara".to_string()),
+                ],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_release_savepoint_and_missing_savepoint_errors() -> Result<()> {
+        let db = TestDbFile::new("_test_release_savepoint_and_missing_savepoint_errors");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("BEGIN;")?;
+        conn.execute("SAVEPOINT first;")?;
+        conn.execute("SAVEPOINT second;")?;
+        conn.execute("RELEASE SAVEPOINT first;")?;
+
+        let missing_release = conn.execute("RELEASE SAVEPOINT first;");
+        assert!(missing_release.is_err());
+        assert!(missing_release
+            .unwrap_err()
+            .to_string()
+            .contains("does not exist"));
+
+        let missing_rollback = conn.execute("ROLLBACK TO SAVEPOINT first;");
+        assert!(missing_rollback.is_err());
+        assert!(missing_rollback
+            .unwrap_err()
+            .to_string()
+            .contains("does not exist"));
+
+        conn.execute("ROLLBACK;")?;
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_insert_into_view_is_rejected() -> Result<()> {
         let db = TestDbFile::new("_test_insert_into_view_is_rejected");
         let mut conn = Connection::new(db.path())?;

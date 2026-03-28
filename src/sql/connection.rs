@@ -42,6 +42,13 @@ use std::sync::{Arc, Mutex, MutexGuard};
 #[derive(Debug, Clone)]
 struct ConnectionTransaction {
     snapshot: QueryCatalogSnapshot,
+    savepoints: Vec<SavepointState>,
+}
+
+#[derive(Debug, Clone)]
+struct SavepointState {
+    name: String,
+    snapshot: QueryCatalogSnapshot,
 }
 
 #[derive(Debug)]
@@ -393,12 +400,17 @@ impl Connection {
                 self.rollback_active_transaction()?;
                 return Ok(Self::empty_result());
             }
-            crate::parser::ast::Statement::Savepoint(_)
-            | crate::parser::ast::Statement::RollbackToSavepoint(_)
-            | crate::parser::ast::Statement::ReleaseSavepoint(_) => {
-                return Err(HematiteError::ParseError(
-                    "SAVEPOINT statements are not implemented yet".to_string(),
-                ));
+            crate::parser::ast::Statement::Savepoint(name) => {
+                self.create_savepoint(&name)?;
+                return Ok(Self::empty_result());
+            }
+            crate::parser::ast::Statement::RollbackToSavepoint(name) => {
+                self.rollback_to_savepoint(&name)?;
+                return Ok(Self::empty_result());
+            }
+            crate::parser::ast::Statement::ReleaseSavepoint(name) => {
+                self.release_savepoint(&name)?;
+                return Ok(Self::empty_result());
             }
             crate::parser::ast::Statement::Explain(explain) => {
                 return self.execute_explain_statement(*explain.statement);
@@ -909,7 +921,10 @@ impl Connection {
         let snapshot = catalog_guard.snapshot();
         catalog_guard.begin_transaction()?;
         drop(catalog_guard);
-        self.transaction = Some(ConnectionTransaction { snapshot });
+        self.transaction = Some(ConnectionTransaction {
+            snapshot,
+            savepoints: Vec::new(),
+        });
         Ok(())
     }
 
@@ -917,6 +932,83 @@ impl Connection {
     pub(crate) fn schema_snapshot(&self) -> Result<Schema> {
         let catalog_guard = self.lock_catalog()?;
         Ok(catalog_guard.clone_schema())
+    }
+
+    fn active_transaction_mut(&mut self, action: &str) -> Result<&mut ConnectionTransaction> {
+        self.transaction.as_mut().ok_or_else(|| {
+            HematiteError::ParseError(format!(
+                "{} requires an active transaction",
+                action
+            ))
+        })
+    }
+
+    fn create_savepoint(&mut self, name: &str) -> Result<()> {
+        {
+            let transaction = self.active_transaction_mut("SAVEPOINT")?;
+            if transaction
+                .savepoints
+                .iter()
+                .any(|savepoint| savepoint.name.eq_ignore_ascii_case(name))
+            {
+                return Err(HematiteError::ParseError(format!(
+                    "Savepoint '{}' already exists",
+                    name
+                )));
+            }
+        }
+
+        let snapshot = {
+            let catalog_guard = self.lock_catalog()?;
+            catalog_guard.snapshot()
+        };
+
+        let transaction = self.active_transaction_mut("SAVEPOINT")?;
+        transaction.savepoints.push(SavepointState {
+            name: name.to_string(),
+            snapshot,
+        });
+        Ok(())
+    }
+
+    fn rollback_to_savepoint(&mut self, name: &str) -> Result<()> {
+        let position = {
+            let transaction = self.active_transaction_mut("ROLLBACK TO SAVEPOINT")?;
+            transaction
+                .savepoints
+                .iter()
+                .position(|savepoint| savepoint.name.eq_ignore_ascii_case(name))
+                .ok_or_else(|| {
+                    HematiteError::ParseError(format!("Savepoint '{}' does not exist", name))
+                })?
+        };
+
+        let snapshot = {
+            let transaction = self.active_transaction_mut("ROLLBACK TO SAVEPOINT")?;
+            transaction.savepoints[position].snapshot.clone()
+        };
+
+        {
+            let mut catalog_guard = self.lock_catalog()?;
+            catalog_guard.restore_snapshot(snapshot);
+        }
+
+        let transaction = self.active_transaction_mut("ROLLBACK TO SAVEPOINT")?;
+        transaction.savepoints.truncate(position + 1);
+        Ok(())
+    }
+
+    fn release_savepoint(&mut self, name: &str) -> Result<()> {
+        let transaction = self.active_transaction_mut("RELEASE SAVEPOINT")?;
+        let position = transaction
+            .savepoints
+            .iter()
+            .position(|savepoint| savepoint.name.eq_ignore_ascii_case(name))
+            .ok_or_else(|| {
+                HematiteError::ParseError(format!("Savepoint '{}' does not exist", name))
+            })?;
+        transaction.savepoints.remove(position);
+        Ok(())
     }
 }
 
