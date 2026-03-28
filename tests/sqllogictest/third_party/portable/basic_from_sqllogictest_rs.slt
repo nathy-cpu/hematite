@@ -1,0 +1,57 @@
+# Adapted from:
+# https://github.com/risinglightdb/sqllogictest-rs/blob/main/tests/slt/basic.slt
+# https://github.com/risinglightdb/sqllogictest-rs/blob/main/tests/slt/rowsort.slt
+
+statement ok
+CREATE TABLE example_basic(v1 INT PRIMARY KEY, v2 INT NOT NULL, v3 INT NOT NULL);
+
+statement ok
+INSERT INTO example_basic (v1, v2, v3) VALUES
+  (1, 4, 2),
+  (2, 3, 3),
+  (3, 4, 4),
+  (4, 3, 5);
+
+query III rowsort
+SELECT * FROM example_basic;
+----
+1 4 2
+2 3 3
+3 4 4
+4 3 5
+
+query I
+SELECT COUNT(*) FROM example_basic;
+----
+4
+
+query II rowsort
+SELECT v1, v2 FROM example_basic WHERE v2 = 3;
+----
+2 3
+4 3
+
+statement ok
+CREATE TABLE example_sort(v1 INT PRIMARY KEY, v2 INT NOT NULL, v3 INT NOT NULL);
+
+statement ok
+INSERT INTO example_sort (v1, v2, v3) VALUES
+  (10, 100, 2333),
+  (2, 20, 2333),
+  (1, 10, 2333);
+
+query III rowsort
+SELECT * FROM example_sort;
+----
+1 10 2333
+10 100 2333
+2 20 2333
+
+statement error
+SELECT * FROM missing_sqllogictest_table;
+
+statement ok
+DROP TABLE example_sort;
+
+statement ok
+DROP TABLE example_basic;
