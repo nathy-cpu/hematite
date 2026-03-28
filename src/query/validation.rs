@@ -239,6 +239,12 @@ fn validate_select_with_outer_bindings(
 }
 
 fn validate_insert(insert: &InsertStatement, catalog: &Schema) -> Result<()> {
+    if catalog.view(&insert.table).is_some() {
+        return Err(HematiteError::ParseError(format!(
+            "View '{}' is read-only",
+            insert.table
+        )));
+    }
     let table = catalog.get_table_by_name(&insert.table).ok_or_else(|| {
         HematiteError::ParseError(format!("Table '{}' does not exist", insert.table))
     })?;
@@ -323,6 +329,12 @@ fn validate_insert(insert: &InsertStatement, catalog: &Schema) -> Result<()> {
 }
 
 fn validate_update(update: &UpdateStatement, catalog: &Schema) -> Result<()> {
+    if catalog.view(&update.table).is_some() {
+        return Err(HematiteError::ParseError(format!(
+            "View '{}' is read-only",
+            update.table
+        )));
+    }
     let table = catalog.get_table_by_name(&update.table).ok_or_else(|| {
         HematiteError::ParseError(format!("Table '{}' does not exist", update.table))
     })?;
@@ -438,6 +450,12 @@ fn validate_create(create: &CreateStatement, catalog: &Schema) -> Result<()> {
 }
 
 fn validate_delete(delete: &DeleteStatement, catalog: &Schema) -> Result<()> {
+    if catalog.view(&delete.table).is_some() {
+        return Err(HematiteError::ParseError(format!(
+            "View '{}' is read-only",
+            delete.table
+        )));
+    }
     let _table = require_table(catalog, &delete.table)?;
     let scope = SelectStatement::single_table_scope(&delete.table);
 

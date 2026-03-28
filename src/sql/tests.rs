@@ -435,6 +435,54 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_insert_into_view_is_rejected() -> Result<()> {
+        let db = TestDbFile::new("_test_insert_into_view_is_rejected");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("CREATE VIEW user_names AS SELECT id, name FROM users;")?;
+
+        let result = conn.execute("INSERT INTO user_names (id, name) VALUES (1, 'Ada');");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("read-only"));
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_view_is_rejected() -> Result<()> {
+        let db = TestDbFile::new("_test_update_view_is_rejected");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("CREATE VIEW user_names AS SELECT id, name FROM users;")?;
+
+        let result = conn.execute("UPDATE user_names SET name = 'Ada';");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("read-only"));
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_delete_from_view_is_rejected() -> Result<()> {
+        let db = TestDbFile::new("_test_delete_from_view_is_rejected");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("CREATE VIEW user_names AS SELECT id, name FROM users;")?;
+
+        let result = conn.execute("DELETE FROM user_names;");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("read-only"));
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_mysql_identifier_quoting_and_type_aliases() -> Result<()> {
         let db = TestDbFile::new("_test_mysql_identifier_quoting_and_type_aliases");
         let mut conn = Connection::new(db.path())?;
