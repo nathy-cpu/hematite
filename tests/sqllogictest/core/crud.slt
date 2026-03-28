@@ -1,0 +1,40 @@
+statement ok
+CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER);
+
+statement ok
+INSERT INTO users (id, name, age) VALUES (1, 'Ada', 33), (2, 'Bob', 29), (3, 'Cid', 29);
+
+query IT
+SELECT id, name FROM users ORDER BY id;
+----
+1 Ada
+2 Bob
+3 Cid
+
+query I rowsort
+SELECT age FROM users;
+----
+29
+29
+33
+
+query I
+SELECT COUNT(*) FROM users WHERE age = 29;
+----
+2
+
+statement ok
+UPDATE users SET age = age + 1 WHERE id = 2;
+
+query I
+SELECT age FROM users WHERE id = 2;
+----
+30
+
+statement ok
+DELETE FROM users WHERE id = 3;
+
+query I
+SELECT COUNT(*) FROM users;
+----
+2

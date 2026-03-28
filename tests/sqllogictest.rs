@@ -97,9 +97,39 @@ fn render_value(value: Value) -> String {
 }
 
 #[test]
-fn sqllogictest_basic() {
-    let mut runner = sqllogictest::Runner::new(|| async { HematiteSlt::new() });
-    runner
-        .run_file("tests/sqllogictest/basic.slt")
-        .expect("sqllogictest basic suite should pass");
+fn sqllogictest_corpus() {
+    let files = collect_slt_files("tests/sqllogictest");
+    assert!(!files.is_empty(), "sqllogictest corpus should not be empty");
+
+    for file in files {
+        let mut runner = sqllogictest::Runner::new(|| async { HematiteSlt::new() });
+        runner
+            .run_file(&file)
+            .unwrap_or_else(|err| panic!("sqllogictest file {} should pass: {err}", file));
+    }
+}
+
+fn collect_slt_files(root: &str) -> Vec<String> {
+    let mut files = Vec::new();
+    collect_slt_files_recursive(std::path::Path::new(root), &mut files);
+    files.sort();
+    files
+}
+
+fn collect_slt_files_recursive(path: &std::path::Path, files: &mut Vec<String>) {
+    let entries = std::fs::read_dir(path).expect("sqllogictest directory should exist");
+    for entry in entries {
+        let entry = entry.expect("sqllogictest entry should be readable");
+        let entry_path = entry.path();
+        if entry_path.is_dir() {
+            collect_slt_files_recursive(&entry_path, files);
+        } else if entry_path.extension().and_then(|ext| ext.to_str()) == Some("slt") {
+            files.push(
+                entry_path
+                    .to_str()
+                    .expect("sqllogictest path should be valid utf-8")
+                    .to_string(),
+            );
+        }
+    }
 }
