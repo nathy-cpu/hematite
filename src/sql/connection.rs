@@ -541,6 +541,16 @@ impl Connection {
         let result = {
             let mut catalog_guard = self.lock_catalog()?;
             let schema = catalog_guard.clone_schema();
+            let dependencies = statement.query.dependency_names();
+            if dependencies
+                .iter()
+                .any(|dependency| dependency.eq_ignore_ascii_case(&statement.view))
+            {
+                return Err(HematiteError::ParseError(format!(
+                    "View '{}' cannot depend on itself",
+                    statement.view
+                )));
+            }
             let expanded_query = Self::expand_views_in_select(statement.query.clone(), &schema)?;
             validate_statement(
                 &crate::parser::ast::Statement::CreateView(CreateViewStatement {
@@ -574,7 +584,7 @@ impl Connection {
                     name: statement.view.clone(),
                     query_sql: statement.query.to_sql(),
                     column_names,
-                    dependencies: statement.query.dependency_names(),
+                    dependencies,
                 })?;
                 Ok(Self::mutation_result(0))
             }

@@ -382,6 +382,36 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_create_view_rejects_direct_self_reference() -> Result<()> {
+        let db = TestDbFile::new("_test_create_view_rejects_direct_self_reference");
+        let mut conn = Connection::new(db.path())?;
+
+        let result = conn.execute("CREATE VIEW user_names AS SELECT * FROM user_names;");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("cannot depend on itself"));
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_drop_view_rejects_dependent_view() -> Result<()> {
+        let db = TestDbFile::new("_test_drop_view_rejects_dependent_view");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("CREATE VIEW user_names AS SELECT id, name FROM users;")?;
+        conn.execute("CREATE VIEW user_ids AS SELECT id FROM user_names;")?;
+
+        let result = conn.execute("DROP VIEW user_names;");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("depends on it"));
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_select_from_view() -> Result<()> {
         let db = TestDbFile::new("_test_select_from_view");
         let mut conn = Connection::new(db.path())?;
