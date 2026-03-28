@@ -568,6 +568,11 @@ impl SelectExecutor {
                 SelectItem::Expression(expr) => {
                     self.bind_expression_outer_references(ctx, &local_from, expr, scopes)?
                 }
+                SelectItem::Window { window, .. } => {
+                    for expr in &mut window.partition_by {
+                        self.bind_expression_outer_references(ctx, &local_from, expr, scopes)?;
+                    }
+                }
                 SelectItem::Wildcard
                 | SelectItem::Column(_)
                 | SelectItem::CountAll
@@ -966,6 +971,7 @@ impl SelectExecutor {
                 }
                 SelectItem::CountAll => {}
                 SelectItem::Aggregate { .. } => {}
+                SelectItem::Window { .. } => {}
             }
         }
 
@@ -1067,16 +1073,16 @@ impl SelectExecutor {
                             inner_rows: &[Vec<Value>],
                             outer_is_left: bool,
                             rows: &mut Vec<Vec<Value>>| {
-                for outer_row in outer_rows {
-                    for inner_row in inner_rows {
-                        rows.push(if outer_is_left {
-                            self.combine_join_rows(outer_row, inner_row)
-                        } else {
-                            self.combine_join_rows(inner_row, outer_row)
-                        });
-                    }
+            for outer_row in outer_rows {
+                for inner_row in inner_rows {
+                    rows.push(if outer_is_left {
+                        self.combine_join_rows(outer_row, inner_row)
+                    } else {
+                        self.combine_join_rows(inner_row, outer_row)
+                    });
                 }
-            };
+            }
+        };
 
         if on.is_none() {
             if self.join_outer_is_left(left_rows, right_rows) {
@@ -1090,23 +1096,11 @@ impl SelectExecutor {
         let predicate = on.expect("checked above");
         if self.join_outer_is_left(left_rows, right_rows) {
             self.push_join_condition_matches(
-                ctx,
-                sources,
-                left_rows,
-                right_rows,
-                true,
-                predicate,
-                rows,
+                ctx, sources, left_rows, right_rows, true, predicate, rows,
             )
         } else {
             self.push_join_condition_matches(
-                ctx,
-                sources,
-                right_rows,
-                left_rows,
-                false,
-                predicate,
-                rows,
+                ctx, sources, right_rows, left_rows, false, predicate, rows,
             )
         }
     }
@@ -1548,6 +1542,14 @@ impl SelectExecutor {
             return self.execute_grouped(ctx, &mut subquery_cache, &sources, &filtered_rows);
         }
 
+        if self.has_window_projection() {
+            let mut projected_rows =
+                self.project_rows_with_windows(ctx, &mut subquery_cache, &sources, &filtered_rows)?;
+            apply_distinct_if_needed(self.statement.distinct, &mut projected_rows);
+            self.apply_select_window(&mut projected_rows);
+            return Ok(self.build_query_result(self.get_column_names(&sources), projected_rows));
+        }
+
         let mut projected_rows = Vec::new();
         for row in filtered_rows {
             projected_rows.push(self.project_row(ctx, &mut subquery_cache, &sources, &row)?);
@@ -1587,7 +1589,8 @@ impl SelectExecutor {
         };
 
         let mut subquery_cache = SubqueryCache::new();
-        let filtered_rows = self.filter_source_rows(ctx, &mut subquery_cache, &sources, all_rows)?;
+        let filtered_rows =
+            self.filter_source_rows(ctx, &mut subquery_cache, &sources, all_rows)?;
         Ok((sources, filtered_rows))
     }
 
@@ -1605,6 +1608,191 @@ impl SelectExecutor {
             .columns
             .iter()
             .any(|item| matches!(item, SelectItem::CountAll | SelectItem::Aggregate { .. }))
+    }
+
+    fn has_window_projection(&self) -> bool {
+        self.statement
+            .columns
+            .iter()
+            .any(|item| matches!(item, SelectItem::Window { .. }))
+    }
+
+    fn project_rows_with_windows(
+        &self,
+        ctx: &mut ExecutionContext<'_>,
+        cache: &mut SubqueryCache,
+        sources: &[ResolvedSource],
+        filtered_rows: &[Vec<Value>],
+    ) -> Result<Vec<Vec<Value>>> {
+        let mut projected_rows = Vec::with_capacity(filtered_rows.len());
+
+        for (row_index, row) in filtered_rows.iter().enumerate() {
+            let mut projected = Vec::new();
+
+            for item in &self.statement.columns {
+                match item {
+                    SelectItem::Wildcard => projected.extend(row.iter().cloned()),
+                    SelectItem::Column(name) => {
+                        if let Some(index) = self.resolve_column_index(sources, name)? {
+                            if index < row.len() {
+                                projected.push(row[index].clone());
+                            }
+                        }
+                    }
+                    SelectItem::Expression(expr) => {
+                        projected.push(self.evaluate_expression(ctx, cache, sources, expr, row)?);
+                    }
+                    SelectItem::Window { function, window } => {
+                        projected.push(self.evaluate_window_item(
+                            ctx,
+                            cache,
+                            sources,
+                            filtered_rows,
+                            row_index,
+                            function,
+                            window,
+                        )?)
+                    }
+                    SelectItem::CountAll | SelectItem::Aggregate { .. } => {}
+                }
+            }
+
+            projected_rows.push(projected);
+        }
+
+        Ok(projected_rows)
+    }
+
+    fn evaluate_window_item(
+        &self,
+        ctx: &mut ExecutionContext<'_>,
+        cache: &mut SubqueryCache,
+        sources: &[ResolvedSource],
+        filtered_rows: &[Vec<Value>],
+        row_index: usize,
+        function: &WindowFunction,
+        window: &WindowSpec,
+    ) -> Result<Value> {
+        let partition_key = window
+            .partition_by
+            .iter()
+            .map(|expr| {
+                self.evaluate_expression(ctx, cache, sources, expr, &filtered_rows[row_index])
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let mut partition_indexes = Vec::new();
+        for (index, row) in filtered_rows.iter().enumerate() {
+            let row_key = window
+                .partition_by
+                .iter()
+                .map(|expr| self.evaluate_expression(ctx, cache, sources, expr, row))
+                .collect::<Result<Vec<_>>>()?;
+            if row_key == partition_key {
+                partition_indexes.push(index);
+            }
+        }
+
+        if !window.order_by.is_empty() {
+            partition_indexes.sort_by(|left_index, right_index| {
+                let left = &filtered_rows[*left_index];
+                let right = &filtered_rows[*right_index];
+
+                for item in &window.order_by {
+                    let Ok(Some(column_index)) = self.resolve_column_index(sources, &item.column)
+                    else {
+                        continue;
+                    };
+
+                    let ordering =
+                        self.compare_sort_values(&left[column_index], &right[column_index]);
+                    if ordering != Ordering::Equal {
+                        return match item.direction {
+                            SortDirection::Asc => ordering,
+                            SortDirection::Desc => ordering.reverse(),
+                        };
+                    }
+                }
+
+                left_index.cmp(right_index)
+            });
+        }
+
+        let position = partition_indexes
+            .iter()
+            .position(|index| *index == row_index)
+            .ok_or_else(|| {
+                HematiteError::InternalError(
+                    "Current row not found in window partition".to_string(),
+                )
+            })?;
+
+        match function {
+            WindowFunction::RowNumber => Ok(Value::Integer((position + 1) as i32)),
+            WindowFunction::Rank => {
+                let mut rank = 1usize;
+                for current in 1..=position {
+                    if self.window_sort_key_changed(
+                        sources,
+                        window,
+                        &filtered_rows[partition_indexes[current - 1]],
+                        &filtered_rows[partition_indexes[current]],
+                    )? {
+                        rank = current + 1;
+                    }
+                }
+                Ok(Value::Integer(rank as i32))
+            }
+            WindowFunction::DenseRank => {
+                let mut rank = 1usize;
+                for current in 1..=position {
+                    if self.window_sort_key_changed(
+                        sources,
+                        window,
+                        &filtered_rows[partition_indexes[current - 1]],
+                        &filtered_rows[partition_indexes[current]],
+                    )? {
+                        rank += 1;
+                    }
+                }
+                Ok(Value::Integer(rank as i32))
+            }
+            WindowFunction::Aggregate { function, target } => {
+                let partition_rows = partition_indexes
+                    .iter()
+                    .map(|index| filtered_rows[*index].clone())
+                    .collect::<Vec<_>>();
+                Ok(self
+                    .evaluate_aggregate_value(sources, *function, target, &partition_rows)?
+                    .unwrap_or(Value::Null))
+            }
+        }
+    }
+
+    fn window_sort_key_changed(
+        &self,
+        sources: &[ResolvedSource],
+        window: &WindowSpec,
+        left: &[Value],
+        right: &[Value],
+    ) -> Result<bool> {
+        if window.order_by.is_empty() {
+            return Ok(false);
+        }
+
+        for item in &window.order_by {
+            let index = self
+                .resolve_column_index(sources, &item.column)?
+                .ok_or_else(|| {
+                    HematiteError::ParseError(format!("Column '{}' not found", item.column))
+                })?;
+
+            if self.compare_sort_values(&left[index], &right[index]) != Ordering::Equal {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
     }
 
     fn apply_select_window(&self, rows: &mut Vec<Vec<Value>>) {
@@ -2475,6 +2663,11 @@ impl SelectExecutor {
                             .unwrap_or(Value::Null),
                     );
                 }
+                SelectItem::Window { .. } => {
+                    return Err(HematiteError::InternalError(
+                        "Window projections are not supported in grouped execution".to_string(),
+                    ))
+                }
             }
         }
 
@@ -3241,10 +3434,10 @@ impl QueryExecutor for InsertExecutor {
                 inserted_row.clone(),
                 false,
             )?;
-            if let Some(new_row) = ctx
-                .engine
-                .lookup_row_by_primary_key(&table, &primary_key_values(&table, &inserted_row.values)?)?
-            {
+            if let Some(new_row) = ctx.engine.lookup_row_by_primary_key(
+                &table,
+                &primary_key_values(&table, &inserted_row.values)?,
+            )? {
                 ctx.mutation_events.push(MutationEvent::Insert {
                     table_name: self.statement.table.clone(),
                     new_row,
@@ -3363,36 +3556,33 @@ impl QueryExecutor for UpdateExecutor {
 
         let table = catalog_table(ctx, &self.statement.table)?;
 
-        let locator_statement = locator_select_statement(
-            self.statement.source(),
-            self.statement.where_clause.clone(),
-        );
-        let mut select_executor =
-            SelectExecutor::new(locator_statement, self.access_path.clone());
+        let locator_statement =
+            locator_select_statement(self.statement.source(), self.statement.where_clause.clone());
+        let mut select_executor = SelectExecutor::new(locator_statement, self.access_path.clone());
         let uses_join_source = matches!(
             self.statement.source.as_ref(),
             Some(source) if !matches!(source, TableReference::Table(_, _))
         );
 
         let (sources, original_rows, joined_rows) = if uses_join_source {
-                let (sources, rows) = locate_rows_for_join_source(
-                    ctx,
-                    &table,
-                    self.statement.target_binding_name(),
-                    &mut select_executor,
-                )?;
-                let (stored_rows, joined_rows): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
-                (sources, stored_rows, Some(joined_rows))
-            } else {
-                let rows = locate_rows_for_access_path(
-                    ctx,
-                    &table,
-                    &self.statement.table,
-                    &self.access_path,
-                    &select_executor,
-                )?;
-                (select_executor.resolve_sources(ctx)?, rows, None)
-            };
+            let (sources, rows) = locate_rows_for_join_source(
+                ctx,
+                &table,
+                self.statement.target_binding_name(),
+                &mut select_executor,
+            )?;
+            let (stored_rows, joined_rows): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
+            (sources, stored_rows, Some(joined_rows))
+        } else {
+            let rows = locate_rows_for_access_path(
+                ctx,
+                &table,
+                &self.statement.table,
+                &self.access_path,
+                &select_executor,
+            )?;
+            (select_executor.resolve_sources(ctx)?, rows, None)
+        };
         let original_rows_snapshot = original_rows.clone();
         let mut updated_rows_data = Vec::with_capacity(original_rows.len());
         let mut updated_rows = 0usize;
@@ -3632,7 +3822,10 @@ fn locate_rows_for_join_source(
             continue;
         }
 
-        if let Some(stored_row) = ctx.engine.lookup_row_by_rowid(&table.name, candidate_rowid)? {
+        if let Some(stored_row) = ctx
+            .engine
+            .lookup_row_by_rowid(&table.name, candidate_rowid)?
+        {
             rows.push((stored_row, joined_row));
         }
     }
@@ -3667,12 +3860,9 @@ impl QueryExecutor for DeleteExecutor {
 
         let table = catalog_table(ctx, &self.statement.table)?;
 
-        let locator_statement = locator_select_statement(
-            self.statement.source(),
-            self.statement.where_clause.clone(),
-        );
-        let mut select_executor =
-            SelectExecutor::new(locator_statement, self.access_path.clone());
+        let locator_statement =
+            locator_select_statement(self.statement.source(), self.statement.where_clause.clone());
+        let mut select_executor = SelectExecutor::new(locator_statement, self.access_path.clone());
         let uses_join_source = matches!(
             self.statement.source.as_ref(),
             Some(source) if !matches!(source, TableReference::Table(_, _))
@@ -4075,7 +4265,8 @@ impl QueryExecutor for AlterExecutor {
                             })?
                             .clone();
                         let rows = ctx.engine.read_rows_with_ids(&self.statement.table)?;
-                        ctx.engine.rebuild_secondary_indexes(&updated_table, &rows)?;
+                        ctx.engine
+                            .rebuild_secondary_indexes(&updated_table, &rows)?;
                     }
                     TableConstraint::ForeignKey(foreign_key) => {
                         let column_indices = foreign_key
@@ -4134,7 +4325,8 @@ impl QueryExecutor for AlterExecutor {
                         )));
                     }
                 } else {
-                    ctx.catalog.drop_named_constraint(table.id, constraint_name)?;
+                    ctx.catalog
+                        .drop_named_constraint(table.id, constraint_name)?;
                 }
             }
             AlterOperation::AlterColumnSetDefault {
@@ -5074,7 +5266,10 @@ fn deduplicate_rows(mut rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
     rows
 }
 
-fn locator_select_statement(from: TableReference, where_clause: Option<WhereClause>) -> SelectStatement {
+fn locator_select_statement(
+    from: TableReference,
+    where_clause: Option<WhereClause>,
+) -> SelectStatement {
     SelectStatement {
         with_clause: Vec::new(),
         distinct: false,

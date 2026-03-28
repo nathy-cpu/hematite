@@ -530,6 +530,21 @@ impl QueryPlanner {
                 }
                 SelectItem::CountAll => {}
                 SelectItem::Aggregate { .. } => {}
+                SelectItem::Window { window, .. } => {
+                    for expr in &window.partition_by {
+                        self.collect_expression_columns(expr, table, &mut accessed_columns);
+                    }
+                    for item in &window.order_by {
+                        if let Some(column) = table.get_column_by_name(
+                            SelectStatement::column_reference_name(&item.column),
+                        ) {
+                            accessed_columns.push(ColumnAccess {
+                                column_id: column.id,
+                                access_type: ColumnAccessType::Read,
+                            });
+                        }
+                    }
+                }
             }
         }
 

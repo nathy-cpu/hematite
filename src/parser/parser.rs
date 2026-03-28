@@ -361,42 +361,8 @@ impl Parser {
             aliases.push(None);
         } else {
             loop {
-                let token = self.peek_token()?;
-                match token {
-                    Token::Count | Token::Sum | Token::Avg | Token::Min | Token::Max => {
-                        columns.push(self.parse_aggregate_select_item()?);
-                        aliases.push(self.parse_optional_alias()?);
-                    }
-                    Token::Identifier(_)
-                    | Token::StringLiteral(_)
-                    | Token::NumberLiteral(_)
-                    | Token::BooleanLiteral(_)
-                    | Token::Null
-                    | Token::NullLiteral
-                    | Token::Placeholder
-                    | Token::LeftParen
-                    | Token::Case
-                    | Token::Cast
-                    | Token::Date
-                    | Token::Time
-                    | Token::Timestamp
-                    | Token::Left
-                    | Token::Right
-                    | Token::Minus => {
-                        let expr = self.parse_expression()?;
-                        columns.push(match expr {
-                            Expression::Column(name) => SelectItem::Column(name),
-                            expr => SelectItem::Expression(expr),
-                        });
-                        aliases.push(self.parse_optional_alias()?);
-                    }
-                    _ => {
-                        return Err(HematiteError::ParseError(format!(
-                            "Expected select item or aggregate, found: {:?}",
-                            token
-                        )))
-                    }
-                }
+                columns.push(self.parse_select_item()?);
+                aliases.push(self.parse_optional_alias()?);
 
                 if self.peek_token()? == Token::Comma {
                     self.consume_token(&Token::Comma)?;
@@ -408,6 +374,51 @@ impl Parser {
         }
 
         Ok((columns, aliases))
+    }
+
+    fn parse_select_item(&mut self) -> Result<SelectItem> {
+        let token = self.peek_token()?;
+        match token {
+            Token::Count | Token::Sum | Token::Avg | Token::Min | Token::Max => {
+                let expr = self.parse_aggregate_expression()?;
+                if matches!(self.peek_token(), Ok(Token::Over)) {
+                    self.parse_window_select_item(expr)
+                } else {
+                    self.aggregate_expression_to_select_item(expr)
+                }
+            }
+            Token::Identifier(ref name)
+                if self.next_token_is(&Token::LeftParen) && is_window_only_function_name(name) =>
+            {
+                self.parse_window_only_select_item()
+            }
+            Token::Identifier(_)
+            | Token::StringLiteral(_)
+            | Token::NumberLiteral(_)
+            | Token::BooleanLiteral(_)
+            | Token::Null
+            | Token::NullLiteral
+            | Token::Placeholder
+            | Token::LeftParen
+            | Token::Case
+            | Token::Cast
+            | Token::Date
+            | Token::Time
+            | Token::Timestamp
+            | Token::Left
+            | Token::Right
+            | Token::Minus => {
+                let expr = self.parse_expression()?;
+                Ok(match expr {
+                    Expression::Column(name) => SelectItem::Column(name),
+                    expr => SelectItem::Expression(expr),
+                })
+            }
+            _ => Err(HematiteError::ParseError(format!(
+                "Expected select item or aggregate, found: {:?}",
+                token
+            ))),
+        }
     }
 
     fn parse_aggregate_expression(&mut self) -> Result<Expression> {
@@ -460,8 +471,8 @@ impl Parser {
         })
     }
 
-    fn parse_aggregate_select_item(&mut self) -> Result<SelectItem> {
-        match self.parse_aggregate_expression()? {
+    fn aggregate_expression_to_select_item(&self, expression: Expression) -> Result<SelectItem> {
+        match expression {
             Expression::AggregateCall {
                 function: AggregateFunction::Count,
                 target: AggregateTarget::All,
@@ -474,6 +485,67 @@ impl Parser {
                 "aggregate expression parser returned a non-aggregate expression".to_string(),
             )),
         }
+    }
+
+    fn parse_window_only_select_item(&mut self) -> Result<SelectItem> {
+        let function_name = self.parse_identifier()?;
+        self.consume_token(&Token::LeftParen)?;
+        self.consume_token(&Token::RightParen)?;
+        let function = match function_name.to_ascii_uppercase().as_str() {
+            "ROW_NUMBER" => WindowFunction::RowNumber,
+            "RANK" => WindowFunction::Rank,
+            "DENSE_RANK" => WindowFunction::DenseRank,
+            _ => {
+                return Err(HematiteError::ParseError(format!(
+                    "Unsupported window function '{}'",
+                    function_name
+                )))
+            }
+        };
+        self.parse_window_item(function)
+    }
+
+    fn parse_window_select_item(&mut self, expression: Expression) -> Result<SelectItem> {
+        let Expression::AggregateCall { function, target } = expression else {
+            return Err(HematiteError::ParseError(
+                "OVER(...) currently requires a ranking or aggregate function".to_string(),
+            ));
+        };
+        self.parse_window_item(WindowFunction::Aggregate { function, target })
+    }
+
+    fn parse_window_item(&mut self, function: WindowFunction) -> Result<SelectItem> {
+        self.consume_token(&Token::Over)?;
+        self.consume_token(&Token::LeftParen)?;
+        let partition_by = if matches!(self.peek_token(), Ok(Token::Partition)) {
+            self.consume_token(&Token::Partition)?;
+            self.consume_token(&Token::By)?;
+            let mut exprs = Vec::new();
+            loop {
+                exprs.push(self.parse_expression()?);
+                if matches!(self.peek_token(), Ok(Token::Comma)) {
+                    self.consume_token(&Token::Comma)?;
+                    continue;
+                }
+                break;
+            }
+            exprs
+        } else {
+            Vec::new()
+        };
+        let order_by = if matches!(self.peek_token(), Ok(Token::Order)) {
+            self.parse_order_by_clause()?
+        } else {
+            Vec::new()
+        };
+        self.consume_token(&Token::RightParen)?;
+        Ok(SelectItem::Window {
+            function,
+            window: WindowSpec {
+                partition_by,
+                order_by,
+            },
+        })
     }
 
     fn parse_from_clause(&mut self) -> Result<TableReference> {
@@ -1389,7 +1461,8 @@ impl Parser {
         let alias = self.parse_optional_alias()?;
         let mut from = TableReference::Table(table.clone(), alias.clone());
         from = self.parse_join_chain(from)?;
-        let has_explicit_source = !matches!(&from, TableReference::Table(name, None) if name == &table);
+        let has_explicit_source =
+            !matches!(&from, TableReference::Table(name, None) if name == &table);
         self.consume_token(&Token::Set)?;
         let assignments = self.parse_update_assignments()?;
 
@@ -2545,4 +2618,11 @@ pub fn parse_condition_fragment(sql: &str) -> Result<Condition> {
         ));
     }
     Ok(condition)
+}
+
+fn is_window_only_function_name(name: &str) -> bool {
+    matches!(
+        name.to_ascii_uppercase().as_str(),
+        "ROW_NUMBER" | "RANK" | "DENSE_RANK"
+    )
 }

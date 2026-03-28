@@ -91,6 +91,10 @@ pub enum SelectItem {
         function: AggregateFunction,
         column: String,
     },
+    Window {
+        function: WindowFunction,
+        window: WindowSpec,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +104,23 @@ pub enum AggregateFunction {
     Avg,
     Min,
     Max,
+}
+
+#[derive(Debug, Clone)]
+pub struct WindowSpec {
+    pub partition_by: Vec<Expression>,
+    pub order_by: Vec<OrderByItem>,
+}
+
+#[derive(Debug, Clone)]
+pub enum WindowFunction {
+    RowNumber,
+    Rank,
+    DenseRank,
+    Aggregate {
+        function: AggregateFunction,
+        target: AggregateTarget,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -699,9 +720,7 @@ impl Statement {
             | Statement::ShowIndexes(_)
             | Statement::ShowTriggers(_)
             | Statement::ShowCreateTable(_)
-            | Statement::ShowCreateView(_) => {
-                Ok(())
-            }
+            | Statement::ShowCreateView(_) => Ok(()),
             Statement::Explain(explain) => explain.statement.validate(catalog),
             Statement::Describe(describe) => {
                 if catalog.get_table_by_name(&describe.table).is_none() {
@@ -792,12 +811,12 @@ impl Statement {
             | Statement::RollbackToSavepoint(_)
             | Statement::ReleaseSavepoint(_)
             | Statement::Describe(_)
-                | Statement::ShowTables
-                | Statement::ShowViews
-                | Statement::ShowIndexes(_)
-                | Statement::ShowTriggers(_)
-                | Statement::ShowCreateTable(_)
-                | Statement::ShowCreateView(_) => {}
+            | Statement::ShowTables
+            | Statement::ShowViews
+            | Statement::ShowIndexes(_)
+            | Statement::ShowTriggers(_)
+            | Statement::ShowCreateTable(_)
+            | Statement::ShowCreateView(_) => {}
             Statement::Explain(explain) => explain.statement.visit_parameters(f),
             Statement::Select(select) => {
                 select.visit_parameters(f);
@@ -989,15 +1008,13 @@ impl Statement {
                     .transpose()?,
             })),
             Statement::Create(create) => Ok(Statement::Create(create.clone())),
-            Statement::CreateView(create_view) => {
-                Ok(Statement::CreateView(CreateViewStatement {
-                    view: create_view.view.clone(),
-                    if_not_exists: create_view.if_not_exists,
-                    query: Statement::Select(create_view.query.clone())
-                        .bind_parameters(parameters)?
-                        .into_select()?,
-                }))
-            }
+            Statement::CreateView(create_view) => Ok(Statement::CreateView(CreateViewStatement {
+                view: create_view.view.clone(),
+                if_not_exists: create_view.if_not_exists,
+                query: Statement::Select(create_view.query.clone())
+                    .bind_parameters(parameters)?
+                    .into_select()?,
+            })),
             Statement::CreateTrigger(create_trigger) => {
                 Ok(Statement::CreateTrigger(CreateTriggerStatement {
                     trigger: create_trigger.trigger.clone(),
@@ -1058,7 +1075,9 @@ impl Condition {
                 expr.collect_dependency_names_into(names);
                 subquery.collect_dependency_names_into(names);
             }
-            Condition::Between { expr, lower, upper, .. } => {
+            Condition::Between {
+                expr, lower, upper, ..
+            } => {
                 expr.collect_dependency_names_into(names);
                 lower.collect_dependency_names_into(names);
                 upper.collect_dependency_names_into(names);
@@ -1209,6 +1228,9 @@ impl SelectItem {
             SelectItem::Aggregate { function, column } => {
                 format!("{}({})", function.to_sql(), column)
             }
+            SelectItem::Window { function, window } => {
+                format!("{} OVER ({})", function.to_sql(), window.to_sql())
+            }
         }
     }
 
@@ -1218,6 +1240,11 @@ impl SelectItem {
     {
         match self {
             SelectItem::Expression(expr) => expr.visit_parameters(f),
+            SelectItem::Window { window, .. } => {
+                for expr in &window.partition_by {
+                    expr.visit_parameters(f);
+                }
+            }
             SelectItem::Wildcard
             | SelectItem::Column(_)
             | SelectItem::CountAll
@@ -1235,6 +1262,65 @@ impl SelectItem {
                 function: *function,
                 column: column.clone(),
             }),
+            SelectItem::Window { function, window } => Ok(SelectItem::Window {
+                function: function.clone(),
+                window: WindowSpec {
+                    partition_by: window
+                        .partition_by
+                        .iter()
+                        .map(|expr| expr.bind(parameters))
+                        .collect::<Result<Vec<_>>>()?,
+                    order_by: window.order_by.clone(),
+                },
+            }),
+        }
+    }
+}
+
+impl WindowSpec {
+    fn to_sql(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.partition_by.is_empty() {
+            parts.push(format!(
+                "PARTITION BY {}",
+                self.partition_by
+                    .iter()
+                    .map(Expression::to_sql)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if !self.order_by.is_empty() {
+            parts.push(format!(
+                "ORDER BY {}",
+                self.order_by
+                    .iter()
+                    .map(|item| format!(
+                        "{} {}",
+                        item.column,
+                        match item.direction {
+                            SortDirection::Asc => "ASC",
+                            SortDirection::Desc => "DESC",
+                        }
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        parts.join(" ")
+    }
+}
+
+impl WindowFunction {
+    fn to_sql(&self) -> String {
+        match self {
+            WindowFunction::RowNumber => "ROW_NUMBER()".to_string(),
+            WindowFunction::Rank => "RANK()".to_string(),
+            WindowFunction::DenseRank => "DENSE_RANK()".to_string(),
+            WindowFunction::Aggregate { function, target } => match target {
+                AggregateTarget::All => format!("{}(*)", function.to_sql()),
+                AggregateTarget::Column(column) => format!("{}({})", function.to_sql(), column),
+            },
         }
     }
 }
@@ -1243,7 +1329,10 @@ impl Expression {
     fn collect_dependency_names_into(&self, names: &mut std::collections::BTreeSet<String>) {
         match self {
             Expression::ScalarSubquery(subquery) => subquery.collect_dependency_names_into(names),
-            Expression::Case { branches, else_expr } => {
+            Expression::Case {
+                branches,
+                else_expr,
+            } => {
                 for branch in branches {
                     branch.condition.collect_dependency_names_into(names);
                     branch.result.collect_dependency_names_into(names);
@@ -1277,7 +1366,9 @@ impl Expression {
                 expr.collect_dependency_names_into(names);
                 subquery.collect_dependency_names_into(names);
             }
-            Expression::Between { expr, lower, upper, .. } => {
+            Expression::Between {
+                expr, lower, upper, ..
+            } => {
                 expr.collect_dependency_names_into(names);
                 lower.collect_dependency_names_into(names);
                 upper.collect_dependency_names_into(names);
@@ -1620,6 +1711,7 @@ impl SelectStatement {
                 },
                 column
             )),
+            SelectItem::Window { function, .. } => Some(function.to_sql()),
         }
     }
 
@@ -1686,7 +1778,11 @@ impl SelectStatement {
             .enumerate()
             .map(|(index, item)| {
                 let base = item.to_sql();
-                match self.column_aliases.get(index).and_then(|alias| alias.clone()) {
+                match self
+                    .column_aliases
+                    .get(index)
+                    .and_then(|alias| alias.clone())
+                {
                     Some(alias) => format!("{base} AS {alias}"),
                     None => base,
                 }
@@ -1892,6 +1988,11 @@ impl SelectStatement {
                         names.push(name);
                     }
                 }
+                SelectItem::Window { .. } => {
+                    if let Some(name) = Self::default_output_name(item, index) {
+                        names.push(name);
+                    }
+                }
                 SelectItem::Expression(_) => {
                     return Err(HematiteError::ParseError(
                         "Expression projections in derived tables or CTEs require aliases"
@@ -2091,7 +2192,7 @@ impl SelectStatement {
         let has_aggregate = self.columns.iter().any(|item| match item {
             SelectItem::CountAll | SelectItem::Aggregate { .. } => true,
             SelectItem::Expression(expr) => Self::expression_contains_aggregate(expr),
-            SelectItem::Wildcard | SelectItem::Column(_) => false,
+            SelectItem::Window { .. } | SelectItem::Wildcard | SelectItem::Column(_) => false,
         }) || self.having_clause.as_ref().is_some_and(|having| {
             having
                 .conditions
@@ -2122,6 +2223,19 @@ impl SelectStatement {
                         &self.from,
                         outer_bindings,
                     )?;
+                }
+                SelectItem::Window { window, .. } => {
+                    for expr in &window.partition_by {
+                        self.validate_expression(expr, catalog, &self.from, outer_bindings)?;
+                    }
+                    for item in &window.order_by {
+                        self.validate_column_reference_with_outer(
+                            &item.column,
+                            catalog,
+                            &self.from,
+                            outer_bindings,
+                        )?;
+                    }
                 }
                 SelectItem::Wildcard | SelectItem::CountAll => {} // Always valid
             }
@@ -2160,6 +2274,11 @@ impl SelectStatement {
                         return Err(HematiteError::ParseError(
                             "Expression select items are not supported with GROUP BY yet"
                                 .to_string(),
+                        ));
+                    }
+                    SelectItem::Window { .. } => {
+                        return Err(HematiteError::ParseError(
+                            "Window functions cannot be combined with GROUP BY yet".to_string(),
                         ));
                     }
                     SelectItem::CountAll | SelectItem::Aggregate { .. } => {}
@@ -2523,7 +2642,9 @@ impl TableReference {
             TableReference::Table(table_name, _) => {
                 names.insert(table_name.clone());
             }
-            TableReference::Derived { subquery, .. } => subquery.collect_dependency_names_into(names),
+            TableReference::Derived { subquery, .. } => {
+                subquery.collect_dependency_names_into(names)
+            }
             TableReference::CrossJoin(left, right) => {
                 left.collect_dependency_names_into(names);
                 right.collect_dependency_names_into(names);
@@ -2543,16 +2664,35 @@ impl TableReference {
         match self {
             TableReference::Table(table_name, Some(alias)) => format!("{table_name} {alias}"),
             TableReference::Table(table_name, None) => table_name.clone(),
-            TableReference::Derived { subquery, alias } => format!("({}) {}", subquery.to_sql(), alias),
-            TableReference::CrossJoin(left, right) => format!("{}, {}", left.to_sql(), right.to_sql()),
+            TableReference::Derived { subquery, alias } => {
+                format!("({}) {}", subquery.to_sql(), alias)
+            }
+            TableReference::CrossJoin(left, right) => {
+                format!("{}, {}", left.to_sql(), right.to_sql())
+            }
             TableReference::InnerJoin { left, right, on } => {
-                format!("{} INNER JOIN {} ON {}", left.to_sql(), right.to_sql(), on.to_sql())
+                format!(
+                    "{} INNER JOIN {} ON {}",
+                    left.to_sql(),
+                    right.to_sql(),
+                    on.to_sql()
+                )
             }
             TableReference::LeftJoin { left, right, on } => {
-                format!("{} LEFT JOIN {} ON {}", left.to_sql(), right.to_sql(), on.to_sql())
+                format!(
+                    "{} LEFT JOIN {} ON {}",
+                    left.to_sql(),
+                    right.to_sql(),
+                    on.to_sql()
+                )
             }
             TableReference::RightJoin { left, right, on } => {
-                format!("{} RIGHT JOIN {} ON {}", left.to_sql(), right.to_sql(), on.to_sql())
+                format!(
+                    "{} RIGHT JOIN {} ON {}",
+                    left.to_sql(),
+                    right.to_sql(),
+                    on.to_sql()
+                )
             }
             TableReference::FullOuterJoin { left, right, on } => format!(
                 "{} FULL OUTER JOIN {} ON {}",

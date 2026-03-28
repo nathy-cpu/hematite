@@ -156,6 +156,60 @@ mod ast_tests {
     }
 
     #[test]
+    fn test_window_projection_rejects_group_by_mix() {
+        let mut catalog = crate::catalog::Schema::new();
+
+        let columns = vec![
+            crate::catalog::Column::new(
+                crate::catalog::ColumnId::new(1),
+                "id".to_string(),
+                CatalogDataType::Integer,
+            )
+            .primary_key(true),
+            crate::catalog::Column::new(
+                crate::catalog::ColumnId::new(2),
+                "name".to_string(),
+                CatalogDataType::Text,
+            ),
+            crate::catalog::Column::new(
+                crate::catalog::ColumnId::new(3),
+                "team".to_string(),
+                CatalogDataType::Text,
+            ),
+        ];
+        catalog.create_table("users".to_string(), columns).unwrap();
+
+        let select = SelectStatement {
+            with_clause: Vec::new(),
+            distinct: false,
+            columns: vec![
+                SelectItem::Column("team".to_string()),
+                SelectItem::Window {
+                    function: WindowFunction::RowNumber,
+                    window: WindowSpec {
+                        partition_by: vec![Expression::Column("team".to_string())],
+                        order_by: vec![OrderByItem {
+                            column: "name".to_string(),
+                            direction: SortDirection::Asc,
+                        }],
+                    },
+                },
+            ],
+            column_aliases: vec![None, Some("row_num".to_string())],
+            from: TableReference::Table("users".to_string(), None),
+            where_clause: None,
+            group_by: vec![Expression::Column("team".to_string())],
+            having_clause: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            set_operation: None,
+        };
+
+        assert!(validate_statement(&Statement::Select(select), &catalog).is_err());
+    }
+
+    #[test]
     fn test_multi_table_column_resolution_requires_qualification_when_ambiguous() -> Result<()> {
         let mut catalog = crate::catalog::Schema::new();
         catalog.create_table(
@@ -1211,6 +1265,30 @@ mod parser_tests {
     }
 
     #[test]
+    fn test_parse_window_functions() -> Result<()> {
+        let select = parse_select(
+            "SELECT name, ROW_NUMBER() OVER (PARTITION BY team ORDER BY score DESC), \
+             COUNT(*) OVER (PARTITION BY team) \
+             FROM users;",
+        )?;
+
+        assert_eq!(select.columns.len(), 3);
+        assert!(matches!(select.columns[1], SelectItem::Window { .. }));
+        assert!(matches!(select.columns[2], SelectItem::Window { .. }));
+
+        match &select.columns[1] {
+            SelectItem::Window { function, window } => {
+                assert!(matches!(function, WindowFunction::RowNumber));
+                assert_eq!(window.partition_by.len(), 1);
+                assert_eq!(window.order_by.len(), 1);
+            }
+            _ => unreachable!("expected window function"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_group_by_having() -> Result<()> {
         let select = parse_select(
             "SELECT name, COUNT(id) AS total_count FROM users GROUP BY name HAVING total_count > 1;",
@@ -1372,14 +1450,20 @@ mod parser_tests {
         )?;
         assert_eq!(update.table, "users");
         assert_eq!(update.target_binding.as_deref(), Some("u"));
-        assert!(matches!(update.source, Some(TableReference::InnerJoin { .. })));
+        assert!(matches!(
+            update.source,
+            Some(TableReference::InnerJoin { .. })
+        ));
 
         let delete = parse_delete(
             "DELETE u FROM users u JOIN teams t ON u.team_id = t.id WHERE t.active = FALSE;",
         )?;
         assert_eq!(delete.table, "users");
         assert_eq!(delete.target_binding.as_deref(), Some("u"));
-        assert!(matches!(delete.source, Some(TableReference::InnerJoin { .. })));
+        assert!(matches!(
+            delete.source,
+            Some(TableReference::InnerJoin { .. })
+        ));
         Ok(())
     }
 
@@ -2039,8 +2123,7 @@ mod parser_tests {
 
     #[test]
     fn test_parse_view_trigger_and_savepoint_statements() -> Result<()> {
-        let create_view =
-            parse_create_view("CREATE VIEW user_names AS SELECT name FROM users;")?;
+        let create_view = parse_create_view("CREATE VIEW user_names AS SELECT name FROM users;")?;
         assert_eq!(create_view.view, "user_names");
         assert!(matches!(
             create_view.query.from,

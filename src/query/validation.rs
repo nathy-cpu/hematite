@@ -119,9 +119,10 @@ fn statement_references_prefixed_alias(
             select_references_prefixed_alias(select, alias, seen_subqueries)
         }
         Statement::Insert(insert) => match &insert.source {
-            InsertSource::Values(rows) => rows.iter().flatten().any(|expr| {
-                expression_references_prefixed_alias(expr, alias, seen_subqueries)
-            }),
+            InsertSource::Values(rows) => rows
+                .iter()
+                .flatten()
+                .any(|expr| expression_references_prefixed_alias(expr, alias, seen_subqueries)),
             InsertSource::Select(select) => {
                 select_references_prefixed_alias(select, alias, seen_subqueries)
             }
@@ -161,18 +162,32 @@ fn select_references_prefixed_alias(
         SelectItem::Aggregate { column, .. } | SelectItem::Column(column) => {
             column_has_prefixed_alias(column, alias)
         }
+        SelectItem::Window { window, .. } => {
+            window
+                .partition_by
+                .iter()
+                .any(|expr| expression_references_prefixed_alias(expr, alias, seen_subqueries))
+                || window
+                    .order_by
+                    .iter()
+                    .any(|item| column_has_prefixed_alias(&item.column, alias))
+        }
         SelectItem::Wildcard | SelectItem::CountAll => false,
-    }) || select.group_by.iter().any(|expr| {
-        expression_references_prefixed_alias(expr, alias, seen_subqueries)
-    }) || select.where_clause.as_ref().is_some_and(|where_clause| {
-        where_clause.conditions.iter().any(|condition| {
-            condition_references_prefixed_alias(condition, alias, seen_subqueries)
+    }) || select
+        .group_by
+        .iter()
+        .any(|expr| expression_references_prefixed_alias(expr, alias, seen_subqueries))
+        || select.where_clause.as_ref().is_some_and(|where_clause| {
+            where_clause.conditions.iter().any(|condition| {
+                condition_references_prefixed_alias(condition, alias, seen_subqueries)
+            })
         })
-    }) || select.having_clause.as_ref().is_some_and(|having_clause| {
-        having_clause.conditions.iter().any(|condition| {
-            condition_references_prefixed_alias(condition, alias, seen_subqueries)
+        || select.having_clause.as_ref().is_some_and(|having_clause| {
+            having_clause.conditions.iter().any(|condition| {
+                condition_references_prefixed_alias(condition, alias, seen_subqueries)
+            })
         })
-    }) || table_reference_references_prefixed_alias(&select.from, alias, seen_subqueries)
+        || table_reference_references_prefixed_alias(&select.from, alias, seen_subqueries)
         || select
             .with_clause
             .iter()
@@ -232,10 +247,7 @@ fn condition_references_prefixed_alias(
                 || select_references_prefixed_alias(subquery, alias, seen_subqueries)
         }
         Condition::Between {
-            expr,
-            lower,
-            upper,
-            ..
+            expr, lower, upper, ..
         } => {
             expression_references_prefixed_alias(expr, alias, seen_subqueries)
                 || expression_references_prefixed_alias(lower, alias, seen_subqueries)
@@ -278,18 +290,14 @@ fn expression_references_prefixed_alias(
         } => {
             branches.iter().any(|branch| {
                 expression_references_prefixed_alias(&branch.condition, alias, seen_subqueries)
-                    || expression_references_prefixed_alias(
-                        &branch.result,
-                        alias,
-                        seen_subqueries,
-                    )
+                    || expression_references_prefixed_alias(&branch.result, alias, seen_subqueries)
             }) || else_expr.as_ref().is_some_and(|expr| {
                 expression_references_prefixed_alias(expr, alias, seen_subqueries)
             })
         }
-        Expression::ScalarFunctionCall { args, .. } => args.iter().any(|arg| {
-            expression_references_prefixed_alias(arg, alias, seen_subqueries)
-        }),
+        Expression::ScalarFunctionCall { args, .. } => args
+            .iter()
+            .any(|arg| expression_references_prefixed_alias(arg, alias, seen_subqueries)),
         Expression::AggregateCall { target, .. } => match target {
             AggregateTarget::All => false,
             AggregateTarget::Column(column) => column_has_prefixed_alias(column, alias),
@@ -311,10 +319,7 @@ fn expression_references_prefixed_alias(
                 || select_references_prefixed_alias(subquery, alias, seen_subqueries)
         }
         Expression::Between {
-            expr,
-            lower,
-            upper,
-            ..
+            expr, lower, upper, ..
         } => {
             expression_references_prefixed_alias(expr, alias, seen_subqueries)
                 || expression_references_prefixed_alias(lower, alias, seen_subqueries)
@@ -428,6 +433,17 @@ fn mask_trigger_aliases_in_select(select: &SelectStatement) -> SelectStatement {
                     function: *function,
                     column: column.clone(),
                 },
+                SelectItem::Window { function, window } => SelectItem::Window {
+                    function: function.clone(),
+                    window: WindowSpec {
+                        partition_by: window
+                            .partition_by
+                            .iter()
+                            .map(mask_trigger_aliases_in_expression)
+                            .collect(),
+                        order_by: window.order_by.clone(),
+                    },
+                },
             })
             .collect(),
         column_aliases: select.column_aliases.clone(),
@@ -448,10 +464,13 @@ fn mask_trigger_aliases_in_select(select: &SelectStatement) -> SelectStatement {
         order_by: select.order_by.clone(),
         limit: select.limit,
         offset: select.offset,
-        set_operation: select.set_operation.as_ref().map(|set_operation| SetOperation {
-            operator: set_operation.operator,
-            right: Box::new(mask_trigger_aliases_in_select(&set_operation.right)),
-        }),
+        set_operation: select
+            .set_operation
+            .as_ref()
+            .map(|set_operation| SetOperation {
+                operator: set_operation.operator,
+                right: Box::new(mask_trigger_aliases_in_select(&set_operation.right)),
+            }),
     }
 }
 
@@ -501,7 +520,11 @@ fn mask_trigger_aliases_in_where_clause(where_clause: &WhereClause) -> WhereClau
 
 fn mask_trigger_aliases_in_condition(condition: &Condition) -> Condition {
     match condition {
-        Condition::Comparison { left, operator, right } => Condition::Comparison {
+        Condition::Comparison {
+            left,
+            operator,
+            right,
+        } => Condition::Comparison {
             left: mask_trigger_aliases_in_expression(left),
             operator: operator.clone(),
             right: mask_trigger_aliases_in_expression(right),
@@ -788,14 +811,30 @@ fn validate_select_with_outer_bindings(
     let has_aggregate = select.columns.iter().any(|item| match item {
         SelectItem::CountAll | SelectItem::Aggregate { .. } => true,
         SelectItem::Expression(expr) => expression_contains_aggregate(expr),
-        SelectItem::Wildcard | SelectItem::Column(_) => false,
+        SelectItem::Window { .. } | SelectItem::Wildcard | SelectItem::Column(_) => false,
     }) || select
         .having_clause
         .as_ref()
         .is_some_and(|having| having.conditions.iter().any(condition_contains_aggregate));
+    let has_window = select
+        .columns
+        .iter()
+        .any(|item| matches!(item, SelectItem::Window { .. }));
     if select.distinct && has_aggregate {
         return Err(HematiteError::ParseError(
             "DISTINCT cannot be combined with aggregate select items yet".to_string(),
+        ));
+    }
+    if has_window
+        && (has_aggregate || !select.group_by.is_empty() || select.having_clause.is_some())
+    {
+        return Err(HematiteError::ParseError(
+            "Window functions cannot be combined with grouped aggregation yet".to_string(),
+        ));
+    }
+    if has_window && select.distinct {
+        return Err(HematiteError::ParseError(
+            "DISTINCT cannot be combined with window functions yet".to_string(),
         ));
     }
 
@@ -821,6 +860,27 @@ fn validate_select_with_outer_bindings(
                     &select.from,
                     outer_bindings,
                 )?;
+            }
+            SelectItem::Window { function, window } => {
+                for expr in &window.partition_by {
+                    validate_expression(select, expr, catalog, &select.from, outer_bindings)?;
+                }
+                for item in &window.order_by {
+                    validate_column_reference_with_outer(
+                        select,
+                        &item.column,
+                        catalog,
+                        &select.from,
+                        outer_bindings,
+                    )?;
+                }
+                if matches!(function, WindowFunction::Rank | WindowFunction::DenseRank)
+                    && window.order_by.is_empty()
+                {
+                    return Err(HematiteError::ParseError(
+                        "RANK() and DENSE_RANK() require ORDER BY in OVER(...)".to_string(),
+                    ));
+                }
             }
             SelectItem::Wildcard | SelectItem::CountAll => {}
         }
@@ -858,6 +918,11 @@ fn validate_select_with_outer_bindings(
                 SelectItem::Expression(_) => {
                     return Err(HematiteError::ParseError(
                         "Expression select items are not supported with GROUP BY yet".to_string(),
+                    ))
+                }
+                SelectItem::Window { .. } => {
+                    return Err(HematiteError::ParseError(
+                        "Window functions cannot be combined with GROUP BY yet".to_string(),
                     ))
                 }
                 SelectItem::CountAll | SelectItem::Aggregate { .. } => {}
@@ -994,7 +1059,11 @@ fn validate_update(update: &UpdateStatement, catalog: &Schema) -> Result<()> {
     let table = catalog.get_table_by_name(&update.table).ok_or_else(|| {
         HematiteError::ParseError(format!("Table '{}' does not exist", update.table))
     })?;
-    validate_mutation_target_binding(&update.table, update.target_binding_name(), &update.source())?;
+    validate_mutation_target_binding(
+        &update.table,
+        update.target_binding_name(),
+        &update.source(),
+    )?;
 
     if update.assignments.is_empty() {
         return Err(HematiteError::ParseError(
@@ -1114,7 +1183,11 @@ fn validate_delete(delete: &DeleteStatement, catalog: &Schema) -> Result<()> {
         )));
     }
     let _table = require_table(catalog, &delete.table)?;
-    validate_mutation_target_binding(&delete.table, delete.target_binding_name(), &delete.source())?;
+    validate_mutation_target_binding(
+        &delete.table,
+        delete.target_binding_name(),
+        &delete.source(),
+    )?;
     let scope = mutation_scope(&delete.source());
 
     if let Some(where_clause) = &delete.where_clause {
@@ -1402,9 +1475,10 @@ fn validate_add_constraint(
                 .collect::<Result<Vec<_>>>()?;
             let references_primary_key =
                 referenced_table.primary_key_columns == referenced_column_indices;
-            let references_unique_index = referenced_table.secondary_indexes.iter().any(|index| {
-                index.unique && index.column_indices == referenced_column_indices
-            });
+            let references_unique_index = referenced_table
+                .secondary_indexes
+                .iter()
+                .any(|index| index.unique && index.column_indices == referenced_column_indices);
             if !references_primary_key && !references_unique_index {
                 return Err(HematiteError::ParseError(format!(
                     "Foreign key '{}.{}' must reference a PRIMARY KEY or UNIQUE index with the same column list",
@@ -1772,6 +1846,11 @@ fn projected_column_names(select: &SelectStatement, catalog: &Schema) -> Result<
                 }
             }
             SelectItem::CountAll | SelectItem::Aggregate { .. } => {
+                if let Some(name) = SelectStatement::default_output_name(item, index) {
+                    names.push(name);
+                }
+            }
+            SelectItem::Window { .. } => {
                 if let Some(name) = SelectStatement::default_output_name(item, index) {
                     names.push(name);
                 }
