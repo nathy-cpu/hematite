@@ -48,7 +48,11 @@ impl QueryPlanner {
             Statement::Explain(_)
             | Statement::Describe(_)
             | Statement::ShowTables
-            | Statement::ShowViews => {
+            | Statement::ShowViews
+            | Statement::ShowIndexes(_)
+            | Statement::ShowTriggers(_)
+            | Statement::ShowCreateTable(_)
+            | Statement::ShowCreateView(_) => {
                 return Err(HematiteError::ParseError(
                     "Introspection statements are handled at the SQL connection boundary"
                         .to_string(),

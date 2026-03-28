@@ -22,7 +22,12 @@ pub(crate) fn validate_statement(statement: &Statement, catalog: &Schema) -> Res
         | Statement::ReleaseSavepoint(_) => Ok(()),
         Statement::Explain(explain) => validate_statement(&explain.statement, catalog),
         Statement::Describe(describe) => require_table(catalog, &describe.table).map(|_| ()),
-        Statement::ShowTables | Statement::ShowViews => Ok(()),
+        Statement::ShowTables
+        | Statement::ShowViews
+        | Statement::ShowIndexes(_)
+        | Statement::ShowTriggers(_)
+        | Statement::ShowCreateTable(_)
+        | Statement::ShowCreateView(_) => Ok(()),
         Statement::Select(select) => validate_select(select, catalog),
         Statement::Update(update) => validate_update(update, catalog),
         Statement::Insert(insert) => validate_insert(insert, catalog),

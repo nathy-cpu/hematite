@@ -424,6 +424,18 @@ impl Connection {
             crate::parser::ast::Statement::ShowViews => {
                 return self.execute_show_views_statement();
             }
+            crate::parser::ast::Statement::ShowIndexes(table_name) => {
+                return self.execute_show_indexes_statement(table_name.as_deref());
+            }
+            crate::parser::ast::Statement::ShowTriggers(table_name) => {
+                return self.execute_show_triggers_statement(table_name.as_deref());
+            }
+            crate::parser::ast::Statement::ShowCreateTable(table_name) => {
+                return self.execute_show_create_table_statement(&table_name);
+            }
+            crate::parser::ast::Statement::ShowCreateView(view_name) => {
+                return self.execute_show_create_view_statement(&view_name);
+            }
             crate::parser::ast::Statement::CreateView(create_view) => {
                 return self.execute_create_view_statement(create_view);
             }
@@ -543,6 +555,121 @@ impl Connection {
             affected_rows: 0,
             columns: vec!["view_name".to_string()],
             rows: views.into_iter().map(|name| vec![Value::Text(name)]).collect(),
+        })
+    }
+
+    fn execute_show_indexes_statement(&mut self, table_name: Option<&str>) -> Result<QueryResult> {
+        let catalog_guard = self.lock_catalog()?;
+        let mut rows = Vec::new();
+        let mut tables = catalog_guard.list_tables()?;
+        tables.sort_by(|left, right| left.1.cmp(&right.1));
+
+        for (table_id, name) in tables {
+            if table_name.is_some_and(|filter| filter != name) {
+                continue;
+            }
+            let Some(table) = catalog_guard.get_table(table_id)? else {
+                continue;
+            };
+            for index in &table.secondary_indexes {
+                let columns = index
+                    .column_indices
+                    .iter()
+                    .map(|&column_index| table.columns[column_index].name.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                rows.push(vec![
+                    Value::Text(table.name.clone()),
+                    Value::Text(index.name.clone()),
+                    Value::Boolean(index.unique),
+                    Value::Text(columns),
+                ]);
+            }
+        }
+        drop(catalog_guard);
+
+        Ok(QueryResult {
+            affected_rows: 0,
+            columns: vec![
+                "table_name".to_string(),
+                "index_name".to_string(),
+                "unique".to_string(),
+                "columns".to_string(),
+            ],
+            rows,
+        })
+    }
+
+    fn execute_show_triggers_statement(&mut self, table_name: Option<&str>) -> Result<QueryResult> {
+        let catalog_guard = self.lock_catalog()?;
+        let mut trigger_names = catalog_guard.list_triggers()?;
+        trigger_names.sort();
+        let mut rows = Vec::new();
+        for trigger_name in trigger_names {
+            let Some(trigger) = catalog_guard.get_trigger(&trigger_name)? else {
+                continue;
+            };
+            if table_name.is_some_and(|filter| filter != trigger.table_name) {
+                continue;
+            }
+            rows.push(vec![
+                Value::Text(trigger.name.clone()),
+                Value::Text(trigger.table_name.clone()),
+                Value::Text(match trigger.event {
+                    crate::catalog::TriggerEvent::Insert => "INSERT".to_string(),
+                    crate::catalog::TriggerEvent::Update => "UPDATE".to_string(),
+                    crate::catalog::TriggerEvent::Delete => "DELETE".to_string(),
+                }),
+            ]);
+        }
+        drop(catalog_guard);
+
+        Ok(QueryResult {
+            affected_rows: 0,
+            columns: vec![
+                "trigger_name".to_string(),
+                "table_name".to_string(),
+                "event".to_string(),
+            ],
+            rows,
+        })
+    }
+
+    fn execute_show_create_table_statement(&mut self, table_name: &str) -> Result<QueryResult> {
+        let catalog_guard = self.lock_catalog()?;
+        let table = catalog_guard
+            .get_table_by_name(table_name)?
+            .ok_or_else(|| {
+                HematiteError::ParseError(format!("Table '{}' does not exist", table_name))
+            })?;
+        drop(catalog_guard);
+
+        Ok(QueryResult {
+            affected_rows: 0,
+            columns: vec!["table_name".to_string(), "create_sql".to_string()],
+            rows: vec![vec![
+                Value::Text(table.name.clone()),
+                Value::Text(render_create_table_sql(&table)),
+            ]],
+        })
+    }
+
+    fn execute_show_create_view_statement(&mut self, view_name: &str) -> Result<QueryResult> {
+        let catalog_guard = self.lock_catalog()?;
+        let view = catalog_guard
+            .get_view(view_name)?
+            .ok_or_else(|| {
+                HematiteError::ParseError(format!("View '{}' does not exist", view_name))
+            })?;
+        drop(catalog_guard);
+
+        Ok(QueryResult {
+            affected_rows: 0,
+            columns: vec!["view_name".to_string(), "create_sql".to_string()],
+            rows: vec![vec![
+                Value::Text(view.name.clone()),
+                Value::Text(format!("CREATE VIEW {} AS {}", view.name, view.query_sql)),
+            ]],
         })
     }
 
@@ -844,6 +971,15 @@ impl Connection {
             .collect()
     }
 
+    fn render_show_columns(table: &crate::catalog::Table, index: &crate::catalog::SecondaryIndex) -> String {
+        index
+            .column_indices
+            .iter()
+            .map(|&column_index| table.columns[column_index].name.clone())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     pub fn close(&mut self) -> Result<()> {
         if self.transaction.is_some() {
             return Err(HematiteError::InternalError(
@@ -1009,6 +1145,88 @@ impl Connection {
             })?;
         transaction.savepoints.remove(position);
         Ok(())
+    }
+}
+
+fn render_create_table_sql(table: &crate::catalog::Table) -> String {
+    let mut definitions = Vec::new();
+
+    for (index, column) in table.columns.iter().enumerate() {
+        let mut parts = vec![format!("{} {}", column.name, column.data_type.name())];
+        if !column.nullable {
+            parts.push("NOT NULL".to_string());
+        }
+        if column.primary_key && table.primary_key_columns.len() == 1 && table.primary_key_columns[0] == index {
+            parts.push("PRIMARY KEY".to_string());
+        }
+        if column.auto_increment {
+            parts.push("AUTO_INCREMENT".to_string());
+        }
+        if let Some(default_value) = &column.default_value {
+            parts.push(format!("DEFAULT {:?}", default_value));
+        }
+        definitions.push(parts.join(" "));
+    }
+
+    if table.primary_key_columns.len() > 1 {
+        definitions.push(format!(
+            "PRIMARY KEY ({})",
+            table.primary_key_columns
+                .iter()
+                .map(|&index| table.columns[index].name.clone())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
+    for index in table.secondary_indexes.iter().filter(|index| index.unique) {
+        definitions.push(format!(
+            "CONSTRAINT {} UNIQUE ({})",
+            index.name,
+            Connection::render_show_columns(table, index)
+        ));
+    }
+
+    for constraint in &table.check_constraints {
+        definitions.push(match &constraint.name {
+            Some(name) => format!("CONSTRAINT {} CHECK ({})", name, constraint.expression_sql),
+            None => format!("CHECK ({})", constraint.expression_sql),
+        });
+    }
+
+    for foreign_key in &table.foreign_keys {
+        let local_columns = foreign_key
+            .column_indices
+            .iter()
+            .map(|&index| table.columns[index].name.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut rendered = String::new();
+        if let Some(name) = &foreign_key.name {
+            rendered.push_str(&format!("CONSTRAINT {} ", name));
+        }
+        rendered.push_str(&format!(
+            "FOREIGN KEY ({}) REFERENCES {} ({})",
+            local_columns,
+            foreign_key.referenced_table,
+            foreign_key.referenced_columns.join(", ")
+        ));
+        rendered.push_str(&format!(
+            " ON DELETE {} ON UPDATE {}",
+            render_foreign_key_action(foreign_key.on_delete),
+            render_foreign_key_action(foreign_key.on_update)
+        ));
+        definitions.push(rendered);
+    }
+
+    format!("CREATE TABLE {} ({})", table.name, definitions.join(", "))
+}
+
+fn render_foreign_key_action(action: crate::catalog::table::ForeignKeyAction) -> &'static str {
+    match action {
+        crate::catalog::table::ForeignKeyAction::Restrict => "RESTRICT",
+        crate::catalog::table::ForeignKeyAction::Cascade => "CASCADE",
+        crate::catalog::table::ForeignKeyAction::SetNull => "SET NULL",
     }
 }
 

@@ -15,6 +15,10 @@ pub enum Statement {
     Describe(DescribeStatement),
     ShowTables,
     ShowViews,
+    ShowIndexes(Option<String>),
+    ShowTriggers(Option<String>),
+    ShowCreateTable(String),
+    ShowCreateView(String),
     Select(SelectStatement),
     Update(UpdateStatement),
     Insert(InsertStatement),
@@ -615,6 +619,16 @@ impl Statement {
             Statement::Describe(describe) => format!("DESCRIBE {}", describe.table),
             Statement::ShowTables => "SHOW TABLES".to_string(),
             Statement::ShowViews => "SHOW VIEWS".to_string(),
+            Statement::ShowIndexes(table) => match table {
+                Some(table) => format!("SHOW INDEXES FROM {table}"),
+                None => "SHOW INDEXES".to_string(),
+            },
+            Statement::ShowTriggers(table) => match table {
+                Some(table) => format!("SHOW TRIGGERS FROM {table}"),
+                None => "SHOW TRIGGERS".to_string(),
+            },
+            Statement::ShowCreateTable(table) => format!("SHOW CREATE TABLE {table}"),
+            Statement::ShowCreateView(view) => format!("SHOW CREATE VIEW {view}"),
             Statement::Begin => "BEGIN".to_string(),
             Statement::Commit => "COMMIT".to_string(),
             Statement::Rollback => "ROLLBACK".to_string(),
@@ -643,7 +657,11 @@ impl Statement {
             | Statement::RollbackToSavepoint(_)
             | Statement::ReleaseSavepoint(_)
             | Statement::ShowTables
-            | Statement::ShowViews => {
+            | Statement::ShowViews
+            | Statement::ShowIndexes(_)
+            | Statement::ShowTriggers(_)
+            | Statement::ShowCreateTable(_)
+            | Statement::ShowCreateView(_) => {
                 Ok(())
             }
             Statement::Explain(explain) => explain.statement.validate(catalog),
@@ -689,6 +707,10 @@ impl Statement {
                 | Statement::Describe(_)
                 | Statement::ShowTables
                 | Statement::ShowViews
+                | Statement::ShowIndexes(_)
+                | Statement::ShowTriggers(_)
+                | Statement::ShowCreateTable(_)
+                | Statement::ShowCreateView(_)
                 | Statement::Select(_)
         )
     }
@@ -732,8 +754,12 @@ impl Statement {
             | Statement::RollbackToSavepoint(_)
             | Statement::ReleaseSavepoint(_)
             | Statement::Describe(_)
-            | Statement::ShowTables
-            | Statement::ShowViews => {}
+                | Statement::ShowTables
+                | Statement::ShowViews
+                | Statement::ShowIndexes(_)
+                | Statement::ShowTriggers(_)
+                | Statement::ShowCreateTable(_)
+                | Statement::ShowCreateView(_) => {}
             Statement::Explain(explain) => explain.statement.visit_parameters(f),
             Statement::Select(select) => {
                 select.visit_parameters(f);
@@ -798,6 +824,10 @@ impl Statement {
             Statement::Describe(describe) => Ok(Statement::Describe(describe.clone())),
             Statement::ShowTables => Ok(Statement::ShowTables),
             Statement::ShowViews => Ok(Statement::ShowViews),
+            Statement::ShowIndexes(table) => Ok(Statement::ShowIndexes(table.clone())),
+            Statement::ShowTriggers(table) => Ok(Statement::ShowTriggers(table.clone())),
+            Statement::ShowCreateTable(table) => Ok(Statement::ShowCreateTable(table.clone())),
+            Statement::ShowCreateView(view) => Ok(Statement::ShowCreateView(view.clone())),
             Statement::Select(select) => Ok(Statement::Select(SelectStatement {
                 with_clause: select
                     .with_clause

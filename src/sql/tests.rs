@@ -579,6 +579,72 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_show_indexes_triggers_and_create_statements() -> Result<()> {
+        let db = TestDbFile::new("_test_show_indexes_triggers_and_create_statements");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT UNIQUE, org_id INTEGER);",
+        )?;
+        conn.execute("CREATE INDEX idx_users_org ON users (org_id);")?;
+        conn.execute("CREATE VIEW user_emails AS SELECT id, email FROM users;")?;
+        conn.execute("CREATE TABLE audit_log (id INTEGER PRIMARY KEY, entry TEXT);")?;
+        conn.execute(
+            "CREATE TRIGGER audit_users AFTER INSERT ON users AS INSERT INTO audit_log (id, entry) VALUES (1, NEW.email);",
+        )?;
+
+        let indexes = conn.execute("SHOW INDEXES FROM users;")?;
+        assert_eq!(
+            indexes.columns,
+            vec!["table_name", "index_name", "unique", "columns"]
+        );
+        assert!(indexes.rows.iter().any(|row| {
+            row[1] == crate::catalog::Value::Text("idx_users_org".to_string())
+        }));
+
+        let triggers = conn.execute("SHOW TRIGGERS FROM users;")?;
+        assert_eq!(
+            triggers.columns,
+            vec!["trigger_name", "table_name", "event"]
+        );
+        assert_eq!(
+            triggers.rows,
+            vec![vec![
+                crate::catalog::Value::Text("audit_users".to_string()),
+                crate::catalog::Value::Text("users".to_string()),
+                crate::catalog::Value::Text("INSERT".to_string()),
+            ]]
+        );
+
+        let show_create_table = conn.execute("SHOW CREATE TABLE users;")?;
+        assert_eq!(
+            show_create_table.columns,
+            vec!["table_name", "create_sql"]
+        );
+        let table_sql = match &show_create_table.rows[0][1] {
+            crate::catalog::Value::Text(sql) => sql,
+            other => panic!("expected create sql text, found {other:?}"),
+        };
+        assert!(table_sql.contains("CREATE TABLE users"));
+        assert!(table_sql.contains("UNIQUE"));
+
+        let show_create_view = conn.execute("SHOW CREATE VIEW user_emails;")?;
+        assert_eq!(show_create_view.columns, vec!["view_name", "create_sql"]);
+        assert_eq!(
+            show_create_view.rows,
+            vec![vec![
+                crate::catalog::Value::Text("user_emails".to_string()),
+                crate::catalog::Value::Text(
+                    "CREATE VIEW user_emails AS SELECT id, email FROM users".to_string()
+                ),
+            ]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_trigger_validation_rejects_invalid_old_new_usage() -> Result<()> {
         let db = TestDbFile::new("_test_trigger_validation_rejects_invalid_old_new_usage");
         let mut conn = Connection::new(db.path())?;

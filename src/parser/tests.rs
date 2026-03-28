@@ -2055,6 +2055,22 @@ mod parser_tests {
             parse_statement("RELEASE SAVEPOINT before_users;")?,
             Statement::ReleaseSavepoint(ref name) if name == "before_users"
         ));
+        assert!(matches!(
+            parse_statement("SHOW INDEXES FROM users;")?,
+            Statement::ShowIndexes(Some(ref table)) if table == "users"
+        ));
+        assert!(matches!(
+            parse_statement("SHOW TRIGGERS;")?,
+            Statement::ShowTriggers(None)
+        ));
+        assert!(matches!(
+            parse_statement("SHOW CREATE TABLE users;")?,
+            Statement::ShowCreateTable(ref table) if table == "users"
+        ));
+        assert!(matches!(
+            parse_statement("SHOW CREATE VIEW user_names;")?,
+            Statement::ShowCreateView(ref view) if view == "user_names"
+        ));
         Ok(())
     }
 }

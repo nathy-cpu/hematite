@@ -143,8 +143,51 @@ impl Parser {
                 self.consume_token(&Token::Semicolon)?;
                 Ok(Statement::ShowViews)
             }
+            Token::Indexes => {
+                self.consume_token(&Token::Indexes)?;
+                let table = if matches!(self.peek_token(), Ok(Token::From)) {
+                    self.consume_token(&Token::From)?;
+                    Some(self.parse_identifier()?)
+                } else {
+                    None
+                };
+                self.consume_token(&Token::Semicolon)?;
+                Ok(Statement::ShowIndexes(table))
+            }
+            Token::Triggers => {
+                self.consume_token(&Token::Triggers)?;
+                let table = if matches!(self.peek_token(), Ok(Token::From)) {
+                    self.consume_token(&Token::From)?;
+                    Some(self.parse_identifier()?)
+                } else {
+                    None
+                };
+                self.consume_token(&Token::Semicolon)?;
+                Ok(Statement::ShowTriggers(table))
+            }
+            Token::Create => {
+                self.consume_token(&Token::Create)?;
+                match self.peek_token()? {
+                    Token::Table => {
+                        self.consume_token(&Token::Table)?;
+                        let table = self.parse_identifier()?;
+                        self.consume_token(&Token::Semicolon)?;
+                        Ok(Statement::ShowCreateTable(table))
+                    }
+                    Token::View => {
+                        self.consume_token(&Token::View)?;
+                        let view = self.parse_identifier()?;
+                        self.consume_token(&Token::Semicolon)?;
+                        Ok(Statement::ShowCreateView(view))
+                    }
+                    token => Err(HematiteError::ParseError(format!(
+                        "Expected TABLE or VIEW after SHOW CREATE, found: {:?}",
+                        token
+                    ))),
+                }
+            }
             token => Err(HematiteError::ParseError(format!(
-                "Expected TABLES or VIEWS after SHOW, found: {:?}",
+                "Expected TABLES, VIEWS, INDEXES, TRIGGERS, or CREATE after SHOW, found: {:?}",
                 token
             ))),
         }
