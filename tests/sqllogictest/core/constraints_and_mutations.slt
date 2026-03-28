@@ -1,0 +1,66 @@
+statement ok
+CREATE TABLE orgs (id INTEGER PRIMARY KEY, active BOOLEAN, code TEXT UNIQUE);
+
+statement ok
+CREATE TABLE users (
+  id INTEGER PRIMARY KEY,
+  org_id INTEGER,
+  email TEXT,
+  score INTEGER,
+  CONSTRAINT uq_users_email UNIQUE (email),
+  CONSTRAINT chk_users_score CHECK (score >= 0),
+  CONSTRAINT fk_users_org FOREIGN KEY (org_id) REFERENCES orgs (id) ON DELETE RESTRICT ON UPDATE RESTRICT
+);
+
+statement ok
+INSERT INTO orgs (id, active, code) VALUES (1, TRUE, 'a'), (2, FALSE, 'b');
+
+statement ok
+INSERT INTO users (id, org_id, email, score) VALUES (1, 1, 'a@example.com', 10), (2, 2, 'b@example.com', 20);
+
+statement error
+INSERT INTO users (id, org_id, email, score) VALUES (3, 99, 'c@example.com', 5);
+
+statement error
+INSERT INTO users (id, org_id, email, score) VALUES (3, 1, 'a@example.com', 5);
+
+statement error
+INSERT INTO users (id, org_id, email, score) VALUES (3, 1, 'c@example.com', -1);
+
+statement ok
+UPDATE users u
+JOIN orgs o ON u.org_id = o.id
+SET score = score + 5
+WHERE o.active = TRUE;
+
+query II
+SELECT id, score FROM users ORDER BY id;
+----
+1 15
+2 20
+
+statement ok
+CREATE TABLE parents (id INTEGER PRIMARY KEY, code TEXT);
+
+statement ok
+CREATE TABLE children (
+  id INTEGER PRIMARY KEY,
+  parent_id INTEGER,
+  CONSTRAINT fk_parent FOREIGN KEY (parent_id) REFERENCES parents (id) ON DELETE RESTRICT ON UPDATE RESTRICT
+);
+
+statement ok
+INSERT INTO parents (id, code) VALUES (1, 'root');
+
+statement ok
+INSERT INTO children (id, parent_id) VALUES (10, 1);
+
+statement error
+DELETE p FROM parents p
+JOIN children c ON p.id = c.parent_id
+WHERE c.id = 10;
+
+query I
+SELECT COUNT(*) FROM parents;
+----
+1

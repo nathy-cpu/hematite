@@ -1,0 +1,56 @@
+statement ok
+CREATE TABLE typed_values (
+  id INTEGER PRIMARY KEY,
+  amount DECIMAL(5, 2),
+  payload BLOB,
+  day_value DATE,
+  time_value TIME,
+  dt_value DATETIME,
+  ts_value TIMESTAMP,
+  zone_time TIME WITH TIME ZONE,
+  state ENUM('draft', 'live')
+);
+
+statement ok
+INSERT INTO typed_values (
+  id, amount, payload, day_value, time_value, dt_value, ts_value, zone_time, state
+) VALUES (
+  1,
+  CAST('12.34' AS DECIMAL(5, 2)),
+  CAST('abc' AS BLOB),
+  DATE('2026-03-28'),
+  TIME('10:11:12'),
+  CAST('2026-03-28 13:14:15' AS DATETIME),
+  CAST('2026-03-28 13:14:15' AS TIMESTAMP),
+  CAST('10:11:12+03:00' AS TIME WITH TIME ZONE),
+  'draft'
+);
+
+query TTTTTTTTT
+SELECT
+  COALESCE(CAST(amount AS TEXT), '0'),
+  CAST(payload AS TEXT),
+  CAST(day_value AS TEXT),
+  CAST(time_value AS TEXT),
+  CAST(dt_value AS TEXT),
+  CAST(ts_value AS TEXT),
+  CAST(zone_time AS TEXT),
+  state,
+  CONCAT(UPPER('draft'), '-', CAST(id AS TEXT))
+FROM typed_values;
+----
+12.34 abc 2026-03-28 10:11:12 2026-03-28 13:14:15 2026-03-28 13:14:15 10:11:12+03:00 draft DRAFT-1
+
+query TTTTTTT
+SELECT
+  CAST(DATE('2026-03-28') + INTERVAL '1-02' YEAR TO MONTH AS TEXT),
+  CAST(TIME('10:11:12') + INTERVAL '0 01:02:03' DAY TO SECOND AS TEXT),
+  CAST(ABS(-4) AS TEXT),
+  CAST(ROUND(12.345, 2) AS TEXT),
+  CAST(POWER(2, 3) AS TEXT),
+  LOWER(TRIM('  Ada  ')),
+  CONCAT_WS(':', 'a', 'b', 'c')
+FROM typed_values
+WHERE id = 1;
+----
+2027-05-28 11:13:15 4 12.35 8 ada a:b:c

@@ -1,0 +1,8 @@
+# This directory intentionally holds SQLLogicTest cases for features or semantics
+# that Hematite does not support yet. The Rust harness skips this directory.
+#
+# Example placeholders:
+# - writable views
+# - trigger BEGIN/END blocks
+# - window frame clauses
+# - full information_schema-style introspection

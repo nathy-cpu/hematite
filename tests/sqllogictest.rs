@@ -117,6 +117,15 @@ fn collect_slt_files(root: &str) -> Vec<String> {
 }
 
 fn collect_slt_files_recursive(path: &std::path::Path, files: &mut Vec<String>) {
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name == "unsupported")
+        .unwrap_or(false)
+    {
+        return;
+    }
+
     let entries = std::fs::read_dir(path).expect("sqllogictest directory should exist");
     for entry in entries {
         let entry = entry.expect("sqllogictest entry should be readable");
