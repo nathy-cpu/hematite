@@ -382,6 +382,59 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_select_from_view() -> Result<()> {
+        let db = TestDbFile::new("_test_select_from_view");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, active BOOLEAN);")?;
+        conn.execute("INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Bob', FALSE);")?;
+        conn.execute(
+            "CREATE VIEW active_users AS SELECT id, name FROM users WHERE active = TRUE;",
+        )?;
+
+        let result = conn.execute("SELECT id, name FROM active_users ORDER BY id ASC;")?;
+        assert_eq!(result.columns, vec!["id", "name"]);
+        assert_eq!(
+            result.rows,
+            vec![vec![
+                crate::catalog::Value::Integer(1),
+                crate::catalog::Value::Text("Ada".to_string()),
+            ]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_select_from_nested_view_and_joined_view() -> Result<()> {
+        let db = TestDbFile::new("_test_select_from_nested_view_and_joined_view");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("CREATE TABLE posts (id INTEGER PRIMARY KEY, user_id INTEGER, title TEXT);")?;
+        conn.execute("INSERT INTO users (id, name) VALUES (1, 'Ada'), (2, 'Bob');")?;
+        conn.execute(
+            "INSERT INTO posts (id, user_id, title) VALUES (10, 1, 'Intro'), (11, 1, 'Rust'), (12, 2, 'SQL');",
+        )?;
+        conn.execute("CREATE VIEW user_names AS SELECT id, name FROM users;")?;
+        conn.execute("CREATE VIEW post_counts AS SELECT user_id, COUNT(*) AS total FROM posts GROUP BY user_id;")?;
+
+        let result = conn.execute(
+            "SELECT u.name, p.total \
+             FROM user_names u INNER JOIN post_counts p ON u.id = p.user_id \
+             ORDER BY u.name ASC;",
+        )?;
+        assert_eq!(result.columns, vec!["name", "total"]);
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.rows[0][0], crate::catalog::Value::Text("Ada".to_string()));
+        assert_eq!(result.rows[1][0], crate::catalog::Value::Text("Bob".to_string()));
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_mysql_identifier_quoting_and_type_aliases() -> Result<()> {
         let db = TestDbFile::new("_test_mysql_identifier_quoting_and_type_aliases");
         let mut conn = Connection::new(db.path())?;

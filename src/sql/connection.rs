@@ -23,6 +23,10 @@
 //! structure; it only sequences higher-level components.
 
 use crate::error::{HematiteError, Result};
+use crate::parser::ast::{
+    Condition, CreateViewStatement, Expression, InsertSource, SelectStatement, Statement,
+    TableReference, WhereClause,
+};
 use crate::parser::{Lexer, Parser};
 use crate::query::lowering::raise_literal_value;
 use crate::query::validation::validate_statement;
@@ -138,6 +142,240 @@ impl Connection {
         parser.parse()
     }
 
+    fn parse_select_sql(sql: &str) -> Result<SelectStatement> {
+        match Self::parse_statement(&format!("{sql};"))? {
+            Statement::Select(select) => Ok(select),
+            other => Err(HematiteError::ParseError(format!(
+                "Expected stored view query to be SELECT, found {:?}",
+                other
+            ))),
+        }
+    }
+
+    fn expand_views_in_statement(statement: Statement, schema: &Schema) -> Result<Statement> {
+        match statement {
+            Statement::Explain(explain) => Ok(Statement::Explain(crate::parser::ast::ExplainStatement {
+                statement: Box::new(Self::expand_views_in_statement(*explain.statement, schema)?),
+            })),
+            Statement::Select(select) => Ok(Statement::Select(Self::expand_views_in_select(
+                select, schema,
+            )?)),
+            Statement::Insert(mut insert) => {
+                if let InsertSource::Select(select) = insert.source {
+                    insert.source =
+                        InsertSource::Select(Box::new(Self::expand_views_in_select(*select, schema)?));
+                }
+                Ok(Statement::Insert(insert))
+            }
+            Statement::CreateView(mut create_view) => {
+                create_view.query = Self::expand_views_in_select(create_view.query, schema)?;
+                Ok(Statement::CreateView(create_view))
+            }
+            other => Ok(other),
+        }
+    }
+
+    fn expand_views_in_select(mut select: SelectStatement, schema: &Schema) -> Result<SelectStatement> {
+        for cte in &mut select.with_clause {
+            cte.query = Box::new(Self::expand_views_in_select((*cte.query).clone(), schema)?);
+        }
+        let original_from = select.from.clone();
+        let select_context = select.clone();
+        select.from = Self::expand_views_in_table_reference(original_from, &select_context, schema)?;
+        if let Some(where_clause) = &mut select.where_clause {
+            Self::expand_views_in_where_clause(where_clause, schema)?;
+        }
+        for expr in &mut select.group_by {
+            Self::expand_views_in_expression(expr, schema)?;
+        }
+        if let Some(having_clause) = &mut select.having_clause {
+            Self::expand_views_in_where_clause(having_clause, schema)?;
+        }
+        if let Some(set_operation) = &mut select.set_operation {
+            set_operation.right = Box::new(Self::expand_views_in_select(
+                (*set_operation.right).clone(),
+                schema,
+            )?);
+        }
+        for item in &mut select.columns {
+            if let crate::parser::ast::SelectItem::Expression(expr) = item {
+                Self::expand_views_in_expression(expr, schema)?;
+            }
+        }
+        Ok(select)
+    }
+
+    fn expand_views_in_table_reference(
+        from: TableReference,
+        select: &SelectStatement,
+        schema: &Schema,
+    ) -> Result<TableReference> {
+        match from {
+            TableReference::Table(table_name, alias) => {
+                if select.lookup_cte(&table_name).is_some() || schema.get_table_by_name(&table_name).is_some() {
+                    Ok(TableReference::Table(table_name, alias))
+                } else if let Some(view) = schema.view(&table_name) {
+                    let subquery = Self::expand_views_in_select(
+                        Self::parse_select_sql(&view.query_sql)?,
+                        schema,
+                    )?;
+                    Ok(TableReference::Derived {
+                        subquery: Box::new(subquery),
+                        alias: alias.unwrap_or(table_name),
+                    })
+                } else {
+                    Ok(TableReference::Table(table_name, alias))
+                }
+            }
+            TableReference::Derived { subquery, alias } => Ok(TableReference::Derived {
+                subquery: Box::new(Self::expand_views_in_select(*subquery, schema)?),
+                alias,
+            }),
+            TableReference::CrossJoin(left, right) => Ok(TableReference::CrossJoin(
+                Box::new(Self::expand_views_in_table_reference(*left, select, schema)?),
+                Box::new(Self::expand_views_in_table_reference(*right, select, schema)?),
+            )),
+            TableReference::InnerJoin { left, right, mut on } => {
+                Self::expand_views_in_condition(&mut on, schema)?;
+                Ok(TableReference::InnerJoin {
+                    left: Box::new(Self::expand_views_in_table_reference(*left, select, schema)?),
+                    right: Box::new(Self::expand_views_in_table_reference(*right, select, schema)?),
+                    on,
+                })
+            }
+            TableReference::LeftJoin { left, right, mut on } => {
+                Self::expand_views_in_condition(&mut on, schema)?;
+                Ok(TableReference::LeftJoin {
+                    left: Box::new(Self::expand_views_in_table_reference(*left, select, schema)?),
+                    right: Box::new(Self::expand_views_in_table_reference(*right, select, schema)?),
+                    on,
+                })
+            }
+            TableReference::RightJoin { left, right, mut on } => {
+                Self::expand_views_in_condition(&mut on, schema)?;
+                Ok(TableReference::RightJoin {
+                    left: Box::new(Self::expand_views_in_table_reference(*left, select, schema)?),
+                    right: Box::new(Self::expand_views_in_table_reference(*right, select, schema)?),
+                    on,
+                })
+            }
+            TableReference::FullOuterJoin { left, right, mut on } => {
+                Self::expand_views_in_condition(&mut on, schema)?;
+                Ok(TableReference::FullOuterJoin {
+                    left: Box::new(Self::expand_views_in_table_reference(*left, select, schema)?),
+                    right: Box::new(Self::expand_views_in_table_reference(*right, select, schema)?),
+                    on,
+                })
+            }
+        }
+    }
+
+    fn expand_views_in_where_clause(where_clause: &mut WhereClause, schema: &Schema) -> Result<()> {
+        for condition in &mut where_clause.conditions {
+            Self::expand_views_in_condition(condition, schema)?;
+        }
+        Ok(())
+    }
+
+    fn expand_views_in_condition(condition: &mut Condition, schema: &Schema) -> Result<()> {
+        match condition {
+            Condition::Comparison { left, right, .. } => {
+                Self::expand_views_in_expression(left, schema)?;
+                Self::expand_views_in_expression(right, schema)?;
+            }
+            Condition::InList { expr, values, .. } => {
+                Self::expand_views_in_expression(expr, schema)?;
+                for value in values {
+                    Self::expand_views_in_expression(value, schema)?;
+                }
+            }
+            Condition::InSubquery { expr, subquery, .. } => {
+                Self::expand_views_in_expression(expr, schema)?;
+                *subquery = Box::new(Self::expand_views_in_select((**subquery).clone(), schema)?);
+            }
+            Condition::Between { expr, lower, upper, .. } => {
+                Self::expand_views_in_expression(expr, schema)?;
+                Self::expand_views_in_expression(lower, schema)?;
+                Self::expand_views_in_expression(upper, schema)?;
+            }
+            Condition::Like { expr, pattern, .. } => {
+                Self::expand_views_in_expression(expr, schema)?;
+                Self::expand_views_in_expression(pattern, schema)?;
+            }
+            Condition::Exists { subquery, .. } => {
+                *subquery = Box::new(Self::expand_views_in_select((**subquery).clone(), schema)?);
+            }
+            Condition::NullCheck { expr, .. } => {
+                Self::expand_views_in_expression(expr, schema)?;
+            }
+            Condition::Not(inner) => Self::expand_views_in_condition(inner, schema)?,
+            Condition::Logical { left, right, .. } => {
+                Self::expand_views_in_condition(left, schema)?;
+                Self::expand_views_in_condition(right, schema)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn expand_views_in_expression(expr: &mut Expression, schema: &Schema) -> Result<()> {
+        match expr {
+            Expression::ScalarSubquery(subquery) => {
+                *subquery = Box::new(Self::expand_views_in_select((**subquery).clone(), schema)?);
+            }
+            Expression::Cast { expr, .. }
+            | Expression::UnaryMinus(expr)
+            | Expression::UnaryNot(expr)
+            | Expression::NullCheck { expr, .. } => Self::expand_views_in_expression(expr, schema)?,
+            Expression::Case { branches, else_expr } => {
+                for branch in branches {
+                    Self::expand_views_in_expression(&mut branch.condition, schema)?;
+                    Self::expand_views_in_expression(&mut branch.result, schema)?;
+                }
+                if let Some(else_expr) = else_expr {
+                    Self::expand_views_in_expression(else_expr, schema)?;
+                }
+            }
+            Expression::ScalarFunctionCall { args, .. } => {
+                for arg in args {
+                    Self::expand_views_in_expression(arg, schema)?;
+                }
+            }
+            Expression::Binary { left, right, .. }
+            | Expression::Comparison { left, right, .. }
+            | Expression::Logical { left, right, .. } => {
+                Self::expand_views_in_expression(left, schema)?;
+                Self::expand_views_in_expression(right, schema)?;
+            }
+            Expression::InList { expr, values, .. } => {
+                Self::expand_views_in_expression(expr, schema)?;
+                for value in values {
+                    Self::expand_views_in_expression(value, schema)?;
+                }
+            }
+            Expression::InSubquery { expr, subquery, .. } => {
+                Self::expand_views_in_expression(expr, schema)?;
+                *subquery = Box::new(Self::expand_views_in_select((**subquery).clone(), schema)?);
+            }
+            Expression::Between { expr, lower, upper, .. } => {
+                Self::expand_views_in_expression(expr, schema)?;
+                Self::expand_views_in_expression(lower, schema)?;
+                Self::expand_views_in_expression(upper, schema)?;
+            }
+            Expression::Like { expr, pattern, .. } => {
+                Self::expand_views_in_expression(expr, schema)?;
+                Self::expand_views_in_expression(pattern, schema)?;
+            }
+            Expression::Exists { subquery, .. } => {
+                *subquery = Box::new(Self::expand_views_in_select((**subquery).clone(), schema)?);
+            }
+            Expression::AggregateCall { .. }
+            | Expression::Column(_)
+            | Expression::Literal(_)
+            | Expression::Parameter(_) => {}
+        }
+        Ok(())
+    }
+
     pub(crate) fn execute_statement(
         &mut self,
         statement: crate::parser::ast::Statement,
@@ -201,6 +439,7 @@ impl Connection {
         statement: crate::parser::ast::Statement,
     ) -> Result<QueryResult> {
         let (schema, table_row_counts) = self.read_planning_state()?;
+        let statement = Self::expand_views_in_statement(statement, &schema)?;
         let planner = QueryPlanner::new(schema).with_table_row_counts(table_row_counts);
         let plan = planner.plan(statement)?;
         Ok(QueryResult {
@@ -302,8 +541,13 @@ impl Connection {
         let result = {
             let mut catalog_guard = self.lock_catalog()?;
             let schema = catalog_guard.clone_schema();
+            let expanded_query = Self::expand_views_in_select(statement.query.clone(), &schema)?;
             validate_statement(
-                &crate::parser::ast::Statement::CreateView(statement.clone()),
+                &crate::parser::ast::Statement::CreateView(CreateViewStatement {
+                    view: statement.view.clone(),
+                    if_not_exists: statement.if_not_exists,
+                    query: expanded_query,
+                }),
                 &schema,
             )?;
 
@@ -469,6 +713,7 @@ impl Connection {
         statement: crate::parser::ast::Statement,
     ) -> Result<(Schema, Box<dyn QueryExecutor>)> {
         let (schema, table_row_counts) = self.read_planning_state()?;
+        let statement = Self::expand_views_in_statement(statement, &schema)?;
         let planner = QueryPlanner::new(schema.clone()).with_table_row_counts(table_row_counts);
         let plan = planner.plan(statement)?;
         Ok((schema, plan.into_executor()))
