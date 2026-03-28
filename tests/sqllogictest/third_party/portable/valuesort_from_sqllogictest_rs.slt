@@ -1,0 +1,40 @@
+# Adapted from:
+# https://github.com/risinglightdb/sqllogictest-rs/blob/main/tests/slt/valuesort.slt
+
+statement ok
+CREATE TABLE example_sort(v1 INT PRIMARY KEY, v2 INT NOT NULL, v3 INT NOT NULL);
+
+statement ok
+INSERT INTO example_sort (v1, v2, v3) VALUES
+  (10, 100, 2333),
+  (2, 20, 2333),
+  (1, 10, 2333);
+
+query III valuesort
+SELECT * FROM example_sort;
+----
+1
+10
+10
+100
+2
+20
+2333
+2333
+2333
+
+query III valuesort
+SELECT * FROM example_sort WHERE v3 = 2333;
+----
+1
+10
+10
+100
+2
+20
+2333
+2333
+2333
+
+statement ok
+DROP TABLE example_sort;
