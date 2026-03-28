@@ -1,0 +1,16 @@
+# Upstream reference:
+# https://github.com/risinglightdb/sqllogictest-rs/blob/main/tests/slt/retry.slt
+#
+# This file is intentionally skipped by the Hematite sqllogictest runner because
+# it depends on `retry` and `system` harness directives and a custom `counter()`
+# function that are not part of Hematite's portable SQL corpus.
+
+query I retry 3 backoff 0s
+select counter()
+----
+3
+
+system ok retry 3 backoff 1ms1ns
+echo "hello"
+----
+hello

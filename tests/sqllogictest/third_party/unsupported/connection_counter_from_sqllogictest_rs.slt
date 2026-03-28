@@ -1,0 +1,23 @@
+# Upstream reference:
+# https://github.com/risinglightdb/sqllogictest-rs/blob/main/tests/slt/connection/counter.slt
+#
+# This file is intentionally skipped by the Hematite sqllogictest runner because
+# it depends on sqllogictest multi-connection directives and a custom `counter()`
+# function that are outside Hematite's portable SQL corpus.
+
+query I
+select counter()
+----
+1
+
+connection another
+query I
+select counter()
+----
+1
+
+connection default
+query I
+select counter()
+----
+3

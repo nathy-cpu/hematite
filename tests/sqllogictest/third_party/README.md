@@ -12,3 +12,4 @@ Notes:
 - Some upstream files use harness directives or DB-specific conditions that Hematite does not support yet.
 - Portable imports may be lightly adapted so they exercise the same behavior using Hematite's supported SQL surface.
 - The sqllogictest runner reads `tests/sqllogictest/manifest.txt`, so `raw/` and `unsupported/` stay available for triage without being executed automatically.
+- Each raw upstream bucket may include a `STATUS.md` file documenting which files were promoted, adapted, or intentionally left unsupported.
