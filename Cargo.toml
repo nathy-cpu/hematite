@@ -12,3 +12,6 @@ name = "hematite_cli"
 path = "src/main.rs"
 
 [dependencies]
+
+[dev-dependencies]
+sqllogictest = "0.29.1"
