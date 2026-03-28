@@ -498,10 +498,9 @@ impl Connection {
         let rows = table
             .columns
             .iter()
-            .map(|column| {
-                let is_unique = table.secondary_indexes.iter().any(|index| {
-                    index.unique && index.column_indices == vec![column.id.as_u32() as usize]
-                });
+            .enumerate()
+            .map(|(column_index, column)| {
+                let metadata = table_column_metadata(&table, column_index);
                 vec![
                     Value::Text(column.name.clone()),
                     Value::Text(column.data_type.name().to_string()),
@@ -511,8 +510,10 @@ impl Connection {
                         None => Value::Null,
                     },
                     Value::Boolean(column.primary_key),
-                    Value::Boolean(is_unique),
+                    Value::Boolean(metadata.is_unique),
                     Value::Boolean(column.auto_increment),
+                    text_or_null(metadata.constraints),
+                    text_or_null(metadata.indexes),
                 ]
             })
             .collect();
@@ -527,6 +528,8 @@ impl Connection {
                 "primary_key".to_string(),
                 "unique".to_string(),
                 "auto_increment".to_string(),
+                "constraints".to_string(),
+                "indexes".to_string(),
             ],
             rows,
         })
@@ -1245,6 +1248,70 @@ impl Connection {
         transaction.savepoints.remove(position);
         Ok(())
     }
+}
+
+struct TableColumnMetadata {
+    is_unique: bool,
+    constraints: Option<String>,
+    indexes: Option<String>,
+}
+
+fn table_column_metadata(table: &crate::catalog::Table, column_index: usize) -> TableColumnMetadata {
+    let mut constraints = Vec::new();
+    let mut indexes = Vec::new();
+
+    if table.primary_key_columns.contains(&column_index) {
+        constraints.push("PRIMARY KEY".to_string());
+    }
+
+    for constraint in table.list_named_constraints() {
+        match constraint.kind {
+            crate::catalog::NamedConstraintKind::Check => {
+                if table.check_constraints.iter().any(|check| {
+                    check.name.as_deref() == Some(constraint.name.as_str())
+                        && check.expression_sql.contains(&table.columns[column_index].name)
+                }) {
+                    constraints.push(format!("CHECK {}", constraint.name));
+                }
+            }
+            crate::catalog::NamedConstraintKind::ForeignKey => {
+                if table.foreign_keys.iter().any(|foreign_key| {
+                    foreign_key.name.as_deref() == Some(constraint.name.as_str())
+                        && foreign_key.column_indices.contains(&column_index)
+                }) {
+                    constraints.push(format!("FOREIGN KEY {}", constraint.name));
+                }
+            }
+            crate::catalog::NamedConstraintKind::Unique => {
+                if table.secondary_indexes.iter().any(|index| {
+                    index.name == constraint.name
+                        && index.unique
+                        && index.column_indices.contains(&column_index)
+                }) {
+                    constraints.push(format!("UNIQUE {}", constraint.name));
+                }
+            }
+        }
+    }
+
+    for index in &table.secondary_indexes {
+        if index.column_indices.contains(&column_index) {
+            indexes.push(index.name.clone());
+        }
+    }
+
+    TableColumnMetadata {
+        is_unique: table
+            .secondary_indexes
+            .iter()
+            .any(|index| index.unique && index.column_indices == vec![column_index]),
+        constraints: (!constraints.is_empty()).then(|| constraints.join(", ")),
+        indexes: (!indexes.is_empty()).then(|| indexes.join(", ")),
+    }
+}
+
+fn text_or_null(value: Option<String>) -> Value {
+    value.map(Value::Text).unwrap_or(Value::Null)
 }
 
 fn render_create_table_sql(table: &crate::catalog::Table) -> String {

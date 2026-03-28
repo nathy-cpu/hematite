@@ -314,9 +314,23 @@ mod connection_tests {
                 "primary_key",
                 "unique",
                 "auto_increment",
+                "constraints",
+                "indexes",
             ]
         );
         assert_eq!(describe.rows.len(), 3);
+        assert_eq!(describe.rows[0][7], crate::catalog::Value::Text("PRIMARY KEY".to_string()));
+        assert_eq!(describe.rows[0][8], crate::catalog::Value::Null);
+        let constraints = match &describe.rows[2][7] {
+            crate::catalog::Value::Text(value) => value,
+            other => panic!("expected constraint text, found {other:?}"),
+        };
+        assert!(constraints.contains("UNIQUE"));
+        let indexes = match &describe.rows[2][8] {
+            crate::catalog::Value::Text(value) => value,
+            other => panic!("expected index text, found {other:?}"),
+        };
+        assert!(indexes.starts_with("uq_"));
 
         let show_tables = conn.execute("SHOW TABLES;")?;
         assert_eq!(show_tables.columns, vec!["table_name"]);
