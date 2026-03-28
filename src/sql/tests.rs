@@ -465,6 +465,87 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_grouped_query_over_view() -> Result<()> {
+        let db = TestDbFile::new("_test_grouped_query_over_view");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE posts (id INTEGER PRIMARY KEY, user_id INTEGER, title TEXT);")?;
+        conn.execute(
+            "INSERT INTO posts (id, user_id, title) VALUES (10, 1, 'Intro'), (11, 1, 'Rust'), (12, 2, 'SQL');",
+        )?;
+        conn.execute("CREATE VIEW post_counts AS SELECT user_id, COUNT(*) AS total FROM posts GROUP BY user_id;")?;
+
+        let result = conn.execute(
+            "SELECT user_id, total FROM post_counts WHERE total >= 1 ORDER BY total DESC, user_id ASC;",
+        )?;
+
+        assert_eq!(result.columns, vec!["user_id", "total"]);
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![crate::catalog::Value::Integer(1), crate::catalog::Value::Integer(2)],
+                vec![crate::catalog::Value::Integer(2), crate::catalog::Value::Integer(1)],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_view_in_cte_and_subquery() -> Result<()> {
+        let db = TestDbFile::new("_test_view_in_cte_and_subquery");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, active BOOLEAN);")?;
+        conn.execute(
+            "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Bob', FALSE), (3, 'Cara', TRUE);",
+        )?;
+        conn.execute("CREATE VIEW active_users AS SELECT id, name FROM users WHERE active = TRUE;")?;
+
+        let cte_result = conn.execute(
+            "WITH named_users AS (SELECT id, name FROM active_users) \
+             SELECT name FROM named_users ORDER BY id ASC;",
+        )?;
+        assert_eq!(cte_result.columns, vec!["name"]);
+        assert_eq!(
+            cte_result.rows,
+            vec![
+                vec![crate::catalog::Value::Text("Ada".to_string())],
+                vec![crate::catalog::Value::Text("Cara".to_string())],
+            ]
+        );
+
+        let subquery_result = conn.execute(
+            "SELECT name FROM (SELECT id, name FROM active_users) filtered WHERE id > 1 ORDER BY id ASC;",
+        )?;
+        assert_eq!(subquery_result.columns, vec!["name"]);
+        assert_eq!(
+            subquery_result.rows,
+            vec![vec![crate::catalog::Value::Text("Cara".to_string())]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_explain_select_from_view() -> Result<()> {
+        let db = TestDbFile::new("_test_explain_select_from_view");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, active BOOLEAN);")?;
+        conn.execute("CREATE VIEW active_users AS SELECT id, name FROM users WHERE active = TRUE;")?;
+
+        let explain = conn.execute("EXPLAIN SELECT id, name FROM active_users WHERE id = 1;")?;
+        assert_eq!(explain.columns, vec!["kind", "detail"]);
+        assert!(!explain.rows.is_empty());
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_insert_into_view_is_rejected() -> Result<()> {
         let db = TestDbFile::new("_test_insert_into_view_is_rejected");
         let mut conn = Connection::new(db.path())?;
