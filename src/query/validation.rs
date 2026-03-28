@@ -368,6 +368,11 @@ fn mask_trigger_aliases_in_statement(statement: &Statement) -> Statement {
         }),
         Statement::Update(update) => Statement::Update(UpdateStatement {
             table: update.table.clone(),
+            target_binding: update.target_binding.clone(),
+            source: update
+                .source
+                .as_ref()
+                .map(mask_trigger_aliases_in_table_reference),
             assignments: update
                 .assignments
                 .iter()
@@ -383,6 +388,11 @@ fn mask_trigger_aliases_in_statement(statement: &Statement) -> Statement {
         }),
         Statement::Delete(delete) => Statement::Delete(DeleteStatement {
             table: delete.table.clone(),
+            target_binding: delete.target_binding.clone(),
+            source: delete
+                .source
+                .as_ref()
+                .map(mask_trigger_aliases_in_table_reference),
             where_clause: delete
                 .where_clause
                 .as_ref()
@@ -984,6 +994,7 @@ fn validate_update(update: &UpdateStatement, catalog: &Schema) -> Result<()> {
     let table = catalog.get_table_by_name(&update.table).ok_or_else(|| {
         HematiteError::ParseError(format!("Table '{}' does not exist", update.table))
     })?;
+    validate_mutation_target_binding(&update.table, update.target_binding_name(), &update.source())?;
 
     if update.assignments.is_empty() {
         return Err(HematiteError::ParseError(
@@ -992,7 +1003,7 @@ fn validate_update(update: &UpdateStatement, catalog: &Schema) -> Result<()> {
     }
 
     let mut seen_columns = std::collections::HashSet::new();
-    let scope = SelectStatement::single_table_scope(&update.table);
+    let scope = mutation_scope(&update.source());
     for assignment in &update.assignments {
         if !seen_columns.insert(&assignment.column) {
             return Err(HematiteError::ParseError(format!(
@@ -1103,7 +1114,8 @@ fn validate_delete(delete: &DeleteStatement, catalog: &Schema) -> Result<()> {
         )));
     }
     let _table = require_table(catalog, &delete.table)?;
-    let scope = SelectStatement::single_table_scope(&delete.table);
+    validate_mutation_target_binding(&delete.table, delete.target_binding_name(), &delete.source())?;
+    let scope = mutation_scope(&delete.source());
 
     if let Some(where_clause) = &delete.where_clause {
         for condition in &where_clause.conditions {
@@ -1112,6 +1124,51 @@ fn validate_delete(delete: &DeleteStatement, catalog: &Schema) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn mutation_scope(from: &TableReference) -> SelectStatement {
+    SelectStatement {
+        with_clause: Vec::new(),
+        distinct: false,
+        columns: Vec::new(),
+        column_aliases: Vec::new(),
+        from: from.clone(),
+        where_clause: None,
+        group_by: Vec::new(),
+        having_clause: None,
+        order_by: Vec::new(),
+        limit: None,
+        offset: None,
+        set_operation: None,
+    }
+}
+
+fn validate_mutation_target_binding(
+    target_table: &str,
+    target_binding: &str,
+    source: &TableReference,
+) -> Result<()> {
+    let bindings = SelectStatement::collect_table_bindings(source);
+    let target_matches = bindings
+        .iter()
+        .filter(|binding| {
+            let binding_name = binding.alias.as_deref().unwrap_or(&binding.table_name);
+            binding.table_name.eq_ignore_ascii_case(target_table)
+                && binding_name.eq_ignore_ascii_case(target_binding)
+        })
+        .count();
+
+    match target_matches {
+        1 => Ok(()),
+        0 => Err(HematiteError::ParseError(format!(
+            "Mutation target '{}' does not resolve to table '{}'",
+            target_binding, target_table
+        ))),
+        _ => Err(HematiteError::ParseError(format!(
+            "Mutation target '{}' resolves ambiguously to table '{}'",
+            target_binding, target_table
+        ))),
+    }
 }
 
 fn validate_drop(drop: &DropStatement, catalog: &Schema) -> Result<()> {

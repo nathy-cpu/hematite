@@ -1391,6 +1391,8 @@ fn substitute_statement_bindings(
         }),
         Statement::Update(update) => Statement::Update(crate::parser::ast::UpdateStatement {
             table: update.table,
+            target_binding: update.target_binding,
+            source: update.source,
             assignments: update
                 .assignments
                 .into_iter()
@@ -1405,6 +1407,8 @@ fn substitute_statement_bindings(
         }),
         Statement::Delete(delete) => Statement::Delete(crate::parser::ast::DeleteStatement {
             table: delete.table,
+            target_binding: delete.target_binding,
+            source: delete.source,
             where_clause: delete
                 .where_clause
                 .map(|where_clause| substitute_where_clause_bindings(where_clause, bindings)),

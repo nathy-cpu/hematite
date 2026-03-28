@@ -134,8 +134,13 @@ impl QueryPlanner {
     }
 
     fn plan_update(&self, statement: UpdateStatement) -> Result<QueryPlan> {
-        let analysis = self.analyze_table_access(&statement.table, &statement.where_clause)?;
-        let access_path = self.choose_access_path(&analysis);
+        let access_path = if matches!(statement.source.as_ref(), Some(source) if !matches!(source, TableReference::Table(_, _)))
+        {
+            SelectAccessPath::JoinScan
+        } else {
+            let analysis = self.analyze_table_access(&statement.table, &statement.where_clause)?;
+            self.choose_access_path(&analysis)
+        };
         let assignment_count = statement.assignments.len();
         let node = PlanNode::Update(UpdatePlanNode {
             table_name: statement.table.clone(),
@@ -143,7 +148,15 @@ impl QueryPlanner {
             has_filter: statement.where_clause.is_some(),
             access_path: access_path.clone(),
         });
-        let estimated_cost = self.estimate_update_cost(&analysis, &access_path, assignment_count);
+        let estimated_cost = if matches!(access_path, SelectAccessPath::JoinScan) {
+            self.catalog
+                .get_table_by_name(&statement.table)
+                .map(|table| self.estimate_table_rows(table) as f64 + assignment_count as f64)
+                .unwrap_or(assignment_count as f64)
+        } else {
+            let analysis = self.analyze_table_access(&statement.table, &statement.where_clause)?;
+            self.estimate_update_cost(&analysis, &access_path, assignment_count)
+        };
 
         Ok(QueryPlan {
             node,
@@ -158,14 +171,27 @@ impl QueryPlanner {
     }
 
     fn plan_delete(&self, statement: DeleteStatement) -> Result<QueryPlan> {
-        let analysis = self.analyze_table_access(&statement.table, &statement.where_clause)?;
-        let access_path = self.choose_access_path(&analysis);
+        let access_path = if matches!(statement.source.as_ref(), Some(source) if !matches!(source, TableReference::Table(_, _)))
+        {
+            SelectAccessPath::JoinScan
+        } else {
+            let analysis = self.analyze_table_access(&statement.table, &statement.where_clause)?;
+            self.choose_access_path(&analysis)
+        };
         let node = PlanNode::Delete(DeletePlanNode {
             table_name: statement.table.clone(),
             has_filter: statement.where_clause.is_some(),
             access_path: access_path.clone(),
         });
-        let estimated_cost = self.estimate_delete_cost(&analysis, &access_path);
+        let estimated_cost = if matches!(access_path, SelectAccessPath::JoinScan) {
+            self.catalog
+                .get_table_by_name(&statement.table)
+                .map(|table| self.estimate_table_rows(table) as f64)
+                .unwrap_or(1.0)
+        } else {
+            let analysis = self.analyze_table_access(&statement.table, &statement.where_clause)?;
+            self.estimate_delete_cost(&analysis, &access_path)
+        };
 
         Ok(QueryPlan {
             node,

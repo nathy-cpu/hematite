@@ -1063,29 +1063,51 @@ impl SelectExecutor {
         on: Option<&Condition>,
         rows: &mut Vec<Vec<Value>>,
     ) -> Result<()> {
-        let push_matches =
-            |outer_rows: &[Vec<Value>], inner_rows: &[Vec<Value>], rows: &mut Vec<Vec<Value>>| {
+        let push_matches = |outer_rows: &[Vec<Value>],
+                            inner_rows: &[Vec<Value>],
+                            outer_is_left: bool,
+                            rows: &mut Vec<Vec<Value>>| {
                 for outer_row in outer_rows {
                     for inner_row in inner_rows {
-                        rows.push(self.combine_join_rows(outer_row, inner_row));
+                        rows.push(if outer_is_left {
+                            self.combine_join_rows(outer_row, inner_row)
+                        } else {
+                            self.combine_join_rows(inner_row, outer_row)
+                        });
                     }
                 }
             };
 
         if on.is_none() {
             if self.join_outer_is_left(left_rows, right_rows) {
-                push_matches(left_rows, right_rows, rows);
+                push_matches(left_rows, right_rows, true, rows);
             } else {
-                push_matches(right_rows, left_rows, rows);
+                push_matches(right_rows, left_rows, false, rows);
             }
             return Ok(());
         }
 
         let predicate = on.expect("checked above");
         if self.join_outer_is_left(left_rows, right_rows) {
-            self.push_join_condition_matches(ctx, sources, left_rows, right_rows, predicate, rows)
+            self.push_join_condition_matches(
+                ctx,
+                sources,
+                left_rows,
+                right_rows,
+                true,
+                predicate,
+                rows,
+            )
         } else {
-            self.push_join_condition_matches(ctx, sources, right_rows, left_rows, predicate, rows)
+            self.push_join_condition_matches(
+                ctx,
+                sources,
+                right_rows,
+                left_rows,
+                false,
+                predicate,
+                rows,
+            )
         }
     }
 
@@ -1095,13 +1117,18 @@ impl SelectExecutor {
         sources: &[ResolvedSource],
         outer_rows: &[Vec<Value>],
         inner_rows: &[Vec<Value>],
+        outer_is_left: bool,
         predicate: &Condition,
         rows: &mut Vec<Vec<Value>>,
     ) -> Result<()> {
         let mut subquery_cache = SubqueryCache::new();
         for outer_row in outer_rows {
             for inner_row in inner_rows {
-                let combined = self.combine_join_rows(outer_row, inner_row);
+                let combined = if outer_is_left {
+                    self.combine_join_rows(outer_row, inner_row)
+                } else {
+                    self.combine_join_rows(inner_row, outer_row)
+                };
                 if self.evaluate_condition(
                     ctx,
                     &mut subquery_cache,
@@ -1494,33 +1521,8 @@ impl SelectExecutor {
             return Ok(left_result);
         }
 
-        let direct_table = match &self.statement.from {
-            TableReference::Table(table_name, _)
-                if self.statement.lookup_cte(table_name).is_none() =>
-            {
-                ctx.catalog.get_table_by_name(table_name).cloned()
-            }
-            _ => None,
-        };
-
-        let from = self.statement.from.clone();
-        let (sources, all_rows) = if self.uses_materialized_reference() {
-            self.materialize_reference(ctx, &from)?
-        } else if let (TableReference::Table(table_name, _), Some(table)) =
-            (&from, direct_table.as_ref())
-        {
-            let sources = self.resolve_sources(ctx)?;
-            let rows = self.materialize_table_access_rows(ctx, table_name, table)?;
-            (sources, rows)
-        } else {
-            return Err(HematiteError::InternalError(
-                "Planner selected a direct table access path for a non-table source".to_string(),
-            ));
-        };
-
+        let (sources, mut filtered_rows) = self.materialize_filtered_rows(ctx)?;
         let mut subquery_cache = SubqueryCache::new();
-        let mut filtered_rows =
-            self.filter_source_rows(ctx, &mut subquery_cache, &sources, all_rows)?;
 
         if !self.statement.order_by.is_empty() {
             filtered_rows.sort_by(|left, right| {
@@ -1554,6 +1556,39 @@ impl SelectExecutor {
         apply_distinct_if_needed(self.statement.distinct, &mut projected_rows);
         self.apply_select_window(&mut projected_rows);
         Ok(self.build_query_result(self.get_column_names(&sources), projected_rows))
+    }
+
+    fn materialize_filtered_rows(
+        &mut self,
+        ctx: &mut ExecutionContext<'_>,
+    ) -> Result<(Vec<ResolvedSource>, Vec<Vec<Value>>)> {
+        let direct_table = match &self.statement.from {
+            TableReference::Table(table_name, _)
+                if self.statement.lookup_cte(table_name).is_none() =>
+            {
+                ctx.catalog.get_table_by_name(table_name).cloned()
+            }
+            _ => None,
+        };
+
+        let from = self.statement.from.clone();
+        let (sources, all_rows) = if self.uses_materialized_reference() {
+            self.materialize_reference(ctx, &from)?
+        } else if let (TableReference::Table(table_name, _), Some(table)) =
+            (&from, direct_table.as_ref())
+        {
+            let sources = self.resolve_sources(ctx)?;
+            let rows = self.materialize_table_access_rows(ctx, table_name, table)?;
+            (sources, rows)
+        } else {
+            return Err(HematiteError::InternalError(
+                "Planner selected a direct table access path for a non-table source".to_string(),
+            ));
+        };
+
+        let mut subquery_cache = SubqueryCache::new();
+        let filtered_rows = self.filter_source_rows(ctx, &mut subquery_cache, &sources, all_rows)?;
+        Ok((sources, filtered_rows))
     }
 
     fn compare_sort_values(&self, left: &Value, right: &Value) -> Ordering {
@@ -3328,25 +3363,43 @@ impl QueryExecutor for UpdateExecutor {
 
         let table = catalog_table(ctx, &self.statement.table)?;
 
-        let select_executor = SelectExecutor::new(
-            locator_select_statement(&self.statement.table, self.statement.where_clause.clone()),
-            self.access_path.clone(),
+        let locator_statement = locator_select_statement(
+            self.statement.source(),
+            self.statement.where_clause.clone(),
+        );
+        let mut select_executor =
+            SelectExecutor::new(locator_statement, self.access_path.clone());
+        let uses_join_source = matches!(
+            self.statement.source.as_ref(),
+            Some(source) if !matches!(source, TableReference::Table(_, _))
         );
 
-        let rows_to_update = locate_rows_for_access_path(
-            ctx,
-            &table,
-            &self.statement.table,
-            &self.access_path,
-            &select_executor,
-        )?;
-        let original_rows = rows_to_update.clone();
-        let mut updated_rows_data = Vec::with_capacity(rows_to_update.len());
+        let (sources, original_rows, joined_rows) = if uses_join_source {
+                let (sources, rows) = locate_rows_for_join_source(
+                    ctx,
+                    &table,
+                    self.statement.target_binding_name(),
+                    &mut select_executor,
+                )?;
+                let (stored_rows, joined_rows): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
+                (sources, stored_rows, Some(joined_rows))
+            } else {
+                let rows = locate_rows_for_access_path(
+                    ctx,
+                    &table,
+                    &self.statement.table,
+                    &self.access_path,
+                    &select_executor,
+                )?;
+                (select_executor.resolve_sources(ctx)?, rows, None)
+            };
+        let original_rows_snapshot = original_rows.clone();
+        let mut updated_rows_data = Vec::with_capacity(original_rows.len());
         let mut updated_rows = 0usize;
-        let sources = select_executor.resolve_sources(ctx)?;
         let mut subquery_cache = SubqueryCache::new();
+        let row_contexts = joined_rows.as_deref();
 
-        for stored_row in rows_to_update {
+        for (index, stored_row) in original_rows.into_iter().enumerate() {
             let mut updated_row = stored_row.values.clone();
             for assignment in &self.statement.assignments {
                 let column_index = table.get_column_index(&assignment.column).ok_or_else(|| {
@@ -3356,13 +3409,18 @@ impl QueryExecutor for UpdateExecutor {
                     ))
                 })?;
                 let column = &table.columns[column_index];
-                let value = select_executor.evaluate_expression(
-                    ctx,
-                    &mut subquery_cache,
-                    &sources,
-                    &assignment.value,
-                    &updated_row,
-                )?;
+                let value = {
+                    let evaluation_row = row_contexts
+                        .and_then(|rows| rows.get(index).map(Vec::as_slice))
+                        .unwrap_or(updated_row.as_slice());
+                    select_executor.evaluate_expression(
+                        ctx,
+                        &mut subquery_cache,
+                        &sources,
+                        &assignment.value,
+                        evaluation_row,
+                    )?
+                };
                 updated_row[column_index] = coerce_column_value(column, value)?;
             }
 
@@ -3396,7 +3454,10 @@ impl QueryExecutor for UpdateExecutor {
             write_stored_row(ctx, &self.statement.table, &table, row.clone(), true)?;
         }
 
-        for (old_row, new_row) in original_rows.into_iter().zip(updated_rows_data.into_iter()) {
+        for (old_row, new_row) in original_rows_snapshot
+            .into_iter()
+            .zip(updated_rows_data.into_iter())
+        {
             ctx.mutation_events.push(MutationEvent::Update {
                 table_name: self.statement.table.clone(),
                 old_row,
@@ -3534,24 +3595,106 @@ fn locate_rows_for_access_path(
     Ok(rows)
 }
 
+fn locate_rows_for_join_source(
+    ctx: &mut ExecutionContext<'_>,
+    table: &Table,
+    target_binding: &str,
+    select_executor: &mut SelectExecutor,
+) -> Result<(Vec<ResolvedSource>, Vec<(StoredRow, Vec<Value>)>)> {
+    let (sources, joined_rows) = select_executor.materialize_filtered_rows(ctx)?;
+    let target_source = sources
+        .iter()
+        .find(|source| {
+            source.name.eq_ignore_ascii_case(&table.name)
+                && source
+                    .alias
+                    .as_deref()
+                    .unwrap_or(&source.name)
+                    .eq_ignore_ascii_case(target_binding)
+        })
+        .ok_or_else(|| {
+            HematiteError::ParseError(format!(
+                "Mutation target '{}' does not resolve to table '{}'",
+                target_binding, table.name
+            ))
+        })?;
+    let mut seen_rowids = std::collections::HashSet::new();
+    let mut rows = Vec::new();
+
+    for joined_row in joined_rows {
+        let Some(candidate_rowid) =
+            target_rowid_from_join_row(ctx, table, target_source, &joined_row)?
+        else {
+            continue;
+        };
+
+        if !seen_rowids.insert(candidate_rowid) {
+            continue;
+        }
+
+        if let Some(stored_row) = ctx.engine.lookup_row_by_rowid(&table.name, candidate_rowid)? {
+            rows.push((stored_row, joined_row));
+        }
+    }
+
+    Ok((sources, rows))
+}
+
+fn target_rowid_from_join_row(
+    ctx: &mut ExecutionContext<'_>,
+    table: &Table,
+    target_source: &ResolvedSource,
+    joined_row: &[Value],
+) -> Result<Option<u64>> {
+    let mut primary_key = Vec::with_capacity(table.primary_key_columns.len());
+    for &column_index in &table.primary_key_columns {
+        let value = joined_row
+            .get(target_source.offset + column_index)
+            .cloned()
+            .unwrap_or(Value::Null);
+        if value.is_null() {
+            return Ok(None);
+        }
+        primary_key.push(value);
+    }
+
+    ctx.engine.lookup_primary_key_rowid(table, &primary_key)
+}
+
 impl QueryExecutor for DeleteExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext) -> Result<QueryResult> {
         validate_statement(&Statement::Delete(self.statement.clone()), &ctx.catalog)?;
 
         let table = catalog_table(ctx, &self.statement.table)?;
 
-        let select_executor = SelectExecutor::new(
-            locator_select_statement(&self.statement.table, self.statement.where_clause.clone()),
-            self.access_path.clone(),
+        let locator_statement = locator_select_statement(
+            self.statement.source(),
+            self.statement.where_clause.clone(),
+        );
+        let mut select_executor =
+            SelectExecutor::new(locator_statement, self.access_path.clone());
+        let uses_join_source = matches!(
+            self.statement.source.as_ref(),
+            Some(source) if !matches!(source, TableReference::Table(_, _))
         );
 
-        let rows_to_delete = locate_rows_for_access_path(
-            ctx,
-            &table,
-            &self.statement.table,
-            &self.access_path,
-            &select_executor,
-        )?;
+        let rows_to_delete = if uses_join_source {
+            let (_, rows) = locate_rows_for_join_source(
+                ctx,
+                &table,
+                self.statement.target_binding_name(),
+                &mut select_executor,
+            )?;
+            rows.into_iter().map(|(row, _)| row).collect()
+        } else {
+            locate_rows_for_access_path(
+                ctx,
+                &table,
+                &self.statement.table,
+                &self.access_path,
+                &select_executor,
+            )?
+        };
 
         for row in &rows_to_delete {
             apply_parent_delete_foreign_key_actions(ctx, &table, &row.values)?;
@@ -4387,7 +4530,7 @@ fn validate_check_constraints(
     }
 
     let constraint_executor = SelectExecutor::new(
-        locator_select_statement(&table.name, None),
+        locator_select_statement(TableReference::Table(table.name.clone(), None), None),
         SelectAccessPath::FullTableScan,
     );
     let sources = constraint_executor.resolve_sources(ctx)?;
@@ -4931,16 +5074,13 @@ fn deduplicate_rows(mut rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
     rows
 }
 
-fn locator_select_statement(
-    table_name: &str,
-    where_clause: Option<WhereClause>,
-) -> SelectStatement {
+fn locator_select_statement(from: TableReference, where_clause: Option<WhereClause>) -> SelectStatement {
     SelectStatement {
         with_clause: Vec::new(),
         distinct: false,
         columns: vec![SelectItem::Wildcard],
         column_aliases: vec![None],
-        from: TableReference::Table(table_name.to_string(), None),
+        from,
         where_clause,
         group_by: Vec::new(),
         having_clause: None,

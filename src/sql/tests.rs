@@ -4451,6 +4451,93 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_joined_update_uses_join_context_for_target_rows() -> Result<()> {
+        let db = TestDbFile::new("_test_joined_update_uses_join_context_for_target_rows");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, team_id INTEGER, name TEXT);")?;
+        conn.execute(
+            "CREATE TABLE teams (id INTEGER PRIMARY KEY, name TEXT, active BOOLEAN NOT NULL);",
+        )?;
+        conn.execute(
+            "INSERT INTO teams (id, name, active) VALUES
+                (1, 'Core', TRUE),
+                (2, 'Ops', FALSE);",
+        )?;
+        conn.execute(
+            "INSERT INTO users (id, team_id, name) VALUES
+                (1, 1, 'Alice'),
+                (2, 2, 'Bob');",
+        )?;
+
+        let result = conn.execute(
+            "UPDATE users u
+             JOIN teams t ON u.team_id = t.id
+             SET name = t.name
+             WHERE t.active = TRUE;",
+        )?;
+        assert_eq!(result.affected_rows, 1);
+
+        let rows = conn.execute("SELECT id, name FROM users ORDER BY id;")?;
+        assert_eq!(
+            rows.rows,
+            vec![
+                vec![
+                    crate::catalog::Value::Integer(1),
+                    crate::catalog::Value::Text("Core".to_string())
+                ],
+                vec![
+                    crate::catalog::Value::Integer(2),
+                    crate::catalog::Value::Text("Bob".to_string())
+                ],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_joined_delete_removes_only_target_matches() -> Result<()> {
+        let db = TestDbFile::new("_test_joined_delete_removes_only_target_matches");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, team_id INTEGER, name TEXT);")?;
+        conn.execute("CREATE TABLE teams (id INTEGER PRIMARY KEY, active BOOLEAN NOT NULL);")?;
+        conn.execute(
+            "INSERT INTO teams (id, active) VALUES
+                (1, TRUE),
+                (2, FALSE);",
+        )?;
+        conn.execute(
+            "INSERT INTO users (id, team_id, name) VALUES
+                (1, 1, 'Alice'),
+                (2, 2, 'Bob'),
+                (3, 2, 'Cara');",
+        )?;
+
+        let result = conn.execute(
+            "DELETE u
+             FROM users u
+             JOIN teams t ON u.team_id = t.id
+             WHERE t.id = 2;",
+        )?;
+        assert_eq!(result.affected_rows, 2);
+
+        let rows = conn.execute("SELECT id, name FROM users ORDER BY id;")?;
+        assert_eq!(
+            rows.rows,
+            vec![vec![
+                crate::catalog::Value::Integer(1),
+                crate::catalog::Value::Text("Alice".to_string())
+            ]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_reopen_preserves_table_root_page() -> Result<()> {
         let db = TestDbFile::new("_test_reopen_preserves_table_root_page");
 

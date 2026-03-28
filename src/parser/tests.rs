@@ -1348,6 +1348,8 @@ mod parser_tests {
     fn test_parse_delete() -> Result<()> {
         let delete = parse_delete("DELETE FROM users WHERE id = 1;")?;
         assert_eq!(delete.table, "users");
+        assert!(delete.target_binding.is_none());
+        assert!(delete.source.is_none());
         assert!(delete.where_clause.is_some());
         Ok(())
     }
@@ -1356,8 +1358,28 @@ mod parser_tests {
     fn test_parse_update() -> Result<()> {
         let update = parse_update("UPDATE users SET name = 'John', active = TRUE WHERE id = 1;")?;
         assert_eq!(update.table, "users");
+        assert!(update.target_binding.is_none());
+        assert!(update.source.is_none());
         assert_eq!(update.assignments.len(), 2);
         assert!(update.where_clause.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_joined_update_and_delete() -> Result<()> {
+        let update = parse_update(
+            "UPDATE users u JOIN teams t ON u.team_id = t.id SET name = t.name WHERE t.active = TRUE;",
+        )?;
+        assert_eq!(update.table, "users");
+        assert_eq!(update.target_binding.as_deref(), Some("u"));
+        assert!(matches!(update.source, Some(TableReference::InnerJoin { .. })));
+
+        let delete = parse_delete(
+            "DELETE u FROM users u JOIN teams t ON u.team_id = t.id WHERE t.active = FALSE;",
+        )?;
+        assert_eq!(delete.table, "users");
+        assert_eq!(delete.target_binding.as_deref(), Some("u"));
+        assert!(matches!(delete.source, Some(TableReference::InnerJoin { .. })));
         Ok(())
     }
 

@@ -477,8 +477,35 @@ impl Parser {
     }
 
     fn parse_from_clause(&mut self) -> Result<TableReference> {
-        let mut from = self.parse_table_reference()?;
+        let from = self.parse_table_reference()?;
+        self.parse_join_chain(from)
+    }
 
+    fn parse_table_reference(&mut self) -> Result<TableReference> {
+        match self.peek_token()? {
+            Token::Identifier(_) => {
+                let table_name = self.parse_identifier()?;
+                let alias = self.parse_optional_alias()?;
+                Ok(TableReference::Table(table_name, alias))
+            }
+            Token::LeftParen => {
+                self.consume_token(&Token::LeftParen)?;
+                let subquery = self.parse_query_statement(false)?;
+                self.consume_token(&Token::RightParen)?;
+                let alias = self.parse_required_alias("derived table")?;
+                Ok(TableReference::Derived {
+                    subquery: Box::new(subquery),
+                    alias,
+                })
+            }
+            _ => Err(HematiteError::ParseError(format!(
+                "Expected table name, found: {:?}",
+                self.peek_token()?
+            ))),
+        }
+    }
+
+    fn parse_join_chain(&mut self, mut from: TableReference) -> Result<TableReference> {
         loop {
             match self.peek_token()? {
                 Token::Comma => {
@@ -559,30 +586,6 @@ impl Parser {
         }
 
         Ok(from)
-    }
-
-    fn parse_table_reference(&mut self) -> Result<TableReference> {
-        match self.peek_token()? {
-            Token::Identifier(_) => {
-                let table_name = self.parse_identifier()?;
-                let alias = self.parse_optional_alias()?;
-                Ok(TableReference::Table(table_name, alias))
-            }
-            Token::LeftParen => {
-                self.consume_token(&Token::LeftParen)?;
-                let subquery = self.parse_query_statement(false)?;
-                self.consume_token(&Token::RightParen)?;
-                let alias = self.parse_required_alias("derived table")?;
-                Ok(TableReference::Derived {
-                    subquery: Box::new(subquery),
-                    alias,
-                })
-            }
-            _ => Err(HematiteError::ParseError(format!(
-                "Expected table name, found: {:?}",
-                self.peek_token()?
-            ))),
-        }
     }
 
     fn parse_where_clause(&mut self) -> Result<WhereClause> {
@@ -1383,6 +1386,10 @@ impl Parser {
     fn parse_update(&mut self) -> Result<Statement> {
         self.consume_token(&Token::Update)?;
         let table = self.parse_identifier()?;
+        let alias = self.parse_optional_alias()?;
+        let mut from = TableReference::Table(table.clone(), alias.clone());
+        from = self.parse_join_chain(from)?;
+        let has_explicit_source = !matches!(&from, TableReference::Table(name, None) if name == &table);
         self.consume_token(&Token::Set)?;
         let assignments = self.parse_update_assignments()?;
 
@@ -1394,8 +1401,14 @@ impl Parser {
 
         self.consume_token(&Token::Semicolon)?;
 
+        let target_binding =
+            has_explicit_source.then(|| alias.clone().unwrap_or_else(|| table.clone()));
+        let source = has_explicit_source.then_some(from);
+
         Ok(Statement::Update(UpdateStatement {
             table,
+            target_binding,
+            source,
             assignments,
             where_clause,
         }))
@@ -1403,9 +1416,26 @@ impl Parser {
 
     fn parse_delete(&mut self) -> Result<Statement> {
         self.consume_token(&Token::Delete)?;
-        self.consume_token(&Token::From)?;
-
-        let table = self.parse_identifier()?;
+        let (table, target_binding, source) = match self.peek_token()? {
+            Token::From => {
+                self.consume_token(&Token::From)?;
+                let table = self.parse_identifier()?;
+                (table, None, None)
+            }
+            Token::Identifier(_) => {
+                let target_binding = self.parse_identifier()?;
+                self.consume_token(&Token::From)?;
+                let source = self.parse_from_clause()?;
+                let table = self.resolve_delete_target_table(&target_binding, &source)?;
+                (table, Some(target_binding), Some(source))
+            }
+            token => {
+                return Err(HematiteError::ParseError(format!(
+                    "Expected FROM or target table alias after DELETE, found: {:?}",
+                    token
+                )))
+            }
+        };
 
         let where_clause = if matches!(self.peek_token(), Ok(Token::Where)) {
             Some(self.parse_where_clause()?)
@@ -1417,8 +1447,38 @@ impl Parser {
 
         Ok(Statement::Delete(DeleteStatement {
             table,
+            target_binding,
+            source,
             where_clause,
         }))
+    }
+
+    fn resolve_delete_target_table(
+        &self,
+        target_binding: &str,
+        source: &TableReference,
+    ) -> Result<String> {
+        let mut matches = Vec::new();
+        for binding in SelectStatement::collect_table_bindings(source) {
+            let binding_name = binding.alias.as_deref().unwrap_or(&binding.table_name);
+            if binding_name.eq_ignore_ascii_case(target_binding)
+                || binding.table_name.eq_ignore_ascii_case(target_binding)
+            {
+                matches.push(binding.table_name);
+            }
+        }
+
+        match matches.len() {
+            1 => Ok(matches.remove(0)),
+            0 => Err(HematiteError::ParseError(format!(
+                "DELETE target '{}' does not match any table in the FROM clause",
+                target_binding
+            ))),
+            _ => Err(HematiteError::ParseError(format!(
+                "DELETE target '{}' is ambiguous in the FROM clause",
+                target_binding
+            ))),
+        }
     }
 
     fn parse_create(&mut self) -> Result<Statement> {

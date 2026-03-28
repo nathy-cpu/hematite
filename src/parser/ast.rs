@@ -376,6 +376,8 @@ pub struct UpdateAssignment {
 #[derive(Debug, Clone)]
 pub struct UpdateStatement {
     pub table: String,
+    pub target_binding: Option<String>,
+    pub source: Option<TableReference>,
     pub assignments: Vec<UpdateAssignment>,
     pub where_clause: Option<WhereClause>,
 }
@@ -383,7 +385,33 @@ pub struct UpdateStatement {
 #[derive(Debug, Clone)]
 pub struct DeleteStatement {
     pub table: String,
+    pub target_binding: Option<String>,
+    pub source: Option<TableReference>,
     pub where_clause: Option<WhereClause>,
+}
+
+impl UpdateStatement {
+    pub(crate) fn source(&self) -> TableReference {
+        self.source
+            .clone()
+            .unwrap_or_else(|| TableReference::Table(self.table.clone(), None))
+    }
+
+    pub(crate) fn target_binding_name(&self) -> &str {
+        self.target_binding.as_deref().unwrap_or(&self.table)
+    }
+}
+
+impl DeleteStatement {
+    pub(crate) fn source(&self) -> TableReference {
+        self.source
+            .clone()
+            .unwrap_or_else(|| TableReference::Table(self.table.clone(), None))
+    }
+
+    pub(crate) fn target_binding_name(&self) -> &str {
+        self.target_binding.as_deref().unwrap_or(&self.table)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -577,9 +605,10 @@ impl Statement {
                 sql
             }
             Statement::Update(update) => {
+                let source = update.source();
                 let mut sql = format!(
                     "UPDATE {} SET {}",
-                    update.table,
+                    source.to_sql(),
                     update
                         .assignments
                         .iter()
@@ -603,7 +632,14 @@ impl Statement {
                 sql
             }
             Statement::Delete(delete) => {
-                let mut sql = format!("DELETE FROM {}", delete.table);
+                let mut sql = match delete.source.as_ref() {
+                    Some(source) => format!(
+                        "DELETE {} FROM {}",
+                        delete.target_binding_name(),
+                        source.to_sql()
+                    ),
+                    None => format!("DELETE FROM {}", delete.table),
+                };
                 if let Some(where_clause) = &delete.where_clause {
                     sql.push_str(&format!(
                         " WHERE {}",
@@ -889,6 +925,8 @@ impl Statement {
             })),
             Statement::Update(update) => Ok(Statement::Update(UpdateStatement {
                 table: update.table.clone(),
+                target_binding: update.target_binding.clone(),
+                source: update.source.clone(),
                 assignments: update
                     .assignments
                     .iter()
@@ -942,6 +980,8 @@ impl Statement {
             })),
             Statement::Delete(delete) => Ok(Statement::Delete(DeleteStatement {
                 table: delete.table.clone(),
+                target_binding: delete.target_binding.clone(),
+                source: delete.source.clone(),
                 where_clause: delete
                     .where_clause
                     .as_ref()
@@ -2638,7 +2678,20 @@ impl UpdateStatement {
         }
 
         let mut seen_columns = std::collections::HashSet::new();
-        let scope = SelectStatement::single_table_scope(&self.table);
+        let scope = SelectStatement {
+            with_clause: Vec::new(),
+            distinct: false,
+            columns: Vec::new(),
+            column_aliases: Vec::new(),
+            from: self.source(),
+            where_clause: None,
+            group_by: Vec::new(),
+            having_clause: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            set_operation: None,
+        };
         for assignment in &self.assignments {
             if !seen_columns.insert(&assignment.column) {
                 return Err(HematiteError::ParseError(format!(
@@ -2876,7 +2929,20 @@ impl CreateStatement {
 impl DeleteStatement {
     pub fn validate(&self, catalog: &crate::catalog::Schema) -> Result<()> {
         let _table = require_table(catalog, &self.table)?;
-        let scope = SelectStatement::single_table_scope(&self.table);
+        let scope = SelectStatement {
+            with_clause: Vec::new(),
+            distinct: false,
+            columns: Vec::new(),
+            column_aliases: Vec::new(),
+            from: self.source(),
+            where_clause: None,
+            group_by: Vec::new(),
+            having_clause: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            set_operation: None,
+        };
 
         if let Some(where_clause) = &self.where_clause {
             for condition in &where_clause.conditions {

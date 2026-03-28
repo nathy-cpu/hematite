@@ -441,6 +441,8 @@ mod executor_tests {
         let mut ctx = ExecutionContext::for_mutation(&catalog, &mut storage);
         let statement = DeleteStatement {
             table: "users".to_string(),
+            target_binding: None,
+            source: None,
             where_clause: Some(WhereClause {
                 conditions: vec![Condition::Comparison {
                     left: Expression::Column("id".to_string()),
@@ -519,6 +521,8 @@ mod executor_tests {
         let mut ctx = ExecutionContext::for_mutation(&catalog, &mut storage);
         let statement = UpdateStatement {
             table: "users".to_string(),
+            target_binding: None,
+            source: None,
             assignments: vec![UpdateAssignment {
                 column: "name".to_string(),
                 value: Expression::Literal(LiteralValue::Text("Bobby".to_string())),
@@ -1020,6 +1024,8 @@ mod planner_tests {
         let planner = QueryPlanner::new(catalog);
         let statement = DeleteStatement {
             table: "users".to_string(),
+            target_binding: None,
+            source: None,
             where_clause: Some(WhereClause {
                 conditions: vec![Condition::Comparison {
                     left: Expression::Column("id".to_string()),
@@ -1060,6 +1066,8 @@ mod planner_tests {
         let planner = QueryPlanner::new(catalog);
         let statement = UpdateStatement {
             table: "users".to_string(),
+            target_binding: None,
+            source: None,
             assignments: vec![UpdateAssignment {
                 column: "name".to_string(),
                 value: Expression::Literal(LiteralValue::Text("Updated".to_string())),
@@ -1079,6 +1087,86 @@ mod planner_tests {
         assert!(node.has_filter);
         assert_eq!(node.access_path, SelectAccessPath::PrimaryKeyLookup);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_query_planner_joined_mutations_use_join_scan() -> Result<()> {
+        let mut catalog = Schema::new();
+        catalog.create_table(
+            "users".to_string(),
+            vec![
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(1),
+                    "id".to_string(),
+                    DataType::Integer,
+                )
+                .primary_key(true),
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(2),
+                    "team_id".to_string(),
+                    DataType::Integer,
+                ),
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(3),
+                    "name".to_string(),
+                    DataType::Text,
+                ),
+            ],
+        )?;
+        catalog.create_table(
+            "teams".to_string(),
+            vec![
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(4),
+                    "id".to_string(),
+                    DataType::Integer,
+                )
+                .primary_key(true),
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(5),
+                    "active".to_string(),
+                    DataType::Boolean,
+                ),
+            ],
+        )?;
+
+        let planner = QueryPlanner::new(catalog);
+        let joined_source = TableReference::InnerJoin {
+            left: Box::new(TableReference::Table(
+                "users".to_string(),
+                Some("u".to_string()),
+            )),
+            right: Box::new(TableReference::Table(
+                "teams".to_string(),
+                Some("t".to_string()),
+            )),
+            on: Condition::Comparison {
+                left: Expression::Column("u.team_id".to_string()),
+                operator: ComparisonOperator::Equal,
+                right: Expression::Column("t.id".to_string()),
+            },
+        };
+
+        let update_plan = planner.plan(Statement::Update(UpdateStatement {
+            table: "users".to_string(),
+            target_binding: Some("u".to_string()),
+            source: Some(joined_source.clone()),
+            assignments: vec![UpdateAssignment {
+                column: "name".to_string(),
+                value: Expression::Literal(LiteralValue::Text("Updated".to_string())),
+            }],
+            where_clause: None,
+        }))?;
+        assert_eq!(expect_update_node(&update_plan).access_path, SelectAccessPath::JoinScan);
+
+        let delete_plan = planner.plan(Statement::Delete(DeleteStatement {
+            table: "users".to_string(),
+            target_binding: Some("u".to_string()),
+            source: Some(joined_source),
+            where_clause: None,
+        }))?;
+        assert_eq!(expect_delete_node(&delete_plan).access_path, SelectAccessPath::JoinScan);
         Ok(())
     }
 
@@ -1438,10 +1526,14 @@ mod planner_tests {
         }))?;
         let delete_full_scan = planner.plan(Statement::Delete(DeleteStatement {
             table: "users".to_string(),
+            target_binding: None,
+            source: None,
             where_clause: None,
         }))?;
         let delete_pk_lookup = planner.plan(Statement::Delete(DeleteStatement {
             table: "users".to_string(),
+            target_binding: None,
+            source: None,
             where_clause: Some(WhereClause {
                 conditions: vec![Condition::Comparison {
                     left: Expression::Column("id".to_string()),
