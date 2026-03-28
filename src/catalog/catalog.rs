@@ -333,7 +333,9 @@ impl Catalog {
         table_id: TableId,
         constraint_name: &str,
     ) -> Result<NamedConstraintKind> {
-        let kind = self.schema.drop_named_constraint(table_id, constraint_name)?;
+        let kind = self
+            .schema
+            .drop_named_constraint(table_id, constraint_name)?;
         self.schema_dirty = true;
         self.save_schema_to_btree()?;
         Ok(kind)

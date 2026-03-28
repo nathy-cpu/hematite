@@ -1158,7 +1158,10 @@ mod planner_tests {
             }],
             where_clause: None,
         }))?;
-        assert_eq!(expect_update_node(&update_plan).access_path, SelectAccessPath::JoinScan);
+        assert_eq!(
+            expect_update_node(&update_plan).access_path,
+            SelectAccessPath::JoinScan
+        );
 
         let delete_plan = planner.plan(Statement::Delete(DeleteStatement {
             table: "users".to_string(),
@@ -1166,7 +1169,10 @@ mod planner_tests {
             source: Some(joined_source),
             where_clause: None,
         }))?;
-        assert_eq!(expect_delete_node(&delete_plan).access_path, SelectAccessPath::JoinScan);
+        assert_eq!(
+            expect_delete_node(&delete_plan).access_path,
+            SelectAccessPath::JoinScan
+        );
         Ok(())
     }
 

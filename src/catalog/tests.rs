@@ -683,8 +683,7 @@ mod tests {
             constraint.name == "chk_users_email" && constraint.kind == NamedConstraintKind::Check
         }));
         assert!(constraints.iter().any(|constraint| {
-            constraint.name == "fk_users_org"
-                && constraint.kind == NamedConstraintKind::ForeignKey
+            constraint.name == "fk_users_org" && constraint.kind == NamedConstraintKind::ForeignKey
         }));
 
         Ok(())
@@ -718,8 +717,14 @@ mod tests {
         })?;
 
         assert_eq!(schema.list_views(), vec!["user_names".to_string()]);
-        assert_eq!(schema.list_triggers(), vec!["audit_users_insert".to_string()]);
-        assert_eq!(schema.view("user_names").unwrap().dependencies, vec!["users"]);
+        assert_eq!(
+            schema.list_triggers(),
+            vec!["audit_users_insert".to_string()]
+        );
+        assert_eq!(
+            schema.view("user_names").unwrap().dependencies,
+            vec!["users"]
+        );
         assert_eq!(
             schema.trigger("audit_users_insert").unwrap().table_name,
             "users"

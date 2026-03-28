@@ -134,9 +134,9 @@ impl Schema {
     }
 
     pub fn drop_view(&mut self, name: &str) -> Result<View> {
-        self.views.remove(name).ok_or_else(|| {
-            HematiteError::StorageError(format!("View '{}' does not exist", name))
-        })
+        self.views
+            .remove(name)
+            .ok_or_else(|| HematiteError::StorageError(format!("View '{}' does not exist", name)))
     }
 
     pub fn create_trigger(&mut self, trigger: Trigger) -> Result<()> {
