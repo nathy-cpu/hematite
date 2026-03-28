@@ -718,6 +718,66 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_metadata_commands_persist_across_reopen() -> Result<()> {
+        let db = TestDbFile::new("_test_metadata_commands_persist_across_reopen");
+
+        {
+            let mut conn = Connection::new(db.path())?;
+            conn.execute(
+                "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT UNIQUE, org_id INTEGER);",
+            )?;
+            conn.execute("CREATE INDEX idx_users_org ON users (org_id);")?;
+            conn.execute("CREATE VIEW user_emails AS SELECT id, email FROM users;")?;
+            conn.execute("CREATE TABLE audit_log (id INTEGER PRIMARY KEY, entry TEXT);")?;
+            conn.execute(
+                "CREATE TRIGGER audit_users AFTER INSERT ON users AS INSERT INTO audit_log (id, entry) VALUES (1, NEW.email);",
+            )?;
+            conn.close()?;
+        }
+
+        let mut reopened = Connection::new(db.path())?;
+
+        let show_tables = reopened.execute("SHOW TABLES;")?;
+        assert_eq!(show_tables.rows.len(), 2);
+
+        let show_views = reopened.execute("SHOW VIEWS;")?;
+        assert_eq!(
+            show_views.rows,
+            vec![vec![crate::catalog::Value::Text("user_emails".to_string())]]
+        );
+
+        let show_indexes = reopened.execute("SHOW INDEXES FROM users;")?;
+        assert!(show_indexes.rows.iter().any(
+            |row| row[1] == crate::catalog::Value::Text("idx_users_org".to_string())
+        ));
+
+        let show_triggers = reopened.execute("SHOW TRIGGERS FROM users;")?;
+        assert_eq!(
+            show_triggers.rows,
+            vec![vec![
+                crate::catalog::Value::Text("audit_users".to_string()),
+                crate::catalog::Value::Text("users".to_string()),
+                crate::catalog::Value::Text("INSERT".to_string()),
+            ]]
+        );
+
+        let show_create_table = reopened.execute("SHOW CREATE TABLE users;")?;
+        assert_eq!(
+            show_create_table.rows[0][0],
+            crate::catalog::Value::Text("users".to_string())
+        );
+
+        let show_create_view = reopened.execute("SHOW CREATE VIEW user_emails;")?;
+        assert_eq!(
+            show_create_view.rows[0][0],
+            crate::catalog::Value::Text("user_emails".to_string())
+        );
+
+        reopened.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_trigger_validation_rejects_invalid_old_new_usage() -> Result<()> {
         let db = TestDbFile::new("_test_trigger_validation_rejects_invalid_old_new_usage");
         let mut conn = Connection::new(db.path())?;
