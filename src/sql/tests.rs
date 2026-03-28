@@ -330,6 +330,58 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_create_drop_and_show_views() -> Result<()> {
+        let db = TestDbFile::new("_test_create_drop_and_show_views");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("CREATE VIEW user_names AS SELECT name FROM users;")?;
+
+        let show_views = conn.execute("SHOW VIEWS;")?;
+        assert_eq!(show_views.columns, vec!["view_name"]);
+        assert_eq!(
+            show_views.rows,
+            vec![vec![crate::catalog::Value::Text("user_names".to_string())]]
+        );
+
+        conn.execute("DROP VIEW user_names;")?;
+        let show_views = conn.execute("SHOW VIEWS;")?;
+        assert!(show_views.rows.is_empty());
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_create_view_persists_across_reopen_and_blocks_base_drop() -> Result<()> {
+        let db = TestDbFile::new("_test_create_view_persists_across_reopen_and_blocks_base_drop");
+
+        {
+            let mut conn = Connection::new(db.path())?;
+            conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);")?;
+            conn.execute("CREATE VIEW user_names AS SELECT name FROM users;")?;
+            conn.close()?;
+        }
+
+        let mut reopened = Connection::new(db.path())?;
+        let show_views = reopened.execute("SHOW VIEWS;")?;
+        assert_eq!(
+            show_views.rows,
+            vec![vec![crate::catalog::Value::Text("user_names".to_string())]]
+        );
+
+        let drop_result = reopened.execute("DROP TABLE users;");
+        assert!(drop_result.is_err());
+        assert!(drop_result
+            .unwrap_err()
+            .to_string()
+            .contains("depends on it"));
+
+        reopened.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_mysql_identifier_quoting_and_type_aliases() -> Result<()> {
         let db = TestDbFile::new("_test_mysql_identifier_quoting_and_type_aliases");
         let mut conn = Connection::new(db.path())?;

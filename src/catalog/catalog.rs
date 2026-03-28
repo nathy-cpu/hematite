@@ -159,6 +159,13 @@ impl Catalog {
                 "Table not found".to_string(),
             ));
         }
+        let table = table.unwrap();
+        if let Some(view_name) = self.first_view_dependency_on(&table.name, None) {
+            return Err(crate::error::HematiteError::ParseError(format!(
+                "Cannot drop table '{}' because view '{}' depends on it",
+                table.name, view_name
+            )));
+        }
         self.schema.drop_table(table_id)?;
         self.schema_dirty = true;
         self.save_schema_to_btree()?;
@@ -256,12 +263,36 @@ impl Catalog {
     }
 
     pub fn create_view(&mut self, view: View) -> Result<()> {
+        if view
+            .dependencies
+            .iter()
+            .any(|dependency| dependency.eq_ignore_ascii_case(&view.name))
+        {
+            return Err(crate::error::HematiteError::ParseError(format!(
+                "View '{}' cannot depend on itself",
+                view.name
+            )));
+        }
+        for dependency in &view.dependencies {
+            if self.view_depends_on(dependency, &view.name) {
+                return Err(crate::error::HematiteError::ParseError(format!(
+                    "Creating view '{}' would introduce a recursive view cycle through '{}'",
+                    view.name, dependency
+                )));
+            }
+        }
         self.schema.create_view(view)?;
         self.schema_dirty = true;
         self.save_schema_to_btree()
     }
 
     pub fn drop_view(&mut self, name: &str) -> Result<View> {
+        if let Some(view_name) = self.first_view_dependency_on(name, Some(name)) {
+            return Err(crate::error::HematiteError::ParseError(format!(
+                "Cannot drop view '{}' because view '{}' depends on it",
+                name, view_name
+            )));
+        }
         let view = self.schema.drop_view(name)?;
         self.schema_dirty = true;
         self.save_schema_to_btree()?;
@@ -310,6 +341,34 @@ impl Catalog {
 
     pub fn get_schema(&self) -> &Schema {
         &self.schema
+    }
+
+    fn first_view_dependency_on(
+        &self,
+        object_name: &str,
+        skip_view: Option<&str>,
+    ) -> Option<String> {
+        self.schema
+            .list_views()
+            .into_iter()
+            .filter(|view_name| !skip_view.is_some_and(|skip| view_name.eq_ignore_ascii_case(skip)))
+            .find(|view_name| {
+                self.schema.view(view_name).is_some_and(|view| {
+                    view.dependencies
+                        .iter()
+                        .any(|dependency| dependency.eq_ignore_ascii_case(object_name))
+                })
+            })
+    }
+
+    fn view_depends_on(&self, view_name: &str, target_name: &str) -> bool {
+        let Some(view) = self.schema.view(view_name) else {
+            return false;
+        };
+        view.dependencies.iter().any(|dependency| {
+            dependency.eq_ignore_ascii_case(target_name)
+                || self.view_depends_on(dependency, target_name)
+        })
     }
 
     pub fn clone_schema(&self) -> Schema {

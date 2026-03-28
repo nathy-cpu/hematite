@@ -141,9 +141,12 @@ impl Schema {
 
     pub fn create_trigger(&mut self, trigger: Trigger) -> Result<()> {
         trigger.validate()?;
-        if self.triggers.contains_key(&trigger.name) {
+        if self.table_names.contains_key(&trigger.name)
+            || self.views.contains_key(&trigger.name)
+            || self.triggers.contains_key(&trigger.name)
+        {
             return Err(HematiteError::ParseError(format!(
-                "Trigger '{}' already exists",
+                "Schema object '{}' already exists",
                 trigger.name
             )));
         }

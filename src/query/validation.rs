@@ -455,6 +455,18 @@ fn validate_drop(drop: &DropStatement, catalog: &Schema) -> Result<()> {
         return Ok(());
     }
     let _table = require_table(catalog, &drop.table)?;
+    if let Some(view_name) = catalog.list_views().into_iter().find(|view_name| {
+        catalog.view(view_name).is_some_and(|view| {
+            view.dependencies
+                .iter()
+                .any(|dependency| dependency.eq_ignore_ascii_case(&drop.table))
+        })
+    }) {
+        return Err(HematiteError::ParseError(format!(
+            "Cannot drop table '{}' because view '{}' depends on it",
+            drop.table, view_name
+        )));
+    }
     Ok(())
 }
 

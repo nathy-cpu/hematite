@@ -863,6 +863,41 @@ impl WhereClause {
 }
 
 impl Condition {
+    fn collect_dependency_names_into(&self, names: &mut std::collections::BTreeSet<String>) {
+        match self {
+            Condition::Comparison { left, right, .. } => {
+                left.collect_dependency_names_into(names);
+                right.collect_dependency_names_into(names);
+            }
+            Condition::InList { expr, values, .. } => {
+                expr.collect_dependency_names_into(names);
+                for value in values {
+                    value.collect_dependency_names_into(names);
+                }
+            }
+            Condition::InSubquery { expr, subquery, .. } => {
+                expr.collect_dependency_names_into(names);
+                subquery.collect_dependency_names_into(names);
+            }
+            Condition::Between { expr, lower, upper, .. } => {
+                expr.collect_dependency_names_into(names);
+                lower.collect_dependency_names_into(names);
+                upper.collect_dependency_names_into(names);
+            }
+            Condition::Like { expr, pattern, .. } => {
+                expr.collect_dependency_names_into(names);
+                pattern.collect_dependency_names_into(names);
+            }
+            Condition::Exists { subquery, .. } => subquery.collect_dependency_names_into(names),
+            Condition::NullCheck { expr, .. } => expr.collect_dependency_names_into(names),
+            Condition::Not(condition) => condition.collect_dependency_names_into(names),
+            Condition::Logical { left, right, .. } => {
+                left.collect_dependency_names_into(names);
+                right.collect_dependency_names_into(names);
+            }
+        }
+    }
+
     fn visit_parameters<F>(&self, f: &mut F)
     where
         F: FnMut(usize),
@@ -986,6 +1021,18 @@ impl Condition {
 }
 
 impl SelectItem {
+    fn to_sql(&self) -> String {
+        match self {
+            SelectItem::Wildcard => "*".to_string(),
+            SelectItem::Column(name) => name.clone(),
+            SelectItem::Expression(expr) => expr.to_sql(),
+            SelectItem::CountAll => "COUNT(*)".to_string(),
+            SelectItem::Aggregate { function, column } => {
+                format!("{}({})", function.to_sql(), column)
+            }
+        }
+    }
+
     fn visit_parameters<F>(&self, f: &mut F)
     where
         F: FnMut(usize),
@@ -1014,6 +1061,58 @@ impl SelectItem {
 }
 
 impl Expression {
+    fn collect_dependency_names_into(&self, names: &mut std::collections::BTreeSet<String>) {
+        match self {
+            Expression::ScalarSubquery(subquery) => subquery.collect_dependency_names_into(names),
+            Expression::Case { branches, else_expr } => {
+                for branch in branches {
+                    branch.condition.collect_dependency_names_into(names);
+                    branch.result.collect_dependency_names_into(names);
+                }
+                if let Some(else_expr) = else_expr {
+                    else_expr.collect_dependency_names_into(names);
+                }
+            }
+            Expression::ScalarFunctionCall { args, .. } => {
+                for arg in args {
+                    arg.collect_dependency_names_into(names);
+                }
+            }
+            Expression::AggregateCall { .. } => {}
+            Expression::Cast { expr, .. }
+            | Expression::UnaryMinus(expr)
+            | Expression::UnaryNot(expr) => expr.collect_dependency_names_into(names),
+            Expression::Binary { left, right, .. }
+            | Expression::Comparison { left, right, .. }
+            | Expression::Logical { left, right, .. } => {
+                left.collect_dependency_names_into(names);
+                right.collect_dependency_names_into(names);
+            }
+            Expression::InList { expr, values, .. } => {
+                expr.collect_dependency_names_into(names);
+                for value in values {
+                    value.collect_dependency_names_into(names);
+                }
+            }
+            Expression::InSubquery { expr, subquery, .. } => {
+                expr.collect_dependency_names_into(names);
+                subquery.collect_dependency_names_into(names);
+            }
+            Expression::Between { expr, lower, upper, .. } => {
+                expr.collect_dependency_names_into(names);
+                lower.collect_dependency_names_into(names);
+                upper.collect_dependency_names_into(names);
+            }
+            Expression::Like { expr, pattern, .. } => {
+                expr.collect_dependency_names_into(names);
+                pattern.collect_dependency_names_into(names);
+            }
+            Expression::Exists { subquery, .. } => subquery.collect_dependency_names_into(names),
+            Expression::NullCheck { expr, .. } => expr.collect_dependency_names_into(names),
+            Expression::Column(_) | Expression::Literal(_) | Expression::Parameter(_) => {}
+        }
+    }
+
     fn visit_parameters<F>(&self, f: &mut F)
     where
         F: FnMut(usize),
@@ -1354,6 +1453,131 @@ impl SelectStatement {
                     .get(index)
                     .and_then(|item| Self::default_output_name(item, index))
             })
+    }
+
+    pub(crate) fn dependency_names(&self) -> Vec<String> {
+        let mut names = std::collections::BTreeSet::new();
+        self.collect_dependency_names_into(&mut names);
+        names.into_iter().collect()
+    }
+
+    fn collect_dependency_names_into(&self, names: &mut std::collections::BTreeSet<String>) {
+        for cte in &self.with_clause {
+            cte.query.collect_dependency_names_into(names);
+        }
+        self.from.collect_dependency_names_into(names);
+        if let Some(where_clause) = &self.where_clause {
+            for condition in &where_clause.conditions {
+                condition.collect_dependency_names_into(names);
+            }
+        }
+        for expr in &self.group_by {
+            expr.collect_dependency_names_into(names);
+        }
+        if let Some(having_clause) = &self.having_clause {
+            for condition in &having_clause.conditions {
+                condition.collect_dependency_names_into(names);
+            }
+        }
+        if let Some(set_operation) = &self.set_operation {
+            set_operation.right.collect_dependency_names_into(names);
+        }
+    }
+
+    pub(crate) fn to_sql(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.with_clause.is_empty() {
+            let recursive = self.with_clause.iter().any(|cte| cte.recursive);
+            let ctes = self
+                .with_clause
+                .iter()
+                .map(|cte| format!("{} AS ({})", cte.name, cte.query.to_sql()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            parts.push(format!(
+                "WITH {}{}",
+                if recursive { "RECURSIVE " } else { "" },
+                ctes
+            ));
+        }
+
+        let projections = self
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let base = item.to_sql();
+                match self.column_aliases.get(index).and_then(|alias| alias.clone()) {
+                    Some(alias) => format!("{base} AS {alias}"),
+                    None => base,
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        parts.push(format!(
+            "SELECT{} {}",
+            if self.distinct { " DISTINCT" } else { "" },
+            projections
+        ));
+        parts.push(format!("FROM {}", self.from.to_sql()));
+
+        if let Some(where_clause) = &self.where_clause {
+            parts.push(format!(
+                "WHERE {}",
+                where_clause
+                    .conditions
+                    .iter()
+                    .map(Condition::to_sql)
+                    .collect::<Vec<_>>()
+                    .join(" AND ")
+            ));
+        }
+        if !self.group_by.is_empty() {
+            parts.push(format!(
+                "GROUP BY {}",
+                self.group_by
+                    .iter()
+                    .map(Expression::to_sql)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if let Some(having_clause) = &self.having_clause {
+            parts.push(format!(
+                "HAVING {}",
+                having_clause
+                    .conditions
+                    .iter()
+                    .map(Condition::to_sql)
+                    .collect::<Vec<_>>()
+                    .join(" AND ")
+            ));
+        }
+        if !self.order_by.is_empty() {
+            parts.push(format!(
+                "ORDER BY {}",
+                self.order_by
+                    .iter()
+                    .map(|item| format!("{} {}", item.column, item.direction.to_sql()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if let Some(limit) = self.limit {
+            parts.push(format!("LIMIT {}", limit));
+        }
+        if let Some(offset) = self.offset {
+            parts.push(format!("OFFSET {}", offset));
+        }
+        if let Some(set_operation) = &self.set_operation {
+            parts.push(format!(
+                "{} {}",
+                set_operation.operator.to_sql(),
+                set_operation.right.to_sql()
+            ));
+        }
+
+        parts.join(" ")
     }
 
     pub(crate) fn collect_table_bindings(from: &TableReference) -> Vec<TableBinding> {
@@ -2115,6 +2339,51 @@ impl SelectStatement {
 }
 
 impl TableReference {
+    fn collect_dependency_names_into(&self, names: &mut std::collections::BTreeSet<String>) {
+        match self {
+            TableReference::Table(table_name, _) => {
+                names.insert(table_name.clone());
+            }
+            TableReference::Derived { subquery, .. } => subquery.collect_dependency_names_into(names),
+            TableReference::CrossJoin(left, right) => {
+                left.collect_dependency_names_into(names);
+                right.collect_dependency_names_into(names);
+            }
+            TableReference::InnerJoin { left, right, on }
+            | TableReference::LeftJoin { left, right, on }
+            | TableReference::RightJoin { left, right, on }
+            | TableReference::FullOuterJoin { left, right, on } => {
+                left.collect_dependency_names_into(names);
+                right.collect_dependency_names_into(names);
+                on.collect_dependency_names_into(names);
+            }
+        }
+    }
+
+    fn to_sql(&self) -> String {
+        match self {
+            TableReference::Table(table_name, Some(alias)) => format!("{table_name} {alias}"),
+            TableReference::Table(table_name, None) => table_name.clone(),
+            TableReference::Derived { subquery, alias } => format!("({}) {}", subquery.to_sql(), alias),
+            TableReference::CrossJoin(left, right) => format!("{}, {}", left.to_sql(), right.to_sql()),
+            TableReference::InnerJoin { left, right, on } => {
+                format!("{} INNER JOIN {} ON {}", left.to_sql(), right.to_sql(), on.to_sql())
+            }
+            TableReference::LeftJoin { left, right, on } => {
+                format!("{} LEFT JOIN {} ON {}", left.to_sql(), right.to_sql(), on.to_sql())
+            }
+            TableReference::RightJoin { left, right, on } => {
+                format!("{} RIGHT JOIN {} ON {}", left.to_sql(), right.to_sql(), on.to_sql())
+            }
+            TableReference::FullOuterJoin { left, right, on } => format!(
+                "{} FULL OUTER JOIN {} ON {}",
+                left.to_sql(),
+                right.to_sql(),
+                on.to_sql()
+            ),
+        }
+    }
+
     pub(crate) fn references_source_name(&self, name: &str) -> bool {
         match self {
             TableReference::Table(table_name, _) => table_name.eq_ignore_ascii_case(name),
@@ -3417,6 +3686,26 @@ impl ArithmeticOperator {
             ArithmeticOperator::Multiply => "*",
             ArithmeticOperator::Divide => "/",
             ArithmeticOperator::Modulo => "%",
+        }
+    }
+}
+
+impl SortDirection {
+    fn to_sql(&self) -> &'static str {
+        match self {
+            SortDirection::Asc => "ASC",
+            SortDirection::Desc => "DESC",
+        }
+    }
+}
+
+impl SetOperator {
+    fn to_sql(&self) -> &'static str {
+        match self {
+            SetOperator::Union => "UNION",
+            SetOperator::UnionAll => "UNION ALL",
+            SetOperator::Intersect => "INTERSECT",
+            SetOperator::Except => "EXCEPT",
         }
     }
 }

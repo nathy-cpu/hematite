@@ -25,6 +25,7 @@
 use crate::error::{HematiteError, Result};
 use crate::parser::{Lexer, Parser};
 use crate::query::lowering::raise_literal_value;
+use crate::query::validation::validate_statement;
 use crate::query::{
     Catalog, CatalogEngine, ExecutionContext, JournalMode, QueryCatalogSnapshot, QueryExecutor,
     QueryPlanner, QueryResult, Schema, Value,
@@ -99,6 +100,14 @@ impl Connection {
         }
     }
 
+    fn mutation_result(affected_rows: usize) -> QueryResult {
+        QueryResult {
+            affected_rows,
+            columns: Vec::new(),
+            rows: Vec::new(),
+        }
+    }
+
     fn lock_catalog(&self) -> Result<MutexGuard<'_, Catalog>> {
         self.catalog.lock().map_err(|_| {
             HematiteError::InternalError("SQL connection catalog mutex is poisoned".to_string())
@@ -163,13 +172,15 @@ impl Connection {
                 return self.execute_show_tables_statement();
             }
             crate::parser::ast::Statement::ShowViews => {
-                return Err(HematiteError::ParseError(
-                    "SHOW VIEWS is not implemented yet".to_string(),
-                ));
+                return self.execute_show_views_statement();
             }
-            crate::parser::ast::Statement::CreateView(_)
-            | crate::parser::ast::Statement::DropView(_)
-            | crate::parser::ast::Statement::CreateTrigger(_)
+            crate::parser::ast::Statement::CreateView(create_view) => {
+                return self.execute_create_view_statement(create_view);
+            }
+            crate::parser::ast::Statement::DropView(drop_view) => {
+                return self.execute_drop_view_statement(&drop_view.view, drop_view.if_exists);
+            }
+            crate::parser::ast::Statement::CreateTrigger(_)
             | crate::parser::ast::Statement::DropTrigger(_) => {
                 return Err(HematiteError::ParseError(
                     "View and trigger statements are not implemented yet".to_string(),
@@ -268,6 +279,113 @@ impl Connection {
                 .map(|(_, name)| vec![Value::Text(name)])
                 .collect(),
         })
+    }
+
+    fn execute_show_views_statement(&mut self) -> Result<QueryResult> {
+        let catalog_guard = self.lock_catalog()?;
+        let mut views = catalog_guard.list_views()?;
+        drop(catalog_guard);
+        views.sort();
+
+        Ok(QueryResult {
+            affected_rows: 0,
+            columns: vec!["view_name".to_string()],
+            rows: views.into_iter().map(|name| vec![Value::Text(name)]).collect(),
+        })
+    }
+
+    fn execute_create_view_statement(
+        &mut self,
+        statement: crate::parser::ast::CreateViewStatement,
+    ) -> Result<QueryResult> {
+        let mut implicit_mutation = Some(ImplicitMutation::begin(self)?);
+        let result = {
+            let mut catalog_guard = self.lock_catalog()?;
+            let schema = catalog_guard.clone_schema();
+            validate_statement(
+                &crate::parser::ast::Statement::CreateView(statement.clone()),
+                &schema,
+            )?;
+
+            if statement.if_not_exists && catalog_guard.get_view(&statement.view)?.is_some() {
+                Ok(Self::mutation_result(0))
+            } else {
+                let column_names = statement
+                    .query
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .map(|(index, _)| {
+                        statement.query.output_name(index).ok_or_else(|| {
+                            HematiteError::ParseError(format!(
+                                "View '{}' requires a name for projected column {}",
+                                statement.view,
+                                index + 1
+                            ))
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+
+                catalog_guard.create_view(crate::catalog::View {
+                    name: statement.view.clone(),
+                    query_sql: statement.query.to_sql(),
+                    column_names,
+                    dependencies: statement.query.dependency_names(),
+                })?;
+                Ok(Self::mutation_result(0))
+            }
+        };
+
+        match result {
+            Ok(result) => {
+                implicit_mutation
+                    .take()
+                    .expect("implicit mutation should be present")
+                    .commit(self)?;
+                Ok(result)
+            }
+            Err(err) => {
+                implicit_mutation
+                    .take()
+                    .expect("implicit mutation should be present")
+                    .rollback(self)?;
+                Err(err)
+            }
+        }
+    }
+
+    fn execute_drop_view_statement(
+        &mut self,
+        view_name: &str,
+        if_exists: bool,
+    ) -> Result<QueryResult> {
+        let mut implicit_mutation = Some(ImplicitMutation::begin(self)?);
+        let result = {
+            let mut catalog_guard = self.lock_catalog()?;
+            if if_exists && catalog_guard.get_view(view_name)?.is_none() {
+                Ok(Self::mutation_result(0))
+            } else {
+                catalog_guard.drop_view(view_name)?;
+                Ok(Self::mutation_result(0))
+            }
+        };
+
+        match result {
+            Ok(result) => {
+                implicit_mutation
+                    .take()
+                    .expect("implicit mutation should be present")
+                    .commit(self)?;
+                Ok(result)
+            }
+            Err(err) => {
+                implicit_mutation
+                    .take()
+                    .expect("implicit mutation should be present")
+                    .rollback(self)?;
+                Err(err)
+            }
+        }
     }
 
     pub(crate) fn execute_statement_result(
