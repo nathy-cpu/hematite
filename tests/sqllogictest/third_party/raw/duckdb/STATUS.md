@@ -24,3 +24,13 @@ Notes:
   sqllogictest runner.
 - The mirrored DuckDB files include many engine-specific features and directives,
   so promotion will likely happen file-by-file or through adapted portable extracts.
+
+Promoted/adapted so far:
+- `test/sql/select/test_select_empty_table.test`
+  - adapted to:
+    - `third_party/portable/select_empty_table_from_duckdb.slt`
+- `test/sql/filter/test_constant_comparisons.test`
+  - partially adapted to:
+    - `third_party/portable/constant_filters_from_duckdb.slt`
+  - note:
+    - DuckDB cases that rely on bare `CASE ... END` as a `WHERE` predicate were not carried over because Hematite's current parser/executor requires a simpler predicate shape there

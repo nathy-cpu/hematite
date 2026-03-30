@@ -1,0 +1,12 @@
+# Adapted from:
+# https://github.com/duckdb/duckdb/blob/main/test/sql/select/test_select_empty_table.test
+
+statement ok
+CREATE TABLE integers(i INTEGER PRIMARY KEY);
+
+query I
+SELECT * FROM integers;
+----
+
+statement ok
+DROP TABLE integers;
