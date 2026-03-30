@@ -1,0 +1,42 @@
+# Adapted from:
+# https://github.com/duckdb/duckdb/blob/main/test/sql/filter/filter_cache.test
+
+statement ok
+CREATE TABLE integers(id INTEGER PRIMARY KEY, a INTEGER);
+
+statement ok
+INSERT INTO integers (id, a) VALUES
+  (1, 0),
+  (2, 1),
+  (3, 2),
+  (4, 3),
+  (5, 4),
+  (6, 5),
+  (7, 6),
+  (8, 7),
+  (9, 8),
+  (10, 9);
+
+query I
+SELECT COUNT(*) FROM integers WHERE a < 5;
+----
+5
+
+query I
+SELECT COUNT(*) FROM (SELECT a FROM integers WHERE (a > 1 AND a < 10) OR a > 7) AS filtered WHERE a < 5;
+----
+3
+
+query I
+SELECT COUNT(*) FROM (
+  SELECT a FROM (
+    SELECT a FROM integers WHERE (a != 3 AND a < 5) OR a > 8
+  ) AS inner_filtered
+  WHERE a > 1 AND a < 4
+) AS outer_filtered
+WHERE a < 5;
+----
+1
+
+statement ok
+DROP TABLE integers;

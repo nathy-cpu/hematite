@@ -1,0 +1,14 @@
+# Adapted from:
+# https://github.com/duckdb/duckdb/blob/main/test/sql/select/test_select_into.test
+
+statement ok
+CREATE TABLE t (id INTEGER PRIMARY KEY, value TEXT);
+
+statement ok
+INSERT INTO t (id, value) VALUES (1, 'foo'), (2, 'bar'), (3, 'baz');
+
+statement error
+SELECT * INTO t2 FROM t WHERE value LIKE 'b%';
+
+statement ok
+DROP TABLE t;

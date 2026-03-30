@@ -37,6 +37,11 @@ Promoted/adapted so far:
 - `test/sql/filter/test_illegal_filters.test`
   - adapted to:
     - `third_party/portable/illegal_filters_from_duckdb.slt`
+- `test/sql/filter/filter_cache.test`
+  - partially adapted to:
+    - `third_party/portable/filter_cache_from_duckdb.slt`
+  - notes:
+    - rewritten to use explicit rows instead of DuckDB's `generate_series` and verification pragmas while preserving the nested-filter shape
 - `test/sql/filter/test_obsolete_filters.test`
   - partially adapted to:
     - `third_party/portable/obsolete_filters_from_duckdb.slt`
@@ -45,6 +50,9 @@ Promoted/adapted so far:
 - `test/sql/select/test_select_locking.test`
   - adapted to:
     - `third_party/portable/select_locking_errors_from_duckdb.slt`
+- `test/sql/select/test_select_into.test`
+  - adapted to:
+    - `third_party/portable/select_into_errors_from_duckdb.slt`
 - `test/sql/filter/test_alias_filter.test`
   - intentionally not promoted
   - reason:
