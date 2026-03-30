@@ -7,6 +7,7 @@ Layout:
 
 Current upstream source:
 - `risinglightdb/sqllogictest-rs` test corpus
+- focused raw mirror from `duckdb/duckdb` `test/sql`
 
 Notes:
 - Some upstream files use harness directives or DB-specific conditions that Hematite does not support yet.
