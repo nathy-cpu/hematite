@@ -34,3 +34,10 @@ Promoted/adapted so far:
     - `third_party/portable/constant_filters_from_duckdb.slt`
   - note:
     - DuckDB cases that rely on bare `CASE ... END` as a `WHERE` predicate were not carried over because Hematite's current parser/executor requires a simpler predicate shape there
+- `test/sql/filter/test_illegal_filters.test`
+  - adapted to:
+    - `third_party/portable/illegal_filters_from_duckdb.slt`
+- `test/sql/filter/test_alias_filter.test`
+  - intentionally not promoted
+  - reason:
+    - Hematite does not currently support using a SELECT-list alias inside `WHERE`

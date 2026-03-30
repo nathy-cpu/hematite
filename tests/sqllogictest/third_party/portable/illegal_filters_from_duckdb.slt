@@ -1,0 +1,14 @@
+# Adapted from:
+# https://github.com/duckdb/duckdb/blob/main/test/sql/filter/test_illegal_filters.test
+
+statement ok
+CREATE TABLE integers(a INTEGER PRIMARY KEY, b INTEGER);
+
+statement ok
+INSERT INTO integers (a, b) VALUES (2, 12);
+
+statement error
+SELECT * FROM integers WHERE SUM(a) > 10;
+
+statement ok
+DROP TABLE integers;
