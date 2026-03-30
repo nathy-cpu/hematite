@@ -1,0 +1,23 @@
+# Adapted from:
+# https://github.com/duckdb/duckdb/blob/main/test/sql/select/test_positional_reference.test
+
+statement error
+SELECT #1 FROM integers;
+
+statement error
+SELECT #1 + #2 FROM integers;
+
+statement error
+SELECT #1 FROM (SELECT i FROM integers) AS tbl;
+
+statement error
+SELECT #2 FROM integers;
+
+statement error
+SELECT #1;
+
+statement error
+SELECT #0 FROM integers;
+
+statement error
+SELECT #-1 FROM integers;

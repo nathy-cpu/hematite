@@ -53,6 +53,16 @@ Promoted/adapted so far:
 - `test/sql/select/test_select_into.test`
   - adapted to:
     - `third_party/portable/select_into_errors_from_duckdb.slt`
+- `test/sql/select/test_positional_reference.test`
+  - adapted to:
+    - `third_party/portable/positional_reference_errors_from_duckdb.slt`
+  - notes:
+    - kept as an unsupported-syntax regression because Hematite does not implement `#n` positional references
+- `test/sql/select/test_select_alias_prefix_colon.test`
+  - adapted to:
+    - `third_party/portable/select_alias_prefix_colon_errors_from_duckdb.slt`
+  - notes:
+    - kept as an unsupported-syntax regression because Hematite does not implement DuckDB's `alias : expr` or `alias : source` syntax
 - `test/sql/filter/test_alias_filter.test`
   - intentionally not promoted
   - reason:
