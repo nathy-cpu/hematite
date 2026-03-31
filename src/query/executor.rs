@@ -33,7 +33,7 @@ use crate::query::lowering::{lower_literal_value, lower_type_name, raise_literal
 use crate::query::plan::{ExecutionProgram, QueryPlan, SelectAccessPath};
 use crate::query::predicate::extract_literal_equalities;
 pub use crate::query::runtime::{ExecutionContext, MutationEvent, QueryExecutor, QueryResult};
-use crate::query::validation::{validate_column_reference, validate_statement};
+use crate::query::validation::{projected_column_names, validate_column_reference, validate_statement};
 use crate::query::QueryPlanner;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -158,13 +158,12 @@ impl SelectExecutor {
         Ok(sources)
     }
 
-    fn query_output_columns(&self, query: &SelectStatement) -> Vec<String> {
-        query
-            .columns
-            .iter()
-            .enumerate()
-            .map(|(index, _)| query.output_name(index).unwrap_or_else(|| "*".to_string()))
-            .collect()
+    fn query_output_columns(
+        &self,
+        query: &SelectStatement,
+        ctx: &ExecutionContext,
+    ) -> Result<Vec<String>> {
+        projected_column_names(query, &ctx.catalog)
     }
 
     fn resolve_column_index(
@@ -1180,7 +1179,7 @@ impl SelectExecutor {
             return Ok(NamedSource {
                 source: ResolvedSource {
                     name: table_name.to_string(),
-                    columns: self.query_output_columns(&cte.query),
+                    columns: self.query_output_columns(&cte.query, ctx)?,
                     alias,
                     offset,
                 },

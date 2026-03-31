@@ -1767,6 +1767,13 @@ fn collect_source_bindings(
     Ok(bindings)
 }
 
+pub(crate) fn source_column_names(select: &SelectStatement, catalog: &Schema) -> Result<Vec<String>> {
+    Ok(collect_source_bindings(select, catalog, &select.from)?
+        .into_iter()
+        .flat_map(|binding| binding.columns)
+        .collect())
+}
+
 fn collect_source_bindings_into(
     select: &SelectStatement,
     catalog: &Schema,
@@ -1782,7 +1789,7 @@ fn collect_source_bindings_into(
                 bindings.push(SourceBinding {
                     source_name: table_name.clone(),
                     alias: alias.clone(),
-                    columns: projected_column_names(&cte.query, catalog)?,
+                    columns: cte_projected_column_names(cte, catalog)?,
                     has_hidden_rowid: false,
                 });
                 Ok(())
@@ -1827,7 +1834,29 @@ fn collect_source_bindings_into(
     }
 }
 
-fn projected_column_names(select: &SelectStatement, catalog: &Schema) -> Result<Vec<String>> {
+fn cte_projected_column_names(cte: &CommonTableExpression, catalog: &Schema) -> Result<Vec<String>> {
+    if cte.recursive {
+        return cte
+            .query
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                cte.query.output_name(index).ok_or_else(|| {
+                    HematiteError::ParseError(format!(
+                        "Recursive CTE '{}' requires a name for projected column {}",
+                        cte.name,
+                        index + 1
+                    ))
+                })
+            })
+            .collect();
+    }
+
+    projected_column_names(&cte.query, catalog)
+}
+
+pub(crate) fn projected_column_names(select: &SelectStatement, catalog: &Schema) -> Result<Vec<String>> {
     let mut names = Vec::with_capacity(select.columns.len());
     for (index, item) in select.columns.iter().enumerate() {
         if let Some(alias) = select
@@ -1841,9 +1870,7 @@ fn projected_column_names(select: &SelectStatement, catalog: &Schema) -> Result<
 
         match item {
             SelectItem::Wildcard => {
-                return Err(HematiteError::ParseError(
-                    "Wildcard projections are not supported in derived tables or CTEs".to_string(),
-                ))
+                names.extend(source_column_names(select, catalog)?);
             }
             SelectItem::Column(name) => {
                 validate_column_reference(select, name, catalog, &select.from)?;

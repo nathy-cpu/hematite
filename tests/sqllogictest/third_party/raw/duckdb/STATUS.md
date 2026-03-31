@@ -64,6 +64,8 @@ Promoted/adapted so far:
   - notes:
     - kept as an unsupported-syntax regression because Hematite does not implement DuckDB's `alias : expr` or `alias : source` syntax
 - `test/sql/filter/test_alias_filter.test`
-  - intentionally not promoted
-  - reason:
-    - Hematite does not currently support using a SELECT-list alias inside `WHERE`
+  - partially adapted to:
+    - `third_party/portable/alias_filter_from_duckdb.slt`
+  - notes:
+    - aggregate-alias and repeated-alias variants were left out
+    - Hematite now supports unqualified SELECT-list aliases in `WHERE`, while still giving source columns precedence

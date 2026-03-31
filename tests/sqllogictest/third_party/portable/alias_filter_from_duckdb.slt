@@ -1,0 +1,31 @@
+# Adapted from:
+# https://github.com/duckdb/duckdb/blob/main/test/sql/filter/test_alias_filter.test
+
+statement ok
+CREATE TABLE integers(i INTEGER PRIMARY KEY);
+
+statement ok
+INSERT INTO integers (i) VALUES (1), (2), (3);
+
+query I
+SELECT i % 2 AS k FROM integers WHERE k <> 0 ORDER BY i;
+----
+1
+1
+
+query I
+SELECT i % 2 AS i FROM integers WHERE i <> 0;
+----
+1
+0
+1
+
+query I
+SELECT i % 2 AS k FROM integers WHERE integers.i <> 0;
+----
+1
+0
+1
+
+statement ok
+DROP TABLE integers;

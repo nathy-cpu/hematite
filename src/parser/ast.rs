@@ -1939,7 +1939,24 @@ impl SelectStatement {
                     bindings.push(SourceBinding {
                         source_name: table_name.clone(),
                         alias: alias.clone(),
-                        columns: cte.query.projected_column_names(catalog)?,
+                        columns: if cte.recursive {
+                            cte.query
+                                .columns
+                                .iter()
+                                .enumerate()
+                                .map(|(index, _)| {
+                                    cte.query.output_name(index).ok_or_else(|| {
+                                        HematiteError::ParseError(format!(
+                                            "Recursive CTE '{}' requires a name for projected column {}",
+                                            cte.name,
+                                            index + 1
+                                        ))
+                                    })
+                                })
+                                .collect::<Result<Vec<_>>>()?
+                        } else {
+                            cte.query.projected_column_names(catalog)?
+                        },
                         has_hidden_rowid: false,
                     });
                     Ok(())
@@ -1999,10 +2016,11 @@ impl SelectStatement {
 
             match item {
                 SelectItem::Wildcard => {
-                    return Err(HematiteError::ParseError(
-                        "Wildcard projections are not supported in derived tables or CTEs"
-                            .to_string(),
-                    ))
+                    names.extend(
+                        self.collect_source_bindings(catalog, &self.from)?
+                            .into_iter()
+                            .flat_map(|binding| binding.columns),
+                    );
                 }
                 SelectItem::Column(name) => {
                     self.validate_column_reference(name, catalog, &self.from)?;

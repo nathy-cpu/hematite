@@ -492,6 +492,9 @@ impl Lexer {
                 if self.peek_char() == Some('=') {
                     self.advance_char();
                     Token::LessThanOrEqual
+                } else if self.peek_char() == Some('>') {
+                    self.advance_char();
+                    Token::NotEqual
                 } else {
                     Token::LessThan
                 }

@@ -30,14 +30,14 @@ use crate::parser::ast::{
 use crate::parser::{Lexer, Parser};
 use crate::query::lowering::raise_literal_value;
 use crate::query::metadata as query_metadata;
-use crate::query::validation::validate_statement;
+use crate::query::validation::{projected_column_names, source_column_names, validate_statement};
 use crate::query::{
     Catalog, CatalogEngine, ExecutionContext, JournalMode, MutationEvent, QueryCatalogSnapshot,
     QueryExecutor, QueryPlanner, QueryResult, Schema, Value,
 };
 use crate::sql::result::ExecutedStatement;
 use crate::sql::script::{split_script_tokens, ScriptIter};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 #[derive(Debug, Clone)]
@@ -443,6 +443,415 @@ impl Connection {
         Ok(())
     }
 
+    fn normalize_statement(statement: Statement, schema: &Schema) -> Result<Statement> {
+        let mut statement = Self::expand_views_in_statement(statement, schema)?;
+        Self::rewrite_select_aliases_in_statement(&mut statement, schema)?;
+        Ok(statement)
+    }
+
+    fn rewrite_select_aliases_in_statement(statement: &mut Statement, schema: &Schema) -> Result<()> {
+        match statement {
+            Statement::Explain(explain) => {
+                Self::rewrite_select_aliases_in_statement(&mut explain.statement, schema)
+            }
+            Statement::Select(select) => Self::rewrite_select_aliases_in_select(select, schema),
+            Statement::Insert(insert) => {
+                if let InsertSource::Select(select) = &mut insert.source {
+                    Self::rewrite_select_aliases_in_select(select, schema)?;
+                }
+                Ok(())
+            }
+            Statement::CreateView(create_view) => {
+                Self::rewrite_select_aliases_in_select(&mut create_view.query, schema)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn rewrite_select_aliases_in_select(select: &mut SelectStatement, schema: &Schema) -> Result<()> {
+        for cte in &mut select.with_clause {
+            if !cte.recursive {
+                Self::rewrite_select_aliases_in_select(&mut cte.query, schema)?;
+            }
+        }
+
+        Self::rewrite_select_aliases_in_table_reference(&mut select.from, schema)?;
+
+        for item in &mut select.columns {
+            match item {
+                crate::parser::ast::SelectItem::Expression(expr) => {
+                    Self::rewrite_nested_select_aliases_in_expression(expr, schema)?;
+                }
+                crate::parser::ast::SelectItem::Window { window, .. } => {
+                    for expr in &mut window.partition_by {
+                        Self::rewrite_nested_select_aliases_in_expression(expr, schema)?;
+                    }
+                }
+                crate::parser::ast::SelectItem::Wildcard
+                | crate::parser::ast::SelectItem::Column(_)
+                | crate::parser::ast::SelectItem::CountAll
+                | crate::parser::ast::SelectItem::Aggregate { .. } => {}
+            }
+        }
+
+        let alias_map = Self::where_alias_map(select);
+        let source_columns = source_column_names(select, schema)?
+            .into_iter()
+            .collect::<HashSet<_>>();
+
+        if let Some(where_clause) = &mut select.where_clause {
+            for condition in &mut where_clause.conditions {
+                Self::rewrite_where_aliases_in_condition(
+                    condition,
+                    &alias_map,
+                    &source_columns,
+                    &mut HashSet::new(),
+                )?;
+            }
+        }
+
+        for expr in &mut select.group_by {
+            Self::rewrite_nested_select_aliases_in_expression(expr, schema)?;
+        }
+
+        if let Some(having_clause) = &mut select.having_clause {
+            for condition in &mut having_clause.conditions {
+                Self::rewrite_nested_select_aliases_in_condition(condition, schema)?;
+            }
+        }
+
+        if let Some(set_operation) = &mut select.set_operation {
+            Self::rewrite_select_aliases_in_select(&mut set_operation.right, schema)?;
+        }
+
+        Ok(())
+    }
+
+    fn rewrite_select_aliases_in_table_reference(
+        from: &mut TableReference,
+        schema: &Schema,
+    ) -> Result<()> {
+        match from {
+            TableReference::Derived { subquery, .. } => {
+                Self::rewrite_select_aliases_in_select(subquery, schema)
+            }
+            TableReference::CrossJoin(left, right) => {
+                Self::rewrite_select_aliases_in_table_reference(left, schema)?;
+                Self::rewrite_select_aliases_in_table_reference(right, schema)
+            }
+            TableReference::InnerJoin { left, right, on }
+            | TableReference::LeftJoin { left, right, on }
+            | TableReference::RightJoin { left, right, on }
+            | TableReference::FullOuterJoin { left, right, on } => {
+                Self::rewrite_select_aliases_in_table_reference(left, schema)?;
+                Self::rewrite_select_aliases_in_table_reference(right, schema)?;
+                Self::rewrite_nested_select_aliases_in_condition(on, schema)
+            }
+            TableReference::Table(_, _) => Ok(()),
+        }
+    }
+
+    fn rewrite_nested_select_aliases_in_condition(
+        condition: &mut Condition,
+        schema: &Schema,
+    ) -> Result<()> {
+        match condition {
+            Condition::Comparison { left, right, .. } => {
+                Self::rewrite_nested_select_aliases_in_expression(left, schema)?;
+                Self::rewrite_nested_select_aliases_in_expression(right, schema)?;
+            }
+            Condition::InList { expr, values, .. } => {
+                Self::rewrite_nested_select_aliases_in_expression(expr, schema)?;
+                for value in values {
+                    Self::rewrite_nested_select_aliases_in_expression(value, schema)?;
+                }
+            }
+            Condition::InSubquery { expr, subquery, .. } => {
+                Self::rewrite_nested_select_aliases_in_expression(expr, schema)?;
+                Self::rewrite_select_aliases_in_select(subquery, schema)?;
+            }
+            Condition::Between {
+                expr, lower, upper, ..
+            } => {
+                Self::rewrite_nested_select_aliases_in_expression(expr, schema)?;
+                Self::rewrite_nested_select_aliases_in_expression(lower, schema)?;
+                Self::rewrite_nested_select_aliases_in_expression(upper, schema)?;
+            }
+            Condition::Like { expr, pattern, .. } => {
+                Self::rewrite_nested_select_aliases_in_expression(expr, schema)?;
+                Self::rewrite_nested_select_aliases_in_expression(pattern, schema)?;
+            }
+            Condition::Exists { subquery, .. } => {
+                Self::rewrite_select_aliases_in_select(subquery, schema)?;
+            }
+            Condition::NullCheck { expr, .. } => {
+                Self::rewrite_nested_select_aliases_in_expression(expr, schema)?;
+            }
+            Condition::Not(inner) => Self::rewrite_nested_select_aliases_in_condition(inner, schema)?,
+            Condition::Logical { left, right, .. } => {
+                Self::rewrite_nested_select_aliases_in_condition(left, schema)?;
+                Self::rewrite_nested_select_aliases_in_condition(right, schema)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn rewrite_nested_select_aliases_in_expression(
+        expr: &mut Expression,
+        schema: &Schema,
+    ) -> Result<()> {
+        match expr {
+            Expression::ScalarSubquery(subquery) => {
+                Self::rewrite_select_aliases_in_select(subquery, schema)
+            }
+            Expression::Cast { expr, .. }
+            | Expression::UnaryMinus(expr)
+            | Expression::UnaryNot(expr)
+            | Expression::NullCheck { expr, .. } => {
+                Self::rewrite_nested_select_aliases_in_expression(expr, schema)
+            }
+            Expression::Case {
+                branches,
+                else_expr,
+            } => {
+                for branch in branches {
+                    Self::rewrite_nested_select_aliases_in_expression(
+                        &mut branch.condition,
+                        schema,
+                    )?;
+                    Self::rewrite_nested_select_aliases_in_expression(
+                        &mut branch.result,
+                        schema,
+                    )?;
+                }
+                if let Some(else_expr) = else_expr {
+                    Self::rewrite_nested_select_aliases_in_expression(else_expr, schema)?;
+                }
+                Ok(())
+            }
+            Expression::ScalarFunctionCall { args, .. } => {
+                for arg in args {
+                    Self::rewrite_nested_select_aliases_in_expression(arg, schema)?;
+                }
+                Ok(())
+            }
+            Expression::Binary { left, right, .. }
+            | Expression::Comparison { left, right, .. }
+            | Expression::Logical { left, right, .. } => {
+                Self::rewrite_nested_select_aliases_in_expression(left, schema)?;
+                Self::rewrite_nested_select_aliases_in_expression(right, schema)
+            }
+            Expression::InList { expr, values, .. } => {
+                Self::rewrite_nested_select_aliases_in_expression(expr, schema)?;
+                for value in values {
+                    Self::rewrite_nested_select_aliases_in_expression(value, schema)?;
+                }
+                Ok(())
+            }
+            Expression::InSubquery { expr, subquery, .. } => {
+                Self::rewrite_nested_select_aliases_in_expression(expr, schema)?;
+                Self::rewrite_select_aliases_in_select(subquery, schema)
+            }
+            Expression::Between {
+                expr, lower, upper, ..
+            } => {
+                Self::rewrite_nested_select_aliases_in_expression(expr, schema)?;
+                Self::rewrite_nested_select_aliases_in_expression(lower, schema)?;
+                Self::rewrite_nested_select_aliases_in_expression(upper, schema)
+            }
+            Expression::Like { expr, pattern, .. } => {
+                Self::rewrite_nested_select_aliases_in_expression(expr, schema)?;
+                Self::rewrite_nested_select_aliases_in_expression(pattern, schema)
+            }
+            Expression::Exists { subquery, .. } => {
+                Self::rewrite_select_aliases_in_select(subquery, schema)
+            }
+            Expression::AggregateCall { .. }
+            | Expression::Column(_)
+            | Expression::Literal(_)
+            | Expression::IntervalLiteral { .. }
+            | Expression::Parameter(_) => Ok(()),
+        }
+    }
+
+    fn where_alias_map(select: &SelectStatement) -> HashMap<String, Expression> {
+        let mut aliases = HashMap::new();
+        for (index, alias) in select.column_aliases.iter().enumerate() {
+            let Some(alias) = alias.as_ref() else {
+                continue;
+            };
+            let Some(item) = select.columns.get(index) else {
+                continue;
+            };
+
+            let replacement = match item {
+                crate::parser::ast::SelectItem::Column(name) => Expression::Column(name.clone()),
+                crate::parser::ast::SelectItem::Expression(expr) => expr.clone(),
+                _ => continue,
+            };
+            aliases.insert(alias.clone(), replacement);
+        }
+        aliases
+    }
+
+    fn rewrite_where_aliases_in_condition(
+        condition: &mut Condition,
+        aliases: &HashMap<String, Expression>,
+        source_columns: &HashSet<String>,
+        active_aliases: &mut HashSet<String>,
+    ) -> Result<()> {
+        match condition {
+            Condition::Comparison { left, right, .. } => {
+                Self::rewrite_where_aliases_in_expression(left, aliases, source_columns, active_aliases)?;
+                Self::rewrite_where_aliases_in_expression(right, aliases, source_columns, active_aliases)?;
+            }
+            Condition::InList { expr, values, .. } => {
+                Self::rewrite_where_aliases_in_expression(expr, aliases, source_columns, active_aliases)?;
+                for value in values {
+                    Self::rewrite_where_aliases_in_expression(value, aliases, source_columns, active_aliases)?;
+                }
+            }
+            Condition::InSubquery { expr, .. } => {
+                Self::rewrite_where_aliases_in_expression(expr, aliases, source_columns, active_aliases)?;
+            }
+            Condition::Between {
+                expr, lower, upper, ..
+            } => {
+                Self::rewrite_where_aliases_in_expression(expr, aliases, source_columns, active_aliases)?;
+                Self::rewrite_where_aliases_in_expression(lower, aliases, source_columns, active_aliases)?;
+                Self::rewrite_where_aliases_in_expression(upper, aliases, source_columns, active_aliases)?;
+            }
+            Condition::Like { expr, pattern, .. } => {
+                Self::rewrite_where_aliases_in_expression(expr, aliases, source_columns, active_aliases)?;
+                Self::rewrite_where_aliases_in_expression(pattern, aliases, source_columns, active_aliases)?;
+            }
+            Condition::Exists { .. } => {}
+            Condition::NullCheck { expr, .. } => {
+                Self::rewrite_where_aliases_in_expression(expr, aliases, source_columns, active_aliases)?;
+            }
+            Condition::Not(inner) => {
+                Self::rewrite_where_aliases_in_condition(inner, aliases, source_columns, active_aliases)?;
+            }
+            Condition::Logical { left, right, .. } => {
+                Self::rewrite_where_aliases_in_condition(left, aliases, source_columns, active_aliases)?;
+                Self::rewrite_where_aliases_in_condition(right, aliases, source_columns, active_aliases)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn rewrite_where_aliases_in_expression(
+        expr: &mut Expression,
+        aliases: &HashMap<String, Expression>,
+        source_columns: &HashSet<String>,
+        active_aliases: &mut HashSet<String>,
+    ) -> Result<()> {
+        match expr {
+            Expression::Column(name) => {
+                if SelectStatement::split_column_reference(name).0.is_some()
+                    || source_columns.contains(name)
+                {
+                    return Ok(());
+                }
+
+                let Some(replacement) = aliases.get(name).cloned() else {
+                    return Ok(());
+                };
+
+                if !active_aliases.insert(name.clone()) {
+                    return Err(HematiteError::ParseError(format!(
+                        "Select alias '{}' is recursively defined",
+                        name
+                    )));
+                }
+
+                let mut replacement = replacement;
+                Self::rewrite_where_aliases_in_expression(
+                    &mut replacement,
+                    aliases,
+                    source_columns,
+                    active_aliases,
+                )?;
+                active_aliases.remove(name);
+                *expr = replacement;
+            }
+            Expression::Cast { expr, .. }
+            | Expression::UnaryMinus(expr)
+            | Expression::UnaryNot(expr)
+            | Expression::NullCheck { expr, .. } => {
+                Self::rewrite_where_aliases_in_expression(expr, aliases, source_columns, active_aliases)?;
+            }
+            Expression::Case {
+                branches,
+                else_expr,
+            } => {
+                for branch in branches {
+                    Self::rewrite_where_aliases_in_expression(
+                        &mut branch.condition,
+                        aliases,
+                        source_columns,
+                        active_aliases,
+                    )?;
+                    Self::rewrite_where_aliases_in_expression(
+                        &mut branch.result,
+                        aliases,
+                        source_columns,
+                        active_aliases,
+                    )?;
+                }
+                if let Some(else_expr) = else_expr {
+                    Self::rewrite_where_aliases_in_expression(
+                        else_expr,
+                        aliases,
+                        source_columns,
+                        active_aliases,
+                    )?;
+                }
+            }
+            Expression::ScalarFunctionCall { args, .. } => {
+                for arg in args {
+                    Self::rewrite_where_aliases_in_expression(
+                        arg,
+                        aliases,
+                        source_columns,
+                        active_aliases,
+                    )?;
+                }
+            }
+            Expression::Binary { left, right, .. }
+            | Expression::Comparison { left, right, .. }
+            | Expression::Logical { left, right, .. } => {
+                Self::rewrite_where_aliases_in_expression(left, aliases, source_columns, active_aliases)?;
+                Self::rewrite_where_aliases_in_expression(right, aliases, source_columns, active_aliases)?;
+            }
+            Expression::InList { expr, values, .. } => {
+                Self::rewrite_where_aliases_in_expression(expr, aliases, source_columns, active_aliases)?;
+                for value in values {
+                    Self::rewrite_where_aliases_in_expression(value, aliases, source_columns, active_aliases)?;
+                }
+            }
+            Expression::Between {
+                expr, lower, upper, ..
+            } => {
+                Self::rewrite_where_aliases_in_expression(expr, aliases, source_columns, active_aliases)?;
+                Self::rewrite_where_aliases_in_expression(lower, aliases, source_columns, active_aliases)?;
+                Self::rewrite_where_aliases_in_expression(upper, aliases, source_columns, active_aliases)?;
+            }
+            Expression::Like { expr, pattern, .. } => {
+                Self::rewrite_where_aliases_in_expression(expr, aliases, source_columns, active_aliases)?;
+                Self::rewrite_where_aliases_in_expression(pattern, aliases, source_columns, active_aliases)?;
+            }
+            Expression::AggregateCall { .. }
+            | Expression::ScalarSubquery(_)
+            | Expression::InSubquery { .. }
+            | Expression::Exists { .. }
+            | Expression::Literal(_)
+            | Expression::IntervalLiteral { .. }
+            | Expression::Parameter(_) => {}
+        }
+        Ok(())
+    }
+
     pub(crate) fn execute_statement(
         &mut self,
         statement: crate::parser::ast::Statement,
@@ -596,12 +1005,18 @@ impl Connection {
                     statement.view
                 )));
             }
-            let expanded_query = Self::expand_views_in_select(statement.query.clone(), &schema)?;
+            let normalized_query = match Self::normalize_statement(
+                Statement::Select(statement.query.clone()),
+                &schema,
+            )? {
+                Statement::Select(select) => select,
+                _ => unreachable!("normalized create view query should remain a select"),
+            };
             validate_statement(
                 &crate::parser::ast::Statement::CreateView(CreateViewStatement {
                     view: statement.view.clone(),
                     if_not_exists: statement.if_not_exists,
-                    query: expanded_query,
+                    query: normalized_query.clone(),
                 }),
                 &schema,
             )?;
@@ -609,21 +1024,7 @@ impl Connection {
             if statement.if_not_exists && catalog_guard.get_view(&statement.view)?.is_some() {
                 Ok(Self::mutation_result(0))
             } else {
-                let column_names = statement
-                    .query
-                    .columns
-                    .iter()
-                    .enumerate()
-                    .map(|(index, _)| {
-                        statement.query.output_name(index).ok_or_else(|| {
-                            HematiteError::ParseError(format!(
-                                "View '{}' requires a name for projected column {}",
-                                statement.view,
-                                index + 1
-                            ))
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?;
+                let column_names = projected_column_names(&normalized_query, &schema)?;
 
                 catalog_guard.create_view(crate::catalog::View {
                     name: statement.view.clone(),
@@ -867,7 +1268,7 @@ impl Connection {
         statement: crate::parser::ast::Statement,
     ) -> Result<(Schema, Box<dyn QueryExecutor>)> {
         let (schema, table_row_counts) = self.read_planning_state()?;
-        let statement = Self::expand_views_in_statement(statement, &schema)?;
+        let statement = Self::normalize_statement(statement, &schema)?;
         let planner = QueryPlanner::new(schema.clone()).with_table_row_counts(table_row_counts);
         let plan = planner.plan(statement)?;
         Ok((schema, plan.into_executor()))

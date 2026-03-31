@@ -1145,6 +1145,20 @@ mod parser_tests {
     }
 
     #[test]
+    fn test_parse_not_equal_angle_brackets() -> Result<()> {
+        let select = parse_select("SELECT id FROM users WHERE id <> 1;")?;
+        let where_clause = select.where_clause.expect("missing WHERE clause");
+        assert!(matches!(
+            &where_clause.conditions[0],
+            Condition::Comparison {
+                operator: ComparisonOperator::NotEqual,
+                ..
+            }
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_case_expression_with_boolean_condition_expression() -> Result<()> {
         let select = parse_select(
             "SELECT CASE WHEN score > 10 AND NOT active THEN 'high' ELSE 'low' END FROM users;",

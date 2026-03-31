@@ -44,6 +44,118 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_select_alias_is_usable_in_where() -> Result<()> {
+        let db = TestDbFile::new("_test_select_alias_is_usable_in_where");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE integers (i INTEGER PRIMARY KEY);")?;
+        conn.execute("INSERT INTO integers (i) VALUES (1), (2), (3), (4);")?;
+
+        let result = conn.execute(
+            "SELECT i % 2 AS k FROM integers WHERE k <> 0 ORDER BY i;",
+        )?;
+        assert_eq!(result.columns, vec!["k"]);
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![crate::catalog::Value::Integer(1)],
+                vec![crate::catalog::Value::Integer(1)],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_where_prefers_source_column_over_projection_alias() -> Result<()> {
+        let db = TestDbFile::new("_test_where_prefers_source_column_over_projection_alias");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE integers (i INTEGER PRIMARY KEY);")?;
+        conn.execute("INSERT INTO integers (i) VALUES (1), (2), (3);")?;
+
+        let result = conn.execute("SELECT i % 2 AS i FROM integers WHERE i <> 0;")?;
+        assert_eq!(result.columns, vec!["i"]);
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![crate::catalog::Value::Integer(1)],
+                vec![crate::catalog::Value::Integer(0)],
+                vec![crate::catalog::Value::Integer(1)],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_wildcard_projection_works_in_derived_tables_and_ctes() -> Result<()> {
+        let db = TestDbFile::new("_test_wildcard_projection_works_in_derived_tables_and_ctes");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("INSERT INTO items (id, name) VALUES (1, 'a'), (2, 'b');")?;
+
+        let derived = conn.execute(
+            "SELECT d.id, d.name FROM (SELECT * FROM items) AS d ORDER BY d.id;",
+        )?;
+        assert_eq!(derived.columns, vec!["id", "name"]);
+        assert_eq!(
+            derived.rows,
+            vec![
+                vec![
+                    crate::catalog::Value::Integer(1),
+                    crate::catalog::Value::Text("a".to_string()),
+                ],
+                vec![
+                    crate::catalog::Value::Integer(2),
+                    crate::catalog::Value::Text("b".to_string()),
+                ],
+            ]
+        );
+
+        let cte = conn.execute(
+            "WITH copied AS (SELECT * FROM items) SELECT id, name FROM copied ORDER BY id;",
+        )?;
+        assert_eq!(cte.columns, vec!["id", "name"]);
+        assert_eq!(cte.rows, derived.rows);
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_create_view_allows_wildcard_projection() -> Result<()> {
+        let db = TestDbFile::new("_test_create_view_allows_wildcard_projection");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("INSERT INTO items (id, name) VALUES (1, 'a'), (2, 'b');")?;
+        conn.execute("CREATE VIEW item_view AS SELECT * FROM items;")?;
+
+        let result = conn.execute("SELECT * FROM item_view ORDER BY id;")?;
+        assert_eq!(result.columns, vec!["id", "name"]);
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![
+                    crate::catalog::Value::Integer(1),
+                    crate::catalog::Value::Text("a".to_string()),
+                ],
+                vec![
+                    crate::catalog::Value::Integer(2),
+                    crate::catalog::Value::Text("b".to_string()),
+                ],
+            ]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_additional_temporal_binary_and_enum_types_round_trip() -> Result<()> {
         let db = TestDbFile::new("_test_additional_temporal_binary_and_enum_types_round_trip");
         let mut conn = Connection::new(db.path())?;
