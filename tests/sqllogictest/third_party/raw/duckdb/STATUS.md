@@ -6,17 +6,20 @@ Current mirror status:
 - mirrored successfully:
   - `test/sql/select`
   - `test/sql/filter`
-- target directories identified for later expansion:
+  - `test/sql/setops`
+  - `test/sql/cte`
+  - `test/sql/subquery`
   - `test/sql/join`
+  - `test/sql/window`
   - `test/sql/order`
   - `test/sql/limit`
-  - `test/sql/setops`
-  - `test/sql/subquery`
-  - `test/sql/cte`
-  - `test/sql/window`
   - `test/sql/insert`
   - `test/sql/update`
   - `test/sql/delete`
+
+This raw mirror is intentionally broader than the promoted portable bucket.
+Only files explicitly adapted into `third_party/portable` are executed by Hematite's
+sqllogictest runner.
 
 Notes:
 - DuckDB uses `.test` / `.test_slow` files rather than `.slt`.
