@@ -1,0 +1,37 @@
+# Adapted from:
+# https://github.com/duckdb/duckdb/blob/main/test/sql/window/test_rank.test
+# https://github.com/duckdb/duckdb/blob/main/test/sql/window/test_dense_rank.test
+
+statement ok
+CREATE TABLE rank_test (id INTEGER PRIMARY KEY, grp INTEGER, score INTEGER);
+
+statement ok
+INSERT INTO rank_test (id, grp, score) VALUES
+    (1, 1, 10),
+    (2, 1, 10),
+    (3, 1, 20),
+    (4, 2, 5),
+    (5, 2, 5),
+    (6, 2, 9);
+
+query III rowsort
+SELECT grp, score, RANK() OVER (PARTITION BY grp ORDER BY score)
+FROM rank_test;
+----
+1 10 1
+1 10 1
+1 20 3
+2 5 1
+2 5 1
+2 9 3
+
+query III rowsort
+SELECT grp, score, DENSE_RANK() OVER (PARTITION BY grp ORDER BY score)
+FROM rank_test;
+----
+1 10 1
+1 10 1
+1 20 2
+2 5 1
+2 5 1
+2 9 2

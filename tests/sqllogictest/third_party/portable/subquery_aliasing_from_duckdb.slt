@@ -1,0 +1,18 @@
+# Adapted from:
+# https://github.com/duckdb/duckdb/blob/main/test/sql/subquery/table/test_aliasing.test
+
+statement ok
+CREATE TABLE subquery_alias_test (i INTEGER PRIMARY KEY);
+
+statement ok
+INSERT INTO subquery_alias_test (i) VALUES (42);
+
+query I nosort
+SELECT * FROM (SELECT i AS j FROM subquery_alias_test GROUP BY i) sq1 WHERE j = 42;
+----
+42
+
+query I nosort
+SELECT * FROM (SELECT i AS j FROM subquery_alias_test GROUP BY i) sq1 WHERE j = 42;
+----
+42

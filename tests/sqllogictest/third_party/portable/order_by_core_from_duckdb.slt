@@ -1,0 +1,39 @@
+# Adapted from:
+# https://github.com/duckdb/duckdb/blob/main/test/sql/order/test_order_by.test
+
+statement ok
+CREATE TABLE order_test (a INTEGER PRIMARY KEY, b INTEGER);
+
+statement ok
+INSERT INTO order_test (a, b) VALUES (11, 22), (12, 21), (13, 22);
+
+query I nosort
+SELECT b FROM order_test WHERE a = 12;
+----
+21
+
+query I nosort
+SELECT b FROM order_test ORDER BY a DESC;
+----
+22
+21
+22
+
+query II nosort
+SELECT a, b FROM order_test ORDER BY a;
+----
+11 22
+12 21
+13 22
+
+query II nosort
+SELECT a, b FROM order_test ORDER BY b, a;
+----
+12 21
+11 22
+13 22
+
+query II nosort
+SELECT a, b FROM order_test ORDER BY b, a DESC LIMIT 1 OFFSET 1;
+----
+13 22

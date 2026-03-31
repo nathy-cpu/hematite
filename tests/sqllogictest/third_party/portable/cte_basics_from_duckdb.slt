@@ -1,0 +1,21 @@
+# Adapted from:
+# https://github.com/duckdb/duckdb/blob/main/test/sql/cte/test_cte.test
+
+statement ok
+CREATE TABLE cte_test (i INTEGER PRIMARY KEY);
+
+statement ok
+INSERT INTO cte_test (i) VALUES (42);
+
+query I nosort
+WITH cte1 AS (SELECT i AS j FROM cte_test) SELECT * FROM cte1;
+----
+42
+
+query I nosort
+WITH cte1 AS (SELECT i AS j FROM cte_test) SELECT j + 1 FROM cte1;
+----
+43
+
+statement error
+WITH cte1 AS (SELECT 42), cte1 AS (SELECT 42) SELECT * FROM cte1;

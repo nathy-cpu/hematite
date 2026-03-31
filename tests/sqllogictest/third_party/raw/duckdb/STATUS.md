@@ -74,3 +74,48 @@ Promoted/adapted so far:
   - notes:
     - aggregate-alias and repeated-alias variants were left out
     - Hematite now supports unqualified SELECT-list aliases in `WHERE`, while still giving source columns precedence
+- `test/sql/setops/test_setops.test`
+  - partially adapted to:
+    - `third_party/portable/setops_core_from_duckdb.slt`
+  - notes:
+    - kept to table-backed UNION and DISTINCT set-operation cases
+    - bare constant-select set-operation forms were left out because Hematite's parser currently expects a regular select source shape there
+- `test/sql/setops/test_except.test`
+  - partially adapted to:
+    - `third_party/portable/setops_core_from_duckdb.slt`
+  - notes:
+    - NOCASE collation cases were left out because Hematite does not implement collation semantics
+- `test/sql/subquery/table/test_table_subquery.test`
+  - partially adapted to:
+    - `third_party/portable/table_subquery_from_duckdb.slt`
+- `test/sql/join/cross_product/test_cross_product.test`
+  - partially adapted to:
+    - `third_party/portable/cross_product_from_duckdb.slt`
+  - notes:
+    - `range(...)`-based large-count cases were left out because Hematite does not expose DuckDB's table-function syntax
+- `test/sql/cte/test_cte.test`
+  - partially adapted to:
+    - `third_party/portable/cte_basics_from_duckdb.slt`
+  - notes:
+    - recursive/materialized, alias-list-heavy, and chained-CTE variants were left out for a smaller portable baseline because Hematite does not yet resolve later CTEs from earlier CTE definitions in the same `WITH` list
+- `test/sql/subquery/table/test_aliasing.test`
+  - adapted to:
+    - `third_party/portable/subquery_aliasing_from_duckdb.slt`
+  - notes:
+    - rewritten to group by the underlying column rather than the projection alias because Hematite does not currently resolve grouped aliases there
+- `test/sql/order/test_order_by.test`
+  - partially adapted to:
+    - `third_party/portable/order_by_core_from_duckdb.slt`
+  - notes:
+    - kept to portable ordering and offset cases
+    - left out positional ordering because Hematite does not yet accept `ORDER BY 2, 1`
+    - left out grouped expression ordering because Hematite does not yet support the DuckDB-style grouped alias/expression form cleanly
+    - left out DuckDB-specific `SET` controls, controversial union-order alias cases, and non-integer-literal ordering behavior
+- `test/sql/window/test_rank.test`
+  - partially adapted to:
+    - `third_party/portable/ranking_windows_from_duckdb.slt`
+- `test/sql/window/test_dense_rank.test`
+  - partially adapted to:
+    - `third_party/portable/ranking_windows_from_duckdb.slt`
+  - notes:
+    - the promoted cases use explicit rows instead of `range(...)` and skip `NULLS FIRST/LAST` and frame-clause variants that go beyond Hematite's current window surface
