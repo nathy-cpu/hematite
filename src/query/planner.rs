@@ -59,6 +59,11 @@ impl QueryPlanner {
                 ))
             }
             Statement::Select(select) => self.plan_select(select),
+            Statement::SelectInto(_) => {
+                return Err(HematiteError::ParseError(
+                    "SELECT INTO is handled at the SQL connection boundary".to_string(),
+                ))
+            }
             Statement::Update(update) => self.plan_update(update),
             Statement::Insert(insert) => self.plan_insert(insert),
             Statement::Delete(delete) => self.plan_delete(delete),

@@ -7,8 +7,17 @@ CREATE TABLE t (id INTEGER PRIMARY KEY, value TEXT);
 statement ok
 INSERT INTO t (id, value) VALUES (1, 'foo'), (2, 'bar'), (3, 'baz');
 
-statement error
+statement ok
 SELECT * INTO t2 FROM t WHERE value LIKE 'b%';
+
+query T rowsort
+SELECT value FROM t2;
+----
+bar
+baz
+
+statement ok
+DROP TABLE t2;
 
 statement ok
 DROP TABLE t;

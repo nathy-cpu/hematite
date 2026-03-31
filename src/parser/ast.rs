@@ -20,6 +20,7 @@ pub enum Statement {
     ShowCreateTable(String),
     ShowCreateView(String),
     Select(SelectStatement),
+    SelectInto(SelectIntoStatement),
     Update(UpdateStatement),
     Insert(InsertStatement),
     Delete(DeleteStatement),
@@ -32,6 +33,12 @@ pub enum Statement {
     DropView(DropViewStatement),
     DropTrigger(DropTriggerStatement),
     DropIndex(DropIndexStatement),
+}
+
+#[derive(Debug, Clone)]
+pub struct SelectIntoStatement {
+    pub table: String,
+    pub query: SelectStatement,
 }
 
 #[derive(Debug, Clone)]
@@ -594,6 +601,7 @@ impl Statement {
     pub(crate) fn to_sql(&self) -> String {
         match self {
             Statement::Select(select) => select.to_sql(),
+            Statement::SelectInto(select_into) => select_into.to_sql(),
             Statement::Insert(insert) => {
                 let mut sql = format!(
                     "INSERT INTO {} ({}) ",
@@ -743,6 +751,18 @@ impl Statement {
                 }
             }
             Statement::Select(select) => select.validate(catalog),
+            Statement::SelectInto(select_into) => {
+                if catalog.get_table_by_name(&select_into.table).is_some()
+                    || catalog.view(&select_into.table).is_some()
+                {
+                    Err(HematiteError::ParseError(format!(
+                        "Table '{}' already exists",
+                        select_into.table
+                    )))
+                } else {
+                    select_into.query.validate(catalog)
+                }
+            }
             Statement::Update(update) => update.validate(catalog),
             Statement::Insert(insert) => insert.validate(catalog),
             Statement::Delete(delete) => delete.validate(catalog),
@@ -786,6 +806,7 @@ impl Statement {
         matches!(
             self,
             Statement::Create(_)
+                | Statement::SelectInto(_)
                 | Statement::CreateView(_)
                 | Statement::CreateTrigger(_)
                 | Statement::CreateIndex(_)
@@ -830,6 +851,9 @@ impl Statement {
             Statement::Explain(explain) => explain.statement.visit_parameters(f),
             Statement::Select(select) => {
                 select.visit_parameters(f);
+            }
+            Statement::SelectInto(select_into) => {
+                select_into.query.visit_parameters(f);
             }
             Statement::Update(update) => {
                 for assignment in &update.assignments {
@@ -952,6 +976,12 @@ impl Statement {
                     })
                     .transpose()?,
             })),
+            Statement::SelectInto(select_into) => Ok(Statement::SelectInto(SelectIntoStatement {
+                table: select_into.table.clone(),
+                query: Statement::Select(select_into.query.clone())
+                    .bind_parameters(parameters)?
+                    .into_select()?,
+            })),
             Statement::Update(update) => Ok(Statement::Update(UpdateStatement {
                 table: update.table.clone(),
                 target_binding: update.target_binding.clone(),
@@ -1044,6 +1074,12 @@ impl Statement {
             }
             Statement::DropIndex(drop_index) => Ok(Statement::DropIndex(drop_index.clone())),
         }
+    }
+}
+
+impl SelectIntoStatement {
+    fn to_sql(&self) -> String {
+        self.query.to_sql_with_into(&self.table)
     }
 }
 
@@ -1780,6 +1816,107 @@ impl SelectStatement {
         if let Some(set_operation) = &self.set_operation {
             set_operation.right.collect_dependency_names_into(names);
         }
+    }
+
+    pub(crate) fn to_sql_with_into(&self, table: &str) -> String {
+        let mut parts = Vec::new();
+        if !self.with_clause.is_empty() {
+            let recursive = self.with_clause.iter().any(|cte| cte.recursive);
+            let ctes = self
+                .with_clause
+                .iter()
+                .map(|cte| format!("{} AS ({})", cte.name, cte.query.to_sql()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            parts.push(format!(
+                "WITH {}{}",
+                if recursive { "RECURSIVE " } else { "" },
+                ctes
+            ));
+        }
+
+        let projections = self
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let base = item.to_sql();
+                match self
+                    .column_aliases
+                    .get(index)
+                    .and_then(|alias| alias.clone())
+                {
+                    Some(alias) => format!("{base} AS {alias}"),
+                    None => base,
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        parts.push(format!(
+            "SELECT{} {} INTO {}",
+            if self.distinct { " DISTINCT" } else { "" },
+            projections,
+            table
+        ));
+        parts.push(format!("FROM {}", self.from.to_sql()));
+
+        if let Some(where_clause) = &self.where_clause {
+            parts.push(format!(
+                "WHERE {}",
+                where_clause
+                    .conditions
+                    .iter()
+                    .map(Condition::to_sql)
+                    .collect::<Vec<_>>()
+                    .join(" AND ")
+            ));
+        }
+        if !self.group_by.is_empty() {
+            parts.push(format!(
+                "GROUP BY {}",
+                self.group_by
+                    .iter()
+                    .map(Expression::to_sql)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if let Some(having_clause) = &self.having_clause {
+            parts.push(format!(
+                "HAVING {}",
+                having_clause
+                    .conditions
+                    .iter()
+                    .map(Condition::to_sql)
+                    .collect::<Vec<_>>()
+                    .join(" AND ")
+            ));
+        }
+        if !self.order_by.is_empty() {
+            parts.push(format!(
+                "ORDER BY {}",
+                self.order_by
+                    .iter()
+                    .map(|item| format!("{} {}", item.column, item.direction.to_sql()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if let Some(limit) = self.limit {
+            parts.push(format!("LIMIT {}", limit));
+        }
+        if let Some(offset) = self.offset {
+            parts.push(format!("OFFSET {}", offset));
+        }
+        if let Some(set_operation) = &self.set_operation {
+            parts.push(format!(
+                "{} {}",
+                set_operation.operator.to_sql(),
+                set_operation.right.to_sql()
+            ));
+        }
+
+        parts.join(" ")
     }
 
     pub(crate) fn to_sql(&self) -> String {

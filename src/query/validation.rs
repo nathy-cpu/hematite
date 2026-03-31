@@ -29,6 +29,17 @@ pub(crate) fn validate_statement(statement: &Statement, catalog: &Schema) -> Res
         | Statement::ShowCreateTable(_)
         | Statement::ShowCreateView(_) => Ok(()),
         Statement::Select(select) => validate_select(select, catalog),
+        Statement::SelectInto(select_into) => {
+            if catalog.get_table_by_name(&select_into.table).is_some()
+                || catalog.view(&select_into.table).is_some()
+            {
+                return Err(HematiteError::ParseError(format!(
+                    "Table '{}' already exists",
+                    select_into.table
+                )));
+            }
+            validate_select(&select_into.query, catalog)
+        }
         Statement::Update(update) => validate_update(update, catalog),
         Statement::Insert(insert) => validate_insert(insert, catalog),
         Statement::Delete(delete) => validate_delete(delete, catalog),
@@ -1022,10 +1033,11 @@ fn validate_insert(insert: &InsertStatement, catalog: &Schema) -> Result<()> {
         }
         InsertSource::Select(select) => {
             validate_select(select, catalog)?;
-            if select.columns.len() != insert.columns.len() {
+            let projected_count = projected_column_names(select, catalog)?.len();
+            if projected_count != insert.columns.len() {
                 return Err(HematiteError::ParseError(format!(
                     "INSERT SELECT returns {} columns, expected {}",
-                    select.columns.len(),
+                    projected_count,
                     insert.columns.len()
                 )));
             }
@@ -1767,7 +1779,10 @@ fn collect_source_bindings(
     Ok(bindings)
 }
 
-pub(crate) fn source_column_names(select: &SelectStatement, catalog: &Schema) -> Result<Vec<String>> {
+pub(crate) fn source_column_names(
+    select: &SelectStatement,
+    catalog: &Schema,
+) -> Result<Vec<String>> {
     Ok(collect_source_bindings(select, catalog, &select.from)?
         .into_iter()
         .flat_map(|binding| binding.columns)
@@ -1834,7 +1849,10 @@ fn collect_source_bindings_into(
     }
 }
 
-fn cte_projected_column_names(cte: &CommonTableExpression, catalog: &Schema) -> Result<Vec<String>> {
+fn cte_projected_column_names(
+    cte: &CommonTableExpression,
+    catalog: &Schema,
+) -> Result<Vec<String>> {
     if cte.recursive {
         return cte
             .query
@@ -1856,7 +1874,10 @@ fn cte_projected_column_names(cte: &CommonTableExpression, catalog: &Schema) -> 
     projected_column_names(&cte.query, catalog)
 }
 
-pub(crate) fn projected_column_names(select: &SelectStatement, catalog: &Schema) -> Result<Vec<String>> {
+pub(crate) fn projected_column_names(
+    select: &SelectStatement,
+    catalog: &Schema,
+) -> Result<Vec<String>> {
     let mut names = Vec::with_capacity(select.columns.len());
     for (index, item) in select.columns.iter().enumerate() {
         if let Some(alias) = select

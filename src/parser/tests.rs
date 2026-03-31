@@ -2151,6 +2151,13 @@ mod parser_tests {
 
     #[test]
     fn test_parse_view_trigger_and_savepoint_statements() -> Result<()> {
+        assert!(matches!(
+            parse_statement("SELECT name INTO copied_users FROM users;")?,
+            Statement::SelectInto(SelectIntoStatement { ref table, ref query })
+                if table == "copied_users"
+                    && matches!(query.from, TableReference::Table(ref name, None) if name == "users")
+        ));
+
         let create_view = parse_create_view("CREATE VIEW user_names AS SELECT name FROM users;")?;
         assert_eq!(create_view.view, "user_names");
         assert!(matches!(

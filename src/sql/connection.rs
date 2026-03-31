@@ -24,10 +24,11 @@
 
 use crate::error::{HematiteError, Result};
 use crate::parser::ast::{
-    Condition, CreateViewStatement, Expression, InsertSource, SelectStatement, Statement,
-    TableReference, TriggerEvent, WhereClause,
+    ColumnDefinition, Condition, CreateStatement, CreateViewStatement, Expression, InsertSource,
+    InsertStatement, SelectIntoStatement, SelectStatement, Statement, TableReference, TriggerEvent,
+    WhereClause,
 };
-use crate::parser::{Lexer, Parser};
+use crate::parser::{Lexer, Parser, SqlTypeName};
 use crate::query::lowering::raise_literal_value;
 use crate::query::metadata as query_metadata;
 use crate::query::validation::{projected_column_names, source_column_names, validate_statement};
@@ -105,6 +106,8 @@ pub struct Connection {
 }
 
 impl Connection {
+    const SELECT_INTO_ROWID_COLUMN: &'static str = "__hematite_select_into_rowid";
+
     fn empty_result() -> QueryResult {
         QueryResult {
             affected_rows: 0,
@@ -119,6 +122,241 @@ impl Connection {
             columns: Vec::new(),
             rows: Vec::new(),
         }
+    }
+
+    fn select_into_synthetic_pk_name(column_names: &[String]) -> String {
+        let mut candidate = Self::SELECT_INTO_ROWID_COLUMN.to_string();
+        let used = column_names
+            .iter()
+            .map(|name| name.to_ascii_lowercase())
+            .collect::<HashSet<_>>();
+        let mut suffix = 2usize;
+        while used.contains(&candidate.to_ascii_lowercase()) {
+            candidate = format!("{}_{}", Self::SELECT_INTO_ROWID_COLUMN, suffix);
+            suffix += 1;
+        }
+        candidate
+    }
+
+    fn select_into_column_names(result: &QueryResult) -> Vec<String> {
+        let mut used = HashSet::new();
+        let mut names = Vec::with_capacity(result.columns.len());
+        for (index, name) in result.columns.iter().enumerate() {
+            let mut candidate = if name.trim().is_empty() {
+                format!("column{}", index + 1)
+            } else {
+                name.clone()
+            };
+            let base = candidate.clone();
+            let mut suffix = 2usize;
+            while used.contains(&candidate.to_ascii_lowercase())
+                || candidate.eq_ignore_ascii_case(Self::SELECT_INTO_ROWID_COLUMN)
+            {
+                candidate = format!("{base}_{suffix}");
+                suffix += 1;
+            }
+            used.insert(candidate.to_ascii_lowercase());
+            names.push(candidate);
+        }
+        names
+    }
+
+    fn infer_select_into_type(
+        column_name: &str,
+        values: &[Vec<Value>],
+        index: usize,
+    ) -> Result<SqlTypeName> {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum NumericKind {
+            Integer,
+            BigInt,
+            Float,
+            Decimal,
+        }
+
+        #[derive(Debug, Clone)]
+        enum InferredKind {
+            Numeric(NumericKind),
+            String { saw_enum: bool, values: Vec<String> },
+            Boolean,
+            Blob,
+            Date,
+            Time,
+            DateTime,
+            Timestamp,
+            TimeWithTimeZone,
+        }
+
+        impl InferredKind {
+            fn absorb(self, value: &Value, column_name: &str) -> Result<Self> {
+                use InferredKind::*;
+                use NumericKind::*;
+                match (self, value) {
+                    (kind, Value::Null) => Ok(kind),
+                    (_, Value::IntervalYearMonth(_)) | (_, Value::IntervalDaySecond(_)) => {
+                        Err(HematiteError::ParseError(format!(
+                            "SELECT INTO cannot infer a stored column type for interval-valued column '{}'",
+                            column_name
+                        )))
+                    }
+                    (Numeric(Integer), Value::Integer(_)) => Ok(Numeric(Integer)),
+                    (Numeric(Integer), Value::BigInt(_))
+                    | (Numeric(BigInt), Value::Integer(_))
+                    | (Numeric(BigInt), Value::BigInt(_)) => Ok(Numeric(BigInt)),
+                    (Numeric(Integer), Value::Float(_))
+                    | (Numeric(BigInt), Value::Float(_))
+                    | (Numeric(Float), Value::Integer(_))
+                    | (Numeric(Float), Value::BigInt(_))
+                    | (Numeric(Float), Value::Float(_)) => Ok(Numeric(Float)),
+                    (Numeric(Integer), Value::Decimal(_))
+                    | (Numeric(BigInt), Value::Decimal(_))
+                    | (Numeric(Float), Value::Decimal(_))
+                    | (Numeric(Decimal), Value::Integer(_))
+                    | (Numeric(Decimal), Value::BigInt(_))
+                    | (Numeric(Decimal), Value::Float(_))
+                    | (Numeric(Decimal), Value::Decimal(_)) => Ok(Numeric(Decimal)),
+                    (
+                        String {
+                            saw_enum,
+                            mut values,
+                        },
+                        Value::Text(text),
+                    ) => {
+                        if !values.iter().any(|candidate| candidate == text) {
+                            values.push(text.clone());
+                        }
+                        Ok(String { saw_enum, values })
+                    }
+                    (
+                        String {
+                            saw_enum: _,
+                            mut values,
+                        },
+                        Value::Enum(text),
+                    ) => {
+                        if !values.iter().any(|candidate| candidate == text) {
+                            values.push(text.clone());
+                        }
+                        Ok(String {
+                            saw_enum: true,
+                            values,
+                        })
+                    }
+                    (Blob, Value::Blob(_)) => Ok(Blob),
+                    (Blob, Value::Text(_)) => Ok(Blob),
+                    (Date, Value::Date(_)) => Ok(Date),
+                    (Time, Value::Time(_)) => Ok(Time),
+                    (DateTime, Value::DateTime(_)) => Ok(DateTime),
+                    (Timestamp, Value::Timestamp(_)) => Ok(Timestamp),
+                    (TimeWithTimeZone, Value::TimeWithTimeZone(_)) => Ok(TimeWithTimeZone),
+                    (Boolean, Value::Boolean(_)) => Ok(Boolean),
+                    (left, right) => Err(HematiteError::ParseError(format!(
+                        "SELECT INTO cannot infer a stable column type for '{}': {:?} cannot be combined with {:?}",
+                        column_name, left, right
+                    ))),
+                }
+            }
+
+            fn from_value(value: &Value, column_name: &str) -> Result<Option<Self>> {
+                use InferredKind::*;
+                use NumericKind::*;
+                let inferred = match value {
+                    Value::Null => return Ok(None),
+                    Value::Integer(_) => Numeric(Integer),
+                    Value::BigInt(_) => Numeric(BigInt),
+                    Value::Float(_) => Numeric(Float),
+                    Value::Decimal(_) => Numeric(Decimal),
+                    Value::Text(text) => String {
+                        saw_enum: false,
+                        values: vec![text.clone()],
+                    },
+                    Value::Enum(text) => String {
+                        saw_enum: true,
+                        values: vec![text.clone()],
+                    },
+                    Value::Boolean(_) => Boolean,
+                    Value::Blob(_) => Blob,
+                    Value::Date(_) => Date,
+                    Value::Time(_) => Time,
+                    Value::DateTime(_) => DateTime,
+                    Value::Timestamp(_) => Timestamp,
+                    Value::TimeWithTimeZone(_) => TimeWithTimeZone,
+                    Value::IntervalYearMonth(_) | Value::IntervalDaySecond(_) => {
+                        return Err(HematiteError::ParseError(format!(
+                            "SELECT INTO cannot infer a stored column type for interval-valued column '{}'",
+                            column_name
+                        )))
+                    }
+                };
+                Ok(Some(inferred))
+            }
+
+            fn into_sql_type(self) -> SqlTypeName {
+                match self {
+                    InferredKind::Numeric(NumericKind::Integer) => SqlTypeName::Integer,
+                    InferredKind::Numeric(NumericKind::BigInt) => SqlTypeName::BigInt,
+                    InferredKind::Numeric(NumericKind::Float) => SqlTypeName::Float,
+                    InferredKind::Numeric(NumericKind::Decimal) => SqlTypeName::Decimal {
+                        precision: None,
+                        scale: None,
+                    },
+                    InferredKind::String {
+                        saw_enum: true,
+                        values,
+                    } => SqlTypeName::Enum(values),
+                    InferredKind::String { .. } => SqlTypeName::Text,
+                    InferredKind::Boolean => SqlTypeName::Boolean,
+                    InferredKind::Blob => SqlTypeName::Blob,
+                    InferredKind::Date => SqlTypeName::Date,
+                    InferredKind::Time => SqlTypeName::Time,
+                    InferredKind::DateTime => SqlTypeName::DateTime,
+                    InferredKind::Timestamp => SqlTypeName::Timestamp,
+                    InferredKind::TimeWithTimeZone => SqlTypeName::TimeWithTimeZone,
+                }
+            }
+        }
+
+        let mut inferred = None;
+        for row in values {
+            let Some(value) = row.get(index) else {
+                return Err(HematiteError::InternalError(format!(
+                    "SELECT INTO result row is missing projected column {}",
+                    index
+                )));
+            };
+
+            inferred = match (inferred, InferredKind::from_value(value, column_name)?) {
+                (None, None) => None,
+                (None, Some(kind)) => Some(kind),
+                (Some(kind), None) => Some(kind),
+                (Some(kind), Some(_)) => Some(kind.absorb(value, column_name)?),
+            };
+        }
+
+        Ok(inferred
+            .map(InferredKind::into_sql_type)
+            .unwrap_or(SqlTypeName::Text))
+    }
+
+    fn infer_select_into_columns(result: &QueryResult) -> Result<Vec<ColumnDefinition>> {
+        let column_names = Self::select_into_column_names(result);
+        column_names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                Ok(ColumnDefinition {
+                    name: name.clone(),
+                    data_type: Self::infer_select_into_type(name, &result.rows, index)?,
+                    nullable: true,
+                    primary_key: false,
+                    auto_increment: false,
+                    unique: false,
+                    default_value: None,
+                    check_constraint: None,
+                    references: None,
+                })
+            })
+            .collect()
     }
 
     fn lock_catalog(&self) -> Result<MutexGuard<'_, Catalog>> {
@@ -449,7 +687,10 @@ impl Connection {
         Ok(statement)
     }
 
-    fn rewrite_select_aliases_in_statement(statement: &mut Statement, schema: &Schema) -> Result<()> {
+    fn rewrite_select_aliases_in_statement(
+        statement: &mut Statement,
+        schema: &Schema,
+    ) -> Result<()> {
         match statement {
             Statement::Explain(explain) => {
                 Self::rewrite_select_aliases_in_statement(&mut explain.statement, schema)
@@ -468,7 +709,10 @@ impl Connection {
         }
     }
 
-    fn rewrite_select_aliases_in_select(select: &mut SelectStatement, schema: &Schema) -> Result<()> {
+    fn rewrite_select_aliases_in_select(
+        select: &mut SelectStatement,
+        schema: &Schema,
+    ) -> Result<()> {
         for cte in &mut select.with_clause {
             if !cte.recursive {
                 Self::rewrite_select_aliases_in_select(&mut cte.query, schema)?;
@@ -587,7 +831,9 @@ impl Connection {
             Condition::NullCheck { expr, .. } => {
                 Self::rewrite_nested_select_aliases_in_expression(expr, schema)?;
             }
-            Condition::Not(inner) => Self::rewrite_nested_select_aliases_in_condition(inner, schema)?,
+            Condition::Not(inner) => {
+                Self::rewrite_nested_select_aliases_in_condition(inner, schema)?
+            }
             Condition::Logical { left, right, .. } => {
                 Self::rewrite_nested_select_aliases_in_condition(left, schema)?;
                 Self::rewrite_nested_select_aliases_in_condition(right, schema)?;
@@ -619,10 +865,7 @@ impl Connection {
                         &mut branch.condition,
                         schema,
                     )?;
-                    Self::rewrite_nested_select_aliases_in_expression(
-                        &mut branch.result,
-                        schema,
-                    )?;
+                    Self::rewrite_nested_select_aliases_in_expression(&mut branch.result, schema)?;
                 }
                 if let Some(else_expr) = else_expr {
                     Self::rewrite_nested_select_aliases_in_expression(else_expr, schema)?;
@@ -702,39 +945,109 @@ impl Connection {
     ) -> Result<()> {
         match condition {
             Condition::Comparison { left, right, .. } => {
-                Self::rewrite_where_aliases_in_expression(left, aliases, source_columns, active_aliases)?;
-                Self::rewrite_where_aliases_in_expression(right, aliases, source_columns, active_aliases)?;
+                Self::rewrite_where_aliases_in_expression(
+                    left,
+                    aliases,
+                    source_columns,
+                    active_aliases,
+                )?;
+                Self::rewrite_where_aliases_in_expression(
+                    right,
+                    aliases,
+                    source_columns,
+                    active_aliases,
+                )?;
             }
             Condition::InList { expr, values, .. } => {
-                Self::rewrite_where_aliases_in_expression(expr, aliases, source_columns, active_aliases)?;
+                Self::rewrite_where_aliases_in_expression(
+                    expr,
+                    aliases,
+                    source_columns,
+                    active_aliases,
+                )?;
                 for value in values {
-                    Self::rewrite_where_aliases_in_expression(value, aliases, source_columns, active_aliases)?;
+                    Self::rewrite_where_aliases_in_expression(
+                        value,
+                        aliases,
+                        source_columns,
+                        active_aliases,
+                    )?;
                 }
             }
             Condition::InSubquery { expr, .. } => {
-                Self::rewrite_where_aliases_in_expression(expr, aliases, source_columns, active_aliases)?;
+                Self::rewrite_where_aliases_in_expression(
+                    expr,
+                    aliases,
+                    source_columns,
+                    active_aliases,
+                )?;
             }
             Condition::Between {
                 expr, lower, upper, ..
             } => {
-                Self::rewrite_where_aliases_in_expression(expr, aliases, source_columns, active_aliases)?;
-                Self::rewrite_where_aliases_in_expression(lower, aliases, source_columns, active_aliases)?;
-                Self::rewrite_where_aliases_in_expression(upper, aliases, source_columns, active_aliases)?;
+                Self::rewrite_where_aliases_in_expression(
+                    expr,
+                    aliases,
+                    source_columns,
+                    active_aliases,
+                )?;
+                Self::rewrite_where_aliases_in_expression(
+                    lower,
+                    aliases,
+                    source_columns,
+                    active_aliases,
+                )?;
+                Self::rewrite_where_aliases_in_expression(
+                    upper,
+                    aliases,
+                    source_columns,
+                    active_aliases,
+                )?;
             }
             Condition::Like { expr, pattern, .. } => {
-                Self::rewrite_where_aliases_in_expression(expr, aliases, source_columns, active_aliases)?;
-                Self::rewrite_where_aliases_in_expression(pattern, aliases, source_columns, active_aliases)?;
+                Self::rewrite_where_aliases_in_expression(
+                    expr,
+                    aliases,
+                    source_columns,
+                    active_aliases,
+                )?;
+                Self::rewrite_where_aliases_in_expression(
+                    pattern,
+                    aliases,
+                    source_columns,
+                    active_aliases,
+                )?;
             }
             Condition::Exists { .. } => {}
             Condition::NullCheck { expr, .. } => {
-                Self::rewrite_where_aliases_in_expression(expr, aliases, source_columns, active_aliases)?;
+                Self::rewrite_where_aliases_in_expression(
+                    expr,
+                    aliases,
+                    source_columns,
+                    active_aliases,
+                )?;
             }
             Condition::Not(inner) => {
-                Self::rewrite_where_aliases_in_condition(inner, aliases, source_columns, active_aliases)?;
+                Self::rewrite_where_aliases_in_condition(
+                    inner,
+                    aliases,
+                    source_columns,
+                    active_aliases,
+                )?;
             }
             Condition::Logical { left, right, .. } => {
-                Self::rewrite_where_aliases_in_condition(left, aliases, source_columns, active_aliases)?;
-                Self::rewrite_where_aliases_in_condition(right, aliases, source_columns, active_aliases)?;
+                Self::rewrite_where_aliases_in_condition(
+                    left,
+                    aliases,
+                    source_columns,
+                    active_aliases,
+                )?;
+                Self::rewrite_where_aliases_in_condition(
+                    right,
+                    aliases,
+                    source_columns,
+                    active_aliases,
+                )?;
             }
         }
         Ok(())
@@ -779,7 +1092,12 @@ impl Connection {
             | Expression::UnaryMinus(expr)
             | Expression::UnaryNot(expr)
             | Expression::NullCheck { expr, .. } => {
-                Self::rewrite_where_aliases_in_expression(expr, aliases, source_columns, active_aliases)?;
+                Self::rewrite_where_aliases_in_expression(
+                    expr,
+                    aliases,
+                    source_columns,
+                    active_aliases,
+                )?;
             }
             Expression::Case {
                 branches,
@@ -821,25 +1139,70 @@ impl Connection {
             Expression::Binary { left, right, .. }
             | Expression::Comparison { left, right, .. }
             | Expression::Logical { left, right, .. } => {
-                Self::rewrite_where_aliases_in_expression(left, aliases, source_columns, active_aliases)?;
-                Self::rewrite_where_aliases_in_expression(right, aliases, source_columns, active_aliases)?;
+                Self::rewrite_where_aliases_in_expression(
+                    left,
+                    aliases,
+                    source_columns,
+                    active_aliases,
+                )?;
+                Self::rewrite_where_aliases_in_expression(
+                    right,
+                    aliases,
+                    source_columns,
+                    active_aliases,
+                )?;
             }
             Expression::InList { expr, values, .. } => {
-                Self::rewrite_where_aliases_in_expression(expr, aliases, source_columns, active_aliases)?;
+                Self::rewrite_where_aliases_in_expression(
+                    expr,
+                    aliases,
+                    source_columns,
+                    active_aliases,
+                )?;
                 for value in values {
-                    Self::rewrite_where_aliases_in_expression(value, aliases, source_columns, active_aliases)?;
+                    Self::rewrite_where_aliases_in_expression(
+                        value,
+                        aliases,
+                        source_columns,
+                        active_aliases,
+                    )?;
                 }
             }
             Expression::Between {
                 expr, lower, upper, ..
             } => {
-                Self::rewrite_where_aliases_in_expression(expr, aliases, source_columns, active_aliases)?;
-                Self::rewrite_where_aliases_in_expression(lower, aliases, source_columns, active_aliases)?;
-                Self::rewrite_where_aliases_in_expression(upper, aliases, source_columns, active_aliases)?;
+                Self::rewrite_where_aliases_in_expression(
+                    expr,
+                    aliases,
+                    source_columns,
+                    active_aliases,
+                )?;
+                Self::rewrite_where_aliases_in_expression(
+                    lower,
+                    aliases,
+                    source_columns,
+                    active_aliases,
+                )?;
+                Self::rewrite_where_aliases_in_expression(
+                    upper,
+                    aliases,
+                    source_columns,
+                    active_aliases,
+                )?;
             }
             Expression::Like { expr, pattern, .. } => {
-                Self::rewrite_where_aliases_in_expression(expr, aliases, source_columns, active_aliases)?;
-                Self::rewrite_where_aliases_in_expression(pattern, aliases, source_columns, active_aliases)?;
+                Self::rewrite_where_aliases_in_expression(
+                    expr,
+                    aliases,
+                    source_columns,
+                    active_aliases,
+                )?;
+                Self::rewrite_where_aliases_in_expression(
+                    pattern,
+                    aliases,
+                    source_columns,
+                    active_aliases,
+                )?;
             }
             Expression::AggregateCall { .. }
             | Expression::ScalarSubquery(_)
@@ -905,6 +1268,9 @@ impl Connection {
             crate::parser::ast::Statement::ShowCreateView(view_name) => {
                 return self.execute_show_create_view_statement(&view_name);
             }
+            crate::parser::ast::Statement::SelectInto(select_into) => {
+                return self.execute_select_into_statement(select_into);
+            }
             crate::parser::ast::Statement::CreateView(create_view) => {
                 return self.execute_create_view_statement(create_view);
             }
@@ -932,6 +1298,10 @@ impl Connection {
         &mut self,
         statement: crate::parser::ast::Statement,
     ) -> Result<QueryResult> {
+        let statement = match statement {
+            Statement::SelectInto(select_into) => Statement::Select(select_into.query),
+            other => other,
+        };
         let (schema, table_row_counts) = self.read_planning_state()?;
         let statement = Self::expand_views_in_statement(statement, &schema)?;
         let planner = QueryPlanner::new(schema).with_table_row_counts(table_row_counts);
@@ -985,6 +1355,93 @@ impl Connection {
     fn execute_show_create_view_statement(&mut self, view_name: &str) -> Result<QueryResult> {
         let catalog_guard = self.lock_catalog()?;
         query_metadata::show_create_view(&catalog_guard, view_name)
+    }
+
+    fn execute_select_into_statement(
+        &mut self,
+        statement: SelectIntoStatement,
+    ) -> Result<QueryResult> {
+        let (schema, _) = self.read_planning_state()?;
+        if schema.get_table_by_name(&statement.table).is_some()
+            || schema.view(&statement.table).is_some()
+        {
+            return Err(HematiteError::ParseError(format!(
+                "Table '{}' already exists",
+                statement.table
+            )));
+        }
+
+        let normalized_query =
+            match Self::normalize_statement(Statement::Select(statement.query.clone()), &schema)? {
+                Statement::Select(select) => select,
+                _ => unreachable!("normalized SELECT INTO query should remain a select"),
+            };
+        validate_statement(&Statement::Select(normalized_query), &schema)?;
+
+        let query_result =
+            self.execute_read_statement(Statement::Select(statement.query.clone()))?;
+        let projected_columns = Self::infer_select_into_columns(&query_result)?;
+        let insert_columns = projected_columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>();
+        let synthetic_pk = Self::select_into_synthetic_pk_name(&insert_columns);
+
+        let mut create_columns = Vec::with_capacity(projected_columns.len() + 1);
+        create_columns.push(ColumnDefinition {
+            name: synthetic_pk,
+            data_type: SqlTypeName::Integer,
+            nullable: false,
+            primary_key: true,
+            auto_increment: true,
+            unique: false,
+            default_value: None,
+            check_constraint: None,
+            references: None,
+        });
+        create_columns.extend(projected_columns);
+
+        let mut implicit_mutation = Some(ImplicitMutation::begin(self)?);
+        let result: Result<QueryResult> = (|| {
+            self.execute_mutating_statement_in_scope(
+                Statement::Create(CreateStatement {
+                    table: statement.table.clone(),
+                    columns: create_columns,
+                    constraints: Vec::new(),
+                    if_not_exists: false,
+                }),
+                false,
+            )?;
+
+            let insert_result = self.execute_mutating_statement_in_scope(
+                Statement::Insert(InsertStatement {
+                    table: statement.table.clone(),
+                    columns: insert_columns,
+                    source: InsertSource::Select(Box::new(statement.query)),
+                    on_duplicate: None,
+                }),
+                false,
+            )?;
+
+            Ok(Self::mutation_result(insert_result.affected_rows))
+        })();
+
+        match result {
+            Ok(result) => {
+                implicit_mutation
+                    .take()
+                    .expect("implicit mutation should be present")
+                    .commit(self)?;
+                Ok(result)
+            }
+            Err(err) => {
+                implicit_mutation
+                    .take()
+                    .expect("implicit mutation should be present")
+                    .rollback(self)?;
+                Err(err)
+            }
+        }
     }
 
     fn execute_create_view_statement(

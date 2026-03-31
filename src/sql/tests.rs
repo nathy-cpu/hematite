@@ -51,9 +51,7 @@ mod connection_tests {
         conn.execute("CREATE TABLE integers (i INTEGER PRIMARY KEY);")?;
         conn.execute("INSERT INTO integers (i) VALUES (1), (2), (3), (4);")?;
 
-        let result = conn.execute(
-            "SELECT i % 2 AS k FROM integers WHERE k <> 0 ORDER BY i;",
-        )?;
+        let result = conn.execute("SELECT i % 2 AS k FROM integers WHERE k <> 0 ORDER BY i;")?;
         assert_eq!(result.columns, vec!["k"]);
         assert_eq!(
             result.rows,
@@ -98,9 +96,8 @@ mod connection_tests {
         conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT);")?;
         conn.execute("INSERT INTO items (id, name) VALUES (1, 'a'), (2, 'b');")?;
 
-        let derived = conn.execute(
-            "SELECT d.id, d.name FROM (SELECT * FROM items) AS d ORDER BY d.id;",
-        )?;
+        let derived =
+            conn.execute("SELECT d.id, d.name FROM (SELECT * FROM items) AS d ORDER BY d.id;")?;
         assert_eq!(derived.columns, vec!["id", "name"]);
         assert_eq!(
             derived.rows,
@@ -150,6 +147,83 @@ mod connection_tests {
                 ],
             ]
         );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_select_into_creates_table_from_query() -> Result<()> {
+        let db = TestDbFile::new("_test_select_into_creates_table_from_query");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute(
+            "CREATE TABLE source (id INTEGER PRIMARY KEY, state ENUM('draft', 'live'), score INTEGER);",
+        )?;
+        conn.execute(
+            "INSERT INTO source (id, state, score) VALUES (1, 'draft', 10), (2, 'live', 20), (3, 'draft', 5);",
+        )?;
+
+        let result = conn.execute(
+            "SELECT state, score INTO copied_source FROM source WHERE score >= 10 ORDER BY id;",
+        )?;
+        assert_eq!(result.affected_rows, 2);
+
+        let copied = conn.execute("SELECT state, score FROM copied_source ORDER BY score;")?;
+        assert_eq!(copied.columns, vec!["state", "score"]);
+        assert_eq!(
+            copied.rows,
+            vec![
+                vec![
+                    crate::catalog::Value::Enum("draft".to_string()),
+                    crate::catalog::Value::Integer(10),
+                ],
+                vec![
+                    crate::catalog::Value::Enum("live".to_string()),
+                    crate::catalog::Value::Integer(20),
+                ],
+            ]
+        );
+
+        let show_create = conn.execute("SHOW CREATE TABLE copied_source;")?;
+        assert!(matches!(
+            show_create.rows.first().and_then(|row| row.get(1)),
+            Some(crate::catalog::Value::Text(sql))
+                if sql.contains("ENUM('draft', 'live')")
+                    && sql.contains("score INTEGER")
+        ));
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_select_into_rejects_existing_target_names() -> Result<()> {
+        let db = TestDbFile::new("_test_select_into_rejects_existing_target_names");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE source (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("INSERT INTO source (id, name) VALUES (1, 'a');")?;
+        conn.execute("CREATE TABLE copied_table (id INTEGER PRIMARY KEY, name TEXT);")?;
+        conn.execute("CREATE VIEW copied_view AS SELECT name FROM source;")?;
+
+        let table_err = conn
+            .execute("SELECT name INTO copied_table FROM source;")
+            .unwrap_err();
+        assert!(matches!(
+            table_err,
+            crate::error::HematiteError::ParseError(message)
+                if message.contains("Table 'copied_table' already exists")
+        ));
+
+        let view_err = conn
+            .execute("SELECT name INTO copied_view FROM source;")
+            .unwrap_err();
+        assert!(matches!(
+            view_err,
+            crate::error::HematiteError::ParseError(message)
+                if message.contains("Table 'copied_view' already exists")
+        ));
 
         conn.close()?;
         Ok(())

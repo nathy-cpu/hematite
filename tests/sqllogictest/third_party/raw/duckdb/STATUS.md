@@ -53,6 +53,8 @@ Promoted/adapted so far:
 - `test/sql/select/test_select_into.test`
   - adapted to:
     - `third_party/portable/select_into_errors_from_duckdb.slt`
+  - notes:
+    - Hematite now supports `SELECT INTO`; the promoted case keeps the portable table-creation behavior and avoids DuckDB-specific extras
 - `test/sql/select/test_positional_reference.test`
   - adapted to:
     - `third_party/portable/positional_reference_errors_from_duckdb.slt`
