@@ -73,7 +73,10 @@ pub(crate) fn show_views(catalog: &Catalog) -> Result<QueryResult> {
     Ok(QueryResult {
         affected_rows: 0,
         columns: vec!["view_name".to_string()],
-        rows: views.into_iter().map(|name| vec![Value::Text(name)]).collect(),
+        rows: views
+            .into_iter()
+            .map(|name| vec![Value::Text(name)])
+            .collect(),
     })
 }
 
@@ -199,7 +202,9 @@ fn table_column_metadata(table: &Table, column_index: usize) -> TableColumnMetad
             crate::catalog::NamedConstraintKind::Check => {
                 if table.check_constraints.iter().any(|check| {
                     check.name.as_deref() == Some(constraint.name.as_str())
-                        && check.expression_sql.contains(&table.columns[column_index].name)
+                        && check
+                            .expression_sql
+                            .contains(&table.columns[column_index].name)
                 }) {
                     constraints.push(format!("CHECK {}", constraint.name));
                 }
@@ -270,7 +275,8 @@ fn render_create_table_sql(table: &Table) -> String {
     if table.primary_key_columns.len() > 1 {
         definitions.push(format!(
             "PRIMARY KEY ({})",
-            table.primary_key_columns
+            table
+                .primary_key_columns
                 .iter()
                 .map(|&index| table.columns[index].name.clone())
                 .collect::<Vec<_>>()

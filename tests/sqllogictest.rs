@@ -112,8 +112,12 @@ fn sqllogictest_corpus() {
 fn collect_slt_files_from_manifest(root: &str) -> Vec<String> {
     let root_path = std::path::Path::new(root);
     let manifest_path = root_path.join("manifest.txt");
-    let manifest = std::fs::read_to_string(&manifest_path)
-        .unwrap_or_else(|err| panic!("sqllogictest manifest {} should be readable: {err}", manifest_path.display()));
+    let manifest = std::fs::read_to_string(&manifest_path).unwrap_or_else(|err| {
+        panic!(
+            "sqllogictest manifest {} should be readable: {err}",
+            manifest_path.display()
+        )
+    });
 
     let mut files = Vec::new();
     for line in manifest.lines() {

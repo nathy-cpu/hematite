@@ -33,7 +33,9 @@ use crate::query::lowering::{lower_literal_value, lower_type_name, raise_literal
 use crate::query::plan::{ExecutionProgram, QueryPlan, SelectAccessPath};
 use crate::query::predicate::extract_literal_equalities;
 pub use crate::query::runtime::{ExecutionContext, MutationEvent, QueryExecutor, QueryResult};
-use crate::query::validation::{projected_column_names, validate_column_reference, validate_statement};
+use crate::query::validation::{
+    projected_column_names, validate_column_reference, validate_statement,
+};
 use crate::query::QueryPlanner;
 use std::cmp::Ordering;
 use std::collections::HashMap;
