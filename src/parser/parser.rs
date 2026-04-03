@@ -1997,13 +1997,13 @@ impl Parser {
     fn peek_identifier_keyword(&self, keyword: &str) -> bool {
         matches!(
             self.peek_token(),
-            Ok(Token::Identifier(name)) if name.eq_ignore_ascii_case(keyword)
+            Ok(Token::Identifier(name)) if name == keyword
         )
     }
 
     fn consume_identifier_keyword(&mut self, keyword: &str) -> Result<()> {
         match self.peek_token()? {
-            Token::Identifier(name) if name.eq_ignore_ascii_case(keyword) => {
+            Token::Identifier(name) if name == keyword => {
                 self.consume_token(&Token::Identifier(name.clone()))
             }
             token => Err(HematiteError::ParseError(format!(
@@ -2026,9 +2026,7 @@ impl Parser {
         }
         self.consume_identifier_keyword("USING")?;
         match self.peek_token()? {
-            Token::Identifier(name)
-                if name.eq_ignore_ascii_case("BTREE") || name.eq_ignore_ascii_case("HASH") =>
-            {
+            Token::Identifier(name) if name == "BTREE" || name == "HASH" => {
                 self.consume_token(&Token::Identifier(name.clone()))?;
                 Ok(())
             }

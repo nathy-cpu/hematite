@@ -246,7 +246,7 @@ impl Lexer {
         }
 
         let identifier = &self.input[start..self.position];
-        let token = match identifier.to_uppercase().as_str() {
+        let token = match identifier {
             "BEGIN" => Token::Begin,
             "COMMIT" => Token::Commit,
             "ROLLBACK" => Token::Rollback,

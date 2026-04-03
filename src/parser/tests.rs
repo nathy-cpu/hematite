@@ -829,6 +829,23 @@ mod lexer_tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn test_lowercase_keywords_are_not_tokenized_as_keywords() -> Result<()> {
+        let mut lexer = Lexer::new("select * from users;".to_string());
+        lexer.tokenize()?;
+
+        let expected = vec![
+            Token::Identifier("select".to_string()),
+            Token::Asterisk,
+            Token::Identifier("from".to_string()),
+            Token::Identifier("users".to_string()),
+            Token::Semicolon,
+        ];
+
+        assert_eq!(lexer.get_tokens(), &expected);
+        Ok(())
+    }
 }
 
 mod parser_tests {
@@ -955,6 +972,23 @@ mod parser_tests {
         assert!(select.order_by.is_empty());
         assert!(select.limit.is_none());
         Ok(())
+    }
+
+    #[test]
+    fn test_parse_rejects_lowercase_keywords() {
+        assert!(parse_statement("select * from users;").is_err());
+    }
+
+    #[test]
+    fn test_parse_rejects_lowercase_identifier_keywords() {
+        assert!(parse_create_index("CREATE UNIQUE KEY idx_users_name using btree ON users (name);")
+            .is_err());
+        assert!(
+            parse_create(
+                "CREATE TABLE users (id INT PRIMARY KEY) ENGINE=InnoDB DEFAULT charset=utf8mb4;"
+            )
+            .is_err()
+        );
     }
 
     #[test]
