@@ -102,7 +102,7 @@ impl Row {
         match self.get(index) {
             Some(Value::Integer(i)) => Ok(*i),
             Some(value) => Err(HematiteError::ParseError(format!(
-                "Expected INTEGER, found {:?}",
+                "Expected INT, found {:?}",
                 value
             ))),
             None => Err(HematiteError::ParseError(
@@ -151,6 +151,7 @@ impl Row {
             Some(Value::Float(f)) => Ok(*f),
             Some(Value::Integer(i)) => Ok(*i as f64), // Allow integer to float conversion
             Some(Value::BigInt(i)) => Ok(*i as f64),
+            Some(Value::Int128(i)) => Ok(*i as f64),
             Some(value) => Err(HematiteError::ParseError(format!(
                 "Expected FLOAT, found {:?}",
                 value
@@ -170,7 +171,22 @@ impl Row {
             Some(Value::BigInt(i)) => Ok(*i),
             Some(Value::Integer(i)) => Ok(*i as i64),
             Some(value) => Err(HematiteError::ParseError(format!(
-                "Expected BIGINT, found {:?}",
+                "Expected INT64, found {:?}",
+                value
+            ))),
+            None => Err(HematiteError::ParseError(
+                "Column index out of bounds".to_string(),
+            )),
+        }
+    }
+
+    pub fn get_int128(&self, index: usize) -> Result<i128> {
+        match self.get(index) {
+            Some(Value::Int128(i)) => Ok(*i),
+            Some(Value::BigInt(i)) => Ok(*i as i128),
+            Some(Value::Integer(i)) => Ok(*i as i128),
+            Some(value) => Err(HematiteError::ParseError(format!(
+                "Expected INT128, found {:?}",
                 value
             ))),
             None => Err(HematiteError::ParseError(

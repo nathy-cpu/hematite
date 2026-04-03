@@ -60,7 +60,7 @@ fn infer_column_types(rows: &[hematite::sql::result::Row]) -> Vec<sqllogictest::
         .values
         .iter()
         .map(|value| match value {
-            Value::Integer(_) | Value::BigInt(_) | Value::Boolean(_) => {
+            Value::Integer(_) | Value::BigInt(_) | Value::Int128(_) | Value::Boolean(_) => {
                 sqllogictest::DefaultColumnType::Integer
             }
             Value::Float(_) | Value::Decimal(_) => sqllogictest::DefaultColumnType::FloatingPoint,
@@ -74,6 +74,7 @@ fn render_value(value: Value) -> String {
         Value::Null => "NULL".to_string(),
         Value::Integer(value) => value.to_string(),
         Value::BigInt(value) => value.to_string(),
+        Value::Int128(value) => value.to_string(),
         Value::Text(value) => value,
         Value::Enum(value) => value,
         Value::Boolean(value) => {

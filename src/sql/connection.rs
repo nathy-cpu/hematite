@@ -168,8 +168,9 @@ impl Connection {
     ) -> Result<SqlTypeName> {
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         enum NumericKind {
-            Integer,
-            BigInt,
+            Int,
+            Int64,
+            Int128,
             Float,
             Decimal,
         }
@@ -199,20 +200,29 @@ impl Connection {
                             column_name
                         )))
                     }
-                    (Numeric(Integer), Value::Integer(_)) => Ok(Numeric(Integer)),
-                    (Numeric(Integer), Value::BigInt(_))
-                    | (Numeric(BigInt), Value::Integer(_))
-                    | (Numeric(BigInt), Value::BigInt(_)) => Ok(Numeric(BigInt)),
-                    (Numeric(Integer), Value::Float(_))
-                    | (Numeric(BigInt), Value::Float(_))
+                    (Numeric(Int), Value::Integer(_)) => Ok(Numeric(Int)),
+                    (Numeric(Int), Value::BigInt(_))
+                    | (Numeric(Int64), Value::Integer(_))
+                    | (Numeric(Int64), Value::BigInt(_)) => Ok(Numeric(Int64)),
+                    (Numeric(Int), Value::Int128(_))
+                    | (Numeric(Int64), Value::Int128(_))
+                    | (Numeric(Int128), Value::Integer(_))
+                    | (Numeric(Int128), Value::BigInt(_))
+                    | (Numeric(Int128), Value::Int128(_)) => Ok(Numeric(Int128)),
+                    (Numeric(Int), Value::Float(_))
+                    | (Numeric(Int64), Value::Float(_))
+                    | (Numeric(Int128), Value::Float(_))
                     | (Numeric(Float), Value::Integer(_))
                     | (Numeric(Float), Value::BigInt(_))
+                    | (Numeric(Float), Value::Int128(_))
                     | (Numeric(Float), Value::Float(_)) => Ok(Numeric(Float)),
-                    (Numeric(Integer), Value::Decimal(_))
-                    | (Numeric(BigInt), Value::Decimal(_))
+                    (Numeric(Int), Value::Decimal(_))
+                    | (Numeric(Int64), Value::Decimal(_))
+                    | (Numeric(Int128), Value::Decimal(_))
                     | (Numeric(Float), Value::Decimal(_))
                     | (Numeric(Decimal), Value::Integer(_))
                     | (Numeric(Decimal), Value::BigInt(_))
+                    | (Numeric(Decimal), Value::Int128(_))
                     | (Numeric(Decimal), Value::Float(_))
                     | (Numeric(Decimal), Value::Decimal(_)) => Ok(Numeric(Decimal)),
                     (
@@ -262,8 +272,9 @@ impl Connection {
                 use NumericKind::*;
                 let inferred = match value {
                     Value::Null => return Ok(None),
-                    Value::Integer(_) => Numeric(Integer),
-                    Value::BigInt(_) => Numeric(BigInt),
+                    Value::Integer(_) => Numeric(Int),
+                    Value::BigInt(_) => Numeric(Int64),
+                    Value::Int128(_) => Numeric(Int128),
                     Value::Float(_) => Numeric(Float),
                     Value::Decimal(_) => Numeric(Decimal),
                     Value::Text(text) => String {
@@ -293,8 +304,9 @@ impl Connection {
 
             fn into_sql_type(self) -> SqlTypeName {
                 match self {
-                    InferredKind::Numeric(NumericKind::Integer) => SqlTypeName::Integer,
-                    InferredKind::Numeric(NumericKind::BigInt) => SqlTypeName::BigInt,
+                    InferredKind::Numeric(NumericKind::Int) => SqlTypeName::Int,
+                    InferredKind::Numeric(NumericKind::Int64) => SqlTypeName::Int64,
+                    InferredKind::Numeric(NumericKind::Int128) => SqlTypeName::Int128,
                     InferredKind::Numeric(NumericKind::Float) => SqlTypeName::Float,
                     InferredKind::Numeric(NumericKind::Decimal) => SqlTypeName::Decimal {
                         precision: None,
@@ -1390,7 +1402,7 @@ impl Connection {
         let mut create_columns = Vec::with_capacity(projected_columns.len() + 1);
         create_columns.push(ColumnDefinition {
             name: synthetic_pk,
-            data_type: SqlTypeName::Integer,
+            data_type: SqlTypeName::Int,
             nullable: false,
             primary_key: true,
             auto_increment: true,

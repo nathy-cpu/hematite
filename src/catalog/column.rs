@@ -67,8 +67,8 @@ impl Column {
         }
 
         match (&self.data_type, value) {
-            (DataType::TinyInt, Value::Integer(value)) => i8::try_from(*value).is_ok(),
-            (DataType::SmallInt, Value::Integer(value)) => i16::try_from(*value).is_ok(),
+            (DataType::Int8, Value::Integer(value)) => i8::try_from(*value).is_ok(),
+            (DataType::Int16, Value::Integer(value)) => i16::try_from(*value).is_ok(),
             (DataType::Char(length), Value::Text(text))
             | (DataType::VarChar(length), Value::Text(text)) => {
                 text.chars().count() <= *length as usize
@@ -92,10 +92,9 @@ impl Column {
                     Value::Null
                 } else {
                     match &self.data_type {
-                        DataType::TinyInt | DataType::SmallInt | DataType::Integer => {
-                            Value::Integer(0)
-                        }
-                        DataType::BigInt => Value::BigInt(0),
+                        DataType::Int8 | DataType::Int16 | DataType::Int => Value::Integer(0),
+                        DataType::Int64 => Value::BigInt(0),
+                        DataType::Int128 => Value::Int128(0),
                         DataType::Text | DataType::Char(_) | DataType::VarChar(_) => {
                             Value::Text(String::new())
                         }
@@ -206,10 +205,11 @@ impl Column {
 
 fn write_data_type(buffer: &mut Vec<u8>, data_type: &DataType) {
     match data_type {
-        DataType::TinyInt => buffer.push(0),
-        DataType::SmallInt => buffer.push(1),
-        DataType::Integer => buffer.push(2),
-        DataType::BigInt => buffer.push(3),
+        DataType::Int8 => buffer.push(0),
+        DataType::Int16 => buffer.push(1),
+        DataType::Int => buffer.push(2),
+        DataType::Int64 => buffer.push(3),
+        DataType::Int128 => buffer.push(24),
         DataType::Text => buffer.push(4),
         DataType::Char(length) => {
             buffer.push(5);
@@ -269,10 +269,10 @@ fn read_data_type(buffer: &[u8], offset: &mut usize) -> Result<DataType, Hematit
     *offset += 1;
 
     Ok(match tag {
-        0 => DataType::TinyInt,
-        1 => DataType::SmallInt,
-        2 => DataType::Integer,
-        3 => DataType::BigInt,
+        0 => DataType::Int8,
+        1 => DataType::Int16,
+        2 => DataType::Int,
+        3 => DataType::Int64,
         4 => DataType::Text,
         5 => DataType::Char(read_u32(buffer, offset, "CHAR length")?),
         6 => DataType::VarChar(read_u32(buffer, offset, "VARCHAR length")?),
@@ -309,6 +309,7 @@ fn read_data_type(buffer: &[u8], offset: &mut usize) -> Result<DataType, Hematit
         19 => DataType::DateTime,
         20 => DataType::Timestamp,
         21 => DataType::TimeWithTimeZone,
+        24 => DataType::Int128,
         _ => {
             return Err(HematiteError::CorruptedData(
                 "Invalid data type".to_string(),
@@ -374,6 +375,10 @@ fn write_optional_value(buffer: &mut Vec<u8>, value: Option<&Value>) {
         }
         Some(Value::BigInt(value)) => {
             buffer.push(4);
+            buffer.extend_from_slice(&value.to_le_bytes());
+        }
+        Some(Value::Int128(value)) => {
+            buffer.push(16);
             buffer.extend_from_slice(&value.to_le_bytes());
         }
         Some(Value::Decimal(value)) => {
@@ -489,6 +494,14 @@ fn read_optional_value(buffer: &[u8], offset: &mut usize) -> Result<Option<Value
             Some(Value::Blob(
                 read_fixed(buffer, offset, len, "default blob")?.to_vec(),
             ))
+        }
+        16 => {
+            let value = i128::from_le_bytes(
+                read_fixed(buffer, offset, 16, "default int128")?
+                    .try_into()
+                    .unwrap(),
+            );
+            Some(Value::Int128(value))
         }
         7 => {
             let days = i32::from_le_bytes(

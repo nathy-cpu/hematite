@@ -69,13 +69,14 @@ pub enum Token {
     Avg,
     Min,
     Max,
-    Integer,
+    Int32,
     Text,
     Boolean,
     Float,
-    TinyInt,
-    SmallInt,
-    BigInt,
+    Int8,
+    Int16,
+    Int64,
+    Int128,
     Int,
     Bool,
     Double,
@@ -149,7 +150,7 @@ pub enum Token {
     // Literals
     Identifier(String),
     StringLiteral(String),
-    NumberLiteral(f64),
+    NumberLiteral(String),
     BooleanLiteral(bool),
     NullLiteral,
 }
@@ -311,10 +312,15 @@ impl Lexer {
             "AVG" => Token::Avg,
             "MIN" => Token::Min,
             "MAX" => Token::Max,
-            "INTEGER" => Token::Integer,
-            "TINYINT" => Token::TinyInt,
-            "SMALLINT" => Token::SmallInt,
-            "BIGINT" => Token::BigInt,
+            "INTEGER" => Token::Int32,
+            "TINYINT" => Token::Int8,
+            "INT8" => Token::Int8,
+            "SMALLINT" => Token::Int16,
+            "INT16" => Token::Int16,
+            "BIGINT" => Token::Int64,
+            "INT64" => Token::Int64,
+            "INT128" => Token::Int128,
+            "INT32" => Token::Int32,
             "INT" => Token::Int,
             "TEXT" => Token::Text,
             "BOOLEAN" => Token::Boolean,
@@ -463,15 +469,18 @@ impl Lexer {
         }
 
         let number_str = &self.input[start..self.position];
-        let number = number_str
-            .parse::<f64>()
-            .map_err(|_| HematiteError::ParseError("Invalid number".to_string()))?;
-
         if has_decimal {
-            self.tokens.push(Token::NumberLiteral(number));
+            number_str
+                .parse::<f64>()
+                .map_err(|_| HematiteError::ParseError("Invalid number".to_string()))?;
         } else {
-            self.tokens.push(Token::NumberLiteral(number as f64));
+            number_str
+                .parse::<i128>()
+                .map_err(|_| HematiteError::ParseError("Invalid integer".to_string()))?;
         }
+
+        self.tokens
+            .push(Token::NumberLiteral(number_str.to_string()));
 
         Ok(())
     }

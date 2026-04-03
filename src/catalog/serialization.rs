@@ -33,6 +33,10 @@ impl RowCodec {
                     buffer.push(6);
                     buffer.extend_from_slice(&i.to_le_bytes());
                 }
+                Value::Int128(i) => {
+                    buffer.push(17);
+                    buffer.extend_from_slice(&i.to_le_bytes());
+                }
                 Value::Text(s) => {
                     buffer.push(2);
                     write_bytes(&mut buffer, s.as_bytes());
@@ -186,6 +190,10 @@ impl RowCodec {
                 6 => {
                     let bytes = read_exact(data, &mut offset, payload_end, 8, "BigInt value")?;
                     Value::BigInt(i64::from_le_bytes(bytes.try_into().unwrap()))
+                }
+                17 => {
+                    let bytes = read_exact(data, &mut offset, payload_end, 16, "Int128 value")?;
+                    Value::Int128(i128::from_le_bytes(bytes.try_into().unwrap()))
                 }
                 7 => Value::Decimal(read_decimal(data, &mut offset, payload_end)?),
                 8 => Value::Blob(read_bytes(data, &mut offset, payload_end, "Blob value")?),
@@ -357,6 +365,10 @@ fn encode_key_value(buffer: &mut Vec<u8>, value: &Value) {
         Value::BigInt(value) => {
             buffer.push(4);
             buffer.extend_from_slice(&(i64::to_be_bytes(*value ^ i64::MIN)));
+        }
+        Value::Int128(value) => {
+            buffer.push(17);
+            buffer.extend_from_slice(&(i128::to_be_bytes(*value ^ i128::MIN)));
         }
         Value::Float(value) => {
             buffer.push(5);

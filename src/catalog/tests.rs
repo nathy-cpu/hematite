@@ -42,7 +42,7 @@ mod tests {
     #[test]
     fn test_table_to_bytes_roundtrip() -> Result<()> {
         let columns = vec![
-            Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer).primary_key(true),
+            Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true),
             Column::new(ColumnId::new(2), "name".to_string(), DataType::Text),
             Column::new(ColumnId::new(3), "active".to_string(), DataType::Boolean),
         ];
@@ -109,7 +109,7 @@ mod tests {
         let mut schema = Schema::new();
 
         let columns = vec![
-            Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer).primary_key(true),
+            Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true),
             Column::new(ColumnId::new(2), "name".to_string(), DataType::Text),
         ];
 
@@ -125,9 +125,8 @@ mod tests {
     fn test_duplicate_table_name() -> Result<()> {
         let mut schema = Schema::new();
 
-        let columns = vec![
-            Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer).primary_key(true),
-        ];
+        let columns =
+            vec![Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true)];
 
         schema
             .create_table("users".to_string(), columns.clone())
@@ -141,11 +140,11 @@ mod tests {
 
     #[test]
     fn test_column_creation() {
-        let column = Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer);
+        let column = Column::new(ColumnId::new(1), "id".to_string(), DataType::Int);
 
         assert_eq!(column.id.as_u32(), 1);
         assert_eq!(column.name, "id");
-        assert_eq!(column.data_type, DataType::Integer);
+        assert_eq!(column.data_type, DataType::Int);
         assert!(column.nullable);
         assert!(!column.primary_key);
         assert!(!column.auto_increment);
@@ -154,7 +153,7 @@ mod tests {
 
     #[test]
     fn test_column_auto_increment_roundtrip() -> Result<()> {
-        let original = Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer)
+        let original = Column::new(ColumnId::new(1), "id".to_string(), DataType::Int)
             .primary_key(true)
             .auto_increment(true);
 
@@ -187,12 +186,12 @@ mod tests {
     #[test]
     fn test_column_validation() {
         // Test valid values
-        let int_column = Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer);
+        let int_column = Column::new(ColumnId::new(1), "id".to_string(), DataType::Int);
         assert!(int_column.validate_value(&Value::Integer(42)));
         assert!(int_column.validate_value(&Value::Null)); // NULL is allowed by default
 
         let non_null_int_column =
-            Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer).nullable(false);
+            Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).nullable(false);
         assert!(non_null_int_column.validate_value(&Value::Integer(42)));
         assert!(!non_null_int_column.validate_value(&Value::Null)); // NULL not allowed
 
@@ -208,7 +207,8 @@ mod tests {
 
     #[test]
     fn test_data_type_size() {
-        assert_eq!(DataType::Integer.size(), 4);
+        assert_eq!(DataType::Int.size(), 4);
+        assert_eq!(DataType::Int128.size(), 16);
         assert_eq!(DataType::Text.size(), 255);
         assert_eq!(DataType::Boolean.size(), 1);
         assert_eq!(DataType::Float.size(), 8);
@@ -216,7 +216,8 @@ mod tests {
 
     #[test]
     fn test_data_type_name() {
-        assert_eq!(DataType::Integer.name(), "INTEGER");
+        assert_eq!(DataType::Int.name(), "INT");
+        assert_eq!(DataType::Int128.name(), "INT128");
         assert_eq!(DataType::Text.name(), "TEXT");
         assert_eq!(DataType::Boolean.name(), "BOOLEAN");
         assert_eq!(DataType::Float.name(), "FLOAT");
@@ -224,7 +225,7 @@ mod tests {
 
     #[test]
     fn test_value_data_type() {
-        assert_eq!(Value::Integer(42).data_type(), DataType::Integer);
+        assert_eq!(Value::Integer(42).data_type(), DataType::Int);
         assert_eq!(Value::Text("hello".to_string()).data_type(), DataType::Text);
         assert_eq!(Value::Boolean(true).data_type(), DataType::Boolean);
         assert_eq!(Value::Float(3.14).data_type(), DataType::Float);
@@ -234,18 +235,18 @@ mod tests {
     #[test]
     fn test_value_compatibility() {
         // Compatible values
-        assert!(Value::Integer(42).is_compatible_with(DataType::Integer));
+        assert!(Value::Integer(42).is_compatible_with(DataType::Int));
         assert!(Value::Text("hello".to_string()).is_compatible_with(DataType::Text));
         assert!(Value::Boolean(true).is_compatible_with(DataType::Boolean));
         assert!(Value::Float(3.14).is_compatible_with(DataType::Float));
-        assert!(Value::Null.is_compatible_with(DataType::Integer));
+        assert!(Value::Null.is_compatible_with(DataType::Int));
         assert!(Value::Null.is_compatible_with(DataType::Text));
         assert!(Value::Null.is_compatible_with(DataType::Boolean));
         assert!(Value::Null.is_compatible_with(DataType::Float));
 
         // Incompatible values
         assert!(!Value::Integer(42).is_compatible_with(DataType::Text));
-        assert!(!Value::Text("hello".to_string()).is_compatible_with(DataType::Integer));
+        assert!(!Value::Text("hello".to_string()).is_compatible_with(DataType::Int));
         assert!(!Value::Boolean(true).is_compatible_with(DataType::Float));
         assert!(!Value::Float(3.14).is_compatible_with(DataType::Boolean));
     }
@@ -295,7 +296,7 @@ mod tests {
 
         // Non-nullable column without default (should get type default)
         let non_null_int_column =
-            Column::new(ColumnId::new(3), "count".to_string(), DataType::Integer).nullable(false);
+            Column::new(ColumnId::new(3), "count".to_string(), DataType::Int).nullable(false);
         assert_eq!(non_null_int_column.get_default_or_null(), Value::Integer(0));
 
         let non_null_text_column =
@@ -322,7 +323,7 @@ mod tests {
 
     #[test]
     fn test_column_size() {
-        let int_column = Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer);
+        let int_column = Column::new(ColumnId::new(1), "id".to_string(), DataType::Int);
         assert_eq!(int_column.size(), 4);
 
         let text_column = Column::new(ColumnId::new(2), "name".to_string(), DataType::Text);
@@ -337,14 +338,10 @@ mod tests {
 
     #[test]
     fn test_column_serialization_roundtrip() -> Result<()> {
-        let original = Column::new(
-            ColumnId::new(42),
-            "test_column".to_string(),
-            DataType::Integer,
-        )
-        .nullable(false)
-        .primary_key(true)
-        .default_value(Value::Integer(123));
+        let original = Column::new(ColumnId::new(42), "test_column".to_string(), DataType::Int)
+            .nullable(false)
+            .primary_key(true)
+            .default_value(Value::Integer(123));
 
         let mut buffer = Vec::new();
         original.serialize(&mut buffer)?;
@@ -399,7 +396,7 @@ mod tests {
 
     #[test]
     fn test_column_serialization_null_default() -> Result<()> {
-        let original = Column::new(ColumnId::new(1), "optional".to_string(), DataType::Integer)
+        let original = Column::new(ColumnId::new(1), "optional".to_string(), DataType::Int)
             .default_value(Value::Null);
 
         let mut buffer = Vec::new();
@@ -442,7 +439,7 @@ mod tests {
 
     #[test]
     fn test_column_debug() {
-        let column = Column::new(ColumnId::new(1), "test".to_string(), DataType::Integer);
+        let column = Column::new(ColumnId::new(1), "test".to_string(), DataType::Int);
         let debug_str = format!("{:?}", column);
         assert!(debug_str.contains("Column"));
         assert!(debug_str.contains("test"));
@@ -615,7 +612,7 @@ mod tests {
 
     fn create_test_columns() -> Vec<Column> {
         vec![
-            Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer).primary_key(true),
+            Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true),
             Column::new(ColumnId::new(2), "name".to_string(), DataType::Text),
             Column::new(ColumnId::new(3), "active".to_string(), DataType::Boolean),
         ]
@@ -650,9 +647,9 @@ mod tests {
     #[test]
     fn test_table_lists_named_constraints() -> Result<()> {
         let columns = vec![
-            Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer).primary_key(true),
+            Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true),
             Column::new(ColumnId::new(2), "email".to_string(), DataType::Text),
-            Column::new(ColumnId::new(3), "org_id".to_string(), DataType::Integer),
+            Column::new(ColumnId::new(3), "org_id".to_string(), DataType::Int),
         ];
         let mut table = Table::new(TableId::new(42), "users".to_string(), columns, 7)?;
 
@@ -695,8 +692,7 @@ mod tests {
         let table_id = schema.create_table(
             "users".to_string(),
             vec![
-                Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer)
-                    .primary_key(true),
+                Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true),
                 Column::new(ColumnId::new(2), "name".to_string(), DataType::Text),
             ],
         )?;
@@ -747,10 +743,9 @@ mod tests {
         let table_id = schema.create_table(
             "users".to_string(),
             vec![
-                Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer)
-                    .primary_key(true),
+                Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true),
                 Column::new(ColumnId::new(2), "email".to_string(), DataType::Text),
-                Column::new(ColumnId::new(3), "org_id".to_string(), DataType::Integer),
+                Column::new(ColumnId::new(3), "org_id".to_string(), DataType::Int),
             ],
         )?;
 
@@ -804,8 +799,7 @@ mod tests {
         catalog.create_table(
             "users",
             vec![
-                Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer)
-                    .primary_key(true),
+                Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true),
                 Column::new(ColumnId::new(2), "name".to_string(), DataType::Text),
             ],
         )?;
@@ -848,7 +842,7 @@ mod tests {
         let mut schema = Schema::new();
 
         let columns = vec![
-            Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer).primary_key(true),
+            Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true),
             Column::new(ColumnId::new(2), "id".to_string(), DataType::Text), // Duplicate name
         ];
 
@@ -866,9 +860,8 @@ mod tests {
     fn test_drop_table() -> Result<()> {
         let mut schema = Schema::new();
 
-        let columns = vec![
-            Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer).primary_key(true),
-        ];
+        let columns =
+            vec![Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true)];
 
         let table_id = schema.create_table("users".to_string(), columns)?;
         assert_eq!(schema.get_table_count(), 1);
@@ -893,12 +886,10 @@ mod tests {
     fn test_list_tables() -> Result<()> {
         let mut schema = Schema::new();
 
-        let columns1 = vec![
-            Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer).primary_key(true),
-        ];
-        let columns2 = vec![
-            Column::new(ColumnId::new(2), "id".to_string(), DataType::Integer).primary_key(true),
-        ];
+        let columns1 =
+            vec![Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true)];
+        let columns2 =
+            vec![Column::new(ColumnId::new(2), "id".to_string(), DataType::Int).primary_key(true)];
 
         let table1_id = schema.create_table("users".to_string(), columns1)?;
         let table2_id = schema.create_table("products".to_string(), columns2)?;
@@ -940,12 +931,10 @@ mod tests {
     fn test_table_id_assignment() -> Result<()> {
         let mut schema = Schema::new();
 
-        let columns1 = vec![
-            Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer).primary_key(true),
-        ];
-        let columns2 = vec![
-            Column::new(ColumnId::new(2), "id".to_string(), DataType::Integer).primary_key(true),
-        ];
+        let columns1 =
+            vec![Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true)];
+        let columns2 =
+            vec![Column::new(ColumnId::new(2), "id".to_string(), DataType::Int).primary_key(true)];
 
         let table1_id = schema.create_table("table1".to_string(), columns1)?;
         let table2_id = schema.create_table("table2".to_string(), columns2)?;
@@ -968,7 +957,7 @@ mod tests {
         assert_eq!(schema.get_total_column_count(), 3);
 
         let columns2 = vec![
-            Column::new(ColumnId::new(4), "id".to_string(), DataType::Integer).primary_key(true),
+            Column::new(ColumnId::new(4), "id".to_string(), DataType::Int).primary_key(true),
             Column::new(ColumnId::new(5), "name".to_string(), DataType::Text),
         ]; // 2 columns
         schema.create_table("products".to_string(), columns2)?;
@@ -999,7 +988,7 @@ mod tests {
         let table1_id = original_schema.create_table("users".to_string(), columns1)?;
 
         let columns2 = vec![
-            Column::new(ColumnId::new(4), "id".to_string(), DataType::Integer).primary_key(true),
+            Column::new(ColumnId::new(4), "id".to_string(), DataType::Int).primary_key(true),
             Column::new(ColumnId::new(5), "name".to_string(), DataType::Text),
         ];
         let table2_id = original_schema.create_table("products".to_string(), columns2)?;
@@ -1146,7 +1135,7 @@ mod tests {
     fn test_table_validation_no_primary_key() {
         let columns = vec![
             Column::new(ColumnId::new(1), "name".to_string(), DataType::Text),
-            Column::new(ColumnId::new(2), "age".to_string(), DataType::Integer),
+            Column::new(ColumnId::new(2), "age".to_string(), DataType::Int),
         ];
 
         let result = Table::new(TableId::new(1), "no_pk".to_string(), columns, 1u32);
@@ -1225,14 +1214,10 @@ mod tests {
     #[test]
     fn test_table_get_primary_key_values() -> Result<()> {
         let columns = vec![
-            Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer).primary_key(true),
+            Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true),
             Column::new(ColumnId::new(2), "name".to_string(), DataType::Text),
-            Column::new(
-                ColumnId::new(3),
-                "created_at".to_string(),
-                DataType::Integer,
-            )
-            .primary_key(true),
+            Column::new(ColumnId::new(3), "created_at".to_string(), DataType::Int)
+                .primary_key(true),
         ];
         let table = Table::new(TableId::new(1), "logs".to_string(), columns, 42u32)?;
 
@@ -1266,7 +1251,7 @@ mod tests {
     #[test]
     fn test_table_row_size() -> Result<()> {
         let columns = vec![
-            Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer).primary_key(true),
+            Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true),
             Column::new(ColumnId::new(2), "name".to_string(), DataType::Text),
             Column::new(ColumnId::new(3), "active".to_string(), DataType::Boolean),
             Column::new(ColumnId::new(4), "price".to_string(), DataType::Float),
@@ -1315,10 +1300,8 @@ mod tests {
     #[test]
     fn test_table_serialization_multiple_primary_keys() -> Result<()> {
         let columns = vec![
-            Column::new(ColumnId::new(1), "user_id".to_string(), DataType::Integer)
-                .primary_key(true),
-            Column::new(ColumnId::new(2), "post_id".to_string(), DataType::Integer)
-                .primary_key(true),
+            Column::new(ColumnId::new(1), "user_id".to_string(), DataType::Int).primary_key(true),
+            Column::new(ColumnId::new(2), "post_id".to_string(), DataType::Int).primary_key(true),
             Column::new(ColumnId::new(3), "content".to_string(), DataType::Text),
         ];
         let original = Table::new(TableId::new(1), "user_posts".to_string(), columns, 42u32)?;
@@ -1339,8 +1322,8 @@ mod tests {
     #[test]
     fn test_table_serialization_roundtrip_with_constraints() -> Result<()> {
         let columns = vec![
-            Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer).primary_key(true),
-            Column::new(ColumnId::new(2), "user_id".to_string(), DataType::Integer),
+            Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true),
+            Column::new(ColumnId::new(2), "user_id".to_string(), DataType::Int),
             Column::new(ColumnId::new(3), "name".to_string(), DataType::Text),
         ];
         let mut original = Table::new(TableId::new(7), "posts".to_string(), columns, 42u32)?;
@@ -1519,8 +1502,7 @@ mod catalog_new_tests {
 
             // Create a table
             let columns = vec![
-                Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer)
-                    .primary_key(true),
+                Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true),
                 Column::new(ColumnId::new(2), "name".to_string(), DataType::Text),
             ];
 
@@ -1548,12 +1530,12 @@ mod catalog_new_tests {
 
         // Create multiple tables
         let columns1 = vec![
-            Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer).primary_key(true),
+            Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true),
             Column::new(ColumnId::new(2), "email".to_string(), DataType::Text),
         ];
 
         let columns2 = vec![
-            Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer).primary_key(true),
+            Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true),
             Column::new(ColumnId::new(2), "title".to_string(), DataType::Text),
         ];
 
@@ -1587,9 +1569,8 @@ mod catalog_new_tests {
 
         let mut catalog = Catalog::open_or_create(test_db.path())?;
 
-        let columns = vec![
-            Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer).primary_key(true),
-        ];
+        let columns =
+            vec![Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true)];
 
         // Create first table
         catalog.create_table("users", columns.clone())?;
@@ -1610,7 +1591,7 @@ mod catalog_new_tests {
 
         // Create a table
         let columns = vec![
-            Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer).primary_key(true),
+            Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true),
             Column::new(ColumnId::new(2), "name".to_string(), DataType::Text),
         ];
 
@@ -1678,8 +1659,7 @@ mod catalog_new_tests {
         {
             let mut catalog = Catalog::open_or_create(test_db.path())?;
             let columns = vec![
-                Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer)
-                    .primary_key(true),
+                Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true),
             ];
 
             let table_id = catalog.create_table_with_root("products", columns, root_page)?;
@@ -1704,8 +1684,7 @@ mod catalog_new_tests {
         {
             let mut catalog = Catalog::open_or_create(test_db.path())?;
             let columns = vec![
-                Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer)
-                    .primary_key(true),
+                Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true),
             ];
 
             let table_id = catalog.create_table("users", columns)?;
@@ -1727,9 +1706,8 @@ mod catalog_new_tests {
         let mut catalog = Catalog::open_or_create(test_db.path())?;
 
         // Create a table
-        let columns = vec![
-            Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer).primary_key(true),
-        ];
+        let columns =
+            vec![Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true)];
 
         let table_id = catalog.create_table("users", columns)?;
 
@@ -1770,8 +1748,7 @@ mod catalog_new_tests {
             TableId::new(1),
             "users".to_string(),
             vec![
-                Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer)
-                    .primary_key(true),
+                Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true),
                 Column::new(ColumnId::new(2), "email".to_string(), DataType::Text),
             ],
             10u32,
@@ -1804,7 +1781,7 @@ mod catalog_new_tests {
             let table_id = catalog.create_table(
                 "users",
                 vec![
-                    Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer)
+                    Column::new(ColumnId::new(1), "id".to_string(), DataType::Int)
                         .primary_key(true),
                     Column::new(ColumnId::new(2), "email".to_string(), DataType::Text),
                 ],
@@ -1839,7 +1816,7 @@ mod catalog_new_tests {
         let table_id = catalog.create_table(
             "users",
             vec![
-                Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer)
+                Column::new(ColumnId::new(1), "id".to_string(), DataType::Int)
                     .primary_key(true)
                     .nullable(false),
             ],
@@ -1864,7 +1841,7 @@ mod catalog_new_tests {
         let table_id = catalog.create_table(
             "users",
             vec![
-                Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer)
+                Column::new(ColumnId::new(1), "id".to_string(), DataType::Int)
                     .primary_key(true)
                     .nullable(false),
                 Column::new(ColumnId::new(2), "email".to_string(), DataType::Text),
@@ -1897,7 +1874,7 @@ mod catalog_new_tests {
         let table_id = catalog.create_table(
             "users",
             vec![
-                Column::new(ColumnId::new(1), "id".to_string(), DataType::Integer)
+                Column::new(ColumnId::new(1), "id".to_string(), DataType::Int)
                     .primary_key(true)
                     .nullable(false),
                 Column::new(ColumnId::new(2), "email".to_string(), DataType::Text),

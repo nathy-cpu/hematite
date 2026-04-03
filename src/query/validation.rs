@@ -1155,7 +1155,14 @@ fn validate_create(create: &CreateStatement, catalog: &Schema) -> Result<()> {
         ));
     }
     if let Some(column) = auto_increment_columns.first() {
-        if column.data_type != SqlTypeName::Integer {
+        if !matches!(
+            column.data_type,
+            SqlTypeName::Int
+                | SqlTypeName::Int8
+                | SqlTypeName::Int16
+                | SqlTypeName::Int64
+                | SqlTypeName::Int128
+        ) {
             return Err(HematiteError::ParseError(format!(
                 "AUTO_INCREMENT column '{}' must use an integer type",
                 column.name
@@ -2403,10 +2410,11 @@ fn require_table<'a>(catalog: &'a Schema, table_name: &str) -> Result<&'a Table>
 
 fn sql_type_name_for_catalog_type(data_type: crate::catalog::DataType) -> SqlTypeName {
     match data_type {
-        crate::catalog::DataType::TinyInt => SqlTypeName::TinyInt,
-        crate::catalog::DataType::SmallInt => SqlTypeName::SmallInt,
-        crate::catalog::DataType::Integer => SqlTypeName::Integer,
-        crate::catalog::DataType::BigInt => SqlTypeName::BigInt,
+        crate::catalog::DataType::Int8 => SqlTypeName::Int8,
+        crate::catalog::DataType::Int16 => SqlTypeName::Int16,
+        crate::catalog::DataType::Int => SqlTypeName::Int,
+        crate::catalog::DataType::Int64 => SqlTypeName::Int64,
+        crate::catalog::DataType::Int128 => SqlTypeName::Int128,
         crate::catalog::DataType::Text => SqlTypeName::Text,
         crate::catalog::DataType::Char(length) => SqlTypeName::Char(length),
         crate::catalog::DataType::VarChar(length) => SqlTypeName::VarChar(length),

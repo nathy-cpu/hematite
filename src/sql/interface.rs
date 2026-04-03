@@ -131,7 +131,7 @@ impl FromValue for i32 {
         match value {
             Value::Integer(i) => Ok(*i),
             _ => Err(HematiteError::ParseError(format!(
-                "Expected INTEGER, found {:?}",
+                "Expected INT, found {:?}",
                 value
             ))),
         }
@@ -175,6 +175,7 @@ impl FromValue for f64 {
             Value::Float(f) => Ok(*f),
             Value::Integer(i) => Ok(*i as f64), // Allow integer to float conversion
             Value::BigInt(i) => Ok(*i as f64),
+            Value::Int128(i) => Ok(*i as f64),
             _ => Err(HematiteError::ParseError(format!(
                 "Expected FLOAT, found {:?}",
                 value
@@ -195,7 +196,21 @@ impl FromValue for i64 {
             Value::BigInt(i) => Ok(*i),
             Value::Integer(i) => Ok(*i as i64),
             _ => Err(HematiteError::ParseError(format!(
-                "Expected BIGINT, found {:?}",
+                "Expected INT64, found {:?}",
+                value
+            ))),
+        }
+    }
+}
+
+impl FromValue for i128 {
+    fn from_value(value: &Value) -> Result<Self> {
+        match value {
+            Value::Int128(i) => Ok(*i),
+            Value::BigInt(i) => Ok(*i as i128),
+            Value::Integer(i) => Ok(*i as i128),
+            _ => Err(HematiteError::ParseError(format!(
+                "Expected INT128, found {:?}",
                 value
             ))),
         }

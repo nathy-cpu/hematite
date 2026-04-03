@@ -1624,7 +1624,7 @@ mod mod_tests {
                 crate::catalog::Column::new(
                     crate::catalog::ColumnId::new(1),
                     "id".to_string(),
-                    crate::catalog::DataType::Integer,
+                    crate::catalog::DataType::Int,
                 )
                 .primary_key(true),
                 crate::catalog::Column::new(
@@ -1685,7 +1685,7 @@ mod mod_tests {
                 crate::catalog::Column::new(
                     crate::catalog::ColumnId::new(1),
                     "id".to_string(),
-                    crate::catalog::DataType::Integer,
+                    crate::catalog::DataType::Int,
                 )
                 .primary_key(true),
                 crate::catalog::Column::new(
@@ -1775,7 +1775,7 @@ mod mod_tests {
                     crate::catalog::Column::new(
                         crate::catalog::ColumnId::new(1),
                         "id".to_string(),
-                        crate::catalog::DataType::Integer,
+                        crate::catalog::DataType::Int,
                     )
                     .primary_key(true),
                     crate::catalog::Column::new(
@@ -1844,7 +1844,7 @@ mod mod_tests {
                 crate::catalog::Column::new(
                     crate::catalog::ColumnId::new(1),
                     "id".to_string(),
-                    crate::catalog::DataType::Integer,
+                    crate::catalog::DataType::Int,
                 )
                 .primary_key(true),
                 crate::catalog::Column::new(

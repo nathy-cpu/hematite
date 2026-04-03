@@ -16,7 +16,7 @@ mod ast_tests {
             crate::catalog::Column::new(
                 crate::catalog::ColumnId::new(1),
                 "id".to_string(),
-                CatalogDataType::Integer,
+                CatalogDataType::Int,
             )
             .primary_key(true),
             crate::catalog::Column::new(
@@ -53,7 +53,7 @@ mod ast_tests {
         let columns = vec![crate::catalog::Column::new(
             crate::catalog::ColumnId::new(1),
             "id".to_string(),
-            CatalogDataType::Integer,
+            CatalogDataType::Int,
         )
         .primary_key(true)];
         catalog.create_table("users".to_string(), columns).unwrap();
@@ -83,7 +83,7 @@ mod ast_tests {
         let columns = vec![crate::catalog::Column::new(
             crate::catalog::ColumnId::new(1),
             "id".to_string(),
-            CatalogDataType::Integer,
+            CatalogDataType::Int,
         )
         .primary_key(true)];
         catalog.create_table("users".to_string(), columns).unwrap();
@@ -120,7 +120,7 @@ mod ast_tests {
             crate::catalog::Column::new(
                 crate::catalog::ColumnId::new(1),
                 "id".to_string(),
-                CatalogDataType::Integer,
+                CatalogDataType::Int,
             )
             .primary_key(true),
             crate::catalog::Column::new(
@@ -163,7 +163,7 @@ mod ast_tests {
             crate::catalog::Column::new(
                 crate::catalog::ColumnId::new(1),
                 "id".to_string(),
-                CatalogDataType::Integer,
+                CatalogDataType::Int,
             )
             .primary_key(true),
             crate::catalog::Column::new(
@@ -218,7 +218,7 @@ mod ast_tests {
                 crate::catalog::Column::new(
                     crate::catalog::ColumnId::new(1),
                     "id".to_string(),
-                    CatalogDataType::Integer,
+                    CatalogDataType::Int,
                 )
                 .primary_key(true),
                 crate::catalog::Column::new(
@@ -234,13 +234,13 @@ mod ast_tests {
                 crate::catalog::Column::new(
                     crate::catalog::ColumnId::new(3),
                     "id".to_string(),
-                    CatalogDataType::Integer,
+                    CatalogDataType::Int,
                 )
                 .primary_key(true),
                 crate::catalog::Column::new(
                     crate::catalog::ColumnId::new(4),
                     "user_id".to_string(),
-                    CatalogDataType::Integer,
+                    CatalogDataType::Int,
                 ),
             ],
         )?;
@@ -346,7 +346,7 @@ mod lexer_tests {
             Token::Identifier("name".to_string()),
             Token::Varchar,
             Token::LeftParen,
-            Token::NumberLiteral(32.0),
+            Token::NumberLiteral("32".to_string()),
             Token::RightParen,
             Token::RightParen,
             Token::Semicolon,
@@ -370,11 +370,11 @@ mod lexer_tests {
             Token::Identifier("id".to_string()),
             Token::In,
             Token::LeftParen,
-            Token::NumberLiteral(1.0),
+            Token::NumberLiteral("1".to_string()),
             Token::Comma,
-            Token::NumberLiteral(2.0),
+            Token::NumberLiteral("2".to_string()),
             Token::Comma,
-            Token::NumberLiteral(3.0),
+            Token::NumberLiteral("3".to_string()),
             Token::RightParen,
             Token::Semicolon,
         ];
@@ -396,9 +396,9 @@ mod lexer_tests {
             Token::Where,
             Token::Identifier("id".to_string()),
             Token::Between,
-            Token::NumberLiteral(1.0),
+            Token::NumberLiteral("1".to_string()),
             Token::And,
-            Token::NumberLiteral(3.0),
+            Token::NumberLiteral("3".to_string()),
             Token::Semicolon,
         ];
 
@@ -437,11 +437,11 @@ mod lexer_tests {
             Token::Where,
             Token::Identifier("id".to_string()),
             Token::Equal,
-            Token::NumberLiteral(1.0),
+            Token::NumberLiteral("1".to_string()),
             Token::And,
             Token::Identifier("id".to_string()),
             Token::NotEqual,
-            Token::NumberLiteral(2.0),
+            Token::NumberLiteral("2".to_string()),
         ];
 
         assert_eq!(lexer.get_tokens(), &expected);
@@ -463,7 +463,7 @@ mod lexer_tests {
             Token::Identifier("name".to_string()),
             Token::Desc,
             Token::Limit,
-            Token::NumberLiteral(5.0),
+            Token::NumberLiteral("5".to_string()),
             Token::Semicolon,
         ];
 
@@ -487,9 +487,9 @@ mod lexer_tests {
             Token::Identifier("name".to_string()),
             Token::Desc,
             Token::Limit,
-            Token::NumberLiteral(5.0),
+            Token::NumberLiteral("5".to_string()),
             Token::Offset,
-            Token::NumberLiteral(2.0),
+            Token::NumberLiteral("2".to_string()),
             Token::Semicolon,
         ];
 
@@ -629,7 +629,7 @@ mod lexer_tests {
             Token::RightParen,
             Token::Values,
             Token::LeftParen,
-            Token::NumberLiteral(1.0),
+            Token::NumberLiteral("1".to_string()),
             Token::Comma,
             Token::StringLiteral("John".to_string()),
             Token::RightParen,
@@ -681,7 +681,7 @@ mod lexer_tests {
             Token::Where,
             Token::Identifier("id".to_string()),
             Token::Equal,
-            Token::NumberLiteral(1.0),
+            Token::NumberLiteral("1".to_string()),
             Token::Semicolon,
         ];
 
@@ -709,7 +709,7 @@ mod lexer_tests {
             Token::Where,
             Token::Identifier("id".to_string()),
             Token::Equal,
-            Token::NumberLiteral(1.0),
+            Token::NumberLiteral("1".to_string()),
             Token::Semicolon,
         ];
 
@@ -767,7 +767,7 @@ mod lexer_tests {
             Token::Identifier("users".to_string()),
             Token::LeftParen,
             Token::Identifier("id".to_string()),
-            Token::Integer,
+            Token::Int32,
             Token::Primary,
             Token::Key,
             Token::Comma,
@@ -995,9 +995,10 @@ mod parser_tests {
                 if message.contains("Keyword 'using' must be capitalized as 'USING'")
         ));
 
-        let charset_err =
-            parse_create("CREATE TABLE users (id INT PRIMARY KEY) ENGINE=InnoDB DEFAULT charset=utf8mb4;")
-                .unwrap_err();
+        let charset_err = parse_create(
+            "CREATE TABLE users (id INT PRIMARY KEY) ENGINE=InnoDB DEFAULT charset=utf8mb4;",
+        )
+        .unwrap_err();
         assert!(matches!(
             charset_err,
             crate::error::HematiteError::ParseError(message)
@@ -1258,7 +1259,7 @@ mod parser_tests {
                         operator: ArithmeticOperator::Modulo,
                         ..
                     }
-                ) && *target_type == SqlTypeName::Integer
+                ) && *target_type == SqlTypeName::Int
         ));
         assert_eq!(select.column_aliases[0].as_deref(), Some("bucket"));
         Ok(())
@@ -1667,7 +1668,7 @@ mod parser_tests {
         assert_eq!(create.table, "user data");
         assert_eq!(create.columns.len(), 4);
         assert_eq!(create.columns[0].name, "id");
-        assert_eq!(create.columns[0].data_type, SqlTypeName::Integer);
+        assert_eq!(create.columns[0].data_type, SqlTypeName::Int);
         assert!(create.columns[0].unique);
         assert_eq!(create.columns[1].data_type, SqlTypeName::Boolean);
         assert!(!create.columns[1].nullable);
@@ -1691,7 +1692,7 @@ mod parser_tests {
         let create = parse_create(
             "CREATE TABLE metrics (id BIGINT UNSIGNED PRIMARY KEY, ratio REAL, amount DECIMAL(10, 2), code CHAR(8), tiny TINYINT, small SMALLINT, exact NUMERIC(6));",
         )?;
-        assert_eq!(create.columns[0].data_type, SqlTypeName::BigInt);
+        assert_eq!(create.columns[0].data_type, SqlTypeName::Int64);
         assert_eq!(create.columns[1].data_type, SqlTypeName::Real);
         assert_eq!(
             create.columns[2].data_type,
@@ -1701,8 +1702,8 @@ mod parser_tests {
             }
         );
         assert_eq!(create.columns[3].data_type, SqlTypeName::Char(8));
-        assert_eq!(create.columns[4].data_type, SqlTypeName::TinyInt);
-        assert_eq!(create.columns[5].data_type, SqlTypeName::SmallInt);
+        assert_eq!(create.columns[4].data_type, SqlTypeName::Int8);
+        assert_eq!(create.columns[5].data_type, SqlTypeName::Int16);
         assert_eq!(
             create.columns[6].data_type,
             SqlTypeName::Numeric {
@@ -1718,7 +1719,7 @@ mod parser_tests {
         let create = parse_create(
             "CREATE TABLE events (id BIGINT PRIMARY KEY, amount DECIMAL(12, 4), payload BLOB, start_date DATE, created_at DATETIME);",
         )?;
-        assert_eq!(create.columns[0].data_type, SqlTypeName::BigInt);
+        assert_eq!(create.columns[0].data_type, SqlTypeName::Int64);
         assert_eq!(
             create.columns[1].data_type,
             SqlTypeName::Decimal {
@@ -1729,6 +1730,20 @@ mod parser_tests {
         assert_eq!(create.columns[2].data_type, SqlTypeName::Blob);
         assert_eq!(create.columns[3].data_type, SqlTypeName::Date);
         assert_eq!(create.columns[4].data_type, SqlTypeName::DateTime);
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_new_integer_type_names() -> Result<()> {
+        let create = parse_create(
+            "CREATE TABLE ints (id INT PRIMARY KEY, tiny INT8, small INT16, normal INT32, large INT64, massive INT128);",
+        )?;
+        assert_eq!(create.columns[0].data_type, SqlTypeName::Int);
+        assert_eq!(create.columns[1].data_type, SqlTypeName::Int8);
+        assert_eq!(create.columns[2].data_type, SqlTypeName::Int16);
+        assert_eq!(create.columns[3].data_type, SqlTypeName::Int);
+        assert_eq!(create.columns[4].data_type, SqlTypeName::Int64);
+        assert_eq!(create.columns[5].data_type, SqlTypeName::Int128);
         Ok(())
     }
 

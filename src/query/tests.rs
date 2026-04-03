@@ -19,7 +19,7 @@ mod executor_tests {
             Column::new(
                 crate::catalog::ColumnId::new(1),
                 "id".to_string(),
-                DataType::Integer,
+                DataType::Int,
             )
             .primary_key(true),
             Column::new(
@@ -88,7 +88,7 @@ mod executor_tests {
                 Column::new(
                     crate::catalog::ColumnId::new(1),
                     "id".to_string(),
-                    DataType::Integer,
+                    DataType::Int,
                 )
                 .primary_key(true),
                 Column::new(
@@ -200,7 +200,7 @@ mod executor_tests {
                 Column::new(
                     crate::catalog::ColumnId::new(1),
                     "id".to_string(),
-                    DataType::Integer,
+                    DataType::Int,
                 )
                 .primary_key(true),
                 Column::new(
@@ -285,7 +285,7 @@ mod executor_tests {
             Column::new(
                 crate::catalog::ColumnId::new(1),
                 "id".to_string(),
-                DataType::Integer,
+                DataType::Int,
             )
             .primary_key(true),
             Column::new(
@@ -320,7 +320,7 @@ mod executor_tests {
                 conditions: vec![Condition::Comparison {
                     left: Expression::Column("rowid".to_string()),
                     operator: ComparisonOperator::Equal,
-                    right: Expression::Literal(LiteralValue::Integer(rowid_1 as i32)),
+                    right: Expression::Literal(LiteralValue::Integer(rowid_1 as i128)),
                 }],
             }),
             group_by: Vec::new(),
@@ -349,7 +349,7 @@ mod executor_tests {
             Column::new(
                 crate::catalog::ColumnId::new(1),
                 "id".to_string(),
-                DataType::Integer,
+                DataType::Int,
             )
             .primary_key(true),
             Column::new(
@@ -396,7 +396,7 @@ mod executor_tests {
             Column::new(
                 crate::catalog::ColumnId::new(1),
                 "id".to_string(),
-                DataType::Integer,
+                DataType::Int,
             )
             .primary_key(true),
             Column::new(
@@ -476,7 +476,7 @@ mod executor_tests {
             Column::new(
                 crate::catalog::ColumnId::new(1),
                 "id".to_string(),
-                DataType::Integer,
+                DataType::Int,
             )
             .primary_key(true),
             Column::new(
@@ -566,7 +566,7 @@ mod executor_tests {
             table: "test_table".to_string(),
             columns: vec![ColumnDefinition {
                 name: "id".to_string(),
-                data_type: SqlTypeName::Integer,
+                data_type: SqlTypeName::Int,
                 nullable: false,
                 primary_key: true,
                 auto_increment: false,
@@ -597,7 +597,7 @@ mod executor_tests {
             vec![crate::catalog::Column::new(
                 crate::catalog::ColumnId::new(1),
                 "id".to_string(),
-                DataType::Integer,
+                DataType::Int,
             )
             .primary_key(true)],
         )?;
@@ -611,7 +611,7 @@ mod executor_tests {
             columns: vec![
                 ColumnDefinition {
                     name: "id".to_string(),
-                    data_type: SqlTypeName::Integer,
+                    data_type: SqlTypeName::Int,
                     nullable: false,
                     primary_key: true,
                     auto_increment: false,
@@ -622,7 +622,7 @@ mod executor_tests {
                 },
                 ColumnDefinition {
                     name: "parent_id".to_string(),
-                    data_type: SqlTypeName::Integer,
+                    data_type: SqlTypeName::Int,
                     nullable: true,
                     primary_key: false,
                     auto_increment: false,
@@ -668,7 +668,7 @@ mod executor_tests {
                 crate::catalog::Column::new(
                     crate::catalog::ColumnId::new(1),
                     "id".to_string(),
-                    DataType::Integer,
+                    DataType::Int,
                 )
                 .primary_key(true),
                 crate::catalog::Column::new(
@@ -724,7 +724,7 @@ mod optimizer_tests {
             crate::catalog::Column::new(
                 crate::catalog::ColumnId::new(1),
                 "id".to_string(),
-                DataType::Integer,
+                DataType::Int,
             )
             .primary_key(true),
             crate::catalog::Column::new(
@@ -809,7 +809,7 @@ mod planner_tests {
             crate::catalog::Column::new(
                 crate::catalog::ColumnId::new(1),
                 "id".to_string(),
-                DataType::Integer,
+                DataType::Int,
             )
             .primary_key(true),
             crate::catalog::Column::new(
@@ -873,7 +873,7 @@ mod planner_tests {
                 crate::catalog::Column::new(
                     crate::catalog::ColumnId::new(1),
                     "id".to_string(),
-                    DataType::Integer,
+                    DataType::Int,
                 )
                 .primary_key(true),
                 crate::catalog::Column::new(
@@ -936,7 +936,7 @@ mod planner_tests {
                 crate::catalog::Column::new(
                     crate::catalog::ColumnId::new(1),
                     "id".to_string(),
-                    DataType::Integer,
+                    DataType::Int,
                 )
                 .primary_key(true),
                 crate::catalog::Column::new(
@@ -952,13 +952,13 @@ mod planner_tests {
                 crate::catalog::Column::new(
                     crate::catalog::ColumnId::new(3),
                     "id".to_string(),
-                    DataType::Integer,
+                    DataType::Int,
                 )
                 .primary_key(true),
                 crate::catalog::Column::new(
                     crate::catalog::ColumnId::new(4),
                     "user_id".to_string(),
-                    DataType::Integer,
+                    DataType::Int,
                 ),
             ],
         )?;
@@ -1010,7 +1010,7 @@ mod planner_tests {
             crate::catalog::Column::new(
                 crate::catalog::ColumnId::new(1),
                 "id".to_string(),
-                DataType::Integer,
+                DataType::Int,
             )
             .primary_key(true),
             crate::catalog::Column::new(
@@ -1052,7 +1052,7 @@ mod planner_tests {
             crate::catalog::Column::new(
                 crate::catalog::ColumnId::new(1),
                 "id".to_string(),
-                DataType::Integer,
+                DataType::Int,
             )
             .primary_key(true),
             crate::catalog::Column::new(
@@ -1099,13 +1099,13 @@ mod planner_tests {
                 crate::catalog::Column::new(
                     crate::catalog::ColumnId::new(1),
                     "id".to_string(),
-                    DataType::Integer,
+                    DataType::Int,
                 )
                 .primary_key(true),
                 crate::catalog::Column::new(
                     crate::catalog::ColumnId::new(2),
                     "team_id".to_string(),
-                    DataType::Integer,
+                    DataType::Int,
                 ),
                 crate::catalog::Column::new(
                     crate::catalog::ColumnId::new(3),
@@ -1120,7 +1120,7 @@ mod planner_tests {
                 crate::catalog::Column::new(
                     crate::catalog::ColumnId::new(4),
                     "id".to_string(),
-                    DataType::Integer,
+                    DataType::Int,
                 )
                 .primary_key(true),
                 crate::catalog::Column::new(
@@ -1185,19 +1185,19 @@ mod planner_tests {
                 crate::catalog::Column::new(
                     crate::catalog::ColumnId::new(1),
                     "src".to_string(),
-                    DataType::Integer,
+                    DataType::Int,
                 )
                 .primary_key(true),
                 crate::catalog::Column::new(
                     crate::catalog::ColumnId::new(2),
                     "dst".to_string(),
-                    DataType::Integer,
+                    DataType::Int,
                 )
                 .primary_key(true),
                 crate::catalog::Column::new(
                     crate::catalog::ColumnId::new(3),
                     "weight".to_string(),
-                    DataType::Integer,
+                    DataType::Int,
                 ),
             ],
         )?;
@@ -1247,18 +1247,18 @@ mod planner_tests {
                 crate::catalog::Column::new(
                     crate::catalog::ColumnId::new(1),
                     "id".to_string(),
-                    DataType::Integer,
+                    DataType::Int,
                 )
                 .primary_key(true),
                 crate::catalog::Column::new(
                     crate::catalog::ColumnId::new(2),
                     "user_id".to_string(),
-                    DataType::Integer,
+                    DataType::Int,
                 ),
                 crate::catalog::Column::new(
                     crate::catalog::ColumnId::new(3),
                     "org_id".to_string(),
-                    DataType::Integer,
+                    DataType::Int,
                 ),
             ],
         )?;
@@ -1320,7 +1320,7 @@ mod planner_tests {
                 crate::catalog::Column::new(
                     crate::catalog::ColumnId::new(1),
                     "id".to_string(),
-                    DataType::Integer,
+                    DataType::Int,
                 )
                 .primary_key(true),
                 crate::catalog::Column::new(
@@ -1400,7 +1400,7 @@ mod planner_tests {
             vec![crate::catalog::Column::new(
                 crate::catalog::ColumnId::new(1),
                 "id".to_string(),
-                DataType::Integer,
+                DataType::Int,
             )
             .primary_key(true)],
         )?;
@@ -1410,13 +1410,13 @@ mod planner_tests {
                 crate::catalog::Column::new(
                     crate::catalog::ColumnId::new(2),
                     "id".to_string(),
-                    DataType::Integer,
+                    DataType::Int,
                 )
                 .primary_key(true),
                 crate::catalog::Column::new(
                     crate::catalog::ColumnId::new(3),
                     "user_id".to_string(),
-                    DataType::Integer,
+                    DataType::Int,
                 ),
             ],
         )?;
@@ -1481,7 +1481,7 @@ mod planner_tests {
             crate::catalog::Column::new(
                 crate::catalog::ColumnId::new(1),
                 "id".to_string(),
-                DataType::Integer,
+                DataType::Int,
             )
             .primary_key(true),
             crate::catalog::Column::new(
@@ -1563,7 +1563,7 @@ mod planner_tests {
             crate::catalog::Column::new(
                 crate::catalog::ColumnId::new(1),
                 "id".to_string(),
-                DataType::Integer,
+                DataType::Int,
             )
             .primary_key(true),
             crate::catalog::Column::new(
@@ -1614,7 +1614,7 @@ mod planner_tests {
             crate::catalog::Column::new(
                 crate::catalog::ColumnId::new(1),
                 "id".to_string(),
-                DataType::Integer,
+                DataType::Int,
             )
             .primary_key(true),
             crate::catalog::Column::new(
@@ -1658,7 +1658,7 @@ mod planner_tests {
             crate::catalog::Column::new(
                 crate::catalog::ColumnId::new(1),
                 "id".to_string(),
-                DataType::Integer,
+                DataType::Int,
             )
             .primary_key(true),
             crate::catalog::Column::new(
@@ -1699,7 +1699,7 @@ mod planner_tests {
             table: "test_table".to_string(),
             columns: vec![ColumnDefinition {
                 name: "id".to_string(),
-                data_type: SqlTypeName::Integer,
+                data_type: SqlTypeName::Int,
                 nullable: false,
                 primary_key: true,
                 auto_increment: false,

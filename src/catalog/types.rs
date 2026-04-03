@@ -7,10 +7,11 @@ use crate::error::{HematiteError, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DataType {
-    TinyInt,
-    SmallInt,
-    Integer,
-    BigInt,
+    Int8,
+    Int16,
+    Int,
+    Int64,
+    Int128,
     Text,
     Char(u32),
     VarChar(u32),
@@ -40,10 +41,11 @@ pub enum DataType {
 impl DataType {
     pub fn size(&self) -> usize {
         match self {
-            DataType::TinyInt => 1,
-            DataType::SmallInt => 2,
-            DataType::Integer => 4,
-            DataType::BigInt => 8,
+            DataType::Int8 => 1,
+            DataType::Int16 => 2,
+            DataType::Int => 4,
+            DataType::Int64 => 8,
+            DataType::Int128 => 16,
             DataType::Text => 255,
             DataType::Char(length) | DataType::VarChar(length) => *length as usize,
             DataType::Binary(length) | DataType::VarBinary(length) => *length as usize,
@@ -66,10 +68,11 @@ impl DataType {
 
     pub fn name(&self) -> String {
         match self {
-            DataType::TinyInt => "TINYINT".to_string(),
-            DataType::SmallInt => "SMALLINT".to_string(),
-            DataType::Integer => "INTEGER".to_string(),
-            DataType::BigInt => "BIGINT".to_string(),
+            DataType::Int8 => "INT8".to_string(),
+            DataType::Int16 => "INT16".to_string(),
+            DataType::Int => "INT".to_string(),
+            DataType::Int64 => "INT64".to_string(),
+            DataType::Int128 => "INT128".to_string(),
             DataType::Text => "TEXT".to_string(),
             DataType::Char(length) => format!("CHAR({length})"),
             DataType::VarChar(length) => format!("VARCHAR({length})"),
@@ -104,10 +107,11 @@ impl DataType {
 
     pub fn base_name(&self) -> &'static str {
         match self {
-            DataType::TinyInt => "TINYINT",
-            DataType::SmallInt => "SMALLINT",
-            DataType::Integer => "INTEGER",
-            DataType::BigInt => "BIGINT",
+            DataType::Int8 => "INT8",
+            DataType::Int16 => "INT16",
+            DataType::Int => "INT",
+            DataType::Int64 => "INT64",
+            DataType::Int128 => "INT128",
             DataType::Text => "TEXT",
             DataType::Char(_) => "CHAR",
             DataType::VarChar(_) => "VARCHAR",
@@ -235,6 +239,10 @@ impl DecimalValue {
 
     pub fn from_i64(value: i64) -> Self {
         Self::parse(&value.to_string()).expect("i64 string is always a valid decimal")
+    }
+
+    pub fn from_i128(value: i128) -> Self {
+        Self::parse(&value.to_string()).expect("i128 string is always a valid decimal")
     }
 
     pub fn from_f64(value: f64) -> Result<Self> {
@@ -800,6 +808,7 @@ impl fmt::Display for IntervalDaySecondValue {
 pub enum Value {
     Integer(i32),
     BigInt(i64),
+    Int128(i128),
     Text(String),
     Enum(String),
     Boolean(bool),
@@ -819,8 +828,9 @@ pub enum Value {
 impl Value {
     pub fn data_type(&self) -> DataType {
         match self {
-            Value::Integer(_) => DataType::Integer,
-            Value::BigInt(_) => DataType::BigInt,
+            Value::Integer(_) => DataType::Int,
+            Value::BigInt(_) => DataType::Int64,
+            Value::Int128(_) => DataType::Int128,
             Value::Text(_) => DataType::Text,
             Value::Enum(_) => DataType::Enum(Vec::new()),
             Value::Boolean(_) => DataType::Boolean,
@@ -842,10 +852,11 @@ impl Value {
 
     pub fn is_compatible_with(&self, data_type: DataType) -> bool {
         match (self, data_type) {
-            (Value::Integer(_), DataType::TinyInt)
-            | (Value::Integer(_), DataType::SmallInt)
-            | (Value::Integer(_), DataType::Integer) => true,
-            (Value::BigInt(_), DataType::BigInt) => true,
+            (Value::Integer(_), DataType::Int8)
+            | (Value::Integer(_), DataType::Int16)
+            | (Value::Integer(_), DataType::Int) => true,
+            (Value::BigInt(_), DataType::Int64) => true,
+            (Value::Int128(_), DataType::Int128) => true,
             (Value::Text(_), DataType::Text)
             | (Value::Text(_), DataType::Char(_))
             | (Value::Text(_), DataType::VarChar(_)) => true,
@@ -917,6 +928,15 @@ impl Value {
         }
     }
 
+    pub fn as_int128(&self) -> Option<i128> {
+        match self {
+            Value::Int128(i) => Some(*i),
+            Value::BigInt(i) => Some(*i as i128),
+            Value::Integer(i) => Some(*i as i128),
+            _ => None,
+        }
+    }
+
     pub fn as_blob(&self) -> Option<&[u8]> {
         match self {
             Value::Blob(bytes) => Some(bytes),
@@ -936,6 +956,13 @@ impl PartialOrd for Value {
         match (self, other) {
             (Value::Integer(a), Value::Integer(b)) => a.partial_cmp(b),
             (Value::BigInt(a), Value::BigInt(b)) => a.partial_cmp(b),
+            (Value::Int128(a), Value::Int128(b)) => a.partial_cmp(b),
+            (Value::Integer(a), Value::BigInt(b)) => (*a as i64).partial_cmp(b),
+            (Value::BigInt(a), Value::Integer(b)) => a.partial_cmp(&(*b as i64)),
+            (Value::Integer(a), Value::Int128(b)) => (*a as i128).partial_cmp(b),
+            (Value::Int128(a), Value::Integer(b)) => a.partial_cmp(&(*b as i128)),
+            (Value::BigInt(a), Value::Int128(b)) => (*a as i128).partial_cmp(b),
+            (Value::Int128(a), Value::BigInt(b)) => a.partial_cmp(&(*b as i128)),
             (Value::Text(a), Value::Text(b)) => a.partial_cmp(b),
             (Value::Enum(a), Value::Enum(b)) => a.partial_cmp(b),
             (Value::Boolean(a), Value::Boolean(b)) => a.partial_cmp(b),

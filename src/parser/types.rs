@@ -4,10 +4,11 @@ use std::cmp::Ordering;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SqlTypeName {
-    TinyInt,
-    SmallInt,
-    Integer,
-    BigInt,
+    Int8,
+    Int16,
+    Int,
+    Int64,
+    Int128,
     Text,
     Char(u32),
     VarChar(u32),
@@ -37,10 +38,11 @@ pub enum SqlTypeName {
 impl SqlTypeName {
     pub fn to_sql(&self) -> String {
         match self {
-            SqlTypeName::TinyInt => "TINYINT".to_string(),
-            SqlTypeName::SmallInt => "SMALLINT".to_string(),
-            SqlTypeName::Integer => "INTEGER".to_string(),
-            SqlTypeName::BigInt => "BIGINT".to_string(),
+            SqlTypeName::Int8 => "INT8".to_string(),
+            SqlTypeName::Int16 => "INT16".to_string(),
+            SqlTypeName::Int => "INT".to_string(),
+            SqlTypeName::Int64 => "INT64".to_string(),
+            SqlTypeName::Int128 => "INT128".to_string(),
             SqlTypeName::Text => "TEXT".to_string(),
             SqlTypeName::Char(length) => format!("CHAR({length})"),
             SqlTypeName::VarChar(length) => format!("VARCHAR({length})"),
@@ -84,7 +86,7 @@ fn format_numeric_type(name: &str, precision: Option<u32>, scale: Option<u32>) -
 
 #[derive(Debug, Clone)]
 pub enum LiteralValue {
-    Integer(i32),
+    Integer(i128),
     Text(String),
     Boolean(bool),
     Float(f64),
@@ -94,7 +96,7 @@ pub enum LiteralValue {
 impl LiteralValue {
     pub fn data_type(&self) -> SqlTypeName {
         match self {
-            LiteralValue::Integer(_) => SqlTypeName::Integer,
+            LiteralValue::Integer(_) => SqlTypeName::Int,
             LiteralValue::Text(_) => SqlTypeName::Text,
             LiteralValue::Boolean(_) => SqlTypeName::Boolean,
             LiteralValue::Float(_) => SqlTypeName::Float,
@@ -104,10 +106,11 @@ impl LiteralValue {
 
     pub fn is_compatible_with(&self, data_type: SqlTypeName) -> bool {
         match (self, data_type) {
-            (LiteralValue::Integer(_), SqlTypeName::TinyInt) => true,
-            (LiteralValue::Integer(_), SqlTypeName::SmallInt) => true,
-            (LiteralValue::Integer(_), SqlTypeName::Integer) => true,
-            (LiteralValue::Integer(_), SqlTypeName::BigInt) => true,
+            (LiteralValue::Integer(_), SqlTypeName::Int8) => true,
+            (LiteralValue::Integer(_), SqlTypeName::Int16) => true,
+            (LiteralValue::Integer(_), SqlTypeName::Int) => true,
+            (LiteralValue::Integer(_), SqlTypeName::Int64) => true,
+            (LiteralValue::Integer(_), SqlTypeName::Int128) => true,
             (LiteralValue::Integer(_), SqlTypeName::Decimal { .. }) => true,
             (LiteralValue::Integer(_), SqlTypeName::Numeric { .. }) => true,
             (LiteralValue::Float(_), SqlTypeName::Float) => true,

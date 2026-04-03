@@ -775,9 +775,10 @@ impl Parser {
 
     fn parse_non_negative_integer_clause(&mut self, clause_name: &str) -> Result<usize> {
         match self.peek_token()? {
-            Token::NumberLiteral(value) if value.fract() == 0.0 && value >= 0.0 => {
+            Token::NumberLiteral(value) => {
+                let parsed = parse_non_negative_integer_literal(&value, clause_name)?;
                 self.consume_token(&Token::NumberLiteral(value))?;
-                Ok(value as usize)
+                Ok(parsed)
             }
             token => Err(HematiteError::ParseError(format!(
                 "Expected non-negative integer after {}, found: {:?}",
@@ -1258,10 +1259,24 @@ impl Parser {
             }
             Token::NumberLiteral(value) => {
                 self.consume_token(&Token::NumberLiteral(value.clone()))?;
-                if value.fract() == 0.0 {
-                    Ok(Expression::Literal(LiteralValue::Integer(value as i32)))
+                if value.contains('.') {
+                    Ok(Expression::Literal(LiteralValue::Float(
+                        value.parse::<f64>().map_err(|_| {
+                            HematiteError::ParseError(format!(
+                                "Invalid floating-point literal '{}'",
+                                value
+                            ))
+                        })?,
+                    )))
                 } else {
-                    Ok(Expression::Literal(LiteralValue::Float(value)))
+                    Ok(Expression::Literal(LiteralValue::Integer(
+                        value.parse::<i128>().map_err(|_| {
+                            HematiteError::ParseError(format!(
+                                "Invalid integer literal '{}'",
+                                value
+                            ))
+                        })?,
+                    )))
                 }
             }
             Token::BooleanLiteral(value) => {
@@ -2015,12 +2030,12 @@ impl Parser {
             Token::Identifier(name) if name == keyword => {
                 self.consume_token(&Token::Identifier(name.clone()))
             }
-            Token::Identifier(name) if name.eq_ignore_ascii_case(keyword) => Err(
-                HematiteError::ParseError(format!(
+            Token::Identifier(name) if name.eq_ignore_ascii_case(keyword) => {
+                Err(HematiteError::ParseError(format!(
                     "Keyword '{}' must be capitalized as '{}'",
                     name, keyword
-                )),
-            ),
+                )))
+            }
             token => Err(HematiteError::ParseError(format!(
                 "Expected {}, found: {:?}",
                 keyword, token
@@ -2451,10 +2466,11 @@ impl Parser {
     fn parse_data_type(&mut self) -> Result<SqlTypeName> {
         let token = self.peek_token()?;
         let data_type = match token {
-            Token::TinyInt => SqlTypeName::TinyInt,
-            Token::SmallInt => SqlTypeName::SmallInt,
-            Token::Integer | Token::Int => SqlTypeName::Integer,
-            Token::BigInt => SqlTypeName::BigInt,
+            Token::Int8 => SqlTypeName::Int8,
+            Token::Int16 => SqlTypeName::Int16,
+            Token::Int32 | Token::Int => SqlTypeName::Int,
+            Token::Int64 => SqlTypeName::Int64,
+            Token::Int128 => SqlTypeName::Int128,
             Token::Text => SqlTypeName::Text,
             Token::Boolean | Token::Bool => SqlTypeName::Boolean,
             Token::Float => SqlTypeName::Float,
@@ -2575,9 +2591,10 @@ impl Parser {
     fn parse_type_length(&mut self) -> Result<u32> {
         self.consume_token(&Token::LeftParen)?;
         let length = match self.peek_token()? {
-            Token::NumberLiteral(length) if length.fract() == 0.0 && length > 0.0 => {
+            Token::NumberLiteral(length) => {
+                let parsed = parse_positive_u32_literal(&length, "length")?;
                 self.consume_token(&Token::NumberLiteral(length))?;
-                length as u32
+                parsed
             }
             token => {
                 return Err(HematiteError::ParseError(format!(
@@ -2608,9 +2625,10 @@ impl Parser {
 
     fn consume_positive_integer_literal(&mut self, label: &str) -> Result<u32> {
         match self.peek_token()? {
-            Token::NumberLiteral(value) if value.fract() == 0.0 && value >= 0.0 => {
+            Token::NumberLiteral(value) => {
+                let parsed = parse_non_negative_u32_literal(&value, label)?;
                 self.consume_token(&Token::NumberLiteral(value))?;
-                Ok(value as u32)
+                Ok(parsed)
             }
             token => Err(HematiteError::ParseError(format!(
                 "Expected non-negative integer {} value, found: {:?}",
@@ -2642,10 +2660,22 @@ impl Parser {
             }
             Token::NumberLiteral(value) => {
                 self.consume_token(&Token::NumberLiteral(value.clone()))?;
-                if value.fract() == 0.0 {
-                    Ok(LiteralValue::Integer(value as i32))
+                if value.contains('.') {
+                    Ok(LiteralValue::Float(value.parse::<f64>().map_err(|_| {
+                        HematiteError::ParseError(format!(
+                            "Invalid floating-point literal '{}'",
+                            value
+                        ))
+                    })?))
                 } else {
-                    Ok(LiteralValue::Float(value))
+                    Ok(LiteralValue::Integer(value.parse::<i128>().map_err(
+                        |_| {
+                            HematiteError::ParseError(format!(
+                                "Invalid integer literal '{}'",
+                                value
+                            ))
+                        },
+                    )?))
                 }
             }
             Token::BooleanLiteral(value) => {
@@ -2734,32 +2764,221 @@ pub fn parse_condition_fragment(sql: &str) -> Result<Condition> {
     Ok(condition)
 }
 
+fn parse_non_negative_integer_literal(value: &str, label: &str) -> Result<usize> {
+    value.parse::<usize>().map_err(|_| {
+        HematiteError::ParseError(format!(
+            "Expected non-negative integer after {}, found: {}",
+            label, value
+        ))
+    })
+}
+
+fn parse_non_negative_u32_literal(value: &str, label: &str) -> Result<u32> {
+    value.parse::<u32>().map_err(|_| {
+        HematiteError::ParseError(format!(
+            "Expected non-negative integer {} value, found: {}",
+            label, value
+        ))
+    })
+}
+
+fn parse_positive_u32_literal(value: &str, label: &str) -> Result<u32> {
+    let parsed = value.parse::<u32>().map_err(|_| {
+        HematiteError::ParseError(format!(
+            "Expected positive integer {}, found: {}",
+            label, value
+        ))
+    })?;
+    if parsed == 0 {
+        return Err(HematiteError::ParseError(format!(
+            "Expected positive integer {}, found: {}",
+            label, value
+        )));
+    }
+    Ok(parsed)
+}
+
 const TOP_LEVEL_KEYWORDS: &[&str] = &[
-    "BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE", "EXPLAIN", "DESCRIBE", "SHOW",
-    "SELECT", "UPDATE", "INSERT", "DELETE", "CREATE", "ALTER", "DROP", "WITH",
+    "BEGIN",
+    "COMMIT",
+    "ROLLBACK",
+    "SAVEPOINT",
+    "RELEASE",
+    "EXPLAIN",
+    "DESCRIBE",
+    "SHOW",
+    "SELECT",
+    "UPDATE",
+    "INSERT",
+    "DELETE",
+    "CREATE",
+    "ALTER",
+    "DROP",
+    "WITH",
 ];
 
 const ALL_UPPERCASE_KEYWORDS: &[&str] = &[
-    "BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE", "SELECT", "UPDATE", "FROM",
-    "INSERT", "DELETE", "DROP", "EXPLAIN", "DESCRIBE", "SHOW", "TABLES", "VIEWS", "INDEXES",
-    "TRIGGERS", "ALTER", "ADD", "IF", "INTO", "SET", "VALUES", "CREATE", "VIEW", "TRIGGER",
-    "INDEX", "EXISTS", "UNION", "INTERSECT", "EXCEPT", "ALL", "WITH", "RECURSIVE", "LEFT",
-    "RIGHT", "FULL", "OUTER", "INNER", "JOIN", "ON", "AS", "DISTINCT", "CAST", "TABLE",
-    "COLUMN", "WHERE", "GROUP", "HAVING", "ORDER", "BY", "ASC", "DESC", "OVER", "PARTITION",
-    "INTERVAL", "LIMIT", "OFFSET", "COUNT", "SUM", "AVG", "MIN", "MAX", "INTEGER", "TEXT",
-    "BOOLEAN", "FLOAT", "TINYINT", "SMALLINT", "BIGINT", "INT", "BOOL", "DOUBLE", "REAL",
-    "DECIMAL", "NUMERIC", "BLOB", "DATE", "TIME", "DATETIME", "TIMESTAMP", "ZONE", "CHAR",
-    "VARCHAR", "BINARY", "VARBINARY", "ENUM", "PRECISION", "UNSIGNED", "AUTO_INCREMENT",
-    "UNIQUE", "PRIMARY", "KEY", "DUPLICATE", "CONSTRAINT", "CHECK", "FOREIGN", "REFERENCES",
-    "CASCADE", "RESTRICT", "RENAME", "TO", "AFTER", "NOT", "IS", "NULL", "DEFAULT", "IN",
-    "BETWEEN", "LIKE", "CASE", "WHEN", "THEN", "ELSE", "END", "AND", "OR", "USING", "ENGINE",
-    "CHARSET", "CHARACTER", "COLLATE", "BTREE", "HASH",
+    "BEGIN",
+    "COMMIT",
+    "ROLLBACK",
+    "SAVEPOINT",
+    "RELEASE",
+    "SELECT",
+    "UPDATE",
+    "FROM",
+    "INSERT",
+    "DELETE",
+    "DROP",
+    "EXPLAIN",
+    "DESCRIBE",
+    "SHOW",
+    "TABLES",
+    "VIEWS",
+    "INDEXES",
+    "TRIGGERS",
+    "ALTER",
+    "ADD",
+    "IF",
+    "INTO",
+    "SET",
+    "VALUES",
+    "CREATE",
+    "VIEW",
+    "TRIGGER",
+    "INDEX",
+    "EXISTS",
+    "UNION",
+    "INTERSECT",
+    "EXCEPT",
+    "ALL",
+    "WITH",
+    "RECURSIVE",
+    "LEFT",
+    "RIGHT",
+    "FULL",
+    "OUTER",
+    "INNER",
+    "JOIN",
+    "ON",
+    "AS",
+    "DISTINCT",
+    "CAST",
+    "TABLE",
+    "COLUMN",
+    "WHERE",
+    "GROUP",
+    "HAVING",
+    "ORDER",
+    "BY",
+    "ASC",
+    "DESC",
+    "OVER",
+    "PARTITION",
+    "INTERVAL",
+    "LIMIT",
+    "OFFSET",
+    "COUNT",
+    "SUM",
+    "AVG",
+    "MIN",
+    "MAX",
+    "INT8",
+    "INT16",
+    "INT",
+    "INT32",
+    "INT64",
+    "INT128",
+    "INTEGER",
+    "TINYINT",
+    "SMALLINT",
+    "BIGINT",
+    "TEXT",
+    "BOOLEAN",
+    "FLOAT",
+    "BOOL",
+    "DOUBLE",
+    "REAL",
+    "DECIMAL",
+    "NUMERIC",
+    "BLOB",
+    "DATE",
+    "TIME",
+    "DATETIME",
+    "TIMESTAMP",
+    "ZONE",
+    "CHAR",
+    "VARCHAR",
+    "BINARY",
+    "VARBINARY",
+    "ENUM",
+    "PRECISION",
+    "UNSIGNED",
+    "AUTO_INCREMENT",
+    "UNIQUE",
+    "PRIMARY",
+    "KEY",
+    "DUPLICATE",
+    "CONSTRAINT",
+    "CHECK",
+    "FOREIGN",
+    "REFERENCES",
+    "CASCADE",
+    "RESTRICT",
+    "RENAME",
+    "TO",
+    "AFTER",
+    "NOT",
+    "IS",
+    "NULL",
+    "DEFAULT",
+    "IN",
+    "BETWEEN",
+    "LIKE",
+    "CASE",
+    "WHEN",
+    "THEN",
+    "ELSE",
+    "END",
+    "AND",
+    "OR",
+    "USING",
+    "ENGINE",
+    "CHARSET",
+    "CHARACTER",
+    "COLLATE",
+    "BTREE",
+    "HASH",
 ];
 
 const DATA_TYPE_KEYWORDS: &[&str] = &[
-    "TINYINT", "SMALLINT", "INTEGER", "INT", "BIGINT", "TEXT", "BOOLEAN", "BOOL", "FLOAT",
-    "REAL", "DOUBLE", "DECIMAL", "NUMERIC", "BLOB", "DATE", "TIME", "DATETIME", "TIMESTAMP",
-    "CHAR", "VARCHAR", "BINARY", "VARBINARY", "ENUM",
+    "INT8",
+    "INT16",
+    "INT",
+    "INT32",
+    "INT64",
+    "INT128",
+    "INTEGER",
+    "TINYINT",
+    "SMALLINT",
+    "BIGINT",
+    "TEXT",
+    "BOOLEAN",
+    "BOOL",
+    "FLOAT",
+    "REAL",
+    "DOUBLE",
+    "DECIMAL",
+    "NUMERIC",
+    "BLOB",
+    "DATE",
+    "TIME",
+    "DATETIME",
+    "TIMESTAMP",
+    "CHAR",
+    "VARCHAR",
+    "BINARY",
+    "VARBINARY",
+    "ENUM",
 ];
 
 fn uppercase_keyword_match<'a>(name: &str, keywords: &'a [&'a str]) -> Option<&'a str> {
@@ -2771,9 +2990,8 @@ fn uppercase_keyword_match<'a>(name: &str, keywords: &'a [&'a str]) -> Option<&'
 
 fn capitalization_hint_for_token(token: &Token) -> Option<String> {
     match token {
-        Token::Identifier(name) => uppercase_keyword_match(name, ALL_UPPERCASE_KEYWORDS).map(
-            |keyword| format!("Keyword '{}' must be capitalized as '{}'", name, keyword),
-        ),
+        Token::Identifier(name) => uppercase_keyword_match(name, ALL_UPPERCASE_KEYWORDS)
+            .map(|keyword| format!("Keyword '{}' must be capitalized as '{}'", name, keyword)),
         _ => None,
     }
 }
@@ -2844,13 +3062,14 @@ fn token_keyword_name(token: &Token) -> Option<&'static str> {
         Token::Avg => Some("AVG"),
         Token::Min => Some("MIN"),
         Token::Max => Some("MAX"),
-        Token::Integer => Some("INTEGER"),
+        Token::Int32 => Some("INT32"),
         Token::Text => Some("TEXT"),
         Token::Boolean => Some("BOOLEAN"),
         Token::Float => Some("FLOAT"),
-        Token::TinyInt => Some("TINYINT"),
-        Token::SmallInt => Some("SMALLINT"),
-        Token::BigInt => Some("BIGINT"),
+        Token::Int8 => Some("INT8"),
+        Token::Int16 => Some("INT16"),
+        Token::Int64 => Some("INT64"),
+        Token::Int128 => Some("INT128"),
         Token::Int => Some("INT"),
         Token::Bool => Some("BOOL"),
         Token::Double => Some("DOUBLE"),

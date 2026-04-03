@@ -190,7 +190,7 @@ mod connection_tests {
             show_create.rows.first().and_then(|row| row.get(1)),
             Some(crate::catalog::Value::Text(sql))
                 if sql.contains("ENUM('draft', 'live')")
-                    && sql.contains("score INTEGER")
+                    && sql.contains("score INT")
         ));
 
         conn.close()?;
@@ -1387,6 +1387,55 @@ mod connection_tests {
                 crate::catalog::Value::Decimal(crate::catalog::DecimalValue::parse("5.5")?),
             ]]
         );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_new_integer_type_names_and_int128_round_trip() -> Result<()> {
+        let db = TestDbFile::new("_test_new_integer_type_names_and_int128_round_trip");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute(
+            "CREATE TABLE ints (\
+                id INT PRIMARY KEY,\
+                tiny INT8,\
+                small INT16,\
+                normal INT32,\
+                large INT64,\
+                massive INT128\
+            );",
+        )?;
+        conn.execute(
+            "INSERT INTO ints (id, tiny, small, normal, large, massive) VALUES (\
+                1, 127, 32000, 2147483647, 9223372036854775807, 170141183460469231731687303715884105727\
+            );",
+        )?;
+
+        let result =
+            conn.execute("SELECT tiny, small, normal, large, massive FROM ints ORDER BY id;")?;
+        assert_eq!(
+            result.rows,
+            vec![vec![
+                crate::catalog::Value::Integer(127),
+                crate::catalog::Value::Integer(32000),
+                crate::catalog::Value::Integer(2147483647),
+                crate::catalog::Value::BigInt(9223372036854775807),
+                crate::catalog::Value::Int128(170141183460469231731687303715884105727),
+            ]]
+        );
+
+        let show_create = conn.execute("SHOW CREATE TABLE ints;")?;
+        assert!(matches!(
+            show_create.rows.first().and_then(|row| row.get(1)),
+            Some(crate::catalog::Value::Text(sql))
+                if sql.contains("tiny INT8")
+                    && sql.contains("small INT16")
+                    && sql.contains("normal INT")
+                    && sql.contains("large INT64")
+                    && sql.contains("massive INT128")
+        ));
 
         conn.close()?;
         Ok(())
@@ -4796,7 +4845,7 @@ mod connection_tests {
 
             assert_eq!(table.columns.len(), 3);
             assert_eq!(table.columns[0].name, "id");
-            assert_eq!(table.columns[0].data_type, DataType::Integer);
+            assert_eq!(table.columns[0].data_type, DataType::Int);
             assert!(table.columns[0].primary_key);
 
             assert_eq!(table.columns[1].name, "name");
