@@ -1,0 +1,38 @@
+# Adapted from:
+# https://github.com/duckdb/duckdb/blob/main/test/sql/subquery/scalar/test_scalar_subquery.test
+# https://github.com/duckdb/duckdb/blob/main/test/sql/subquery/scalar/test_uncorrelated_scalar_subquery.test
+
+statement ok
+CREATE TABLE scalar_subquery_test (i INTEGER PRIMARY KEY);
+
+statement ok
+INSERT INTO scalar_subquery_test (i) VALUES (1), (2), (3);
+
+query I nosort
+SELECT * FROM scalar_subquery_test WHERE i = (SELECT i FROM scalar_subquery_test WHERE i = 1);
+----
+1
+
+query I nosort
+SELECT * FROM scalar_subquery_test WHERE i = (SELECT MIN(i) FROM scalar_subquery_test);
+----
+1
+
+query I nosort
+SELECT * FROM scalar_subquery_test WHERE i = (SELECT MAX(i) FROM scalar_subquery_test);
+----
+3
+
+query I nosort
+SELECT * FROM scalar_subquery_test WHERE i > (SELECT MIN(i) FROM scalar_subquery_test) ORDER BY i;
+----
+2
+3
+
+statement error
+SELECT * FROM scalar_subquery_test WHERE i = (SELECT i FROM scalar_subquery_test);
+
+query I nosort
+SELECT * FROM scalar_subquery_test WHERE i = (SELECT i FROM scalar_subquery_test ORDER BY i LIMIT 1);
+----
+1

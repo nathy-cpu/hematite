@@ -125,6 +125,55 @@ Promoted/adapted so far:
     - `third_party/portable/ranking_windows_from_duckdb.slt`
   - notes:
     - the promoted cases use explicit rows instead of `range(...)` and skip `NULLS FIRST/LAST` and frame-clause variants that go beyond Hematite's current window surface
+- `test/sql/setops/test_union_except_empty.test`
+  - partially adapted to:
+    - `third_party/portable/nested_setops_from_duckdb.slt`
+  - notes:
+    - rewritten to use table-backed empty branches instead of bare constant-select forms
+- `test/sql/setops/test_nested_except.test`
+  - adapted to:
+    - `third_party/portable/nested_setops_from_duckdb.slt`
+  - notes:
+    - rewritten with an explicit derived-table grouping so the intended nested `EXCEPT` precedence is preserved
+- `test/sql/subquery/scalar/test_scalar_subquery.test`
+  - partially adapted to:
+    - `third_party/portable/scalar_subqueries_from_duckdb.slt`
+- `test/sql/subquery/scalar/test_uncorrelated_scalar_subquery.test`
+  - partially adapted to:
+    - `third_party/portable/scalar_subqueries_from_duckdb.slt`
+  - notes:
+    - kept to portable scalar-subquery predicates and multiple-row error behavior
+    - bare constant subqueries were rewritten to single-row table-backed subqueries
+    - left out null-order settings, direct scalar projection forms, and aggregate-subquery edge cases
+- `test/sql/subquery/any_all/test_simple_not_in.test`
+  - adapted to:
+    - `third_party/portable/in_not_in_from_duckdb.slt`
+- `test/sql/join/test_join_always_true_conditions.test`
+  - partially adapted to:
+    - `third_party/portable/join_on_true_from_duckdb.slt`
+  - notes:
+    - kept to portable inner and left join `ON TRUE` cases
+    - rewritten to use `1 = 1` / `1 = 0` because Hematite does not parse raw `ON TRUE` / `ON FALSE` join conditions directly
+    - left out semi/anti join variants because Hematite does not support those join types
+- `test/sql/join/left_outer/test_left_join_on_true.test`
+  - partially adapted to:
+    - `third_party/portable/join_on_true_from_duckdb.slt`
+  - notes:
+    - kept only the non-lateral table join cases
+    - left out `UNNEST`, array, and struct-based lateral variants
+- `test/sql/order/negative_offset.test`
+  - partially adapted to:
+    - `third_party/portable/negative_limit_errors_from_duckdb.slt`
+  - notes:
+    - kept to literal negative limit/offset errors over explicit rows
+    - left out `generate_series`, percent-limit, and subquery-limit variants
+- `test/sql/window/test_basic_window.test`
+  - partially adapted to:
+    - `third_party/portable/window_basics_from_duckdb.slt`
+  - notes:
+    - kept to portable whole-partition aggregate-window and `ROW_NUMBER` cases
+    - running-frame semantics tied to `ORDER BY` were left out because Hematite currently evaluates aggregate windows over the whole partition
+    - left out frame-clause, statistical aggregate, and date-heavy variants
 - `test/sql/join/inner/test_join.test`
   - partially adapted to:
     - `third_party/portable/inner_join_basics_from_duckdb.slt`

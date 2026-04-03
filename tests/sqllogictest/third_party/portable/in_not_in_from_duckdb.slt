@@ -1,0 +1,28 @@
+# Adapted from:
+# https://github.com/duckdb/duckdb/blob/main/test/sql/subquery/any_all/test_simple_not_in.test
+
+statement ok
+CREATE TABLE in_subquery_test (id INTEGER PRIMARY KEY, b INTEGER);
+
+statement ok
+INSERT INTO in_subquery_test (id, b) VALUES (1, 22), (2, 21), (3, 23);
+
+query I nosort
+SELECT 1 FROM in_subquery_test WHERE id = 1 AND 1 IN (SELECT 1 FROM in_subquery_test WHERE id = 1);
+----
+1
+
+query II nosort
+SELECT * FROM in_subquery_test
+WHERE b IN (SELECT b FROM in_subquery_test WHERE b * id < 30)
+ORDER BY id, b;
+----
+1 22
+
+query II nosort
+SELECT * FROM in_subquery_test
+WHERE b NOT IN (SELECT b FROM in_subquery_test WHERE b * id < 30)
+ORDER BY id, b;
+----
+2 21
+3 23
