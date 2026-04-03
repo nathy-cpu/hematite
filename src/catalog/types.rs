@@ -274,6 +274,102 @@ impl DecimalValue {
         Self::parse(&value.to_string())
     }
 
+    pub fn is_integral(&self) -> bool {
+        self.scale == 0
+    }
+
+    pub fn add(&self, other: &Self) -> Self {
+        let target_scale = self.scale.max(other.scale);
+        let left = scale_decimal_digits(&self.digits, self.scale, target_scale);
+        let right = scale_decimal_digits(&other.digits, other.scale, target_scale);
+
+        if self.negative == other.negative {
+            normalize_decimal_parts(
+                self.negative,
+                add_digit_vectors(&left, &right),
+                target_scale,
+            )
+        } else {
+            match compare_digit_vectors(&left, &right) {
+                Ordering::Greater => normalize_decimal_parts(
+                    self.negative,
+                    subtract_digit_vectors(&left, &right),
+                    target_scale,
+                ),
+                Ordering::Less => normalize_decimal_parts(
+                    other.negative,
+                    subtract_digit_vectors(&right, &left),
+                    target_scale,
+                ),
+                Ordering::Equal => Self::zero(),
+            }
+        }
+    }
+
+    pub fn subtract(&self, other: &Self) -> Self {
+        if other.is_zero() {
+            return self.clone();
+        }
+
+        let mut negated = other.clone();
+        negated.negative = !negated.negative;
+        self.add(&negated)
+    }
+
+    pub fn multiply(&self, other: &Self) -> Self {
+        normalize_decimal_parts(
+            self.negative ^ other.negative,
+            multiply_digit_vectors(&self.digits, &other.digits),
+            self.scale + other.scale,
+        )
+    }
+
+    pub fn divide(&self, other: &Self) -> Result<Self> {
+        if other.is_zero() {
+            return Err(HematiteError::ParseError("Division by zero".to_string()));
+        }
+
+        const DECIMAL_DIVISION_SCALE: u32 = 18;
+
+        let mut numerator = self.digits.clone();
+        numerator.resize(
+            numerator.len() + other.scale as usize + DECIMAL_DIVISION_SCALE as usize,
+            0,
+        );
+        let mut denominator = other.digits.clone();
+        denominator.resize(denominator.len() + self.scale as usize, 0);
+
+        let (mut quotient, remainder) = divide_digit_vectors(&numerator, &denominator);
+        if !is_zero_digit_vector(&remainder) {
+            let doubled_remainder = add_digit_vectors(&remainder, &remainder);
+            if compare_digit_vectors(&doubled_remainder, &denominator) != Ordering::Less {
+                quotient = increment_digit_vector(&quotient);
+            }
+        }
+
+        Ok(normalize_decimal_parts(
+            self.negative ^ other.negative,
+            quotient,
+            DECIMAL_DIVISION_SCALE,
+        ))
+    }
+
+    pub fn remainder(&self, other: &Self) -> Result<Self> {
+        if other.is_zero() {
+            return Err(HematiteError::ParseError("Division by zero".to_string()));
+        }
+
+        let target_scale = self.scale.max(other.scale);
+        let left = scale_decimal_digits(&self.digits, self.scale, target_scale);
+        let right = scale_decimal_digits(&other.digits, other.scale, target_scale);
+        let (_, remainder) = divide_digit_vectors(&left, &right);
+        Ok(normalize_decimal_parts(
+            self.negative,
+            remainder,
+            target_scale,
+        ))
+    }
+
     pub fn precision(&self) -> u32 {
         self.digits.len() as u32
     }
@@ -318,6 +414,165 @@ impl DecimalValue {
     pub fn negative(&self) -> bool {
         self.negative
     }
+}
+
+fn normalize_decimal_parts(negative: bool, mut digits: Vec<u8>, mut scale: u32) -> DecimalValue {
+    trim_leading_digit_zeros(&mut digits);
+    while scale > 0 && digits.len() > 1 && digits.last() == Some(&0) {
+        digits.pop();
+        scale -= 1;
+    }
+    trim_leading_digit_zeros(&mut digits);
+    if is_zero_digit_vector(&digits) {
+        return DecimalValue::zero();
+    }
+
+    DecimalValue {
+        negative,
+        digits,
+        scale,
+    }
+}
+
+fn scale_decimal_digits(digits: &[u8], scale: u32, target_scale: u32) -> Vec<u8> {
+    let mut scaled = digits.to_vec();
+    scaled.resize(
+        scaled.len() + target_scale.saturating_sub(scale) as usize,
+        0,
+    );
+    scaled
+}
+
+fn compare_digit_vectors(left: &[u8], right: &[u8]) -> Ordering {
+    left.len().cmp(&right.len()).then_with(|| left.cmp(right))
+}
+
+fn add_digit_vectors(left: &[u8], right: &[u8]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(left.len().max(right.len()) + 1);
+    let mut carry = 0u8;
+    let mut left_index = left.len();
+    let mut right_index = right.len();
+
+    while left_index > 0 || right_index > 0 || carry > 0 {
+        let left_digit = if left_index > 0 {
+            left_index -= 1;
+            left[left_index]
+        } else {
+            0
+        };
+        let right_digit = if right_index > 0 {
+            right_index -= 1;
+            right[right_index]
+        } else {
+            0
+        };
+        let total = left_digit + right_digit + carry;
+        result.push(total % 10);
+        carry = total / 10;
+    }
+
+    result.reverse();
+    result
+}
+
+fn subtract_digit_vectors(left: &[u8], right: &[u8]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(left.len());
+    let mut borrow = 0i16;
+    let mut left_index = left.len();
+    let mut right_index = right.len();
+
+    while left_index > 0 {
+        left_index -= 1;
+        let left_digit = left[left_index] as i16 - borrow;
+        let right_digit = if right_index > 0 {
+            right_index -= 1;
+            right[right_index] as i16
+        } else {
+            0
+        };
+        if left_digit < right_digit {
+            result.push((left_digit + 10 - right_digit) as u8);
+            borrow = 1;
+        } else {
+            result.push((left_digit - right_digit) as u8);
+            borrow = 0;
+        }
+    }
+
+    result.reverse();
+    trim_leading_digit_zeros(&mut result);
+    result
+}
+
+fn multiply_digit_vectors(left: &[u8], right: &[u8]) -> Vec<u8> {
+    if is_zero_digit_vector(left) || is_zero_digit_vector(right) {
+        return vec![0];
+    }
+
+    let mut result = vec![0u32; left.len() + right.len()];
+    for (left_index, left_digit) in left.iter().enumerate().rev() {
+        for (right_index, right_digit) in right.iter().enumerate().rev() {
+            let slot = left_index + right_index + 1;
+            result[slot] += (*left_digit as u32) * (*right_digit as u32);
+        }
+    }
+
+    for index in (1..result.len()).rev() {
+        let carry = result[index] / 10;
+        result[index] %= 10;
+        result[index - 1] += carry;
+    }
+
+    let mut digits = result
+        .into_iter()
+        .map(|digit| digit as u8)
+        .collect::<Vec<_>>();
+    trim_leading_digit_zeros(&mut digits);
+    digits
+}
+
+fn divide_digit_vectors(numerator: &[u8], denominator: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    debug_assert!(!is_zero_digit_vector(denominator));
+
+    let mut quotient = Vec::with_capacity(numerator.len().max(1));
+    let mut remainder = vec![0];
+
+    for digit in numerator {
+        if is_zero_digit_vector(&remainder) {
+            remainder[0] = *digit;
+        } else {
+            remainder.push(*digit);
+        }
+        trim_leading_digit_zeros(&mut remainder);
+
+        let mut quotient_digit = 0u8;
+        while compare_digit_vectors(&remainder, denominator) != Ordering::Less {
+            remainder = subtract_digit_vectors(&remainder, denominator);
+            quotient_digit += 1;
+        }
+        quotient.push(quotient_digit);
+    }
+
+    trim_leading_digit_zeros(&mut quotient);
+    trim_leading_digit_zeros(&mut remainder);
+    (quotient, remainder)
+}
+
+fn increment_digit_vector(digits: &[u8]) -> Vec<u8> {
+    add_digit_vectors(digits, &[1])
+}
+
+fn trim_leading_digit_zeros(digits: &mut Vec<u8>) {
+    while digits.len() > 1 && digits.first() == Some(&0) {
+        digits.remove(0);
+    }
+    if digits.is_empty() {
+        digits.push(0);
+    }
+}
+
+fn is_zero_digit_vector(digits: &[u8]) -> bool {
+    digits.len() == 1 && digits[0] == 0
 }
 
 impl fmt::Display for DecimalValue {

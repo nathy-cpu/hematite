@@ -4437,6 +4437,43 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_exact_numeric_arithmetic_supports_large_signed_unsigned_and_decimal_values(
+    ) -> Result<()> {
+        let db = TestDbFile::new(
+            "_test_exact_numeric_arithmetic_supports_large_signed_unsigned_and_decimal_values",
+        );
+        let mut conn = Connection::new(db.path())?;
+        conn.execute("CREATE TABLE one_row (id INT PRIMARY KEY);")?;
+        conn.execute("INSERT INTO one_row (id) VALUES (1);")?;
+
+        let result = conn.execute(
+            "SELECT \
+                CAST('9223372036854775807' AS INT64) + 1 AS signed_promoted,\
+                CAST('18446744073709551615' AS UINT64) + CAST('1' AS UINT64) AS unsigned_promoted,\
+                CAST('10' AS UINT64) - CAST('12' AS UINT64) AS unsigned_negative,\
+                CAST('5.5' AS DECIMAL) + CAST('2.25' AS DECIMAL) AS decimal_sum,\
+                CAST('5.5' AS DECIMAL) % CAST('2' AS DECIMAL) AS decimal_mod,\
+                CAST('1' AS UINT64) / CAST('4' AS UINT64) AS exact_division \
+             FROM one_row;",
+        )?;
+
+        assert_eq!(
+            result.rows,
+            vec![vec![
+                crate::catalog::Value::Int128(9_223_372_036_854_775_808),
+                crate::catalog::Value::UInt128(18_446_744_073_709_551_616),
+                crate::catalog::Value::Integer(-2),
+                crate::catalog::Value::Decimal(crate::catalog::DecimalValue::parse("7.75")?),
+                crate::catalog::Value::Decimal(crate::catalog::DecimalValue::parse("1.5")?),
+                crate::catalog::Value::Decimal(crate::catalog::DecimalValue::parse("0.25")?),
+            ]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_cast_and_modulo_expressions() -> Result<()> {
         let db = TestDbFile::new("_test_cast_and_modulo_expressions");
         let mut conn = Connection::new(db.path())?;

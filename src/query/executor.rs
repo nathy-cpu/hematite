@@ -5680,42 +5680,43 @@ fn evaluate_arithmetic_values(
         }
     }
 
-    match (left, right) {
-        (Value::Integer(left), Value::Integer(right)) => match operator {
-            ArithmeticOperator::Add => {
-                left.checked_add(right).map(Value::Integer).ok_or_else(|| {
-                    HematiteError::ParseError("Integer overflow while evaluating '+'".to_string())
-                })
-            }
-            ArithmeticOperator::Subtract => {
-                left.checked_sub(right).map(Value::Integer).ok_or_else(|| {
-                    HematiteError::ParseError("Integer overflow while evaluating '-'".to_string())
-                })
-            }
-            ArithmeticOperator::Multiply => {
-                left.checked_mul(right).map(Value::Integer).ok_or_else(|| {
-                    HematiteError::ParseError("Integer overflow while evaluating '*'".to_string())
-                })
-            }
-            ArithmeticOperator::Divide => {
-                if right == 0 {
-                    Err(HematiteError::ParseError("Division by zero".to_string()))
-                } else {
-                    Ok(Value::Float(left as f64 / right as f64))
-                }
-            }
-            ArithmeticOperator::Modulo => {
-                if right == 0 {
-                    Err(HematiteError::ParseError("Division by zero".to_string()))
-                } else {
-                    Ok(Value::Integer(left % right))
-                }
-            }
-        },
-        (left, right) => Err(HematiteError::ParseError(format!(
-            "Arithmetic requires numeric values, found {:?} and {:?}",
-            left, right
-        ))),
+    if is_exact_numeric_value(&left) && is_exact_numeric_value(&right) {
+        return evaluate_exact_numeric_arithmetic(operator, left, right);
+    }
+
+    Err(HematiteError::ParseError(format!(
+        "Arithmetic requires numeric values, found {:?} and {:?}",
+        left, right
+    )))
+}
+
+fn evaluate_exact_numeric_arithmetic(
+    operator: &ArithmeticOperator,
+    left: Value,
+    right: Value,
+) -> Result<Value> {
+    let prefer_decimal = matches!(left, Value::Decimal(_))
+        || matches!(right, Value::Decimal(_))
+        || matches!(operator, ArithmeticOperator::Divide);
+    let prefer_unsigned = !prefer_decimal
+        && is_unsigned_integral_value(&left)
+        && is_unsigned_integral_value(&right)
+        && !matches!(operator, ArithmeticOperator::Subtract);
+
+    let left_decimal = coerce_decimal_value(left.clone())?;
+    let right_decimal = coerce_decimal_value(right.clone())?;
+    let result = match operator {
+        ArithmeticOperator::Add => left_decimal.add(&right_decimal),
+        ArithmeticOperator::Subtract => left_decimal.subtract(&right_decimal),
+        ArithmeticOperator::Multiply => left_decimal.multiply(&right_decimal),
+        ArithmeticOperator::Divide => left_decimal.divide(&right_decimal)?,
+        ArithmeticOperator::Modulo => left_decimal.remainder(&right_decimal)?,
+    };
+
+    if prefer_decimal || !result.is_integral() {
+        Ok(Value::Decimal(result))
+    } else {
+        decimal_integral_result_to_value(result, prefer_unsigned)
     }
 }
 
@@ -5977,8 +5978,10 @@ fn integral_rhs(value: &Value) -> Option<i64> {
     match value {
         Value::Integer(value) => Some(*value as i64),
         Value::BigInt(value) => Some(*value),
+        Value::Int128(value) => i64::try_from(*value).ok(),
         Value::UInteger(value) => Some(*value as i64),
         Value::UBigInt(value) => i64::try_from(*value).ok(),
+        Value::UInt128(value) => i64::try_from(*value).ok(),
         _ => None,
     }
 }
@@ -6052,6 +6055,82 @@ fn evaluate_float_arithmetic(
         }
     };
     Ok(Value::Float(value))
+}
+
+fn is_exact_numeric_value(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::Integer(_)
+            | Value::BigInt(_)
+            | Value::Int128(_)
+            | Value::UInteger(_)
+            | Value::UBigInt(_)
+            | Value::UInt128(_)
+            | Value::Decimal(_)
+    )
+}
+
+fn is_unsigned_integral_value(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::UInteger(_) | Value::UBigInt(_) | Value::UInt128(_)
+    )
+}
+
+fn decimal_integral_result_to_value(value: DecimalValue, prefer_unsigned: bool) -> Result<Value> {
+    debug_assert!(value.is_integral());
+    let text = value.to_string();
+
+    if value.negative() {
+        return text.parse::<i128>().map(minimal_signed_value).map_err(|_| {
+            HematiteError::ParseError(
+                "Arithmetic overflowed the supported signed integer range".to_string(),
+            )
+        });
+    }
+
+    if prefer_unsigned {
+        return text
+            .parse::<u128>()
+            .map(minimal_unsigned_value)
+            .map_err(|_| {
+                HematiteError::ParseError(
+                    "Arithmetic overflowed the supported unsigned integer range".to_string(),
+                )
+            });
+    }
+
+    if let Ok(signed) = text.parse::<i128>() {
+        Ok(minimal_signed_value(signed))
+    } else {
+        text.parse::<u128>()
+            .map(minimal_unsigned_value)
+            .map_err(|_| {
+                HematiteError::ParseError(
+                    "Arithmetic overflowed the supported integer range".to_string(),
+                )
+            })
+    }
+}
+
+fn minimal_signed_value(value: i128) -> Value {
+    if let Ok(value) = i32::try_from(value) {
+        Value::Integer(value)
+    } else if let Ok(value) = i64::try_from(value) {
+        Value::BigInt(value)
+    } else {
+        Value::Int128(value)
+    }
+}
+
+fn minimal_unsigned_value(value: u128) -> Value {
+    if let Ok(value) = u32::try_from(value) {
+        Value::UInteger(value)
+    } else if let Ok(value) = u64::try_from(value) {
+        Value::UBigInt(value)
+    } else {
+        Value::UInt128(value)
+    }
 }
 
 fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
