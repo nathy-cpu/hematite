@@ -171,6 +171,9 @@ impl Connection {
             Int,
             Int64,
             Int128,
+            UInt,
+            UInt64,
+            UInt128,
             Float,
             Decimal,
         }
@@ -209,20 +212,57 @@ impl Connection {
                     | (Numeric(Int128), Value::Integer(_))
                     | (Numeric(Int128), Value::BigInt(_))
                     | (Numeric(Int128), Value::Int128(_)) => Ok(Numeric(Int128)),
+                    (Numeric(UInt), Value::UInteger(_)) => Ok(Numeric(UInt)),
+                    (Numeric(UInt), Value::UBigInt(_))
+                    | (Numeric(UInt64), Value::UInteger(_))
+                    | (Numeric(UInt64), Value::UBigInt(_)) => Ok(Numeric(UInt64)),
+                    (Numeric(UInt), Value::UInt128(_))
+                    | (Numeric(UInt64), Value::UInt128(_))
+                    | (Numeric(UInt128), Value::UInteger(_))
+                    | (Numeric(UInt128), Value::UBigInt(_))
+                    | (Numeric(UInt128), Value::UInt128(_)) => Ok(Numeric(UInt128)),
+                    (Numeric(Int), Value::UInteger(_))
+                    | (Numeric(Int64), Value::UInteger(_))
+                    | (Numeric(Int128), Value::UInteger(_))
+                    | (Numeric(UInt), Value::Integer(_))
+                    | (Numeric(UInt), Value::BigInt(_))
+                    | (Numeric(UInt), Value::Int128(_))
+                    | (Numeric(UInt64), Value::Integer(_))
+                    | (Numeric(UInt64), Value::BigInt(_))
+                    | (Numeric(UInt64), Value::Int128(_))
+                    | (Numeric(UInt128), Value::Integer(_))
+                    | (Numeric(UInt128), Value::BigInt(_))
+                    | (Numeric(UInt128), Value::Int128(_))
+                    | (Numeric(Int64), Value::UBigInt(_))
+                    | (Numeric(Int128), Value::UBigInt(_))
+                    | (Numeric(Int128), Value::UInt128(_))
+                    => Ok(Numeric(Decimal)),
                     (Numeric(Int), Value::Float(_))
                     | (Numeric(Int64), Value::Float(_))
                     | (Numeric(Int128), Value::Float(_))
+                    | (Numeric(UInt), Value::Float(_))
+                    | (Numeric(UInt64), Value::Float(_))
+                    | (Numeric(UInt128), Value::Float(_))
                     | (Numeric(Float), Value::Integer(_))
                     | (Numeric(Float), Value::BigInt(_))
                     | (Numeric(Float), Value::Int128(_))
+                    | (Numeric(Float), Value::UInteger(_))
+                    | (Numeric(Float), Value::UBigInt(_))
+                    | (Numeric(Float), Value::UInt128(_))
                     | (Numeric(Float), Value::Float(_)) => Ok(Numeric(Float)),
                     (Numeric(Int), Value::Decimal(_))
                     | (Numeric(Int64), Value::Decimal(_))
                     | (Numeric(Int128), Value::Decimal(_))
+                    | (Numeric(UInt), Value::Decimal(_))
+                    | (Numeric(UInt64), Value::Decimal(_))
+                    | (Numeric(UInt128), Value::Decimal(_))
                     | (Numeric(Float), Value::Decimal(_))
                     | (Numeric(Decimal), Value::Integer(_))
                     | (Numeric(Decimal), Value::BigInt(_))
                     | (Numeric(Decimal), Value::Int128(_))
+                    | (Numeric(Decimal), Value::UInteger(_))
+                    | (Numeric(Decimal), Value::UBigInt(_))
+                    | (Numeric(Decimal), Value::UInt128(_))
                     | (Numeric(Decimal), Value::Float(_))
                     | (Numeric(Decimal), Value::Decimal(_)) => Ok(Numeric(Decimal)),
                     (
@@ -275,6 +315,9 @@ impl Connection {
                     Value::Integer(_) => Numeric(Int),
                     Value::BigInt(_) => Numeric(Int64),
                     Value::Int128(_) => Numeric(Int128),
+                    Value::UInteger(_) => Numeric(UInt),
+                    Value::UBigInt(_) => Numeric(UInt64),
+                    Value::UInt128(_) => Numeric(UInt128),
                     Value::Float(_) => Numeric(Float),
                     Value::Decimal(_) => Numeric(Decimal),
                     Value::Text(text) => String {
@@ -307,6 +350,9 @@ impl Connection {
                     InferredKind::Numeric(NumericKind::Int) => SqlTypeName::Int,
                     InferredKind::Numeric(NumericKind::Int64) => SqlTypeName::Int64,
                     InferredKind::Numeric(NumericKind::Int128) => SqlTypeName::Int128,
+                    InferredKind::Numeric(NumericKind::UInt) => SqlTypeName::UInt,
+                    InferredKind::Numeric(NumericKind::UInt64) => SqlTypeName::UInt64,
+                    InferredKind::Numeric(NumericKind::UInt128) => SqlTypeName::UInt128,
                     InferredKind::Numeric(NumericKind::Float) => SqlTypeName::Float,
                     InferredKind::Numeric(NumericKind::Decimal) => SqlTypeName::Decimal {
                         precision: None,

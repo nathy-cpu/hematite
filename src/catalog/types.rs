@@ -12,6 +12,11 @@ pub enum DataType {
     Int,
     Int64,
     Int128,
+    UInt8,
+    UInt16,
+    UInt,
+    UInt64,
+    UInt128,
     Text,
     Char(u32),
     VarChar(u32),
@@ -46,6 +51,11 @@ impl DataType {
             DataType::Int => 4,
             DataType::Int64 => 8,
             DataType::Int128 => 16,
+            DataType::UInt8 => 1,
+            DataType::UInt16 => 2,
+            DataType::UInt => 4,
+            DataType::UInt64 => 8,
+            DataType::UInt128 => 16,
             DataType::Text => 255,
             DataType::Char(length) | DataType::VarChar(length) => *length as usize,
             DataType::Binary(length) | DataType::VarBinary(length) => *length as usize,
@@ -73,6 +83,11 @@ impl DataType {
             DataType::Int => "INT".to_string(),
             DataType::Int64 => "INT64".to_string(),
             DataType::Int128 => "INT128".to_string(),
+            DataType::UInt8 => "UINT8".to_string(),
+            DataType::UInt16 => "UINT16".to_string(),
+            DataType::UInt => "UINT".to_string(),
+            DataType::UInt64 => "UINT64".to_string(),
+            DataType::UInt128 => "UINT128".to_string(),
             DataType::Text => "TEXT".to_string(),
             DataType::Char(length) => format!("CHAR({length})"),
             DataType::VarChar(length) => format!("VARCHAR({length})"),
@@ -112,6 +127,11 @@ impl DataType {
             DataType::Int => "INT",
             DataType::Int64 => "INT64",
             DataType::Int128 => "INT128",
+            DataType::UInt8 => "UINT8",
+            DataType::UInt16 => "UINT16",
+            DataType::UInt => "UINT",
+            DataType::UInt64 => "UINT64",
+            DataType::UInt128 => "UINT128",
             DataType::Text => "TEXT",
             DataType::Char(_) => "CHAR",
             DataType::VarChar(_) => "VARCHAR",
@@ -243,6 +263,18 @@ impl DecimalValue {
 
     pub fn from_i128(value: i128) -> Self {
         Self::parse(&value.to_string()).expect("i128 string is always a valid decimal")
+    }
+
+    pub fn from_u32(value: u32) -> Self {
+        Self::parse(&value.to_string()).expect("u32 string is always a valid decimal")
+    }
+
+    pub fn from_u64(value: u64) -> Self {
+        Self::parse(&value.to_string()).expect("u64 string is always a valid decimal")
+    }
+
+    pub fn from_u128(value: u128) -> Self {
+        Self::parse(&value.to_string()).expect("u128 string is always a valid decimal")
     }
 
     pub fn from_f64(value: f64) -> Result<Self> {
@@ -809,6 +841,9 @@ pub enum Value {
     Integer(i32),
     BigInt(i64),
     Int128(i128),
+    UInteger(u32),
+    UBigInt(u64),
+    UInt128(u128),
     Text(String),
     Enum(String),
     Boolean(bool),
@@ -831,6 +866,9 @@ impl Value {
             Value::Integer(_) => DataType::Int,
             Value::BigInt(_) => DataType::Int64,
             Value::Int128(_) => DataType::Int128,
+            Value::UInteger(_) => DataType::UInt,
+            Value::UBigInt(_) => DataType::UInt64,
+            Value::UInt128(_) => DataType::UInt128,
             Value::Text(_) => DataType::Text,
             Value::Enum(_) => DataType::Enum(Vec::new()),
             Value::Boolean(_) => DataType::Boolean,
@@ -857,6 +895,11 @@ impl Value {
             | (Value::Integer(_), DataType::Int) => true,
             (Value::BigInt(_), DataType::Int64) => true,
             (Value::Int128(_), DataType::Int128) => true,
+            (Value::UInteger(_), DataType::UInt8)
+            | (Value::UInteger(_), DataType::UInt16)
+            | (Value::UInteger(_), DataType::UInt) => true,
+            (Value::UBigInt(_), DataType::UInt64) => true,
+            (Value::UInt128(_), DataType::UInt128) => true,
             (Value::Text(_), DataType::Text)
             | (Value::Text(_), DataType::Char(_))
             | (Value::Text(_), DataType::VarChar(_)) => true,
@@ -924,6 +967,7 @@ impl Value {
         match self {
             Value::BigInt(i) => Some(*i),
             Value::Integer(i) => Some(*i as i64),
+            Value::UInteger(i) => Some(*i as i64),
             _ => None,
         }
     }
@@ -933,6 +977,38 @@ impl Value {
             Value::Int128(i) => Some(*i),
             Value::BigInt(i) => Some(*i as i128),
             Value::Integer(i) => Some(*i as i128),
+            Value::UInteger(i) => Some(*i as i128),
+            Value::UBigInt(i) => i128::try_from(*i).ok(),
+            _ => None,
+        }
+    }
+
+    pub fn as_uint(&self) -> Option<u32> {
+        match self {
+            Value::UInteger(i) => Some(*i),
+            Value::Integer(i) if *i >= 0 => Some(*i as u32),
+            _ => None,
+        }
+    }
+
+    pub fn as_uint64(&self) -> Option<u64> {
+        match self {
+            Value::UBigInt(i) => Some(*i),
+            Value::UInteger(i) => Some(*i as u64),
+            Value::Integer(i) if *i >= 0 => Some(*i as u64),
+            Value::BigInt(i) if *i >= 0 => Some(*i as u64),
+            _ => None,
+        }
+    }
+
+    pub fn as_uint128(&self) -> Option<u128> {
+        match self {
+            Value::UInt128(i) => Some(*i),
+            Value::UBigInt(i) => Some(*i as u128),
+            Value::UInteger(i) => Some(*i as u128),
+            Value::Integer(i) if *i >= 0 => Some(*i as u128),
+            Value::BigInt(i) if *i >= 0 => Some(*i as u128),
+            Value::Int128(i) if *i >= 0 => Some(*i as u128),
             _ => None,
         }
     }
@@ -947,6 +1023,18 @@ impl Value {
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
     }
+
+    fn is_integral_value(&self) -> bool {
+        matches!(
+            self,
+            Value::Integer(_)
+                | Value::BigInt(_)
+                | Value::Int128(_)
+                | Value::UInteger(_)
+                | Value::UBigInt(_)
+                | Value::UInt128(_)
+        )
+    }
 }
 
 impl Eq for Value {}
@@ -957,12 +1045,20 @@ impl PartialOrd for Value {
             (Value::Integer(a), Value::Integer(b)) => a.partial_cmp(b),
             (Value::BigInt(a), Value::BigInt(b)) => a.partial_cmp(b),
             (Value::Int128(a), Value::Int128(b)) => a.partial_cmp(b),
+            (Value::UInteger(a), Value::UInteger(b)) => a.partial_cmp(b),
+            (Value::UBigInt(a), Value::UBigInt(b)) => a.partial_cmp(b),
+            (Value::UInt128(a), Value::UInt128(b)) => a.partial_cmp(b),
             (Value::Integer(a), Value::BigInt(b)) => (*a as i64).partial_cmp(b),
             (Value::BigInt(a), Value::Integer(b)) => a.partial_cmp(&(*b as i64)),
             (Value::Integer(a), Value::Int128(b)) => (*a as i128).partial_cmp(b),
             (Value::Int128(a), Value::Integer(b)) => a.partial_cmp(&(*b as i128)),
             (Value::BigInt(a), Value::Int128(b)) => (*a as i128).partial_cmp(b),
             (Value::Int128(a), Value::BigInt(b)) => a.partial_cmp(&(*b as i128)),
+            (left, right)
+                if left.is_integral_value() && right.is_integral_value() =>
+            {
+                compare_integral_values(left, right)
+            }
             (Value::Text(a), Value::Text(b)) => a.partial_cmp(b),
             (Value::Enum(a), Value::Enum(b)) => a.partial_cmp(b),
             (Value::Boolean(a), Value::Boolean(b)) => a.partial_cmp(b),
@@ -979,6 +1075,45 @@ impl PartialOrd for Value {
             (Value::Null, _) => Some(Ordering::Less),
             (_, Value::Null) => Some(Ordering::Greater),
             _ => None,
+        }
+    }
+}
+
+fn compare_integral_values(left: &Value, right: &Value) -> Option<Ordering> {
+    #[derive(Clone, Copy)]
+    enum Integral {
+        Signed(i128),
+        Unsigned(u128),
+    }
+
+    fn integral(value: &Value) -> Option<Integral> {
+        match value {
+            Value::Integer(value) => Some(Integral::Signed((*value).into())),
+            Value::BigInt(value) => Some(Integral::Signed((*value).into())),
+            Value::Int128(value) => Some(Integral::Signed(*value)),
+            Value::UInteger(value) => Some(Integral::Unsigned((*value).into())),
+            Value::UBigInt(value) => Some(Integral::Unsigned((*value).into())),
+            Value::UInt128(value) => Some(Integral::Unsigned(*value)),
+            _ => None,
+        }
+    }
+
+    match (integral(left)?, integral(right)?) {
+        (Integral::Signed(left), Integral::Signed(right)) => left.partial_cmp(&right),
+        (Integral::Unsigned(left), Integral::Unsigned(right)) => left.partial_cmp(&right),
+        (Integral::Signed(left), Integral::Unsigned(right)) => {
+            if left < 0 {
+                Some(Ordering::Less)
+            } else {
+                (left as u128).partial_cmp(&right)
+            }
+        }
+        (Integral::Unsigned(left), Integral::Signed(right)) => {
+            if right < 0 {
+                Some(Ordering::Greater)
+            } else {
+                left.partial_cmp(&(right as u128))
+            }
         }
     }
 }

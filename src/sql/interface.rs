@@ -174,8 +174,11 @@ impl FromValue for f64 {
         match value {
             Value::Float(f) => Ok(*f),
             Value::Integer(i) => Ok(*i as f64), // Allow integer to float conversion
+            Value::UInteger(i) => Ok(*i as f64),
             Value::BigInt(i) => Ok(*i as f64),
+            Value::UBigInt(i) => Ok(*i as f64),
             Value::Int128(i) => Ok(*i as f64),
+            Value::UInt128(i) => Ok(*i as f64),
             _ => Err(HematiteError::ParseError(format!(
                 "Expected FLOAT, found {:?}",
                 value
@@ -195,6 +198,7 @@ impl FromValue for i64 {
         match value {
             Value::BigInt(i) => Ok(*i),
             Value::Integer(i) => Ok(*i as i64),
+            Value::UInteger(i) => Ok(*i as i64),
             _ => Err(HematiteError::ParseError(format!(
                 "Expected INT64, found {:?}",
                 value
@@ -209,8 +213,52 @@ impl FromValue for i128 {
             Value::Int128(i) => Ok(*i),
             Value::BigInt(i) => Ok(*i as i128),
             Value::Integer(i) => Ok(*i as i128),
+            Value::UInteger(i) => Ok(*i as i128),
+            Value::UBigInt(i) => Ok(*i as i128),
             _ => Err(HematiteError::ParseError(format!(
                 "Expected INT128, found {:?}",
+                value
+            ))),
+        }
+    }
+}
+
+impl FromValue for u32 {
+    fn from_value(value: &Value) -> Result<Self> {
+        match value {
+            Value::UInteger(i) => Ok(*i),
+            Value::Integer(i) if *i >= 0 => Ok(*i as u32),
+            _ => Err(HematiteError::ParseError(format!(
+                "Expected UINT, found {:?}",
+                value
+            ))),
+        }
+    }
+}
+
+impl FromValue for u64 {
+    fn from_value(value: &Value) -> Result<Self> {
+        match value {
+            Value::UBigInt(i) => Ok(*i),
+            Value::UInteger(i) => Ok(*i as u64),
+            Value::Integer(i) if *i >= 0 => Ok(*i as u64),
+            _ => Err(HematiteError::ParseError(format!(
+                "Expected UINT64, found {:?}",
+                value
+            ))),
+        }
+    }
+}
+
+impl FromValue for u128 {
+    fn from_value(value: &Value) -> Result<Self> {
+        match value {
+            Value::UInt128(i) => Ok(*i),
+            Value::UBigInt(i) => Ok(*i as u128),
+            Value::UInteger(i) => Ok(*i as u128),
+            Value::Integer(i) if *i >= 0 => Ok(*i as u128),
+            _ => Err(HematiteError::ParseError(format!(
+                "Expected UINT128, found {:?}",
                 value
             ))),
         }

@@ -3091,7 +3091,7 @@ impl CreateStatement {
             ));
         }
         if let Some(column) = auto_increment_columns.first() {
-            if column.data_type != SqlTypeName::Int {
+            if !matches!(column.data_type, SqlTypeName::Int | SqlTypeName::UInt) {
                 return Err(HematiteError::ParseError(format!(
                     "AUTO_INCREMENT column '{}' must use an integer type",
                     column.name
@@ -4344,6 +4344,11 @@ fn sql_type_name_for_catalog_type(data_type: crate::catalog::DataType) -> SqlTyp
         crate::catalog::DataType::Int => SqlTypeName::Int,
         crate::catalog::DataType::Int64 => SqlTypeName::Int64,
         crate::catalog::DataType::Int128 => SqlTypeName::Int128,
+        crate::catalog::DataType::UInt8 => SqlTypeName::UInt8,
+        crate::catalog::DataType::UInt16 => SqlTypeName::UInt16,
+        crate::catalog::DataType::UInt => SqlTypeName::UInt,
+        crate::catalog::DataType::UInt64 => SqlTypeName::UInt64,
+        crate::catalog::DataType::UInt128 => SqlTypeName::UInt128,
         crate::catalog::DataType::Text => SqlTypeName::Text,
         crate::catalog::DataType::Char(length) => SqlTypeName::Char(length),
         crate::catalog::DataType::VarChar(length) => SqlTypeName::VarChar(length),

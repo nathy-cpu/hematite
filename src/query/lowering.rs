@@ -28,8 +28,11 @@ pub(crate) fn lower_literal_value(value: &LiteralValue) -> Value {
 pub(crate) fn raise_literal_value(value: &Value) -> LiteralValue {
     match value {
         Value::Integer(value) => LiteralValue::Integer((*value).into()),
+        Value::UInteger(value) => LiteralValue::Integer((*value).into()),
         Value::BigInt(value) => LiteralValue::Text(value.to_string()),
+        Value::UBigInt(value) => LiteralValue::Text(value.to_string()),
         Value::Int128(value) => LiteralValue::Text(value.to_string()),
+        Value::UInt128(value) => LiteralValue::Text(value.to_string()),
         Value::Text(value) => LiteralValue::Text(value.clone()),
         Value::Enum(value) => LiteralValue::Text(value.clone()),
         Value::Boolean(value) => LiteralValue::Boolean(*value),
@@ -54,6 +57,11 @@ pub(crate) fn lower_type_name(data_type: SqlTypeName) -> DataType {
         SqlTypeName::Int => DataType::Int,
         SqlTypeName::Int64 => DataType::Int64,
         SqlTypeName::Int128 => DataType::Int128,
+        SqlTypeName::UInt8 => DataType::UInt8,
+        SqlTypeName::UInt16 => DataType::UInt16,
+        SqlTypeName::UInt => DataType::UInt,
+        SqlTypeName::UInt64 => DataType::UInt64,
+        SqlTypeName::UInt128 => DataType::UInt128,
         SqlTypeName::Text => DataType::Text,
         SqlTypeName::Char(length) => DataType::Char(length),
         SqlTypeName::VarChar(length) => DataType::VarChar(length),

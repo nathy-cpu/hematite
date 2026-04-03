@@ -1713,7 +1713,7 @@ mod parser_tests {
         let create = parse_create(
             "CREATE TABLE metrics (id INT64 UNSIGNED PRIMARY KEY, ratio REAL, amount DECIMAL(10, 2), code CHAR(8), tiny INT8, small INT16, exact NUMERIC(6));",
         )?;
-        assert_eq!(create.columns[0].data_type, SqlTypeName::Int64);
+        assert_eq!(create.columns[0].data_type, SqlTypeName::UInt64);
         assert_eq!(create.columns[1].data_type, SqlTypeName::Real);
         assert_eq!(
             create.columns[2].data_type,
@@ -1765,6 +1765,21 @@ mod parser_tests {
         assert_eq!(create.columns[3].data_type, SqlTypeName::Int);
         assert_eq!(create.columns[4].data_type, SqlTypeName::Int64);
         assert_eq!(create.columns[5].data_type, SqlTypeName::Int128);
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_unsigned_integer_type_names() -> Result<()> {
+        let create = parse_create(
+            "CREATE TABLE uints (id UINT PRIMARY KEY, tiny UINT8, small UINT16, normal UINT32, large UINT64, massive UINT128, legacy UINT64 UNSIGNED);",
+        )?;
+        assert_eq!(create.columns[0].data_type, SqlTypeName::UInt);
+        assert_eq!(create.columns[1].data_type, SqlTypeName::UInt8);
+        assert_eq!(create.columns[2].data_type, SqlTypeName::UInt16);
+        assert_eq!(create.columns[3].data_type, SqlTypeName::UInt);
+        assert_eq!(create.columns[4].data_type, SqlTypeName::UInt64);
+        assert_eq!(create.columns[5].data_type, SqlTypeName::UInt128);
+        assert_eq!(create.columns[6].data_type, SqlTypeName::UInt64);
         Ok(())
     }
 

@@ -1162,6 +1162,11 @@ fn validate_create(create: &CreateStatement, catalog: &Schema) -> Result<()> {
                 | SqlTypeName::Int16
                 | SqlTypeName::Int64
                 | SqlTypeName::Int128
+                | SqlTypeName::UInt
+                | SqlTypeName::UInt8
+                | SqlTypeName::UInt16
+                | SqlTypeName::UInt64
+                | SqlTypeName::UInt128
         ) {
             return Err(HematiteError::ParseError(format!(
                 "AUTO_INCREMENT column '{}' must use an integer type",
@@ -2415,6 +2420,11 @@ fn sql_type_name_for_catalog_type(data_type: crate::catalog::DataType) -> SqlTyp
         crate::catalog::DataType::Int => SqlTypeName::Int,
         crate::catalog::DataType::Int64 => SqlTypeName::Int64,
         crate::catalog::DataType::Int128 => SqlTypeName::Int128,
+        crate::catalog::DataType::UInt8 => SqlTypeName::UInt8,
+        crate::catalog::DataType::UInt16 => SqlTypeName::UInt16,
+        crate::catalog::DataType::UInt => SqlTypeName::UInt,
+        crate::catalog::DataType::UInt64 => SqlTypeName::UInt64,
+        crate::catalog::DataType::UInt128 => SqlTypeName::UInt128,
         crate::catalog::DataType::Text => SqlTypeName::Text,
         crate::catalog::DataType::Char(length) => SqlTypeName::Char(length),
         crate::catalog::DataType::VarChar(length) => SqlTypeName::VarChar(length),

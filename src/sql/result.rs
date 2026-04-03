@@ -150,8 +150,11 @@ impl Row {
         match self.get(index) {
             Some(Value::Float(f)) => Ok(*f),
             Some(Value::Integer(i)) => Ok(*i as f64), // Allow integer to float conversion
+            Some(Value::UInteger(i)) => Ok(*i as f64),
             Some(Value::BigInt(i)) => Ok(*i as f64),
+            Some(Value::UBigInt(i)) => Ok(*i as f64),
             Some(Value::Int128(i)) => Ok(*i as f64),
+            Some(Value::UInt128(i)) => Ok(*i as f64),
             Some(value) => Err(HematiteError::ParseError(format!(
                 "Expected FLOAT, found {:?}",
                 value
@@ -170,6 +173,7 @@ impl Row {
         match self.get(index) {
             Some(Value::BigInt(i)) => Ok(*i),
             Some(Value::Integer(i)) => Ok(*i as i64),
+            Some(Value::UInteger(i)) => Ok(*i as i64),
             Some(value) => Err(HematiteError::ParseError(format!(
                 "Expected INT64, found {:?}",
                 value
@@ -185,8 +189,55 @@ impl Row {
             Some(Value::Int128(i)) => Ok(*i),
             Some(Value::BigInt(i)) => Ok(*i as i128),
             Some(Value::Integer(i)) => Ok(*i as i128),
+            Some(Value::UInteger(i)) => Ok(*i as i128),
+            Some(Value::UBigInt(i)) => Ok(*i as i128),
             Some(value) => Err(HematiteError::ParseError(format!(
                 "Expected INT128, found {:?}",
+                value
+            ))),
+            None => Err(HematiteError::ParseError(
+                "Column index out of bounds".to_string(),
+            )),
+        }
+    }
+
+    pub fn get_uint(&self, index: usize) -> Result<u32> {
+        match self.get(index) {
+            Some(Value::UInteger(i)) => Ok(*i),
+            Some(Value::Integer(i)) if *i >= 0 => Ok(*i as u32),
+            Some(value) => Err(HematiteError::ParseError(format!(
+                "Expected UINT, found {:?}",
+                value
+            ))),
+            None => Err(HematiteError::ParseError(
+                "Column index out of bounds".to_string(),
+            )),
+        }
+    }
+
+    pub fn get_uint64(&self, index: usize) -> Result<u64> {
+        match self.get(index) {
+            Some(Value::UBigInt(i)) => Ok(*i),
+            Some(Value::UInteger(i)) => Ok(*i as u64),
+            Some(Value::Integer(i)) if *i >= 0 => Ok(*i as u64),
+            Some(value) => Err(HematiteError::ParseError(format!(
+                "Expected UINT64, found {:?}",
+                value
+            ))),
+            None => Err(HematiteError::ParseError(
+                "Column index out of bounds".to_string(),
+            )),
+        }
+    }
+
+    pub fn get_uint128(&self, index: usize) -> Result<u128> {
+        match self.get(index) {
+            Some(Value::UInt128(i)) => Ok(*i),
+            Some(Value::UBigInt(i)) => Ok(*i as u128),
+            Some(Value::UInteger(i)) => Ok(*i as u128),
+            Some(Value::Integer(i)) if *i >= 0 => Ok(*i as u128),
+            Some(value) => Err(HematiteError::ParseError(format!(
+                "Expected UINT128, found {:?}",
                 value
             ))),
             None => Err(HematiteError::ParseError(

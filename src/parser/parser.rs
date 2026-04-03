@@ -2466,11 +2466,18 @@ impl Parser {
     fn parse_data_type(&mut self) -> Result<SqlTypeName> {
         let token = self.peek_token()?;
         let data_type = match token {
-            Token::Int8 => SqlTypeName::Int8,
-            Token::Int16 => SqlTypeName::Int16,
-            Token::Int32 | Token::Int => SqlTypeName::Int,
-            Token::Int64 => SqlTypeName::Int64,
-            Token::Int128 => SqlTypeName::Int128,
+            Token::Int8 => return self.parse_integer_type(Token::Int8, SqlTypeName::Int8),
+            Token::Int16 => return self.parse_integer_type(Token::Int16, SqlTypeName::Int16),
+            Token::Int32 | Token::Int => {
+                return self.parse_integer_type(token.clone(), SqlTypeName::Int)
+            }
+            Token::Int64 => return self.parse_integer_type(Token::Int64, SqlTypeName::Int64),
+            Token::Int128 => return self.parse_integer_type(Token::Int128, SqlTypeName::Int128),
+            Token::UInt8 => SqlTypeName::UInt8,
+            Token::UInt16 => SqlTypeName::UInt16,
+            Token::UInt32 | Token::UInt => SqlTypeName::UInt,
+            Token::UInt64 => SqlTypeName::UInt64,
+            Token::UInt128 => SqlTypeName::UInt128,
             Token::Text => SqlTypeName::Text,
             Token::Boolean | Token::Bool => SqlTypeName::Boolean,
             Token::Float => SqlTypeName::Float,
@@ -2547,8 +2554,37 @@ impl Parser {
 
         self.consume_token(&token)?;
         self.consume_optional_double_precision()?;
-        self.consume_optional_unsigned()?;
+        if !matches!(
+            token,
+            Token::Int | Token::Int32 | Token::Int64 | Token::Int128 | Token::Int8 | Token::Int16
+        ) {
+            self.consume_optional_unsigned()?;
+        }
         Ok(data_type)
+    }
+
+    fn parse_integer_type(&mut self, token: Token, signed_type: SqlTypeName) -> Result<SqlTypeName> {
+        self.consume_token(&token)?;
+        if matches!(
+            signed_type,
+            SqlTypeName::Int8
+                | SqlTypeName::Int16
+                | SqlTypeName::Int
+                | SqlTypeName::Int64
+                | SqlTypeName::Int128
+        ) && matches!(self.peek_token(), Ok(Token::Unsigned))
+        {
+            self.consume_token(&Token::Unsigned)?;
+            return Ok(match signed_type {
+                SqlTypeName::Int8 => SqlTypeName::UInt8,
+                SqlTypeName::Int16 => SqlTypeName::UInt16,
+                SqlTypeName::Int => SqlTypeName::UInt,
+                SqlTypeName::Int64 => SqlTypeName::UInt64,
+                SqlTypeName::Int128 => SqlTypeName::UInt128,
+                _ => signed_type,
+            });
+        }
+        Ok(signed_type)
     }
 
     fn parse_enum_variants(&mut self) -> Result<Vec<String>> {
@@ -2894,6 +2930,12 @@ const ALL_UPPERCASE_KEYWORDS: &[&str] = &[
     "INT32",
     "INT64",
     "INT128",
+    "UINT8",
+    "UINT16",
+    "UINT",
+    "UINT32",
+    "UINT64",
+    "UINT128",
     "TEXT",
     "BOOLEAN",
     "FLOAT",
@@ -2959,6 +3001,12 @@ const DATA_TYPE_KEYWORDS: &[&str] = &[
     "INT32",
     "INT64",
     "INT128",
+    "UINT8",
+    "UINT16",
+    "UINT",
+    "UINT32",
+    "UINT64",
+    "UINT128",
     "TEXT",
     "BOOLEAN",
     "BOOL",
@@ -3083,6 +3131,12 @@ fn token_keyword_name(token: &Token) -> Option<&'static str> {
         Token::Int64 => Some("INT64"),
         Token::Int128 => Some("INT128"),
         Token::Int => Some("INT"),
+        Token::UInt8 => Some("UINT8"),
+        Token::UInt16 => Some("UINT16"),
+        Token::UInt64 => Some("UINT64"),
+        Token::UInt128 => Some("UINT128"),
+        Token::UInt32 => Some("UINT32"),
+        Token::UInt => Some("UINT"),
         Token::Bool => Some("BOOL"),
         Token::Double => Some("DOUBLE"),
         Token::Real => Some("REAL"),

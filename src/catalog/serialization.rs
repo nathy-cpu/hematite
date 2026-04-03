@@ -37,6 +37,18 @@ impl RowCodec {
                     buffer.push(17);
                     buffer.extend_from_slice(&i.to_le_bytes());
                 }
+                Value::UInteger(i) => {
+                    buffer.push(18);
+                    buffer.extend_from_slice(&i.to_le_bytes());
+                }
+                Value::UBigInt(i) => {
+                    buffer.push(19);
+                    buffer.extend_from_slice(&i.to_le_bytes());
+                }
+                Value::UInt128(i) => {
+                    buffer.push(20);
+                    buffer.extend_from_slice(&i.to_le_bytes());
+                }
                 Value::Text(s) => {
                     buffer.push(2);
                     write_bytes(&mut buffer, s.as_bytes());
@@ -194,6 +206,19 @@ impl RowCodec {
                 17 => {
                     let bytes = read_exact(data, &mut offset, payload_end, 16, "Int128 value")?;
                     Value::Int128(i128::from_le_bytes(bytes.try_into().unwrap()))
+                }
+                18 => {
+                    let bytes = read_exact(data, &mut offset, payload_end, 4, "UInt value")?;
+                    Value::UInteger(u32::from_le_bytes(bytes.try_into().unwrap()))
+                }
+                19 => {
+                    let bytes = read_exact(data, &mut offset, payload_end, 8, "UInt64 value")?;
+                    Value::UBigInt(u64::from_le_bytes(bytes.try_into().unwrap()))
+                }
+                20 => {
+                    let bytes =
+                        read_exact(data, &mut offset, payload_end, 16, "UInt128 value")?;
+                    Value::UInt128(u128::from_le_bytes(bytes.try_into().unwrap()))
                 }
                 7 => Value::Decimal(read_decimal(data, &mut offset, payload_end)?),
                 8 => Value::Blob(read_bytes(data, &mut offset, payload_end, "Blob value")?),
@@ -369,6 +394,18 @@ fn encode_key_value(buffer: &mut Vec<u8>, value: &Value) {
         Value::Int128(value) => {
             buffer.push(17);
             buffer.extend_from_slice(&(i128::to_be_bytes(*value ^ i128::MIN)));
+        }
+        Value::UInteger(value) => {
+            buffer.push(18);
+            buffer.extend_from_slice(&value.to_be_bytes());
+        }
+        Value::UBigInt(value) => {
+            buffer.push(19);
+            buffer.extend_from_slice(&value.to_be_bytes());
+        }
+        Value::UInt128(value) => {
+            buffer.push(20);
+            buffer.extend_from_slice(&value.to_be_bytes());
         }
         Value::Float(value) => {
             buffer.push(5);

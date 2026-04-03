@@ -1378,7 +1378,7 @@ mod connection_tests {
         assert_eq!(
             result.rows,
             vec![vec![
-                crate::catalog::Value::BigInt(1),
+                crate::catalog::Value::UBigInt(1),
                 crate::catalog::Value::Float(1.5),
                 crate::catalog::Value::Decimal(crate::catalog::DecimalValue::parse("2.5")?),
                 crate::catalog::Value::Text("AB".to_string()),
@@ -1436,6 +1436,59 @@ mod connection_tests {
                     && sql.contains("large INT64")
                     && sql.contains("massive INT128")
         ));
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_unsigned_integer_type_names_and_round_trip() -> Result<()> {
+        let db = TestDbFile::new("_test_unsigned_integer_type_names_and_round_trip");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute(
+            "CREATE TABLE uints (\
+                id UINT PRIMARY KEY,\
+                tiny UINT8,\
+                small UINT16,\
+                normal UINT32,\
+                large UINT64,\
+                massive UINT128\
+            );",
+        )?;
+        conn.execute(
+            "INSERT INTO uints (id, tiny, small, normal, large, massive) VALUES (\
+                1,\
+                255,\
+                65535,\
+                4294967295,\
+                CAST('18446744073709551615' AS UINT64),\
+                CAST('340282366920938463463374607431768211455' AS UINT128)\
+            );",
+        )?;
+
+        let result =
+            conn.execute("SELECT id, tiny, small, normal, large, massive FROM uints;")?;
+        assert_eq!(
+            result.rows,
+            vec![vec![
+                crate::catalog::Value::UInteger(1),
+                crate::catalog::Value::UInteger(255),
+                crate::catalog::Value::UInteger(65535),
+                crate::catalog::Value::UInteger(u32::MAX),
+                crate::catalog::Value::UBigInt(u64::MAX),
+                crate::catalog::Value::UInt128(u128::MAX),
+            ]]
+        );
+
+        let result_set = crate::sql::result::ResultSet::new(result.columns.clone(), result.rows.clone());
+        let row = result_set.get_row(0).unwrap();
+        assert_eq!(row.get_uint(0)?, 1);
+        assert_eq!(row.get_uint(1)?, 255);
+        assert_eq!(row.get_uint(2)?, 65535);
+        assert_eq!(row.get_uint(3)?, u32::MAX);
+        assert_eq!(row.get_uint64(4)?, u64::MAX);
+        assert_eq!(row.get_uint128(5)?, u128::MAX);
 
         conn.close()?;
         Ok(())

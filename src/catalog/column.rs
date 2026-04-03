@@ -69,6 +69,8 @@ impl Column {
         match (&self.data_type, value) {
             (DataType::Int8, Value::Integer(value)) => i8::try_from(*value).is_ok(),
             (DataType::Int16, Value::Integer(value)) => i16::try_from(*value).is_ok(),
+            (DataType::UInt8, Value::UInteger(value)) => u8::try_from(*value).is_ok(),
+            (DataType::UInt16, Value::UInteger(value)) => u16::try_from(*value).is_ok(),
             (DataType::Char(length), Value::Text(text))
             | (DataType::VarChar(length), Value::Text(text)) => {
                 text.chars().count() <= *length as usize
@@ -95,6 +97,11 @@ impl Column {
                         DataType::Int8 | DataType::Int16 | DataType::Int => Value::Integer(0),
                         DataType::Int64 => Value::BigInt(0),
                         DataType::Int128 => Value::Int128(0),
+                        DataType::UInt8 | DataType::UInt16 | DataType::UInt => {
+                            Value::UInteger(0)
+                        }
+                        DataType::UInt64 => Value::UBigInt(0),
+                        DataType::UInt128 => Value::UInt128(0),
                         DataType::Text | DataType::Char(_) | DataType::VarChar(_) => {
                             Value::Text(String::new())
                         }
@@ -209,7 +216,12 @@ fn write_data_type(buffer: &mut Vec<u8>, data_type: &DataType) {
         DataType::Int16 => buffer.push(1),
         DataType::Int => buffer.push(2),
         DataType::Int64 => buffer.push(3),
+        DataType::UInt8 => buffer.push(22),
+        DataType::UInt16 => buffer.push(23),
         DataType::Int128 => buffer.push(24),
+        DataType::UInt => buffer.push(25),
+        DataType::UInt64 => buffer.push(26),
+        DataType::UInt128 => buffer.push(27),
         DataType::Text => buffer.push(4),
         DataType::Char(length) => {
             buffer.push(5);
@@ -273,6 +285,8 @@ fn read_data_type(buffer: &[u8], offset: &mut usize) -> Result<DataType, Hematit
         1 => DataType::Int16,
         2 => DataType::Int,
         3 => DataType::Int64,
+        22 => DataType::UInt8,
+        23 => DataType::UInt16,
         4 => DataType::Text,
         5 => DataType::Char(read_u32(buffer, offset, "CHAR length")?),
         6 => DataType::VarChar(read_u32(buffer, offset, "VARCHAR length")?),
@@ -310,6 +324,9 @@ fn read_data_type(buffer: &[u8], offset: &mut usize) -> Result<DataType, Hematit
         20 => DataType::Timestamp,
         21 => DataType::TimeWithTimeZone,
         24 => DataType::Int128,
+        25 => DataType::UInt,
+        26 => DataType::UInt64,
+        27 => DataType::UInt128,
         _ => {
             return Err(HematiteError::CorruptedData(
                 "Invalid data type".to_string(),
@@ -379,6 +396,18 @@ fn write_optional_value(buffer: &mut Vec<u8>, value: Option<&Value>) {
         }
         Some(Value::Int128(value)) => {
             buffer.push(16);
+            buffer.extend_from_slice(&value.to_le_bytes());
+        }
+        Some(Value::UInteger(value)) => {
+            buffer.push(17);
+            buffer.extend_from_slice(&value.to_le_bytes());
+        }
+        Some(Value::UBigInt(value)) => {
+            buffer.push(18);
+            buffer.extend_from_slice(&value.to_le_bytes());
+        }
+        Some(Value::UInt128(value)) => {
+            buffer.push(19);
             buffer.extend_from_slice(&value.to_le_bytes());
         }
         Some(Value::Decimal(value)) => {
@@ -502,6 +531,30 @@ fn read_optional_value(buffer: &[u8], offset: &mut usize) -> Result<Option<Value
                     .unwrap(),
             );
             Some(Value::Int128(value))
+        }
+        17 => {
+            let value = u32::from_le_bytes(
+                read_fixed(buffer, offset, 4, "default uint")?
+                    .try_into()
+                    .unwrap(),
+            );
+            Some(Value::UInteger(value))
+        }
+        18 => {
+            let value = u64::from_le_bytes(
+                read_fixed(buffer, offset, 8, "default uint64")?
+                    .try_into()
+                    .unwrap(),
+            );
+            Some(Value::UBigInt(value))
+        }
+        19 => {
+            let value = u128::from_le_bytes(
+                read_fixed(buffer, offset, 16, "default uint128")?
+                    .try_into()
+                    .unwrap(),
+            );
+            Some(Value::UInt128(value))
         }
         7 => {
             let days = i32::from_le_bytes(
