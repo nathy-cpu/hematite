@@ -60,7 +60,7 @@ impl DataType {
             DataType::Float => 8,
             DataType::Float128 => 16,
             DataType::Decimal { precision, .. } => precision.unwrap_or(32) as usize,
-            DataType::Blob => 255,
+            DataType::Blob => 4096,
             DataType::Date => 4,
             DataType::Time => 4,
             DataType::DateTime => 8,

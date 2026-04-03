@@ -210,6 +210,7 @@ mod tests {
         assert_eq!(DataType::Int.size(), 4);
         assert_eq!(DataType::Int128.size(), 16);
         assert_eq!(DataType::Text.size(), 255);
+        assert_eq!(DataType::Blob.size(), 4096);
         assert_eq!(DataType::Boolean.size(), 1);
         assert_eq!(DataType::Float.size(), 8);
     }

@@ -5157,6 +5157,8 @@ fn coerce_column_value(column: &Column, value: Value) -> Result<Value> {
         }
         (DataType::Blob, Value::Blob(bytes)) => Ok(Value::Blob(bytes)),
         (DataType::Blob, Value::Text(s)) => Ok(Value::Blob(s.into_bytes())),
+        (DataType::Blob, Value::Integer(i)) => Ok(Value::Blob(i.to_le_bytes().to_vec())),
+        (DataType::Blob, Value::BigInt(i)) => Ok(Value::Blob(i.to_le_bytes().to_vec())),
         (DataType::Blob, Value::UInteger(i)) => Ok(Value::Blob(i.to_le_bytes().to_vec())),
         (DataType::Blob, Value::UBigInt(i)) => Ok(Value::Blob(i.to_le_bytes().to_vec())),
         (DataType::Blob, Value::Int128(i)) => Ok(Value::Blob(i.to_le_bytes().to_vec())),
@@ -6184,11 +6186,25 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
             .map_err(|_| {
                 HematiteError::ParseError("Cannot CAST out-of-range INT AS INT8".to_string())
             }),
+        (DataType::Int8, Value::Blob(bytes)) => decode_signed_blob(&bytes, 1, "INT8")
+            .and_then(|value| {
+                i8::try_from(value).map_err(|_| {
+                    HematiteError::ParseError("Cannot CAST blob AS INT8".to_string())
+                })
+            })
+            .map(|value| Value::Integer(value as i32)),
         (DataType::Int16, Value::Integer(value)) => i16::try_from(value)
             .map(|_| Value::Integer(value))
             .map_err(|_| {
                 HematiteError::ParseError("Cannot CAST out-of-range INT AS INT16".to_string())
             }),
+        (DataType::Int16, Value::Blob(bytes)) => decode_signed_blob(&bytes, 2, "INT16")
+            .and_then(|value| {
+                i16::try_from(value).map_err(|_| {
+                    HematiteError::ParseError("Cannot CAST blob AS INT16".to_string())
+                })
+            })
+            .map(|value| Value::Integer(value as i32)),
         (DataType::Int, Value::Integer(value)) => Ok(Value::Integer(value)),
         (DataType::Int, Value::BigInt(value)) => {
             i32::try_from(value).map(Value::Integer).map_err(|_| {
@@ -6209,6 +6225,13 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
             .parse::<i32>()
             .map(Value::Integer)
             .map_err(|_| HematiteError::ParseError(format!("Cannot CAST '{}' AS INT", value))),
+        (DataType::Int, Value::Blob(bytes)) => decode_signed_blob(&bytes, 4, "INT")
+            .and_then(|value| {
+                i32::try_from(value).map_err(|_| {
+                    HematiteError::ParseError("Cannot CAST blob AS INT".to_string())
+                })
+            })
+            .map(Value::Integer),
         (DataType::Int64, Value::Integer(value)) => Ok(Value::BigInt(value as i64)),
         (DataType::Int64, Value::BigInt(value)) => Ok(Value::BigInt(value)),
         (DataType::Int64, Value::Int128(value)) => {
@@ -6225,6 +6248,13 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
             .parse::<i64>()
             .map(Value::BigInt)
             .map_err(|_| HematiteError::ParseError(format!("Cannot CAST '{}' AS INT64", value))),
+        (DataType::Int64, Value::Blob(bytes)) => decode_signed_blob(&bytes, 8, "INT64")
+            .and_then(|value| {
+                i64::try_from(value).map_err(|_| {
+                    HematiteError::ParseError("Cannot CAST blob AS INT64".to_string())
+                })
+            })
+            .map(Value::BigInt),
         (DataType::Int128, Value::Integer(value)) => Ok(Value::Int128(value as i128)),
         (DataType::Int128, Value::BigInt(value)) => Ok(Value::Int128(value as i128)),
         (DataType::Int128, Value::Int128(value)) => Ok(Value::Int128(value)),
@@ -6237,16 +6267,33 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
             .parse::<i128>()
             .map(Value::Int128)
             .map_err(|_| HematiteError::ParseError(format!("Cannot CAST '{}' AS INT128", value))),
+        (DataType::Int128, Value::Blob(bytes)) => {
+            decode_signed_blob(&bytes, 16, "INT128").map(Value::Int128)
+        }
         (DataType::UInt8, Value::Integer(value)) if value >= 0 => u8::try_from(value)
             .map(|value| Value::UInteger(value as u32))
             .map_err(|_| {
                 HematiteError::ParseError("Cannot CAST out-of-range INT AS UINT8".to_string())
             }),
+        (DataType::UInt8, Value::Blob(bytes)) => decode_unsigned_blob(&bytes, 1, "UINT8")
+            .and_then(|value| {
+                u8::try_from(value).map_err(|_| {
+                    HematiteError::ParseError("Cannot CAST blob AS UINT8".to_string())
+                })
+            })
+            .map(|value| Value::UInteger(value as u32)),
         (DataType::UInt16, Value::Integer(value)) if value >= 0 => u16::try_from(value)
             .map(|value| Value::UInteger(value as u32))
             .map_err(|_| {
                 HematiteError::ParseError("Cannot CAST out-of-range INT AS UINT16".to_string())
             }),
+        (DataType::UInt16, Value::Blob(bytes)) => decode_unsigned_blob(&bytes, 2, "UINT16")
+            .and_then(|value| {
+                u16::try_from(value).map_err(|_| {
+                    HematiteError::ParseError("Cannot CAST blob AS UINT16".to_string())
+                })
+            })
+            .map(|value| Value::UInteger(value as u32)),
         (DataType::UInt, Value::Integer(value)) if value >= 0 => Ok(Value::UInteger(value as u32)),
         (DataType::UInt, Value::BigInt(value)) if value >= 0 => {
             u32::try_from(value).map(Value::UInteger).map_err(|_| {
@@ -6280,6 +6327,13 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
             .parse::<u32>()
             .map(Value::UInteger)
             .map_err(|_| HematiteError::ParseError(format!("Cannot CAST '{}' AS UINT", value))),
+        (DataType::UInt, Value::Blob(bytes)) => decode_unsigned_blob(&bytes, 4, "UINT")
+            .and_then(|value| {
+                u32::try_from(value).map_err(|_| {
+                    HematiteError::ParseError("Cannot CAST blob AS UINT".to_string())
+                })
+            })
+            .map(Value::UInteger),
         (DataType::UInt64, Value::Integer(value)) if value >= 0 => Ok(Value::UBigInt(value as u64)),
         (DataType::UInt64, Value::BigInt(value)) if value >= 0 => Ok(Value::UBigInt(value as u64)),
         (DataType::UInt64, Value::Int128(value)) if value >= 0 => {
@@ -6305,6 +6359,13 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
             .parse::<u64>()
             .map(Value::UBigInt)
             .map_err(|_| HematiteError::ParseError(format!("Cannot CAST '{}' AS UINT64", value))),
+        (DataType::UInt64, Value::Blob(bytes)) => decode_unsigned_blob(&bytes, 8, "UINT64")
+            .and_then(|value| {
+                u64::try_from(value).map_err(|_| {
+                    HematiteError::ParseError("Cannot CAST blob AS UINT64".to_string())
+                })
+            })
+            .map(Value::UBigInt),
         (DataType::UInt128, Value::Integer(value)) if value >= 0 => {
             Ok(Value::UInt128(value as u128))
         }
@@ -6330,6 +6391,9 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
             .parse::<u128>()
             .map(Value::UInt128)
             .map_err(|_| HematiteError::ParseError(format!("Cannot CAST '{}' AS UINT128", value))),
+        (DataType::UInt128, Value::Blob(bytes)) => {
+            decode_unsigned_blob(&bytes, 16, "UINT128").map(Value::UInt128)
+        }
         (DataType::Text, value) => cast_value_to_text_string(value).map(Value::Text),
         (DataType::Char(length), value) => {
             coerce_char_value(cast_value_to_text_string(value)?, length, "CAST")
@@ -6461,6 +6525,8 @@ fn evaluate_scalar_function(function: ScalarFunction, args: Vec<Value>) -> Resul
         ScalarFunction::Lower => evaluate_lower(args),
         ScalarFunction::Upper => evaluate_upper(args),
         ScalarFunction::Length => evaluate_length(args),
+        ScalarFunction::OctetLength => evaluate_octet_length(args),
+        ScalarFunction::BitLength => evaluate_bit_length(args),
         ScalarFunction::Trim => evaluate_trim(args),
         ScalarFunction::Abs => evaluate_abs(args),
         ScalarFunction::Round => evaluate_round(args),
@@ -6475,6 +6541,8 @@ fn evaluate_scalar_function(function: ScalarFunction, args: Vec<Value>) -> Resul
         ScalarFunction::Repeat => evaluate_repeat(args),
         ScalarFunction::Reverse => evaluate_reverse(args),
         ScalarFunction::Locate => evaluate_locate(args),
+        ScalarFunction::Hex => evaluate_hex(args),
+        ScalarFunction::Unhex => evaluate_unhex(args),
         ScalarFunction::Ceil => evaluate_ceil(args),
         ScalarFunction::Floor => evaluate_floor(args),
         ScalarFunction::Power => evaluate_power(args),
@@ -6638,10 +6706,56 @@ fn evaluate_upper(args: Vec<Value>) -> Result<Value> {
 }
 
 fn evaluate_length(args: Vec<Value>) -> Result<Value> {
-    expect_unary_text_function("LENGTH", args, |text| {
-        let len = i32::try_from(text.chars().count())
-            .map_err(|_| HematiteError::ParseError("LENGTH result overflowed INT".to_string()))?;
+    expect_unary_length_function("LENGTH", args, |value| match value {
+        Value::Text(text) => {
+            let len = i32::try_from(text.chars().count()).map_err(|_| {
+                HematiteError::ParseError("LENGTH result overflowed INT".to_string())
+            })?;
+            Ok(Value::Integer(len))
+        }
+        Value::Blob(bytes) => {
+            let len = i32::try_from(bytes.len()).map_err(|_| {
+                HematiteError::ParseError("LENGTH result overflowed INT".to_string())
+            })?;
+            Ok(Value::Integer(len))
+        }
+        value => Err(HematiteError::ParseError(format!(
+            "LENGTH requires a text or blob value, found {:?}",
+            value
+        ))),
+    })
+}
+
+fn evaluate_octet_length(args: Vec<Value>) -> Result<Value> {
+    expect_unary_length_function("OCTET_LENGTH", args, |value| {
+        let len = match value {
+            Value::Text(text) => text.len(),
+            Value::Enum(text) => text.len(),
+            Value::Blob(bytes) => bytes.len(),
+            value => {
+                return Err(HematiteError::ParseError(format!(
+                    "OCTET_LENGTH requires a text or blob value, found {:?}",
+                    value
+                )))
+            }
+        };
+        let len = i32::try_from(len).map_err(|_| {
+            HematiteError::ParseError("OCTET_LENGTH result overflowed INT".to_string())
+        })?;
         Ok(Value::Integer(len))
+    })
+}
+
+fn evaluate_bit_length(args: Vec<Value>) -> Result<Value> {
+    expect_unary_length_function("BIT_LENGTH", args, |value| {
+        let len = match evaluate_octet_length(vec![value])? {
+            Value::Integer(length) => length,
+            Value::Null => return Ok(Value::Null),
+            _ => unreachable!("validated OCTET_LENGTH shape"),
+        };
+        len.checked_mul(8)
+            .map(Value::Integer)
+            .ok_or_else(|| HematiteError::ParseError("BIT_LENGTH result overflowed INT".to_string()))
     })
 }
 
@@ -6670,6 +6784,24 @@ where
             "{} requires a text value, found {:?}",
             name, value
         ))),
+    }
+}
+
+fn expect_unary_length_function<F>(name: &str, args: Vec<Value>, f: F) -> Result<Value>
+where
+    F: FnOnce(Value) -> Result<Value>,
+{
+    if args.len() != 1 {
+        return Err(HematiteError::ParseError(format!(
+            "{} requires exactly one argument",
+            name
+        )));
+    }
+
+    let value = args.into_iter().next().expect("validated unary arity");
+    match value {
+        Value::Null => Ok(Value::Null),
+        value => f(value),
     }
 }
 
@@ -7269,6 +7401,44 @@ fn evaluate_locate(args: Vec<Value>) -> Result<Value> {
     Ok(Value::Integer(0))
 }
 
+fn evaluate_hex(args: Vec<Value>) -> Result<Value> {
+    expect_unary_length_function("HEX", args, |value| {
+        let bytes = match value {
+            Value::Blob(bytes) => bytes,
+            Value::Text(text) => text.into_bytes(),
+            Value::Enum(text) => text.into_bytes(),
+            value => {
+                return Err(HematiteError::ParseError(format!(
+                    "HEX requires a text or blob value, found {:?}",
+                    value
+                )))
+            }
+        };
+        Ok(Value::Text(
+            bytes.iter().map(|byte| format!("{byte:02X}")).collect(),
+        ))
+    })
+}
+
+fn evaluate_unhex(args: Vec<Value>) -> Result<Value> {
+    expect_unary_text_function("UNHEX", args, |text| {
+        if text.len() % 2 != 0 {
+            return Err(HematiteError::ParseError(
+                "UNHEX requires an even number of hexadecimal digits".to_string(),
+            ));
+        }
+
+        let mut bytes = Vec::with_capacity(text.len() / 2);
+        for index in (0..text.len()).step_by(2) {
+            let byte = u8::from_str_radix(&text[index..index + 2], 16).map_err(|_| {
+                HematiteError::ParseError("UNHEX requires only hexadecimal digits".to_string())
+            })?;
+            bytes.push(byte);
+        }
+        Ok(Value::Blob(bytes))
+    })
+}
+
 fn evaluate_ceil(args: Vec<Value>) -> Result<Value> {
     expect_unary_numeric_function("CEIL", args, |value| match value {
         Value::Integer(value) => Ok(Value::Integer(value)),
@@ -7535,6 +7705,39 @@ fn sql_partial_cmp(
     }
 
     left.partial_cmp(right)
+}
+
+fn decode_signed_blob(bytes: &[u8], width: usize, target: &str) -> Result<i128> {
+    if bytes.len() > width {
+        return Err(HematiteError::ParseError(format!(
+            "Cannot CAST blob of {} bytes AS {}",
+            bytes.len(),
+            target
+        )));
+    }
+
+    let fill = bytes
+        .last()
+        .is_some_and(|byte| (byte & 0x80) != 0)
+        .then_some(0xFF)
+        .unwrap_or(0);
+    let mut extended = [fill; 16];
+    extended[..bytes.len()].copy_from_slice(bytes);
+    Ok(i128::from_le_bytes(extended))
+}
+
+fn decode_unsigned_blob(bytes: &[u8], width: usize, target: &str) -> Result<u128> {
+    if bytes.len() > width {
+        return Err(HematiteError::ParseError(format!(
+            "Cannot CAST blob of {} bytes AS {}",
+            bytes.len(),
+            target
+        )));
+    }
+
+    let mut extended = [0u8; 16];
+    extended[..bytes.len()].copy_from_slice(bytes);
+    Ok(u128::from_le_bytes(extended))
 }
 
 fn sql_numeric_pair(left: &Value, right: &Value) -> Option<(f64, f64)> {

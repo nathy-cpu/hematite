@@ -321,6 +321,44 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_blob_functions_and_integer_casts() -> Result<()> {
+        let db = TestDbFile::new("_test_blob_functions_and_integer_casts");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE files (id INT PRIMARY KEY, payload BLOB);")?;
+        conn.execute("INSERT INTO files (id, payload) VALUES (1, X'48656C6C6F');")?;
+
+        let result = conn.execute(
+            "SELECT HEX(payload), LENGTH(payload), OCTET_LENGTH(payload), BIT_LENGTH(payload), UNHEX('48656C6C6F') FROM files;",
+        )?;
+        assert_eq!(
+            result.rows,
+            vec![vec![
+                crate::catalog::Value::Text("48656C6C6F".to_string()),
+                crate::catalog::Value::Integer(5),
+                crate::catalog::Value::Integer(5),
+                crate::catalog::Value::Integer(40),
+                crate::catalog::Value::Blob(b"Hello".to_vec()),
+            ]]
+        );
+
+        let int_casts = conn.execute(
+            "SELECT CAST(X'78563412' AS INT), CAST(X'FFFFFFFF' AS INT), CAST(X'78563412' AS UINT) FROM files;",
+        )?;
+        assert_eq!(
+            int_casts.rows,
+            vec![vec![
+                crate::catalog::Value::Integer(305419896),
+                crate::catalog::Value::Integer(-1),
+                crate::catalog::Value::UInteger(305419896),
+            ]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_temporal_scalar_functions_and_arithmetic() -> Result<()> {
         let db = TestDbFile::new("_test_temporal_scalar_functions_and_arithmetic");
         let mut conn = Connection::new(db.path())?;
