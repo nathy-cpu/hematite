@@ -2,7 +2,7 @@
 # https://github.com/duckdb/duckdb/blob/main/test/sql/cte/test_cte.test
 
 statement ok
-CREATE TABLE cte_test (i INTEGER PRIMARY KEY);
+CREATE TABLE cte_test (i INT PRIMARY KEY);
 
 statement ok
 INSERT INTO cte_test (i) VALUES (42);

@@ -4,8 +4,8 @@
 statement ok
 CREATE TABLE basic_window_test (
   depname TEXT,
-  empno INTEGER PRIMARY KEY,
-  salary INTEGER
+  empno INT PRIMARY KEY,
+  salary INT
 );
 
 statement ok

@@ -2,7 +2,7 @@
 # https://github.com/duckdb/duckdb/blob/main/test/sql/subquery/any_all/test_simple_not_in.test
 
 statement ok
-CREATE TABLE in_subquery_test (id INTEGER PRIMARY KEY, b INTEGER);
+CREATE TABLE in_subquery_test (id INT PRIMARY KEY, b INT);
 
 statement ok
 INSERT INTO in_subquery_test (id, b) VALUES (1, 22), (2, 21), (3, 23);

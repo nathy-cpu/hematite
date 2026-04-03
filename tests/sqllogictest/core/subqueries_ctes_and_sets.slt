@@ -1,8 +1,8 @@
 statement ok
-CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);
+CREATE TABLE users (id INT PRIMARY KEY, name TEXT);
 
 statement ok
-CREATE TABLE posts (id INTEGER PRIMARY KEY, user_id INTEGER, title TEXT);
+CREATE TABLE posts (id INT PRIMARY KEY, user_id INT, title TEXT);
 
 statement ok
 INSERT INTO users (id, name) VALUES (1, 'alice'), (2, 'bob'), (3, 'cara');
@@ -11,7 +11,7 @@ statement ok
 INSERT INTO posts (id, user_id, title) VALUES (10, 1, 'First'), (11, 1, 'Second'), (12, 3, 'Third');
 
 statement ok
-CREATE TABLE seeds (n INTEGER PRIMARY KEY);
+CREATE TABLE seeds (n INT PRIMARY KEY);
 
 statement ok
 INSERT INTO seeds (n) VALUES (1);

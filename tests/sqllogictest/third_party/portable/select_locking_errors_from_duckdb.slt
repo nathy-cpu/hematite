@@ -2,7 +2,7 @@
 # https://github.com/duckdb/duckdb/blob/main/test/sql/select/test_select_locking.test
 
 statement ok
-CREATE TABLE t (id INTEGER PRIMARY KEY, value TEXT);
+CREATE TABLE t (id INT PRIMARY KEY, value TEXT);
 
 statement error
 SELECT * FROM t FOR UPDATE;

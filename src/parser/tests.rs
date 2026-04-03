@@ -758,7 +758,7 @@ mod lexer_tests {
     #[test]
     fn test_create_table() -> Result<()> {
         let mut lexer =
-            Lexer::new("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)".to_string());
+            Lexer::new("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)".to_string());
         lexer.tokenize()?;
 
         let expected = vec![
@@ -767,7 +767,7 @@ mod lexer_tests {
             Token::Identifier("users".to_string()),
             Token::LeftParen,
             Token::Identifier("id".to_string()),
-            Token::Int32,
+            Token::Int,
             Token::Primary,
             Token::Key,
             Token::Comma,
@@ -1008,12 +1008,33 @@ mod parser_tests {
 
     #[test]
     fn test_parse_rejects_lowercase_data_type_with_capitalization_hint() {
-        let err = parse_create("CREATE TABLE users (id integer PRIMARY KEY);").unwrap_err();
+        let err = parse_create("CREATE TABLE users (id int PRIMARY KEY);").unwrap_err();
         assert!(matches!(
             err,
             crate::error::HematiteError::ParseError(message)
-                if message.contains("Keyword 'integer' must be capitalized as 'INTEGER'")
+                if message.contains("Keyword 'int' must be capitalized as 'INT'")
         ));
+    }
+
+    #[test]
+    fn test_parse_rejects_legacy_integer_type_names() {
+        for (legacy_name, replacement) in [
+            ("TINYINT", "INT8"),
+            ("SMALLINT", "INT16"),
+            ("INTEGER", "INT or INT32"),
+            ("BIGINT", "INT64"),
+        ] {
+            let sql = format!("CREATE TABLE users (id {} PRIMARY KEY);", legacy_name);
+            let err = parse_create(&sql).unwrap_err();
+            assert!(matches!(
+                err,
+                crate::error::HematiteError::ParseError(message)
+                    if message.contains(&format!(
+                        "Legacy integer type '{}' is not supported; use '{}'",
+                        legacy_name, replacement
+                    ))
+            ));
+        }
     }
 
     #[test]
@@ -1249,7 +1270,7 @@ mod parser_tests {
 
     #[test]
     fn test_parse_cast_and_modulo_expression() -> Result<()> {
-        let select = parse_select("SELECT CAST(score % 2 AS INTEGER) AS bucket FROM users;")?;
+        let select = parse_select("SELECT CAST(score % 2 AS INT) AS bucket FROM users;")?;
         assert!(matches!(
             &select.columns[0],
             SelectItem::Expression(Expression::Cast { expr, target_type })
@@ -1579,7 +1600,7 @@ mod parser_tests {
     #[test]
     fn test_parse_create_with_default_literal() -> Result<()> {
         let create =
-            parse_create("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT DEFAULT 'x');")?;
+            parse_create("CREATE TABLE t (id INT PRIMARY KEY, name TEXT DEFAULT 'x');")?;
         assert_eq!(create.table, "t");
         assert_eq!(create.columns.len(), 2);
         assert_eq!(create.columns[1].name, "name");
@@ -1690,7 +1711,7 @@ mod parser_tests {
     #[test]
     fn test_parse_additional_mysql_type_aliases() -> Result<()> {
         let create = parse_create(
-            "CREATE TABLE metrics (id BIGINT UNSIGNED PRIMARY KEY, ratio REAL, amount DECIMAL(10, 2), code CHAR(8), tiny TINYINT, small SMALLINT, exact NUMERIC(6));",
+            "CREATE TABLE metrics (id INT64 UNSIGNED PRIMARY KEY, ratio REAL, amount DECIMAL(10, 2), code CHAR(8), tiny INT8, small INT16, exact NUMERIC(6));",
         )?;
         assert_eq!(create.columns[0].data_type, SqlTypeName::Int64);
         assert_eq!(create.columns[1].data_type, SqlTypeName::Real);
@@ -1717,7 +1738,7 @@ mod parser_tests {
     #[test]
     fn test_parse_practical_core_type_names() -> Result<()> {
         let create = parse_create(
-            "CREATE TABLE events (id BIGINT PRIMARY KEY, amount DECIMAL(12, 4), payload BLOB, start_date DATE, created_at DATETIME);",
+            "CREATE TABLE events (id INT64 PRIMARY KEY, amount DECIMAL(12, 4), payload BLOB, start_date DATE, created_at DATETIME);",
         )?;
         assert_eq!(create.columns[0].data_type, SqlTypeName::Int64);
         assert_eq!(
@@ -1750,7 +1771,7 @@ mod parser_tests {
     #[test]
     fn test_parse_additional_temporal_binary_and_enum_types() -> Result<()> {
         let create = parse_create(
-            "CREATE TABLE typed (id INTEGER PRIMARY KEY, at TIME, stamped TIMESTAMP, zone_time TIME WITH TIME ZONE, code BINARY(4), bytes VARBINARY(16), state ENUM('draft', 'live'));",
+            "CREATE TABLE typed (id INT PRIMARY KEY, at TIME, stamped TIMESTAMP, zone_time TIME WITH TIME ZONE, code BINARY(4), bytes VARBINARY(16), state ENUM('draft', 'live'));",
         )?;
         assert_eq!(create.columns[1].data_type, SqlTypeName::Time);
         assert_eq!(create.columns[2].data_type, SqlTypeName::Timestamp);

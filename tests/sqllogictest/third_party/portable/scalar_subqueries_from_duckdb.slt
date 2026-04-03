@@ -3,7 +3,7 @@
 # https://github.com/duckdb/duckdb/blob/main/test/sql/subquery/scalar/test_uncorrelated_scalar_subquery.test
 
 statement ok
-CREATE TABLE scalar_subquery_test (i INTEGER PRIMARY KEY);
+CREATE TABLE scalar_subquery_test (i INT PRIMARY KEY);
 
 statement ok
 INSERT INTO scalar_subquery_test (i) VALUES (1), (2), (3);

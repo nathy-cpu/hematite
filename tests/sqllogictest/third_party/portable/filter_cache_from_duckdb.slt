@@ -2,7 +2,7 @@
 # https://github.com/duckdb/duckdb/blob/main/test/sql/filter/filter_cache.test
 
 statement ok
-CREATE TABLE integers(id INTEGER PRIMARY KEY, a INTEGER);
+CREATE TABLE integers(id INT PRIMARY KEY, a INT);
 
 statement ok
 INSERT INTO integers (id, a) VALUES

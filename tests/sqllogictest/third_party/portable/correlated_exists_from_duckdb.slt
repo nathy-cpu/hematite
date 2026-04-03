@@ -2,7 +2,7 @@
 # https://github.com/duckdb/duckdb/blob/main/test/sql/subquery/exists/test_correlated_exists.test
 
 statement ok
-CREATE TABLE correlated_exists_test (i INTEGER PRIMARY KEY);
+CREATE TABLE correlated_exists_test (i INT PRIMARY KEY);
 
 statement ok
 INSERT INTO correlated_exists_test (i) VALUES (1), (2), (3);

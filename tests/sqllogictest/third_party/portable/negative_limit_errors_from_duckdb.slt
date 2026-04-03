@@ -2,7 +2,7 @@
 # https://github.com/duckdb/duckdb/blob/main/test/sql/order/negative_offset.test
 
 statement ok
-CREATE TABLE negative_limit_test (a INTEGER PRIMARY KEY);
+CREATE TABLE negative_limit_test (a INT PRIMARY KEY);
 
 statement ok
 INSERT INTO negative_limit_test (a) VALUES (1), (2), (3);

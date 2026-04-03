@@ -2,7 +2,7 @@
 # https://github.com/duckdb/duckdb/blob/main/test/sql/select/test_select_alias_prefix_colon.test
 
 statement ok
-CREATE TABLE a (i INTEGER PRIMARY KEY);
+CREATE TABLE a (i INT PRIMARY KEY);
 
 statement ok
 INSERT INTO a (i) VALUES (42);

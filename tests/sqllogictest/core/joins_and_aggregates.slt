@@ -1,8 +1,8 @@
 statement ok
-CREATE TABLE teams (id INTEGER PRIMARY KEY, name TEXT);
+CREATE TABLE teams (id INT PRIMARY KEY, name TEXT);
 
 statement ok
-CREATE TABLE players (id INTEGER PRIMARY KEY, team_id INTEGER, name TEXT, score INTEGER);
+CREATE TABLE players (id INT PRIMARY KEY, team_id INT, name TEXT, score INT);
 
 statement ok
 INSERT INTO teams (id, name) VALUES (1, 'A'), (2, 'B');

@@ -1,12 +1,12 @@
 statement ok
-CREATE TABLE orgs (id INTEGER PRIMARY KEY, active BOOLEAN, code TEXT UNIQUE);
+CREATE TABLE orgs (id INT PRIMARY KEY, active BOOLEAN, code TEXT UNIQUE);
 
 statement ok
 CREATE TABLE users (
-  id INTEGER PRIMARY KEY,
-  org_id INTEGER,
+  id INT PRIMARY KEY,
+  org_id INT,
   email TEXT,
-  score INTEGER,
+  score INT,
   CONSTRAINT uq_users_email UNIQUE (email),
   CONSTRAINT chk_users_score CHECK (score >= 0),
   CONSTRAINT fk_users_org FOREIGN KEY (org_id) REFERENCES orgs (id) ON DELETE RESTRICT ON UPDATE RESTRICT
@@ -40,12 +40,12 @@ SELECT id, score FROM users ORDER BY id;
 2 20
 
 statement ok
-CREATE TABLE parents (id INTEGER PRIMARY KEY, code TEXT);
+CREATE TABLE parents (id INT PRIMARY KEY, code TEXT);
 
 statement ok
 CREATE TABLE children (
-  id INTEGER PRIMARY KEY,
-  parent_id INTEGER,
+  id INT PRIMARY KEY,
+  parent_id INT,
   CONSTRAINT fk_parent FOREIGN KEY (parent_id) REFERENCES parents (id) ON DELETE RESTRICT ON UPDATE RESTRICT
 );
 

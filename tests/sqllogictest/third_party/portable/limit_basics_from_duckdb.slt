@@ -3,7 +3,7 @@
 # https://github.com/duckdb/duckdb/blob/main/test/sql/limit/test_preserve_insertion_order.test
 
 statement ok
-CREATE TABLE limit_test (a INTEGER PRIMARY KEY, b INTEGER);
+CREATE TABLE limit_test (a INT PRIMARY KEY, b INT);
 
 statement ok
 INSERT INTO limit_test (a, b) VALUES (11, 22), (12, 21), (13, 22), (14, 23), (15, 24);

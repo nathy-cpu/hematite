@@ -2,13 +2,13 @@
 # https://github.com/duckdb/duckdb/blob/main/test/sql/join/left_outer/test_left_outer.test
 
 statement ok
-CREATE TABLE left_join_test (i INTEGER PRIMARY KEY, j INTEGER);
+CREATE TABLE left_join_test (i INT PRIMARY KEY, j INT);
 
 statement ok
 INSERT INTO left_join_test (i, j) VALUES (1, 2), (2, 3), (3, 4);
 
 statement ok
-CREATE TABLE left_join_test2 (k INTEGER PRIMARY KEY, l INTEGER);
+CREATE TABLE left_join_test2 (k INT PRIMARY KEY, l INT);
 
 statement ok
 INSERT INTO left_join_test2 (k, l) VALUES (1, 10), (2, 20);

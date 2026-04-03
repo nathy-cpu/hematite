@@ -2,7 +2,7 @@
 # https://github.com/duckdb/duckdb/blob/main/test/sql/order/test_order_by.test
 
 statement ok
-CREATE TABLE order_test (a INTEGER PRIMARY KEY, b INTEGER);
+CREATE TABLE order_test (a INT PRIMARY KEY, b INT);
 
 statement ok
 INSERT INTO order_test (a, b) VALUES (11, 22), (12, 21), (13, 22);

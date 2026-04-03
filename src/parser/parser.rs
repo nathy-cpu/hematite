@@ -2520,6 +2520,12 @@ impl Parser {
                 return Ok(SqlTypeName::Enum(self.parse_enum_variants()?));
             }
             Token::Identifier(name) => {
+                if let Some((legacy, replacement)) = legacy_integer_type_replacement(&name) {
+                    return Err(HematiteError::ParseError(format!(
+                        "Legacy integer type '{}' is not supported; use '{}'",
+                        legacy, replacement
+                    )));
+                }
                 if let Some(keyword) = uppercase_keyword_match(&name, &DATA_TYPE_KEYWORDS) {
                     return Err(HematiteError::ParseError(format!(
                         "Keyword '{}' must be capitalized as '{}'",
@@ -2888,10 +2894,6 @@ const ALL_UPPERCASE_KEYWORDS: &[&str] = &[
     "INT32",
     "INT64",
     "INT128",
-    "INTEGER",
-    "TINYINT",
-    "SMALLINT",
-    "BIGINT",
     "TEXT",
     "BOOLEAN",
     "FLOAT",
@@ -2957,10 +2959,6 @@ const DATA_TYPE_KEYWORDS: &[&str] = &[
     "INT32",
     "INT64",
     "INT128",
-    "INTEGER",
-    "TINYINT",
-    "SMALLINT",
-    "BIGINT",
     "TEXT",
     "BOOLEAN",
     "BOOL",
@@ -2993,6 +2991,20 @@ fn capitalization_hint_for_token(token: &Token) -> Option<String> {
         Token::Identifier(name) => uppercase_keyword_match(name, ALL_UPPERCASE_KEYWORDS)
             .map(|keyword| format!("Keyword '{}' must be capitalized as '{}'", name, keyword)),
         _ => None,
+    }
+}
+
+fn legacy_integer_type_replacement(name: &str) -> Option<(&'static str, &'static str)> {
+    if name.eq_ignore_ascii_case("TINYINT") {
+        Some(("TINYINT", "INT8"))
+    } else if name.eq_ignore_ascii_case("SMALLINT") {
+        Some(("SMALLINT", "INT16"))
+    } else if name.eq_ignore_ascii_case("INTEGER") {
+        Some(("INTEGER", "INT or INT32"))
+    } else if name.eq_ignore_ascii_case("BIGINT") {
+        Some(("BIGINT", "INT64"))
+    } else {
+        None
     }
 }
 

@@ -1,8 +1,8 @@
 statement ok
-CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, active BOOLEAN);
+CREATE TABLE users (id INT PRIMARY KEY, name TEXT, active BOOLEAN);
 
 statement ok
-CREATE TABLE audit_log (id INTEGER PRIMARY KEY, entry TEXT);
+CREATE TABLE audit_log (id INT PRIMARY KEY, entry TEXT);
 
 statement ok
 CREATE VIEW active_users AS SELECT id, name FROM users WHERE active = TRUE;

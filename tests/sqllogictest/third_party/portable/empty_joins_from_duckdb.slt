@@ -3,10 +3,10 @@
 # group: [join]
 
 statement ok
-CREATE TABLE integers (i INTEGER PRIMARY KEY);
+CREATE TABLE integers (i INT PRIMARY KEY);
 
 statement ok
-CREATE TABLE integers2 (i INTEGER PRIMARY KEY);
+CREATE TABLE integers2 (i INT PRIMARY KEY);
 
 statement ok
 INSERT INTO integers (i) VALUES (0);

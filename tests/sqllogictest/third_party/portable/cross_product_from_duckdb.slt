@@ -2,7 +2,7 @@
 # https://github.com/duckdb/duckdb/blob/main/test/sql/join/cross_product/test_cross_product.test
 
 statement ok
-CREATE TABLE cross_product_test (a INTEGER PRIMARY KEY, b INTEGER);
+CREATE TABLE cross_product_test (a INT PRIMARY KEY, b INT);
 
 statement ok
 INSERT INTO cross_product_test (a, b) VALUES (11, 1), (12, 2);

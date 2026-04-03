@@ -3,13 +3,13 @@
 # https://github.com/duckdb/duckdb/blob/main/test/sql/join/left_outer/test_left_join_on_true.test
 
 statement ok
-CREATE TABLE join_true_left (id INTEGER PRIMARY KEY, val INTEGER);
+CREATE TABLE join_true_left (id INT PRIMARY KEY, val INT);
 
 statement ok
 INSERT INTO join_true_left (id, val) VALUES (1, 10), (2, 20);
 
 statement ok
-CREATE TABLE join_true_right (id INTEGER PRIMARY KEY, category INTEGER);
+CREATE TABLE join_true_right (id INT PRIMARY KEY, category INT);
 
 statement ok
 INSERT INTO join_true_right (id, category) VALUES (1, 100), (2, 200);

@@ -6084,7 +6084,7 @@ fn evaluate_upper(args: Vec<Value>) -> Result<Value> {
 fn evaluate_length(args: Vec<Value>) -> Result<Value> {
     expect_unary_text_function("LENGTH", args, |text| {
         let len = i32::try_from(text.chars().count()).map_err(|_| {
-            HematiteError::ParseError("LENGTH result overflowed INTEGER".to_string())
+            HematiteError::ParseError("LENGTH result overflowed INT".to_string())
         })?;
         Ok(Value::Integer(len))
     })
@@ -6141,7 +6141,7 @@ fn evaluate_abs(args: Vec<Value>) -> Result<Value> {
         Value::Integer(value) => {
             if value == i32::MIN {
                 return Err(HematiteError::ParseError(
-                    "ABS overflowed INTEGER".to_string(),
+                    "ABS overflowed INT".to_string(),
                 ));
             }
             Ok(Value::Integer(value.abs()))
@@ -6714,7 +6714,7 @@ fn round_integer(value: i32, precision: i32) -> Result<Value> {
 
     let rounded = round_float(value as f64, precision);
     let rounded = i32::try_from(rounded as i64)
-        .map_err(|_| HematiteError::ParseError("ROUND overflowed INTEGER".to_string()))?;
+        .map_err(|_| HematiteError::ParseError("ROUND overflowed INT".to_string()))?;
     Ok(Value::Integer(rounded))
 }
 

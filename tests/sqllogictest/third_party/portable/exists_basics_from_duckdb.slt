@@ -3,7 +3,7 @@
 # https://github.com/duckdb/duckdb/blob/main/test/sql/subquery/exists/test_uncorrelated_exists_subquery.test
 
 statement ok
-CREATE TABLE exists_test (i INTEGER PRIMARY KEY);
+CREATE TABLE exists_test (i INT PRIMARY KEY);
 
 statement ok
 INSERT INTO exists_test (i) VALUES (1), (2), (3);

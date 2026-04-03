@@ -2,7 +2,7 @@
 # https://github.com/duckdb/duckdb/blob/main/test/sql/filter/test_alias_filter.test
 
 statement ok
-CREATE TABLE integers(i INTEGER PRIMARY KEY);
+CREATE TABLE integers(i INT PRIMARY KEY);
 
 statement ok
 INSERT INTO integers (i) VALUES (1), (2), (3);

@@ -2,7 +2,7 @@
 # https://github.com/duckdb/duckdb/blob/main/test/sql/filter/test_constant_comparisons.test
 
 statement ok
-CREATE TABLE integers(a INTEGER PRIMARY KEY, b INTEGER);
+CREATE TABLE integers(a INT PRIMARY KEY, b INT);
 
 statement ok
 INSERT INTO integers (a, b) VALUES (2, 12);

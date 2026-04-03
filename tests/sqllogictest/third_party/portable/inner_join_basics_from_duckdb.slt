@@ -2,13 +2,13 @@
 # https://github.com/duckdb/duckdb/blob/main/test/sql/join/inner/test_join.test
 
 statement ok
-CREATE TABLE inner_join_test (a INTEGER PRIMARY KEY, b INTEGER);
+CREATE TABLE inner_join_test (a INT PRIMARY KEY, b INT);
 
 statement ok
 INSERT INTO inner_join_test (a, b) VALUES (11, 1), (12, 2), (13, 3);
 
 statement ok
-CREATE TABLE inner_join_test2 (id INTEGER PRIMARY KEY, b INTEGER, c INTEGER);
+CREATE TABLE inner_join_test2 (id INT PRIMARY KEY, b INT, c INT);
 
 statement ok
 INSERT INTO inner_join_test2 (id, b, c) VALUES (1, 1, 10), (2, 1, 20), (3, 2, 30);

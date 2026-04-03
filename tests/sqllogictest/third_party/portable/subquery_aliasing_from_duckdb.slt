@@ -2,7 +2,7 @@
 # https://github.com/duckdb/duckdb/blob/main/test/sql/subquery/table/test_aliasing.test
 
 statement ok
-CREATE TABLE subquery_alias_test (i INTEGER PRIMARY KEY);
+CREATE TABLE subquery_alias_test (i INT PRIMARY KEY);
 
 statement ok
 INSERT INTO subquery_alias_test (i) VALUES (42);

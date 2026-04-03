@@ -3,7 +3,7 @@
 # https://github.com/duckdb/duckdb/blob/main/test/sql/setops/test_union_except_empty.test
 
 statement ok
-CREATE TABLE setops_union_test (i INTEGER PRIMARY KEY);
+CREATE TABLE setops_union_test (i INT PRIMARY KEY);
 
 statement ok
 INSERT INTO setops_union_test (i) VALUES (1), (2), (3), (4);
@@ -31,13 +31,13 @@ ORDER BY i;
 4
 
 statement ok
-CREATE TABLE setops_a (i INTEGER PRIMARY KEY);
+CREATE TABLE setops_a (i INT PRIMARY KEY);
 
 statement ok
-CREATE TABLE setops_b (i INTEGER PRIMARY KEY);
+CREATE TABLE setops_b (i INT PRIMARY KEY);
 
 statement ok
-CREATE TABLE setops_c (i INTEGER PRIMARY KEY);
+CREATE TABLE setops_c (i INT PRIMARY KEY);
 
 statement ok
 INSERT INTO setops_a (i) VALUES (42), (43), (44);
