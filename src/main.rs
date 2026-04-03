@@ -1,4 +1,4 @@
-use hematite::{script_is_complete, ExecutedStatement, Hematite, HematiteError};
+use hematite::{script_is_complete, Hematite, HematiteError};
 use std::env;
 use std::io::{self, Write};
 
@@ -42,7 +42,7 @@ fn print_usage() {
 fn run_one_shot(db_path: &str, script: &str) -> Result<(), HematiteError> {
     let mut db = Hematite::new(db_path)?;
     for result in db.iter_script(script)? {
-        print_execution_result(result?)?;
+        println!("{}", result?.render_ascii());
     }
     Ok(())
 }
@@ -103,30 +103,7 @@ fn run_interactive(db_path: &str) -> Result<(), HematiteError> {
 
 fn execute_script(db: &mut Hematite, script: &str) -> Result<(), HematiteError> {
     for result in db.iter_script(script)? {
-        print_execution_result(result?)?;
-    }
-    Ok(())
-}
-
-fn print_execution_result(result: ExecutedStatement) -> Result<(), HematiteError> {
-    match result {
-        ExecutedStatement::Statement(statement) => {
-            println!("{} ({})", statement.message, statement.affected_rows);
-        }
-        ExecutedStatement::Query(result_set) => {
-            if !result_set.columns.is_empty() {
-                println!("{}", result_set.columns.join(" | "));
-            }
-            for row in result_set.iter() {
-                let values = row
-                    .values
-                    .iter()
-                    .map(|value| format!("{value:?}"))
-                    .collect::<Vec<_>>();
-                println!("{}", values.join(" | "));
-            }
-            println!("{} row(s)", result_set.len());
-        }
+        println!("{}", result?.render_ascii());
     }
     Ok(())
 }

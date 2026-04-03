@@ -5738,6 +5738,39 @@ mod result_tests {
     }
 
     #[test]
+    fn test_result_set_render_ascii_table() -> Result<()> {
+        let columns = vec!["id".to_string(), "name".to_string(), "note".to_string()];
+        let rows = vec![
+            vec![
+                Value::Integer(1),
+                Value::Text("Alice".to_string()),
+                Value::Null,
+            ],
+            vec![
+                Value::Integer(2),
+                Value::Text("Bob".to_string()),
+                Value::Text("line1\nline2".to_string()),
+            ],
+        ];
+
+        let result_set = ResultSet::new(columns, rows);
+
+        assert_eq!(
+            result_set.render_ascii_table(),
+            "\
++----+-------+--------------+\n\
+| id | name  | note         |\n\
++----+-------+--------------+\n\
+| 1  | Alice | NULL         |\n\
+| 2  | Bob   | line1\\nline2 |\n\
++----+-------+--------------+\n\
+2 row(s)"
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn test_row() -> Result<()> {
         let values = vec![
             Value::Integer(42),
@@ -5828,6 +5861,36 @@ mod result_tests {
         assert!(matches!(statement, ExecutedStatement::Statement(_)));
         assert_eq!(statement.as_statement().unwrap().affected_rows, 2);
         assert!(statement.as_query().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_executed_statement_render_ascii() -> Result<()> {
+        let query = ExecutedStatement::from_query_result(QueryResult {
+            affected_rows: 0,
+            columns: vec!["value".to_string()],
+            rows: vec![vec![Value::Integer(7)]],
+        });
+        assert_eq!(
+            query.render_ascii(),
+            "\
++-------+\n\
+| value |\n\
++-------+\n\
+| 7     |\n\
++-------+\n\
+1 row(s)"
+        );
+
+        let statement = ExecutedStatement::from_query_result(QueryResult {
+            affected_rows: 2,
+            columns: Vec::new(),
+            rows: Vec::new(),
+        });
+        assert_eq!(
+            statement.render_ascii(),
+            "Statement executed successfully (2)"
+        );
         Ok(())
     }
 }

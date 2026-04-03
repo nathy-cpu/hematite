@@ -53,6 +53,51 @@ impl ResultSet {
     pub fn get_column_index(&self, column_name: &str) -> Option<usize> {
         self.column_index.get(column_name).copied()
     }
+
+    pub fn render_ascii_table(&self) -> String {
+        if self.columns.is_empty() {
+            return format!("{} row(s)", self.len());
+        }
+
+        let mut widths = self
+            .columns
+            .iter()
+            .map(|column| display_width(column))
+            .collect::<Vec<_>>();
+
+        let rendered_rows = self
+            .rows
+            .iter()
+            .map(|row| {
+                row.values
+                    .iter()
+                    .map(render_value_for_table)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        for row in &rendered_rows {
+            for (index, value) in row.iter().enumerate() {
+                if index >= widths.len() {
+                    widths.push(display_width(value));
+                } else {
+                    widths[index] = widths[index].max(display_width(value));
+                }
+            }
+        }
+
+        let border = ascii_border(&widths);
+        let mut lines = Vec::new();
+        lines.push(border.clone());
+        lines.push(ascii_row(&self.columns, &widths));
+        lines.push(border.clone());
+        for row in &rendered_rows {
+            lines.push(ascii_row(row, &widths));
+        }
+        lines.push(border);
+        lines.push(format!("{} row(s)", self.len()));
+        lines.join("\n")
+    }
 }
 
 impl IntoIterator for ResultSet {
@@ -414,6 +459,90 @@ impl ExecutedStatement {
         match self {
             Self::Query(_) => None,
             Self::Statement(result) => Some(result),
+        }
+    }
+
+    pub fn render_ascii(&self) -> String {
+        match self {
+            Self::Query(result_set) => result_set.render_ascii_table(),
+            Self::Statement(result) => format!("{} ({})", result.message, result.affected_rows),
+        }
+    }
+}
+
+fn render_value_for_table(value: &Value) -> String {
+    match value {
+        Value::Null => "NULL".to_string(),
+        Value::Text(value) => sanitize_table_cell(value),
+        Value::Enum(value) => sanitize_table_cell(value),
+        Value::Blob(bytes) => sanitize_table_cell(&format!("0x{}", hex::encode(bytes))),
+        Value::Boolean(value) => value.to_string(),
+        Value::Integer(value) => value.to_string(),
+        Value::BigInt(value) => value.to_string(),
+        Value::Int128(value) => value.to_string(),
+        Value::UInteger(value) => value.to_string(),
+        Value::UBigInt(value) => value.to_string(),
+        Value::UInt128(value) => value.to_string(),
+        Value::Float32(value) => value.to_string(),
+        Value::Float(value) => value.to_string(),
+        Value::Decimal(value) => value.to_string(),
+        Value::Date(value) => value.to_string(),
+        Value::Time(value) => value.to_string(),
+        Value::DateTime(value) => value.to_string(),
+        Value::TimeWithTimeZone(value) => value.to_string(),
+        Value::IntervalYearMonth(value) => value.to_string(),
+        Value::IntervalDaySecond(value) => value.to_string(),
+    }
+}
+
+fn sanitize_table_cell(value: &str) -> String {
+    value.replace('\n', "\\n").replace('\r', "\\r")
+}
+
+fn display_width(value: &str) -> usize {
+    value.chars().count()
+}
+
+fn ascii_border(widths: &[usize]) -> String {
+    let mut border = String::new();
+    border.push('+');
+    for width in widths {
+        border.push_str(&"-".repeat(*width + 2));
+        border.push('+');
+    }
+    border
+}
+
+fn ascii_row(values: &[String], widths: &[usize]) -> String {
+    let mut row = String::new();
+    row.push('|');
+    for (index, width) in widths.iter().enumerate() {
+        let value = values.get(index).map(String::as_str).unwrap_or("");
+        row.push(' ');
+        row.push_str(value);
+        let padding = width.saturating_sub(display_width(value));
+        row.push_str(&" ".repeat(padding));
+        row.push(' ');
+        row.push('|');
+    }
+    row
+}
+
+mod hex {
+    pub fn encode(bytes: &[u8]) -> String {
+        let mut output = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            output.push(nibble_to_hex(byte >> 4));
+            output.push(nibble_to_hex(byte & 0x0f));
+        }
+        output
+    }
+
+    fn nibble_to_hex(value: u8) -> char {
+        match value {
+            0..=9 => (b'0' + value) as char,
+            10..=15 => (b'A' + (value - 10)) as char,
+            _ => unreachable!("hex nibble out of range"),
         }
     }
 }
