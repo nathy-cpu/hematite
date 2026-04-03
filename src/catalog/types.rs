@@ -397,6 +397,757 @@ impl Ord for DecimalValue {
     }
 }
 
+const FLOAT128_MAX_PRECISION: usize = 34;
+const FLOAT128_EXPONENT_BIAS: i16 = 8192;
+const FLOAT128_MIN_EXPONENT: i16 = -8192;
+const FLOAT128_MAX_EXPONENT: i16 = 8191;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Float128Value {
+    negative: bool,
+    coefficient: u128,
+    exponent: i16,
+}
+
+impl Float128Value {
+    pub fn zero() -> Self {
+        Self {
+            negative: false,
+            coefficient: 0,
+            exponent: 0,
+        }
+    }
+
+    pub fn parse(input: &str) -> Result<Self> {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Err(HematiteError::ParseError(
+                "FLOAT128 value cannot be empty".to_string(),
+            ));
+        }
+
+        let (negative, digits) = match trimmed.as_bytes()[0] {
+            b'+' => (false, &trimmed[1..]),
+            b'-' => (true, &trimmed[1..]),
+            _ => (false, trimmed),
+        };
+
+        if digits.is_empty() {
+            return Err(HematiteError::ParseError(format!(
+                "Invalid FLOAT128 value '{}'",
+                input
+            )));
+        }
+
+        let mut parts = digits.split('.');
+        let integer = parts.next().unwrap_or_default();
+        let fraction = parts.next();
+        if parts.next().is_some()
+            || !integer.chars().all(|ch| ch.is_ascii_digit())
+            || fraction.is_some_and(|part| !part.chars().all(|ch| ch.is_ascii_digit()))
+        {
+            return Err(HematiteError::ParseError(format!(
+                "Invalid FLOAT128 value '{}'",
+                input
+            )));
+        }
+
+        let integer = integer.trim_start_matches('0');
+        let integer = if integer.is_empty() { "0" } else { integer };
+        let fraction = fraction.unwrap_or_default();
+        let mut combined = String::with_capacity(integer.len() + fraction.len());
+        combined.push_str(integer);
+        combined.push_str(fraction);
+        let combined = combined.trim_start_matches('0');
+
+        if combined.is_empty() {
+            return Ok(Self::zero());
+        }
+
+        let digits = combined.bytes().map(|byte| byte - b'0').collect::<Vec<_>>();
+        let exponent = -(fraction.len() as i16);
+        Self::from_parts(negative, digits, exponent)
+    }
+
+    pub fn from_integer(value: i128) -> Self {
+        if value == 0 {
+            return Self::zero();
+        }
+        let negative = value.is_negative();
+        let coefficient = value.unsigned_abs();
+        Self {
+            negative,
+            coefficient,
+            exponent: 0,
+        }
+    }
+
+    pub fn from_unsigned(value: u128) -> Self {
+        if value == 0 {
+            return Self::zero();
+        }
+        Self {
+            negative: false,
+            coefficient: value,
+            exponent: 0,
+        }
+    }
+
+    pub fn from_f64(value: f64) -> Result<Self> {
+        if !value.is_finite() {
+            return Err(HematiteError::ParseError(
+                "FLOAT128 value must be finite".to_string(),
+            ));
+        }
+        Self::parse(&value.to_string())
+    }
+
+    pub fn from_storage_bits(bits: u128) -> Result<Self> {
+        let negative = (bits >> 127) != 0;
+        let exponent_bits = ((bits >> 113) & 0x3fff) as u16;
+        let coefficient = bits & ((1u128 << 113) - 1);
+        if coefficient == 0 {
+            return Ok(Self::zero());
+        }
+        let exponent = exponent_bits as i16 - FLOAT128_EXPONENT_BIAS;
+        if !(FLOAT128_MIN_EXPONENT..=FLOAT128_MAX_EXPONENT).contains(&exponent) {
+            return Err(HematiteError::CorruptedData(
+                "FLOAT128 exponent is out of range".to_string(),
+            ));
+        }
+        let digits = u128_to_digits(coefficient);
+        Self::from_parts(negative, digits, exponent)
+    }
+
+    pub fn storage_bits(&self) -> u128 {
+        if self.coefficient == 0 {
+            return 0;
+        }
+        let sign = (self.negative as u128) << 127;
+        let exponent = ((self.exponent + FLOAT128_EXPONENT_BIAS) as u16 as u128) << 113;
+        sign | exponent | self.coefficient
+    }
+
+    pub fn negative(&self) -> bool {
+        self.negative
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.coefficient == 0
+    }
+
+    pub fn exponent(&self) -> i16 {
+        self.exponent
+    }
+
+    pub fn coefficient(&self) -> u128 {
+        self.coefficient
+    }
+
+    pub fn abs(&self) -> Self {
+        let mut value = self.clone();
+        value.negative = false;
+        value
+    }
+
+    pub fn negated(&self) -> Self {
+        if self.is_zero() {
+            return Self::zero();
+        }
+        let mut value = self.clone();
+        value.negative = !value.negative;
+        value
+    }
+
+    pub fn to_f64(&self) -> Result<f64> {
+        self.to_string().parse::<f64>().map_err(|_| {
+            HematiteError::ParseError(format!(
+                "FLOAT128 value '{}' cannot be represented as FLOAT",
+                self
+            ))
+        })
+    }
+
+    pub fn to_decimal(&self) -> Result<DecimalValue> {
+        DecimalValue::parse(&self.to_string())
+    }
+
+    pub fn to_i32(&self) -> Result<i32> {
+        self.floor()?.to_string().parse::<i32>().map_err(|_| {
+            HematiteError::ParseError(format!(
+                "FLOAT128 value '{}' cannot be represented as INT",
+                self
+            ))
+        })
+    }
+
+    pub fn to_i64(&self) -> Result<i64> {
+        self.floor()?.to_string().parse::<i64>().map_err(|_| {
+            HematiteError::ParseError(format!(
+                "FLOAT128 value '{}' cannot be represented as INT64",
+                self
+            ))
+        })
+    }
+
+    pub fn to_i128(&self) -> Result<i128> {
+        self.floor()?.to_string().parse::<i128>().map_err(|_| {
+            HematiteError::ParseError(format!(
+                "FLOAT128 value '{}' cannot be represented as INT128",
+                self
+            ))
+        })
+    }
+
+    pub fn to_u32(&self) -> Result<u32> {
+        if self.negative {
+            return Err(HematiteError::ParseError(format!(
+                "FLOAT128 value '{}' cannot be represented as UINT",
+                self
+            )));
+        }
+        self.floor()?.to_string().parse::<u32>().map_err(|_| {
+            HematiteError::ParseError(format!(
+                "FLOAT128 value '{}' cannot be represented as UINT",
+                self
+            ))
+        })
+    }
+
+    pub fn to_u64(&self) -> Result<u64> {
+        if self.negative {
+            return Err(HematiteError::ParseError(format!(
+                "FLOAT128 value '{}' cannot be represented as UINT64",
+                self
+            )));
+        }
+        self.floor()?.to_string().parse::<u64>().map_err(|_| {
+            HematiteError::ParseError(format!(
+                "FLOAT128 value '{}' cannot be represented as UINT64",
+                self
+            ))
+        })
+    }
+
+    pub fn to_u128(&self) -> Result<u128> {
+        if self.negative {
+            return Err(HematiteError::ParseError(format!(
+                "FLOAT128 value '{}' cannot be represented as UINT128",
+                self
+            )));
+        }
+        self.floor()?.to_string().parse::<u128>().map_err(|_| {
+            HematiteError::ParseError(format!(
+                "FLOAT128 value '{}' cannot be represented as UINT128",
+                self
+            ))
+        })
+    }
+
+    pub fn ceil(&self) -> Result<Self> {
+        if self.is_zero() || self.exponent >= 0 {
+            return Ok(self.clone());
+        }
+
+        let digits = self.coefficient_digits();
+        let integer_len = digits.len() as i32 + self.exponent as i32;
+        if integer_len <= 0 {
+            return if self.negative {
+                Ok(Self::zero())
+            } else {
+                Ok(Self::from_integer(1))
+            };
+        }
+
+        let keep = integer_len as usize;
+        let has_fraction = digits[keep..].iter().any(|digit| *digit != 0);
+        let mut int_digits = digits[..keep].to_vec();
+        if !self.negative && has_fraction {
+            int_digits = add_digit_slices(&int_digits, &[1]);
+        }
+        Self::from_parts(self.negative, int_digits, 0)
+    }
+
+    pub fn floor(&self) -> Result<Self> {
+        if self.is_zero() || self.exponent >= 0 {
+            return Ok(self.clone());
+        }
+
+        let digits = self.coefficient_digits();
+        let integer_len = digits.len() as i32 + self.exponent as i32;
+        if integer_len <= 0 {
+            return if self.negative {
+                Ok(Self::from_integer(-1))
+            } else {
+                Ok(Self::zero())
+            };
+        }
+
+        let keep = integer_len as usize;
+        let has_fraction = digits[keep..].iter().any(|digit| *digit != 0);
+        let mut int_digits = digits[..keep].to_vec();
+        if self.negative && has_fraction {
+            int_digits = add_digit_slices(&int_digits, &[1]);
+        }
+        Self::from_parts(self.negative, int_digits, 0)
+    }
+
+    pub fn round(&self, precision: i32) -> Result<Self> {
+        if self.is_zero() {
+            return Ok(Self::zero());
+        }
+
+        let target_exponent = -(precision as i16);
+        if self.exponent >= target_exponent {
+            return Ok(self.clone());
+        }
+
+        let drop = (target_exponent - self.exponent) as usize;
+        let mut digits = self.coefficient_digits();
+        if drop >= digits.len() {
+            let should_round_up = digits.first().is_some_and(|digit| *digit >= 5);
+            return if should_round_up {
+                Self::from_parts(self.negative, vec![1], target_exponent)
+            } else {
+                Ok(Self::zero())
+            };
+        }
+
+        let keep = digits.len() - drop;
+        let round_digit = digits[keep];
+        digits.truncate(keep);
+        if round_digit >= 5 {
+            digits = add_digit_slices(&digits, &[1]);
+        }
+        Self::from_parts(self.negative, digits, target_exponent)
+    }
+
+    pub fn add(&self, other: &Self) -> Result<Self> {
+        if self.is_zero() {
+            return Ok(other.clone());
+        }
+        if other.is_zero() {
+            return Ok(self.clone());
+        }
+
+        if magnitude_digit_gap(self, other) > FLOAT128_MAX_PRECISION + 1 {
+            return if self.abs_cmp(other).is_ge() {
+                Ok(self.clone())
+            } else {
+                Ok(other.clone())
+            };
+        }
+
+        let common_exponent = self.exponent.min(other.exponent);
+        let left_digits = append_zeros(
+            &self.coefficient_digits(),
+            (self.exponent - common_exponent) as usize,
+        );
+        let right_digits = append_zeros(
+            &other.coefficient_digits(),
+            (other.exponent - common_exponent) as usize,
+        );
+
+        if self.negative == other.negative {
+            return Self::from_parts(
+                self.negative,
+                add_digit_slices(&left_digits, &right_digits),
+                common_exponent,
+            );
+        }
+
+        match compare_digit_slices(&left_digits, &right_digits) {
+            Ordering::Greater => Self::from_parts(
+                self.negative,
+                subtract_digit_slices(&left_digits, &right_digits),
+                common_exponent,
+            ),
+            Ordering::Less => Self::from_parts(
+                other.negative,
+                subtract_digit_slices(&right_digits, &left_digits),
+                common_exponent,
+            ),
+            Ordering::Equal => Ok(Self::zero()),
+        }
+    }
+
+    pub fn subtract(&self, other: &Self) -> Result<Self> {
+        self.add(&other.negated())
+    }
+
+    pub fn multiply(&self, other: &Self) -> Result<Self> {
+        if self.is_zero() || other.is_zero() {
+            return Ok(Self::zero());
+        }
+        let digits = multiply_digit_slices(&self.coefficient_digits(), &other.coefficient_digits());
+        Self::from_parts(
+            self.negative ^ other.negative,
+            digits,
+            self.exponent.checked_add(other.exponent).ok_or_else(|| {
+                HematiteError::ParseError(
+                    "FLOAT128 multiplication overflowed exponent range".to_string(),
+                )
+            })?,
+        )
+    }
+
+    pub fn divide(&self, other: &Self) -> Result<Self> {
+        if other.is_zero() {
+            return Err(HematiteError::ParseError("Division by zero".to_string()));
+        }
+        if self.is_zero() {
+            return Ok(Self::zero());
+        }
+
+        let extra_digits = FLOAT128_MAX_PRECISION + 1;
+        let numerator = append_zeros(&self.coefficient_digits(), extra_digits);
+        let denominator = other.coefficient_digits();
+        let quotient = divide_digit_slices(&numerator, &denominator)?;
+        let exponent = self
+            .exponent
+            .checked_sub(other.exponent)
+            .and_then(|value| value.checked_sub(extra_digits as i16))
+            .ok_or_else(|| {
+                HematiteError::ParseError("FLOAT128 division overflowed exponent range".to_string())
+            })?;
+        Self::from_parts(self.negative ^ other.negative, quotient, exponent)
+    }
+
+    pub fn powi(&self, exponent: i32) -> Result<Self> {
+        if exponent == 0 {
+            return Ok(Self::from_integer(1));
+        }
+        if self.is_zero() {
+            return if exponent < 0 {
+                Err(HematiteError::ParseError("Division by zero".to_string()))
+            } else {
+                Ok(Self::zero())
+            };
+        }
+
+        let mut base = self.clone();
+        let mut exp = exponent.unsigned_abs();
+        let mut result = Self::from_integer(1);
+        while exp > 0 {
+            if exp & 1 == 1 {
+                result = result.multiply(&base)?;
+            }
+            exp >>= 1;
+            if exp > 0 {
+                base = base.multiply(&base)?;
+            }
+        }
+
+        if exponent < 0 {
+            Self::from_integer(1).divide(&result)
+        } else {
+            Ok(result)
+        }
+    }
+
+    fn abs_cmp(&self, other: &Self) -> Ordering {
+        let left = self.coefficient_digits();
+        let right = other.coefficient_digits();
+        let left_magnitude = left.len() as i32 + self.exponent as i32;
+        let right_magnitude = right.len() as i32 + other.exponent as i32;
+        match left_magnitude.cmp(&right_magnitude) {
+            Ordering::Equal => {
+                let common_exponent = self.exponent.min(other.exponent);
+                let left = append_zeros(&left, (self.exponent - common_exponent) as usize);
+                let right = append_zeros(&right, (other.exponent - common_exponent) as usize);
+                compare_digit_slices(&left, &right)
+            }
+            ordering => ordering,
+        }
+    }
+
+    fn coefficient_digits(&self) -> Vec<u8> {
+        u128_to_digits(self.coefficient)
+    }
+
+    fn from_parts(negative: bool, digits: Vec<u8>, exponent: i16) -> Result<Self> {
+        let (digits, exponent) = normalize_float128_parts(digits, exponent)?;
+        if digits.len() == 1 && digits[0] == 0 {
+            return Ok(Self::zero());
+        }
+
+        let (digits, exponent) = round_float128_digits(digits, exponent)?;
+        let coefficient = digits_to_u128(&digits)?;
+        Ok(Self {
+            negative,
+            coefficient,
+            exponent,
+        })
+    }
+}
+
+impl fmt::Display for Float128Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.is_zero() {
+            return write!(f, "0");
+        }
+        if self.negative {
+            write!(f, "-")?;
+        }
+
+        let digits = self.coefficient_digits();
+        if self.exponent >= 0 {
+            let digit_string = digits
+                .iter()
+                .map(|digit| char::from(b'0' + *digit))
+                .collect::<String>();
+            write!(f, "{digit_string}")?;
+            for _ in 0..self.exponent {
+                write!(f, "0")?;
+            }
+            return Ok(());
+        }
+
+        let split = digits.len() as i32 + self.exponent as i32;
+        let digit_string = digits
+            .iter()
+            .map(|digit| char::from(b'0' + *digit))
+            .collect::<String>();
+        if split <= 0 {
+            write!(f, "0.")?;
+            for _ in 0..-split {
+                write!(f, "0")?;
+            }
+            write!(f, "{digit_string}")
+        } else {
+            let split = split as usize;
+            write!(f, "{}.{}", &digit_string[..split], &digit_string[split..])
+        }
+    }
+}
+
+impl PartialOrd for Float128Value {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Float128Value {
+    fn cmp(&self, other: &Self) -> Ordering {
+        if self.negative != other.negative {
+            return if self.negative {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            };
+        }
+
+        let ordering = self.abs_cmp(other);
+        if self.negative {
+            ordering.reverse()
+        } else {
+            ordering
+        }
+    }
+}
+
+fn normalize_float128_parts(mut digits: Vec<u8>, mut exponent: i16) -> Result<(Vec<u8>, i16)> {
+    trim_leading_zero_digits(&mut digits);
+    if digits.is_empty() {
+        return Ok((vec![0], 0));
+    }
+    while digits.len() > 1 && digits.last().copied() == Some(0) {
+        digits.pop();
+        exponent = exponent.checked_add(1).ok_or_else(|| {
+            HematiteError::ParseError("FLOAT128 exponent overflowed supported range".to_string())
+        })?;
+    }
+    if !(FLOAT128_MIN_EXPONENT..=FLOAT128_MAX_EXPONENT).contains(&exponent) {
+        return Err(HematiteError::ParseError(
+            "FLOAT128 exponent overflowed supported range".to_string(),
+        ));
+    }
+    Ok((digits, exponent))
+}
+
+fn round_float128_digits(mut digits: Vec<u8>, mut exponent: i16) -> Result<(Vec<u8>, i16)> {
+    if digits.len() <= FLOAT128_MAX_PRECISION {
+        return Ok((digits, exponent));
+    }
+
+    let drop = digits.len() - FLOAT128_MAX_PRECISION;
+    let round_digit = digits[FLOAT128_MAX_PRECISION];
+    digits.truncate(FLOAT128_MAX_PRECISION);
+    if round_digit >= 5 {
+        digits = add_digit_slices(&digits, &[1]);
+    }
+    exponent = exponent.checked_add(drop as i16).ok_or_else(|| {
+        HematiteError::ParseError("FLOAT128 exponent overflowed supported range".to_string())
+    })?;
+    normalize_float128_parts(digits, exponent)
+}
+
+fn trim_leading_zero_digits(digits: &mut Vec<u8>) {
+    if let Some(first_non_zero) = digits.iter().position(|digit| *digit != 0) {
+        if first_non_zero > 0 {
+            digits.drain(0..first_non_zero);
+        }
+    } else {
+        digits.clear();
+    }
+}
+
+fn magnitude_digit_gap(left: &Float128Value, right: &Float128Value) -> usize {
+    let left_magnitude = left.coefficient_digits().len() as i32 + left.exponent as i32;
+    let right_magnitude = right.coefficient_digits().len() as i32 + right.exponent as i32;
+    left_magnitude.abs_diff(right_magnitude) as usize
+}
+
+fn u128_to_digits(mut value: u128) -> Vec<u8> {
+    if value == 0 {
+        return vec![0];
+    }
+    let mut digits = Vec::new();
+    while value > 0 {
+        digits.push((value % 10) as u8);
+        value /= 10;
+    }
+    digits.reverse();
+    digits
+}
+
+fn digits_to_u128(digits: &[u8]) -> Result<u128> {
+    let mut value = 0u128;
+    for digit in digits {
+        value = value
+            .checked_mul(10)
+            .and_then(|value| value.checked_add(*digit as u128))
+            .ok_or_else(|| {
+                HematiteError::ParseError(
+                    "FLOAT128 coefficient overflowed supported range".to_string(),
+                )
+            })?;
+    }
+    Ok(value)
+}
+
+fn append_zeros(digits: &[u8], count: usize) -> Vec<u8> {
+    if digits.len() == 1 && digits[0] == 0 {
+        return vec![0];
+    }
+    let mut out = digits.to_vec();
+    out.extend(std::iter::repeat_n(0, count));
+    out
+}
+
+fn compare_digit_slices(left: &[u8], right: &[u8]) -> Ordering {
+    left.len().cmp(&right.len()).then_with(|| left.cmp(right))
+}
+
+fn add_digit_slices(left: &[u8], right: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(left.len().max(right.len()) + 1);
+    let mut carry = 0u8;
+    let mut left_index = left.len() as isize - 1;
+    let mut right_index = right.len() as isize - 1;
+    while left_index >= 0 || right_index >= 0 || carry > 0 {
+        let left_digit = if left_index >= 0 {
+            left[left_index as usize]
+        } else {
+            0
+        };
+        let right_digit = if right_index >= 0 {
+            right[right_index as usize]
+        } else {
+            0
+        };
+        let total = left_digit + right_digit + carry;
+        out.push(total % 10);
+        carry = total / 10;
+        left_index -= 1;
+        right_index -= 1;
+    }
+    out.reverse();
+    out
+}
+
+fn subtract_digit_slices(left: &[u8], right: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(left.len());
+    let mut borrow = 0i8;
+    let mut left_index = left.len() as isize - 1;
+    let mut right_index = right.len() as isize - 1;
+    while left_index >= 0 {
+        let mut left_digit = left[left_index as usize] as i8 - borrow;
+        let right_digit = if right_index >= 0 {
+            right[right_index as usize] as i8
+        } else {
+            0
+        };
+        if left_digit < right_digit {
+            left_digit += 10;
+            borrow = 1;
+        } else {
+            borrow = 0;
+        }
+        out.push((left_digit - right_digit) as u8);
+        left_index -= 1;
+        right_index -= 1;
+    }
+    out.reverse();
+    trim_leading_zero_digits(&mut out);
+    if out.is_empty() {
+        vec![0]
+    } else {
+        out
+    }
+}
+
+fn multiply_digit_slices(left: &[u8], right: &[u8]) -> Vec<u8> {
+    if (left.len() == 1 && left[0] == 0) || (right.len() == 1 && right[0] == 0) {
+        return vec![0];
+    }
+    let mut out = vec![0u16; left.len() + right.len()];
+    for (left_offset, left_digit) in left.iter().rev().enumerate() {
+        for (right_offset, right_digit) in right.iter().rev().enumerate() {
+            let index = out.len() - 1 - (left_offset + right_offset);
+            out[index] += (*left_digit as u16) * (*right_digit as u16);
+        }
+    }
+    for index in (1..out.len()).rev() {
+        let carry = out[index] / 10;
+        out[index] %= 10;
+        out[index - 1] += carry;
+    }
+    let mut digits = out.into_iter().map(|digit| digit as u8).collect::<Vec<_>>();
+    trim_leading_zero_digits(&mut digits);
+    if digits.is_empty() {
+        vec![0]
+    } else {
+        digits
+    }
+}
+
+fn divide_digit_slices(numerator: &[u8], denominator: &[u8]) -> Result<Vec<u8>> {
+    if denominator.len() == 1 && denominator[0] == 0 {
+        return Err(HematiteError::ParseError("Division by zero".to_string()));
+    }
+
+    let mut quotient = Vec::with_capacity(numerator.len());
+    let mut remainder = Vec::new();
+    for digit in numerator {
+        remainder.push(*digit);
+        trim_leading_zero_digits(&mut remainder);
+        let mut q = 0u8;
+        while !remainder.is_empty()
+            && compare_digit_slices(&remainder, denominator) != Ordering::Less
+        {
+            remainder = subtract_digit_slices(&remainder, denominator);
+            q += 1;
+        }
+        quotient.push(q);
+    }
+    trim_leading_zero_digits(&mut quotient);
+    if quotient.is_empty() {
+        Ok(vec![0])
+    } else {
+        Ok(quotient)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DateValue {
     days_since_epoch: i32,
@@ -849,7 +1600,7 @@ pub enum Value {
     Boolean(bool),
     Float32(f32),
     Float(f64),
-    Float128(f64),
+    Float128(Float128Value),
     Decimal(DecimalValue),
     Blob(Vec<u8>),
     Date(DateValue),
@@ -964,7 +1715,7 @@ impl Value {
         match self {
             Value::Float32(f) => Some(*f as f64),
             Value::Float(f) => Some(*f),
-            Value::Float128(f) => Some(*f),
+            Value::Float128(f) => f.to_f64().ok(),
             _ => None,
         }
     }
@@ -1067,9 +1818,7 @@ impl PartialOrd for Value {
             (Value::Int128(a), Value::Integer(b)) => a.partial_cmp(&(*b as i128)),
             (Value::BigInt(a), Value::Int128(b)) => (*a as i128).partial_cmp(b),
             (Value::Int128(a), Value::BigInt(b)) => a.partial_cmp(&(*b as i128)),
-            (left, right)
-                if left.is_integral_value() && right.is_integral_value() =>
-            {
+            (left, right) if left.is_integral_value() && right.is_integral_value() => {
                 compare_integral_values(left, right)
             }
             (Value::Text(a), Value::Text(b)) => a.partial_cmp(b),
@@ -1080,10 +1829,18 @@ impl PartialOrd for Value {
             (Value::Float128(a), Value::Float128(b)) => a.partial_cmp(b),
             (Value::Float32(a), Value::Float(b)) => (*a as f64).partial_cmp(b),
             (Value::Float(b), Value::Float32(a)) => b.partial_cmp(&(*a as f64)),
-            (Value::Float32(a), Value::Float128(b)) => (*a as f64).partial_cmp(b),
-            (Value::Float128(b), Value::Float32(a)) => b.partial_cmp(&(*a as f64)),
-            (Value::Float(a), Value::Float128(b)) => a.partial_cmp(b),
-            (Value::Float128(a), Value::Float(b)) => a.partial_cmp(b),
+            (Value::Float32(a), Value::Float128(b)) => {
+                Float128Value::from_f64(*a as f64).ok()?.partial_cmp(b)
+            }
+            (Value::Float128(a), Value::Float32(b)) => {
+                a.partial_cmp(&Float128Value::from_f64(*b as f64).ok()?)
+            }
+            (Value::Float(a), Value::Float128(b)) => {
+                Float128Value::from_f64(*a).ok()?.partial_cmp(b)
+            }
+            (Value::Float128(a), Value::Float(b)) => {
+                a.partial_cmp(&Float128Value::from_f64(*b).ok()?)
+            }
             (Value::Decimal(a), Value::Decimal(b)) => a.partial_cmp(b),
             (Value::Blob(a), Value::Blob(b)) => a.partial_cmp(b),
             (Value::Date(a), Value::Date(b)) => a.partial_cmp(b),

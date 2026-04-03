@@ -1,7 +1,8 @@
 //! Relational row and index-key encoding.
 
 use crate::catalog::{
-    DateTimeValue, DateValue, DecimalValue, TimeValue, TimeWithTimeZoneValue, TimestampValue, Value,
+    DateTimeValue, DateValue, DecimalValue, Float128Value, TimeValue, TimeWithTimeZoneValue,
+    TimestampValue, Value,
 };
 use crate::error::{HematiteError, Result};
 
@@ -71,8 +72,7 @@ impl RowCodec {
                 }
                 Value::Float128(f) => {
                     buffer.push(22);
-                    buffer.extend_from_slice(&f.to_le_bytes());
-                    buffer.extend_from_slice(&0u64.to_le_bytes());
+                    buffer.extend_from_slice(&f.storage_bits().to_le_bytes());
                 }
                 Value::Decimal(decimal) => {
                     buffer.push(7);
@@ -212,16 +212,9 @@ impl RowCodec {
                     Value::Float32(f32::from_le_bytes(bytes.try_into().unwrap()))
                 }
                 22 => {
-                    let bytes =
-                        read_exact(data, &mut offset, payload_end, 8, "Float128 value")?;
-                    let _padding = read_exact(
-                        data,
-                        &mut offset,
-                        payload_end,
-                        8,
-                        "Float128 padding",
-                    )?;
-                    Value::Float128(f64::from_le_bytes(bytes.try_into().unwrap()))
+                    let bytes = read_exact(data, &mut offset, payload_end, 16, "Float128 value")?;
+                    let bits = u128::from_le_bytes(bytes.try_into().unwrap());
+                    Value::Float128(Float128Value::from_storage_bits(bits)?)
                 }
                 5 => Value::Null,
                 6 => {
@@ -241,8 +234,7 @@ impl RowCodec {
                     Value::UBigInt(u64::from_le_bytes(bytes.try_into().unwrap()))
                 }
                 20 => {
-                    let bytes =
-                        read_exact(data, &mut offset, payload_end, 16, "UInt128 value")?;
+                    let bytes = read_exact(data, &mut offset, payload_end, 16, "UInt128 value")?;
                     Value::UInt128(u128::from_le_bytes(bytes.try_into().unwrap()))
                 }
                 7 => Value::Decimal(read_decimal(data, &mut offset, payload_end)?),
@@ -442,8 +434,7 @@ fn encode_key_value(buffer: &mut Vec<u8>, value: &Value) {
         }
         Value::Float128(value) => {
             buffer.push(22);
-            buffer.extend_from_slice(&ordered_f64_bytes(*value));
-            buffer.extend_from_slice(&0u64.to_be_bytes());
+            encode_float128_key(buffer, value);
         }
         Value::Decimal(value) => {
             buffer.push(6);
@@ -514,6 +505,36 @@ fn ordered_f32_bytes(value: f32) -> [u8; 4] {
         !bits
     };
     transformed.to_be_bytes()
+}
+
+fn encode_float128_key(buffer: &mut Vec<u8>, value: &Float128Value) {
+    if value.is_zero() {
+        buffer.push(1);
+        return;
+    }
+
+    let magnitude = float128_order_payload(value);
+    if value.negative() {
+        buffer.push(0);
+        buffer.extend(magnitude.into_iter().map(|byte| !byte));
+    } else {
+        buffer.push(2);
+        buffer.extend_from_slice(&magnitude);
+    }
+}
+
+fn float128_order_payload(value: &Float128Value) -> Vec<u8> {
+    let digits = value.coefficient().to_string();
+    let adjusted = digits.len() as i32 + value.exponent() as i32;
+    let biased = (adjusted + 16384) as u16;
+
+    let mut payload = Vec::with_capacity(2 + digits.len() + 1);
+    payload.extend_from_slice(&biased.to_be_bytes());
+    for digit in digits.bytes() {
+        payload.push((digit - b'0') + 1);
+    }
+    payload.push(0);
+    payload
 }
 
 fn write_bytes(buffer: &mut Vec<u8>, bytes: &[u8]) {

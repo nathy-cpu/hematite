@@ -1599,8 +1599,7 @@ mod parser_tests {
 
     #[test]
     fn test_parse_create_with_default_literal() -> Result<()> {
-        let create =
-            parse_create("CREATE TABLE t (id INT PRIMARY KEY, name TEXT DEFAULT 'x');")?;
+        let create = parse_create("CREATE TABLE t (id INT PRIMARY KEY, name TEXT DEFAULT 'x');")?;
         assert_eq!(create.table, "t");
         assert_eq!(create.columns.len(), 2);
         assert_eq!(create.columns[1].name, "name");
@@ -1696,7 +1695,7 @@ mod parser_tests {
         assert_eq!(create.columns[2].data_type, SqlTypeName::Float128);
         assert_eq!(
             create.columns[2].default_value,
-            Some(LiteralValue::Float(1.5))
+            Some(LiteralValue::Float("1.5".to_string()))
         );
         assert_eq!(create.columns[3].data_type, SqlTypeName::VarChar(32));
         assert_eq!(

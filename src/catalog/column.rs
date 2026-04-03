@@ -1,8 +1,8 @@
 //! Column definitions for database tables.
 
 use super::types::{
-    DataType, DateTimeValue, DateValue, DecimalValue, TimeValue, TimeWithTimeZoneValue,
-    TimestampValue, Value,
+    DataType, DateTimeValue, DateValue, DecimalValue, Float128Value, TimeValue,
+    TimeWithTimeZoneValue, TimestampValue, Value,
 };
 use super::ColumnId;
 use crate::error::HematiteError;
@@ -97,9 +97,7 @@ impl Column {
                         DataType::Int8 | DataType::Int16 | DataType::Int => Value::Integer(0),
                         DataType::Int64 => Value::BigInt(0),
                         DataType::Int128 => Value::Int128(0),
-                        DataType::UInt8 | DataType::UInt16 | DataType::UInt => {
-                            Value::UInteger(0)
-                        }
+                        DataType::UInt8 | DataType::UInt16 | DataType::UInt => Value::UInteger(0),
                         DataType::UInt64 => Value::UBigInt(0),
                         DataType::UInt128 => Value::UInt128(0),
                         DataType::Text | DataType::Char(_) | DataType::VarChar(_) => {
@@ -113,7 +111,7 @@ impl Column {
                         DataType::Boolean => Value::Boolean(false),
                         DataType::Float32 => Value::Float32(0.0),
                         DataType::Float => Value::Float(0.0),
-                        DataType::Float128 => Value::Float128(0.0),
+                        DataType::Float128 => Value::Float128(Float128Value::zero()),
                         DataType::Decimal { .. } | DataType::Numeric { .. } => {
                             Value::Decimal(DecimalValue::zero())
                         }
@@ -398,8 +396,7 @@ fn write_optional_value(buffer: &mut Vec<u8>, value: Option<&Value>) {
         }
         Some(Value::Float128(value)) => {
             buffer.push(21);
-            buffer.extend_from_slice(&value.to_le_bytes());
-            buffer.extend_from_slice(&0u64.to_le_bytes());
+            buffer.extend_from_slice(&value.storage_bits().to_le_bytes());
         }
         Some(Value::BigInt(value)) => {
             buffer.push(4);
@@ -520,13 +517,12 @@ fn read_optional_value(buffer: &[u8], offset: &mut usize) -> Result<Option<Value
             Some(Value::Float32(value))
         }
         21 => {
-            let value = f64::from_le_bytes(
-                read_fixed(buffer, offset, 8, "default float128")?
+            let bits = u128::from_le_bytes(
+                read_fixed(buffer, offset, 16, "default float128")?
                     .try_into()
                     .unwrap(),
             );
-            let _padding = read_fixed(buffer, offset, 8, "default float128 padding")?;
-            Some(Value::Float128(value))
+            Some(Value::Float128(Float128Value::from_storage_bits(bits)?))
         }
         4 => {
             let value = i64::from_le_bytes(

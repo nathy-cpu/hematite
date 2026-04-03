@@ -21,7 +21,7 @@
 use crate::error::{HematiteError, Result};
 use crate::parser::ast::*;
 use crate::parser::lexer::{Lexer, Token};
-use crate::parser::types::{LiteralValue, SqlTypeName};
+use crate::parser::types::{normalize_float_literal, LiteralValue, SqlTypeName};
 
 pub struct Parser {
     tokens: Vec<Token>,
@@ -1261,12 +1261,7 @@ impl Parser {
                 self.consume_token(&Token::NumberLiteral(value.clone()))?;
                 if value.contains('.') {
                     Ok(Expression::Literal(LiteralValue::Float(
-                        value.parse::<f64>().map_err(|_| {
-                            HematiteError::ParseError(format!(
-                                "Invalid floating-point literal '{}'",
-                                value
-                            ))
-                        })?,
+                        normalize_float_literal(&value),
                     )))
                 } else {
                     Ok(Expression::Literal(LiteralValue::Integer(
@@ -2563,7 +2558,11 @@ impl Parser {
         Ok(data_type)
     }
 
-    fn parse_integer_type(&mut self, token: Token, signed_type: SqlTypeName) -> Result<SqlTypeName> {
+    fn parse_integer_type(
+        &mut self,
+        token: Token,
+        signed_type: SqlTypeName,
+    ) -> Result<SqlTypeName> {
         self.consume_token(&token)?;
         if matches!(
             signed_type,
@@ -2703,12 +2702,7 @@ impl Parser {
             Token::NumberLiteral(value) => {
                 self.consume_token(&Token::NumberLiteral(value.clone()))?;
                 if value.contains('.') {
-                    Ok(LiteralValue::Float(value.parse::<f64>().map_err(|_| {
-                        HematiteError::ParseError(format!(
-                            "Invalid floating-point literal '{}'",
-                            value
-                        ))
-                    })?))
+                    Ok(LiteralValue::Float(normalize_float_literal(&value)))
                 } else {
                     Ok(LiteralValue::Integer(value.parse::<i128>().map_err(
                         |_| {

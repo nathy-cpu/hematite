@@ -66,9 +66,7 @@ fn infer_column_types(rows: &[hematite::sql::result::Row]) -> Vec<sqllogictest::
             | Value::UInteger(_)
             | Value::UBigInt(_)
             | Value::UInt128(_)
-            | Value::Boolean(_) => {
-                sqllogictest::DefaultColumnType::Integer
-            }
+            | Value::Boolean(_) => sqllogictest::DefaultColumnType::Integer,
             Value::Float32(_) | Value::Float(_) | Value::Float128(_) | Value::Decimal(_) => {
                 sqllogictest::DefaultColumnType::FloatingPoint
             }

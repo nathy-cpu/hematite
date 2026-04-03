@@ -99,7 +99,7 @@ pub enum LiteralValue {
     Integer(i128),
     Text(String),
     Boolean(bool),
-    Float(f64),
+    Float(String),
     Null,
 }
 
@@ -179,10 +179,84 @@ impl PartialOrd for LiteralValue {
             (LiteralValue::Integer(a), LiteralValue::Integer(b)) => a.partial_cmp(b),
             (LiteralValue::Text(a), LiteralValue::Text(b)) => a.partial_cmp(b),
             (LiteralValue::Boolean(a), LiteralValue::Boolean(b)) => a.partial_cmp(b),
-            (LiteralValue::Float(a), LiteralValue::Float(b)) => a.partial_cmp(b),
+            (LiteralValue::Float(a), LiteralValue::Float(b)) => {
+                compare_normalized_float_literals(a, b)
+            }
             (LiteralValue::Null, _) => Some(Ordering::Less),
             (_, LiteralValue::Null) => Some(Ordering::Greater),
             _ => None,
         }
     }
+}
+
+pub fn normalize_float_literal(input: &str) -> String {
+    let trimmed = input.trim();
+    let (negative, digits) = match trimmed.as_bytes().first() {
+        Some(b'+') => (false, &trimmed[1..]),
+        Some(b'-') => (true, &trimmed[1..]),
+        _ => (false, trimmed),
+    };
+
+    let mut parts = digits.split('.');
+    let integer = parts.next().unwrap_or_default().trim_start_matches('0');
+    let integer = if integer.is_empty() { "0" } else { integer };
+    let mut fraction = parts.next().unwrap_or_default().to_string();
+    while fraction.ends_with('0') {
+        fraction.pop();
+    }
+
+    let combined = if fraction.is_empty() {
+        integer.to_string()
+    } else {
+        format!("{integer}.{fraction}")
+    };
+
+    if combined == "0" {
+        "0".to_string()
+    } else if negative {
+        format!("-{combined}")
+    } else {
+        combined
+    }
+}
+
+fn compare_normalized_float_literals(left: &str, right: &str) -> Option<Ordering> {
+    let (left_negative, left_integer, left_fraction) = split_float_literal(left)?;
+    let (right_negative, right_integer, right_fraction) = split_float_literal(right)?;
+
+    if left_negative != right_negative {
+        return Some(if left_negative {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        });
+    }
+
+    let ordering = left_integer
+        .len()
+        .cmp(&right_integer.len())
+        .then_with(|| left_integer.cmp(right_integer))
+        .then_with(|| {
+            let len = left_fraction.len().max(right_fraction.len());
+            let left_padded = format!("{left_fraction:0<len$}");
+            let right_padded = format!("{right_fraction:0<len$}");
+            left_padded.cmp(&right_padded)
+        });
+
+    Some(if left_negative {
+        ordering.reverse()
+    } else {
+        ordering
+    })
+}
+
+fn split_float_literal(input: &str) -> Option<(bool, &str, &str)> {
+    let (negative, digits) = match input.as_bytes().first() {
+        Some(b'-') => (true, &input[1..]),
+        _ => (false, input),
+    };
+    let mut parts = digits.split('.');
+    let integer = parts.next()?;
+    let fraction = parts.next().unwrap_or_default();
+    Some((negative, integer, fraction))
 }

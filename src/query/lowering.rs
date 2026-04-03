@@ -4,7 +4,7 @@
 //! that carries semantic meaning downward should pass through this file so the layer boundary stays
 //! obvious and centralized.
 
-use crate::catalog::{DataType, Value};
+use crate::catalog::{DataType, Float128Value, Value};
 use crate::parser::{LiteralValue, SqlTypeName};
 
 pub(crate) fn lower_literal_value(value: &LiteralValue) -> Value {
@@ -20,7 +20,9 @@ pub(crate) fn lower_literal_value(value: &LiteralValue) -> Value {
         }
         LiteralValue::Text(value) => Value::Text(value.clone()),
         LiteralValue::Boolean(value) => Value::Boolean(*value),
-        LiteralValue::Float(value) => Value::Float(*value),
+        LiteralValue::Float(value) => Value::Float128(
+            Float128Value::parse(value).expect("parser normalized a valid FLOAT literal"),
+        ),
         LiteralValue::Null => Value::Null,
     }
 }
@@ -36,9 +38,9 @@ pub(crate) fn raise_literal_value(value: &Value) -> LiteralValue {
         Value::Text(value) => LiteralValue::Text(value.clone()),
         Value::Enum(value) => LiteralValue::Text(value.clone()),
         Value::Boolean(value) => LiteralValue::Boolean(*value),
-        Value::Float32(value) => LiteralValue::Float(*value as f64),
-        Value::Float(value) => LiteralValue::Float(*value),
-        Value::Float128(value) => LiteralValue::Float(*value),
+        Value::Float32(value) => LiteralValue::Float(value.to_string()),
+        Value::Float(value) => LiteralValue::Float(value.to_string()),
+        Value::Float128(value) => LiteralValue::Float(value.to_string()),
         Value::Decimal(value) => LiteralValue::Text(value.to_string()),
         Value::Blob(value) => LiteralValue::Text(String::from_utf8_lossy(value).into_owned()),
         Value::Date(value) => LiteralValue::Text(value.to_string()),

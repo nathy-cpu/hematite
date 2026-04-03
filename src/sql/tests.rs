@@ -860,9 +860,7 @@ mod connection_tests {
         let db = TestDbFile::new("_test_show_indexes_triggers_and_create_statements");
         let mut conn = Connection::new(db.path())?;
 
-        conn.execute(
-            "CREATE TABLE users (id INT PRIMARY KEY, email TEXT UNIQUE, org_id INT);",
-        )?;
+        conn.execute("CREATE TABLE users (id INT PRIMARY KEY, email TEXT UNIQUE, org_id INT);")?;
         conn.execute("CREATE INDEX idx_users_org ON users (org_id);")?;
         conn.execute("CREATE VIEW user_emails AS SELECT id, email FROM users;")?;
         conn.execute("CREATE TABLE audit_log (id INT PRIMARY KEY, entry TEXT);")?;
@@ -1352,9 +1350,54 @@ mod connection_tests {
             vec![vec![
                 crate::catalog::Value::Integer(1),
                 crate::catalog::Value::Boolean(true),
-                crate::catalog::Value::Float128(2.5),
+                crate::catalog::Value::Float128(crate::catalog::Float128Value::parse("2.5")?),
                 crate::catalog::Value::Text("alice".to_string()),
             ]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_float128_round_trip_preserves_high_precision() -> Result<()> {
+        let db = TestDbFile::new("_test_float128_round_trip_preserves_high_precision");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE metrics (id INT PRIMARY KEY, precise FLOAT128);")?;
+        conn.execute(
+            "INSERT INTO metrics (id, precise) VALUES (1, 1.234567890123456789012345678901234);",
+        )?;
+
+        let result = conn.execute("SELECT precise FROM metrics;")?;
+        assert_eq!(
+            result.rows,
+            vec![vec![crate::catalog::Value::Float128(
+                crate::catalog::Float128Value::parse("1.234567890123456789012345678901234")?,
+            )]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_float128_arithmetic_stays_exact() -> Result<()> {
+        let db = TestDbFile::new("_test_float128_arithmetic_stays_exact");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE metrics (id INT PRIMARY KEY, precise FLOAT128);")?;
+        conn.execute(
+            "INSERT INTO metrics (id, precise) VALUES (1, 1.234567890123456789012345678901234);",
+        )?;
+
+        let result =
+            conn.execute("SELECT precise + 0.000000000000000000000000000000001 FROM metrics;")?;
+        assert_eq!(
+            result.rows,
+            vec![vec![crate::catalog::Value::Float128(
+                crate::catalog::Float128Value::parse("1.234567890123456789012345678901235")?,
+            )]]
         );
 
         conn.close()?;
@@ -1467,8 +1510,7 @@ mod connection_tests {
             );",
         )?;
 
-        let result =
-            conn.execute("SELECT id, tiny, small, normal, large, massive FROM uints;")?;
+        let result = conn.execute("SELECT id, tiny, small, normal, large, massive FROM uints;")?;
         assert_eq!(
             result.rows,
             vec![vec![
@@ -1481,7 +1523,8 @@ mod connection_tests {
             ]]
         );
 
-        let result_set = crate::sql::result::ResultSet::new(result.columns.clone(), result.rows.clone());
+        let result_set =
+            crate::sql::result::ResultSet::new(result.columns.clone(), result.rows.clone());
         let row = result_set.get_row(0).unwrap();
         assert_eq!(row.get_uint(0)?, 1);
         assert_eq!(row.get_uint(1)?, 255);
@@ -1652,9 +1695,7 @@ mod connection_tests {
         let db = TestDbFile::new("_test_scalar_numeric_functions");
         let mut conn = Connection::new(db.path())?;
 
-        conn.execute(
-            "CREATE TABLE metrics (id INT PRIMARY KEY, amount FLOAT, delta INT);",
-        )?;
+        conn.execute("CREATE TABLE metrics (id INT PRIMARY KEY, amount FLOAT, delta INT);")?;
         conn.execute(
             "INSERT INTO metrics (id, amount, delta) VALUES (1, -12.345, -7), (2, NULL, NULL);",
         )?;
@@ -1690,9 +1731,7 @@ mod connection_tests {
         let db = TestDbFile::new("_test_scalar_numeric_functions_in_updates_and_filters");
         let mut conn = Connection::new(db.path())?;
 
-        conn.execute(
-            "CREATE TABLE metrics (id INT PRIMARY KEY, amount FLOAT, delta INT);",
-        )?;
+        conn.execute("CREATE TABLE metrics (id INT PRIMARY KEY, amount FLOAT, delta INT);")?;
         conn.execute("INSERT INTO metrics (id, amount, delta) VALUES (1, 1.26, -4);")?;
         conn.execute(
             "UPDATE metrics SET amount = ROUND(amount, 1), delta = ABS(delta) WHERE ROUND(amount, 1) = 1.3;",
@@ -1757,9 +1796,7 @@ mod connection_tests {
         let db = TestDbFile::new("_test_case_expression_in_select_and_where");
         let mut conn = Connection::new(db.path())?;
 
-        conn.execute(
-            "CREATE TABLE grades (id INT PRIMARY KEY, score INT, nickname TEXT);",
-        )?;
+        conn.execute("CREATE TABLE grades (id INT PRIMARY KEY, score INT, nickname TEXT);")?;
         conn.execute(
             "INSERT INTO grades (id, score, nickname) VALUES (1, 95, 'ace'), (2, 82, NULL), (3, 70, 'steady');",
         )?;
@@ -1809,9 +1846,7 @@ mod connection_tests {
         let db = TestDbFile::new("_test_boolean_expressions_in_projection_and_case");
         let mut conn = Connection::new(db.path())?;
 
-        conn.execute(
-            "CREATE TABLE flags (id INT PRIMARY KEY, score INT, active BOOLEAN);",
-        )?;
+        conn.execute("CREATE TABLE flags (id INT PRIMARY KEY, score INT, active BOOLEAN);")?;
         conn.execute(
             "INSERT INTO flags (id, score, active) VALUES (1, 1, FALSE), (2, 2, FALSE), (3, 3, TRUE);",
         )?;
@@ -1847,9 +1882,7 @@ mod connection_tests {
         let db = TestDbFile::new("_test_insert_and_update_with_boolean_expressions");
         let mut conn = Connection::new(db.path())?;
 
-        conn.execute(
-            "CREATE TABLE flags (id INT PRIMARY KEY, enabled BOOLEAN, score INT);",
-        )?;
+        conn.execute("CREATE TABLE flags (id INT PRIMARY KEY, enabled BOOLEAN, score INT);")?;
         conn.execute(
             "INSERT INTO flags (id, enabled, score) VALUES (1, 1 < 2 AND NOT FALSE, 4), (2, 3 NOT BETWEEN 1 AND 2 OR FALSE, 7);",
         )?;
@@ -2144,9 +2177,7 @@ mod connection_tests {
         let db = TestDbFile::new("_test_ceil_floor_and_power_functions");
         let mut conn = Connection::new(db.path())?;
 
-        conn.execute(
-            "CREATE TABLE metrics (id INT PRIMARY KEY, score FLOAT, exponent INT);",
-        )?;
+        conn.execute("CREATE TABLE metrics (id INT PRIMARY KEY, score FLOAT, exponent INT);")?;
         conn.execute("INSERT INTO metrics (id, score, exponent) VALUES (1, 2.25, 3);")?;
 
         let result = conn.execute(
@@ -2217,9 +2248,7 @@ mod connection_tests {
         let db = TestDbFile::new("_test_check_constraint_rejects_invalid_insert");
         let mut conn = Connection::new(db.path())?;
 
-        conn.execute(
-            "CREATE TABLE test (id INT PRIMARY KEY, score INT, CHECK (score >= 0));",
-        )?;
+        conn.execute("CREATE TABLE test (id INT PRIMARY KEY, score INT, CHECK (score >= 0));")?;
 
         let result = conn.execute("INSERT INTO test (id, score) VALUES (1, -1);");
         assert!(result.is_err());
@@ -2233,9 +2262,7 @@ mod connection_tests {
         let db = TestDbFile::new("_test_check_constraint_rejects_invalid_update");
         let mut conn = Connection::new(db.path())?;
 
-        conn.execute(
-            "CREATE TABLE test (id INT PRIMARY KEY, score INT, CHECK (score >= 0));",
-        )?;
+        conn.execute("CREATE TABLE test (id INT PRIMARY KEY, score INT, CHECK (score >= 0));")?;
         conn.execute("INSERT INTO test (id, score) VALUES (1, 1);")?;
 
         let result = conn.execute("UPDATE test SET score = -1 WHERE id = 1;");
@@ -2419,9 +2446,7 @@ mod connection_tests {
         let db = TestDbFile::new("_test_rename_column_rewrites_check_constraints");
         let mut conn = Connection::new(db.path())?;
 
-        conn.execute(
-            "CREATE TABLE users (id INT PRIMARY KEY, name TEXT, CHECK (name != ''));",
-        )?;
+        conn.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT, CHECK (name != ''));")?;
         conn.execute("ALTER TABLE users RENAME COLUMN name TO full_name;")?;
         conn.execute("INSERT INTO users (id, full_name) VALUES (1, 'alice');")?;
 
@@ -2540,9 +2565,7 @@ mod connection_tests {
         let db = TestDbFile::new("_test_alter_table_drop_column_rejects_check_dependency");
         let mut conn = Connection::new(db.path())?;
 
-        conn.execute(
-            "CREATE TABLE users (id INT PRIMARY KEY, score INT, CHECK (score >= 0));",
-        )?;
+        conn.execute("CREATE TABLE users (id INT PRIMARY KEY, score INT, CHECK (score >= 0));")?;
 
         let err = conn
             .execute("ALTER TABLE users DROP COLUMN score;")
@@ -2825,9 +2848,7 @@ mod connection_tests {
         let db = TestDbFile::new("_test_composite_primary_key_lookup");
         let mut conn = Connection::new(db.path())?;
 
-        conn.execute(
-            "CREATE TABLE edges (src INT PRIMARY KEY, dst INT PRIMARY KEY, weight INT);",
-        )?;
+        conn.execute("CREATE TABLE edges (src INT PRIMARY KEY, dst INT PRIMARY KEY, weight INT);")?;
         conn.execute("INSERT INTO edges (src, dst, weight) VALUES (1, 2, 7);")?;
         conn.execute("INSERT INTO edges (src, dst, weight) VALUES (1, 3, 9);")?;
 
@@ -4162,9 +4183,7 @@ mod connection_tests {
         let mut conn = Connection::new(db.path())?;
 
         conn.execute("CREATE TABLE orgs (id INT PRIMARY KEY, active BOOLEAN);")?;
-        conn.execute(
-            "CREATE TABLE users (id INT PRIMARY KEY, org_id INT, email TEXT UNIQUE);",
-        )?;
+        conn.execute("CREATE TABLE users (id INT PRIMARY KEY, org_id INT, email TEXT UNIQUE);")?;
         conn.execute("INSERT INTO orgs (id, active) VALUES (1, TRUE), (2, FALSE);")?;
         conn.execute(
             "INSERT INTO users (id, org_id, email) VALUES (1, 1, 'a@example.com'), (2, 2, 'b@example.com');",
@@ -4214,9 +4233,7 @@ mod connection_tests {
 
         {
             let mut conn = Connection::new(db.path())?;
-            conn.execute(
-                "CREATE TABLE users (id INT PRIMARY KEY, email TEXT, org_id INT);",
-            )?;
+            conn.execute("CREATE TABLE users (id INT PRIMARY KEY, email TEXT, org_id INT);")?;
             conn.execute("ALTER TABLE users ADD CONSTRAINT uq_users_email UNIQUE (email);")?;
             conn.execute(
                 "ALTER TABLE users ADD CONSTRAINT fk_users_org FOREIGN KEY (org_id) REFERENCES users (id) ON DELETE RESTRICT ON UPDATE RESTRICT;",
@@ -4570,9 +4587,7 @@ mod connection_tests {
         let db = TestDbFile::new("_test_insert_on_duplicate_key_update");
         let mut conn = Connection::new(db.path())?;
 
-        conn.execute(
-            "CREATE TABLE test (id INT PRIMARY KEY, name TEXT UNIQUE, visits INT);",
-        )?;
+        conn.execute("CREATE TABLE test (id INT PRIMARY KEY, name TEXT UNIQUE, visits INT);")?;
         conn.execute("INSERT INTO test (id, name, visits) VALUES (1, 'Alice', 1);")?;
 
         conn.execute(
