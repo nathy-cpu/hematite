@@ -438,7 +438,6 @@ impl Parser {
             | Token::Date
             | Token::Time
             | Token::DateTime
-            | Token::Timestamp
             | Token::Left
             | Token::Right
             | Token::Minus => {
@@ -1238,7 +1237,7 @@ impl Parser {
             Token::Cast => self.parse_cast_expression(),
             Token::Case => self.parse_case_expression(),
             Token::Interval => self.parse_interval_literal(),
-            Token::Date | Token::Time | Token::DateTime | Token::Timestamp
+            Token::Date | Token::Time | Token::DateTime
                 if self.next_token_is(&Token::LeftParen) =>
             {
                 self.parse_scalar_function_expression()
@@ -1421,10 +1420,6 @@ impl Parser {
             Token::Time => {
                 self.consume_token(&Token::Time)?;
                 Ok("TIME".to_string())
-            }
-            Token::Timestamp => {
-                self.consume_token(&Token::Timestamp)?;
-                Ok("TIMESTAMP".to_string())
             }
             Token::DateTime => {
                 self.consume_token(&Token::DateTime)?;
@@ -2498,7 +2493,6 @@ impl Parser {
                 return Ok(SqlTypeName::Time);
             }
             Token::DateTime => SqlTypeName::DateTime,
-            Token::Timestamp => SqlTypeName::Timestamp,
             Token::Varchar | Token::Char | Token::BinaryType | Token::VarBinary => {
                 self.consume_token(&token)?;
                 let length = self.parse_type_length()?;
@@ -2941,7 +2935,6 @@ const ALL_UPPERCASE_KEYWORDS: &[&str] = &[
     "DATE",
     "TIME",
     "DATETIME",
-    "TIMESTAMP",
     "ZONE",
     "CHAR",
     "VARCHAR",
@@ -3012,7 +3005,6 @@ const DATA_TYPE_KEYWORDS: &[&str] = &[
     "DATE",
     "TIME",
     "DATETIME",
-    "TIMESTAMP",
     "CHAR",
     "VARCHAR",
     "BINARY",
@@ -3052,6 +3044,8 @@ fn legacy_integer_type_replacement(name: &str) -> Option<(&'static str, &'static
 fn removed_type_replacement(name: &str) -> Option<(&'static str, &'static str)> {
     if name.eq_ignore_ascii_case("NUMERIC") {
         Some(("NUMERIC", "DECIMAL"))
+    } else if name.eq_ignore_ascii_case("TIMESTAMP") {
+        Some(("TIMESTAMP", "DATETIME"))
     } else {
         None
     }
@@ -3147,7 +3141,6 @@ fn token_keyword_name(token: &Token) -> Option<&'static str> {
         Token::Date => Some("DATE"),
         Token::Time => Some("TIME"),
         Token::DateTime => Some("DATETIME"),
-        Token::Timestamp => Some("TIMESTAMP"),
         Token::Zone => Some("ZONE"),
         Token::Char => Some("CHAR"),
         Token::Varchar => Some("VARCHAR"),

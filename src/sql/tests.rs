@@ -1,7 +1,7 @@
 //! Centralized tests for the sql module
 
 mod connection_tests {
-    use crate::catalog::{DataType, JournalMode, TimeValue, TimeWithTimeZoneValue, TimestampValue};
+    use crate::catalog::{DataType, DateTimeValue, JournalMode, TimeValue, TimeWithTimeZoneValue};
     use crate::error::Result;
     use crate::sql::connection::*;
     use crate::test_utils::TestDbFile;
@@ -254,7 +254,7 @@ mod connection_tests {
             "CREATE TABLE typed (\
                 id INT PRIMARY KEY,\
                 at TIME,\
-                stamped TIMESTAMP,\
+                stamped DATETIME,\
                 zone_time TIME WITH TIME ZONE,\
                 code BINARY(4),\
                 bytes VARBINARY(8),\
@@ -272,8 +272,8 @@ mod connection_tests {
         let row = crate::sql::result::Row::new(result.rows[0].clone());
         assert_eq!(row.get_time(0)?, TimeValue::parse("10:11:12")?);
         assert_eq!(
-            row.get_timestamp(1)?,
-            TimestampValue::parse("2026-03-28 13:14:15")?
+            row.get_datetime(1)?,
+            DateTimeValue::parse("2026-03-28 13:14:15")?
         );
         assert_eq!(
             row.get_time_with_time_zone(2)?,
@@ -298,7 +298,7 @@ mod connection_tests {
                 event_date DATE,\
                 at TIME,\
                 created_at DATETIME,\
-                stamped TIMESTAMP,\
+                stamped DATETIME,\
                 zone_time TIME WITH TIME ZONE\
             );",
         )?;
@@ -343,11 +343,11 @@ mod connection_tests {
         assert_eq!(row.get_time(9)?.to_string(), "01:01:01");
         assert_eq!(
             row.get_bigint(10)?,
-            TimestampValue::parse("2026-03-28 13:14:15")?.seconds_since_epoch()
+            DateTimeValue::parse("2026-03-28 13:14:15")?.seconds_since_epoch()
         );
         assert_eq!(row.get_date(11)?.to_string(), "2026-03-30");
         assert_eq!(row.get_datetime(12)?.to_string(), "2026-03-28 13:15:00");
-        assert_eq!(row.get_timestamp(13)?.to_string(), "2026-03-28 13:14:00");
+        assert_eq!(row.get_datetime(13)?.to_string(), "2026-03-28 13:14:00");
         assert_eq!(row.get_time(14)?.to_string(), "10:13:12");
         assert_eq!(
             row.get_time_with_time_zone(15)?.to_string(),
@@ -373,7 +373,7 @@ mod connection_tests {
                 DATE('2026-03-28') - INTERVAL '2 00:00:00' DAY TO SECOND, \
                 CAST('2026-03-28 13:14:15' AS DATETIME) + INTERVAL '0-01' YEAR TO MONTH, \
                 CAST('2026-03-28 13:14:15' AS DATETIME) + INTERVAL '1 00:00:45' DAY TO SECOND, \
-                CAST('2026-03-28 13:14:15' AS TIMESTAMP) - INTERVAL '0-02' YEAR TO MONTH, \
+                CAST('2026-03-28 13:14:15' AS DATETIME) - INTERVAL '0-02' YEAR TO MONTH, \
                 TIME('10:11:12') + INTERVAL '0 01:02:03' DAY TO SECOND, \
                 INTERVAL '1-02' YEAR TO MONTH + INTERVAL '0-10' YEAR TO MONTH, \
                 INTERVAL '1 00:00:30' DAY TO SECOND - INTERVAL '0 00:00:45' DAY TO SECOND \
@@ -385,7 +385,7 @@ mod connection_tests {
         assert_eq!(row.get_date(1)?.to_string(), "2026-03-26");
         assert_eq!(row.get_datetime(2)?.to_string(), "2026-04-28 13:14:15");
         assert_eq!(row.get_datetime(3)?.to_string(), "2026-03-29 13:15:00");
-        assert_eq!(row.get_timestamp(4)?.to_string(), "2026-01-28 13:14:15");
+        assert_eq!(row.get_datetime(4)?.to_string(), "2026-01-28 13:14:15");
         assert_eq!(row.get_time(5)?.to_string(), "11:13:15");
         assert_eq!(row.get_interval_year_month(6)?.to_string(), "2-00");
         assert_eq!(row.get_interval_day_second(7)?.to_string(), "0 23:59:45");
@@ -5610,7 +5610,7 @@ mod interface_tests {
 
 mod result_tests {
     use crate::catalog::{
-        DateTimeValue, DateValue, DecimalValue, TimeValue, TimeWithTimeZoneValue, TimestampValue,
+        DateTimeValue, DateValue, DecimalValue, TimeValue, TimeWithTimeZoneValue,
     };
     use crate::error::Result;
     use crate::query::{QueryResult, Value};
@@ -5673,7 +5673,7 @@ mod result_tests {
             Value::Date(DateValue::parse("2026-03-27")?),
             Value::DateTime(DateTimeValue::parse("2026-03-27 10:11:12")?),
             Value::Time(TimeValue::parse("10:11:12")?),
-            Value::Timestamp(TimestampValue::parse("2026-03-27 10:11:12")?),
+            Value::DateTime(DateTimeValue::parse("2026-03-27 10:11:12")?),
             Value::TimeWithTimeZone(TimeWithTimeZoneValue::parse("10:11:12+03:00")?),
             Value::Enum("live".to_string()),
         ];
@@ -5686,7 +5686,7 @@ mod result_tests {
         assert_eq!(row.get_date(3)?.to_string(), "2026-03-27");
         assert_eq!(row.get_datetime(4)?.to_string(), "2026-03-27 10:11:12");
         assert_eq!(row.get_time(5)?.to_string(), "10:11:12");
-        assert_eq!(row.get_timestamp(6)?.to_string(), "2026-03-27 10:11:12");
+        assert_eq!(row.get_datetime(6)?.to_string(), "2026-03-27 10:11:12");
         assert_eq!(
             row.get_time_with_time_zone(7)?.to_string(),
             "10:11:12+03:00"

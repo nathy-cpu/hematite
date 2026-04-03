@@ -101,7 +101,6 @@ fn render_value(value: Value) -> String {
         Value::Date(value) => value.to_string(),
         Value::Time(value) => value.to_string(),
         Value::DateTime(value) => value.to_string(),
-        Value::Timestamp(value) => value.to_string(),
         Value::TimeWithTimeZone(value) => value.to_string(),
         Value::IntervalYearMonth(value) => value.to_string(),
         Value::IntervalDaySecond(value) => value.to_string(),

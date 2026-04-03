@@ -35,7 +35,6 @@ pub enum DataType {
     Date,
     Time,
     DateTime,
-    Timestamp,
     TimeWithTimeZone,
 }
 
@@ -65,7 +64,6 @@ impl DataType {
             DataType::Date => 4,
             DataType::Time => 4,
             DataType::DateTime => 8,
-            DataType::Timestamp => 8,
             DataType::TimeWithTimeZone => 6,
         }
     }
@@ -106,7 +104,6 @@ impl DataType {
             DataType::Date => "DATE".to_string(),
             DataType::Time => "TIME".to_string(),
             DataType::DateTime => "DATETIME".to_string(),
-            DataType::Timestamp => "TIMESTAMP".to_string(),
             DataType::TimeWithTimeZone => "TIME WITH TIME ZONE".to_string(),
         }
     }
@@ -138,7 +135,6 @@ impl DataType {
             DataType::Date => "DATE",
             DataType::Time => "TIME",
             DataType::DateTime => "DATETIME",
-            DataType::Timestamp => "TIMESTAMP",
             DataType::TimeWithTimeZone => "TIME WITH TIME ZONE",
         }
     }
@@ -1312,45 +1308,6 @@ impl fmt::Display for DateTimeValue {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct TimestampValue {
-    seconds_since_epoch: i64,
-}
-
-impl TimestampValue {
-    pub fn epoch() -> Self {
-        Self {
-            seconds_since_epoch: 0,
-        }
-    }
-
-    pub fn parse(input: &str) -> Result<Self> {
-        Ok(Self {
-            seconds_since_epoch: DateTimeValue::parse(input)?.seconds_since_epoch(),
-        })
-    }
-
-    pub fn from_seconds_since_epoch(seconds_since_epoch: i64) -> Self {
-        Self {
-            seconds_since_epoch,
-        }
-    }
-
-    pub fn seconds_since_epoch(self) -> i64 {
-        self.seconds_since_epoch
-    }
-
-    pub fn components(self) -> (DateValue, TimeValue) {
-        DateTimeValue::from_seconds_since_epoch(self.seconds_since_epoch).components()
-    }
-}
-
-impl fmt::Display for TimestampValue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        DateTimeValue::from_seconds_since_epoch(self.seconds_since_epoch).fmt(f)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TimeWithTimeZoneValue {
     seconds_since_midnight: u32,
     offset_minutes: i16,
@@ -1594,7 +1551,6 @@ pub enum Value {
     Date(DateValue),
     Time(TimeValue),
     DateTime(DateTimeValue),
-    Timestamp(TimestampValue),
     TimeWithTimeZone(TimeWithTimeZoneValue),
     IntervalYearMonth(IntervalYearMonthValue),
     IntervalDaySecond(IntervalDaySecondValue),
@@ -1624,7 +1580,6 @@ impl Value {
             Value::Date(_) => DataType::Date,
             Value::Time(_) => DataType::Time,
             Value::DateTime(_) => DataType::DateTime,
-            Value::Timestamp(_) => DataType::Timestamp,
             Value::TimeWithTimeZone(_) => DataType::TimeWithTimeZone,
             Value::IntervalYearMonth(_) | Value::IntervalDaySecond(_) => DataType::Text,
             Value::Null => DataType::Text,
@@ -1661,7 +1616,6 @@ impl Value {
             (Value::Date(_), DataType::Date) => true,
             (Value::Time(_), DataType::Time) => true,
             (Value::DateTime(_), DataType::DateTime) => true,
-            (Value::Timestamp(_), DataType::Timestamp) => true,
             (Value::TimeWithTimeZone(_), DataType::TimeWithTimeZone) => true,
             (Value::Null, _) => true,
             _ => false,
@@ -1683,7 +1637,6 @@ impl Value {
             Value::Date(s) => Some(s.to_string()),
             Value::Time(s) => Some(s.to_string()),
             Value::DateTime(s) => Some(s.to_string()),
-            Value::Timestamp(s) => Some(s.to_string()),
             Value::TimeWithTimeZone(s) => Some(s.to_string()),
             Value::IntervalYearMonth(s) => Some(s.to_string()),
             Value::IntervalDaySecond(s) => Some(s.to_string()),
@@ -1833,7 +1786,6 @@ impl PartialOrd for Value {
             (Value::Date(a), Value::Date(b)) => a.partial_cmp(b),
             (Value::Time(a), Value::Time(b)) => a.partial_cmp(b),
             (Value::DateTime(a), Value::DateTime(b)) => a.partial_cmp(b),
-            (Value::Timestamp(a), Value::Timestamp(b)) => a.partial_cmp(b),
             (Value::TimeWithTimeZone(a), Value::TimeWithTimeZone(b)) => a.partial_cmp(b),
             (Value::IntervalYearMonth(a), Value::IntervalYearMonth(b)) => a.partial_cmp(b),
             (Value::IntervalDaySecond(a), Value::IntervalDaySecond(b)) => a.partial_cmp(b),

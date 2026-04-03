@@ -25,8 +25,7 @@ use crate::catalog::table::{
 use crate::catalog::StoredRow;
 use crate::catalog::{
     Column, DataType, DateTimeValue, DateValue, DecimalValue, Float128Value,
-    IntervalDaySecondValue, IntervalYearMonthValue, Table, TimeValue, TimeWithTimeZoneValue,
-    TimestampValue, Value,
+    IntervalDaySecondValue, IntervalYearMonthValue, Table, TimeValue, TimeWithTimeZoneValue, Value,
 };
 use crate::error::{HematiteError, Result};
 use crate::parser::ast::*;
@@ -4952,10 +4951,6 @@ fn coerce_column_value(column: &Column, value: Value) -> Result<Value> {
         (DataType::Time, Value::Text(s)) => Ok(Value::Time(validate_time_string(&s)?)),
         (DataType::DateTime, Value::DateTime(s)) => Ok(Value::DateTime(s)),
         (DataType::DateTime, Value::Text(s)) => Ok(Value::DateTime(validate_datetime_string(&s)?)),
-        (DataType::Timestamp, Value::Timestamp(s)) => Ok(Value::Timestamp(s)),
-        (DataType::Timestamp, Value::Text(s)) => {
-            Ok(Value::Timestamp(validate_timestamp_string(&s)?))
-        }
         (DataType::TimeWithTimeZone, Value::TimeWithTimeZone(s)) => Ok(Value::TimeWithTimeZone(s)),
         (DataType::TimeWithTimeZone, Value::Text(s)) => Ok(Value::TimeWithTimeZone(
             validate_time_with_time_zone_string(&s)?,
@@ -5703,36 +5698,6 @@ fn evaluate_temporal_arithmetic(
             )))
         }
 
-        (Value::Timestamp(left), Value::Timestamp(right))
-            if matches!(operator, ArithmeticOperator::Subtract) =>
-        {
-            Ok(Some(Value::BigInt(
-                left.seconds_since_epoch() - right.seconds_since_epoch(),
-            )))
-        }
-        (Value::Timestamp(left), Value::IntervalYearMonth(interval)) => Ok(Some(Value::Timestamp(
-            add_months_to_timestamp(*left, signed_interval_months(operator, *interval)?)?,
-        ))),
-        (Value::Timestamp(left), Value::IntervalDaySecond(interval)) => {
-            let seconds = signed_interval_seconds(operator, *interval)?;
-            Ok(Some(Value::Timestamp(
-                TimestampValue::from_seconds_since_epoch(left.seconds_since_epoch() + seconds),
-            )))
-        }
-        (Value::Timestamp(left), right) => {
-            let Some(seconds) = integral_rhs(right) else {
-                return Ok(None);
-            };
-            let delta = match operator {
-                ArithmeticOperator::Add => seconds,
-                ArithmeticOperator::Subtract => -seconds,
-                _ => return Ok(None),
-            };
-            Ok(Some(Value::Timestamp(
-                TimestampValue::from_seconds_since_epoch(left.seconds_since_epoch() + delta),
-            )))
-        }
-
         (Value::Time(left), Value::Time(right))
             if matches!(operator, ArithmeticOperator::Subtract) =>
         {
@@ -5866,16 +5831,6 @@ fn add_months_to_datetime(value: DateTimeValue, delta_months: i32) -> Result<Dat
     let shifted_date = add_months_to_date(date, delta_months)?;
     Ok(DateTimeValue::from_seconds_since_epoch(
         shifted_date.days_since_epoch() as i64 * 86_400 + time.seconds_since_midnight() as i64,
-    ))
-}
-
-fn add_months_to_timestamp(value: TimestampValue, delta_months: i32) -> Result<TimestampValue> {
-    Ok(TimestampValue::from_seconds_since_epoch(
-        add_months_to_datetime(
-            DateTimeValue::from_seconds_since_epoch(value.seconds_since_epoch()),
-            delta_months,
-        )?
-        .seconds_since_epoch(),
     ))
 }
 
@@ -6176,7 +6131,6 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
         (DataType::Text, Value::Date(value)) => Ok(Value::Text(value.to_string())),
         (DataType::Text, Value::Time(value)) => Ok(Value::Text(value.to_string())),
         (DataType::Text, Value::DateTime(value)) => Ok(Value::Text(value.to_string())),
-        (DataType::Text, Value::Timestamp(value)) => Ok(Value::Text(value.to_string())),
         (DataType::Text, Value::TimeWithTimeZone(value)) => Ok(Value::Text(value.to_string())),
         (DataType::Text, Value::Blob(value)) => {
             Ok(Value::Text(String::from_utf8_lossy(&value).into_owned()))
@@ -6275,10 +6229,6 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
         (DataType::DateTime, Value::DateTime(value)) => Ok(Value::DateTime(value)),
         (DataType::DateTime, Value::Text(value)) => {
             Ok(Value::DateTime(validate_datetime_string(&value)?))
-        }
-        (DataType::Timestamp, Value::Timestamp(value)) => Ok(Value::Timestamp(value)),
-        (DataType::Timestamp, Value::Text(value)) => {
-            Ok(Value::Timestamp(validate_timestamp_string(&value)?))
         }
         (DataType::TimeWithTimeZone, Value::TimeWithTimeZone(value)) => {
             Ok(Value::TimeWithTimeZone(value))
@@ -6787,7 +6737,6 @@ fn coerce_value_to_string(function_name: &str, value: Value) -> Result<String> {
         Value::Date(text) => Ok(text.to_string()),
         Value::Time(text) => Ok(text.to_string()),
         Value::DateTime(text) => Ok(text.to_string()),
-        Value::Timestamp(text) => Ok(text.to_string()),
         Value::TimeWithTimeZone(text) => Ok(text.to_string()),
         Value::IntervalYearMonth(text) => Ok(text.to_string()),
         Value::IntervalDaySecond(text) => Ok(text.to_string()),
@@ -6818,7 +6767,6 @@ fn expect_text_argument(function_name: &str, value: Value) -> Result<String> {
         Value::Date(text) => Ok(text.to_string()),
         Value::Time(text) => Ok(text.to_string()),
         Value::DateTime(text) => Ok(text.to_string()),
-        Value::Timestamp(text) => Ok(text.to_string()),
         Value::TimeWithTimeZone(text) => Ok(text.to_string()),
         Value::Integer(value) => Ok(value.to_string()),
         Value::BigInt(value) => Ok(value.to_string()),
@@ -6897,10 +6845,8 @@ fn extract_date_component(function_name: &str, value: Value) -> Result<DateValue
     match value {
         Value::Date(value) => Ok(value),
         Value::DateTime(value) => Ok(value.components().0),
-        Value::Timestamp(value) => Ok(value.components().0),
         Value::Text(value) | Value::Enum(value) => DateValue::parse(&value)
             .or_else(|_| DateTimeValue::parse(&value).map(|value| value.components().0))
-            .or_else(|_| TimestampValue::parse(&value).map(|value| value.components().0))
             .map_err(|_| {
                 HematiteError::ParseError(format!(
                     "{} requires a DATE-like value, found '{}'",
@@ -6919,11 +6865,9 @@ fn extract_time_component(function_name: &str, value: Value) -> Result<TimeValue
         Value::Time(value) => Ok(value),
         Value::TimeWithTimeZone(value) => Ok(value.time()),
         Value::DateTime(value) => Ok(value.components().1),
-        Value::Timestamp(value) => Ok(value.components().1),
         Value::Text(value) | Value::Enum(value) => TimeValue::parse(&value)
             .or_else(|_| TimeWithTimeZoneValue::parse(&value).map(|value| value.time()))
             .or_else(|_| DateTimeValue::parse(&value).map(|value| value.components().1))
-            .or_else(|_| TimestampValue::parse(&value).map(|value| value.components().1))
             .map_err(|_| {
                 HematiteError::ParseError(format!(
                     "{} requires a TIME-like value, found '{}'",
@@ -6937,36 +6881,28 @@ fn extract_time_component(function_name: &str, value: Value) -> Result<TimeValue
     }
 }
 
-fn extract_timestamp_component(function_name: &str, value: Value) -> Result<TimestampValue> {
+fn extract_timestamp_component(function_name: &str, value: Value) -> Result<DateTimeValue> {
     match value {
-        Value::Timestamp(value) => Ok(value),
-        Value::DateTime(value) => Ok(TimestampValue::from_seconds_since_epoch(
-            value.seconds_since_epoch(),
-        )),
-        Value::Date(value) => Ok(TimestampValue::from_seconds_since_epoch(
+        Value::DateTime(value) => Ok(value),
+        Value::Date(value) => Ok(DateTimeValue::from_seconds_since_epoch(
             value.days_since_epoch() as i64 * 86_400,
         )),
-        Value::Text(value) | Value::Enum(value) => TimestampValue::parse(&value)
-            .or_else(|_| {
-                DateTimeValue::parse(&value).map(|value| {
-                    TimestampValue::from_seconds_since_epoch(value.seconds_since_epoch())
-                })
-            })
+        Value::Text(value) | Value::Enum(value) => DateTimeValue::parse(&value)
             .or_else(|_| {
                 DateValue::parse(&value).map(|value| {
-                    TimestampValue::from_seconds_since_epoch(
+                    DateTimeValue::from_seconds_since_epoch(
                         value.days_since_epoch() as i64 * 86_400,
                     )
                 })
             })
             .map_err(|_| {
                 HematiteError::ParseError(format!(
-                    "{} requires a TIMESTAMP-like value, found '{}'",
+                    "{} requires a DATETIME-like value, found '{}'",
                     function_name, value
                 ))
             }),
         value => Err(HematiteError::ParseError(format!(
-            "{} requires a TIMESTAMP-like value, found {:?}",
+            "{} requires a DATETIME-like value, found {:?}",
             function_name, value
         ))),
     }
@@ -7376,10 +7312,6 @@ fn validate_time_string(input: &str) -> Result<TimeValue> {
 
 fn validate_datetime_string(input: &str) -> Result<DateTimeValue> {
     DateTimeValue::parse(input)
-}
-
-fn validate_timestamp_string(input: &str) -> Result<TimestampValue> {
-    TimestampValue::parse(input)
 }
 
 fn validate_time_with_time_zone_string(input: &str) -> Result<TimeWithTimeZoneValue> {

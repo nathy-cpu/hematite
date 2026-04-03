@@ -2,7 +2,7 @@
 
 use super::types::{
     DataType, DateTimeValue, DateValue, DecimalValue, Float128Value, TimeValue,
-    TimeWithTimeZoneValue, TimestampValue, Value,
+    TimeWithTimeZoneValue, Value,
 };
 use super::ColumnId;
 use crate::error::HematiteError;
@@ -115,7 +115,6 @@ impl Column {
                         DataType::Date => Value::Date(DateValue::epoch()),
                         DataType::Time => Value::Time(TimeValue::midnight()),
                         DataType::DateTime => Value::DateTime(DateTimeValue::epoch()),
-                        DataType::Timestamp => Value::Timestamp(TimestampValue::epoch()),
                         DataType::TimeWithTimeZone => {
                             Value::TimeWithTimeZone(TimeWithTimeZoneValue::utc_midnight())
                         }
@@ -257,7 +256,6 @@ fn write_data_type(buffer: &mut Vec<u8>, data_type: &DataType) {
         DataType::Date => buffer.push(17),
         DataType::Time => buffer.push(18),
         DataType::DateTime => buffer.push(19),
-        DataType::Timestamp => buffer.push(20),
         DataType::TimeWithTimeZone => buffer.push(21),
     }
 }
@@ -313,7 +311,7 @@ fn read_data_type(buffer: &[u8], offset: &mut usize) -> Result<DataType, Hematit
         17 => DataType::Date,
         18 => DataType::Time,
         19 => DataType::DateTime,
-        20 => DataType::Timestamp,
+        20 => DataType::DateTime,
         21 => DataType::TimeWithTimeZone,
         24 => DataType::Int128,
         25 => DataType::UInt,
@@ -431,10 +429,6 @@ fn write_optional_value(buffer: &mut Vec<u8>, value: Option<&Value>) {
         }
         Some(Value::DateTime(value)) => {
             buffer.push(8);
-            buffer.extend_from_slice(&value.seconds_since_epoch().to_le_bytes());
-        }
-        Some(Value::Timestamp(value)) => {
-            buffer.push(12);
             buffer.extend_from_slice(&value.seconds_since_epoch().to_le_bytes());
         }
         Some(Value::TimeWithTimeZone(value)) => {
@@ -600,11 +594,11 @@ fn read_optional_value(buffer: &[u8], offset: &mut usize) -> Result<Option<Value
         }
         12 => {
             let seconds = i64::from_le_bytes(
-                read_fixed(buffer, offset, 8, "default timestamp")?
+                read_fixed(buffer, offset, 8, "legacy default timestamp")?
                     .try_into()
                     .unwrap(),
             );
-            Some(Value::Timestamp(TimestampValue::from_seconds_since_epoch(
+            Some(Value::DateTime(DateTimeValue::from_seconds_since_epoch(
                 seconds,
             )))
         }

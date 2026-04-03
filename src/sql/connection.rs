@@ -189,7 +189,6 @@ impl Connection {
             Date,
             Time,
             DateTime,
-            Timestamp,
             TimeWithTimeZone,
         }
 
@@ -335,7 +334,6 @@ impl Connection {
                     (Date, Value::Date(_)) => Ok(Date),
                     (Time, Value::Time(_)) => Ok(Time),
                     (DateTime, Value::DateTime(_)) => Ok(DateTime),
-                    (Timestamp, Value::Timestamp(_)) => Ok(Timestamp),
                     (TimeWithTimeZone, Value::TimeWithTimeZone(_)) => Ok(TimeWithTimeZone),
                     (Boolean, Value::Boolean(_)) => Ok(Boolean),
                     (left, right) => Err(HematiteError::ParseError(format!(
@@ -373,7 +371,6 @@ impl Connection {
                     Value::Date(_) => Date,
                     Value::Time(_) => Time,
                     Value::DateTime(_) => DateTime,
-                    Value::Timestamp(_) => Timestamp,
                     Value::TimeWithTimeZone(_) => TimeWithTimeZone,
                     Value::IntervalYearMonth(_) | Value::IntervalDaySecond(_) => {
                         return Err(HematiteError::ParseError(format!(
@@ -410,7 +407,6 @@ impl Connection {
                     InferredKind::Date => SqlTypeName::Date,
                     InferredKind::Time => SqlTypeName::Time,
                     InferredKind::DateTime => SqlTypeName::DateTime,
-                    InferredKind::Timestamp => SqlTypeName::Timestamp,
                     InferredKind::TimeWithTimeZone => SqlTypeName::TimeWithTimeZone,
                 }
             }

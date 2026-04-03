@@ -2,8 +2,7 @@
 
 use crate::error::{HematiteError, Result};
 use crate::query::{
-    DateTimeValue, DateValue, DecimalValue, JournalMode, TimeValue, TimeWithTimeZoneValue,
-    TimestampValue, Value,
+    DateTimeValue, DateValue, DecimalValue, JournalMode, TimeValue, TimeWithTimeZoneValue, Value,
 };
 use crate::sql::connection::{Connection, PreparedStatement, Transaction};
 use crate::sql::result::{ExecutedStatement, ResultSet, Row, StatementResult};
@@ -147,7 +146,6 @@ impl FromValue for String {
             Value::Date(s) => Ok(s.to_string()),
             Value::Time(s) => Ok(s.to_string()),
             Value::DateTime(s) => Ok(s.to_string()),
-            Value::Timestamp(s) => Ok(s.to_string()),
             Value::TimeWithTimeZone(s) => Ok(s.to_string()),
             _ => Err(HematiteError::ParseError(format!(
                 "Expected TEXT, found {:?}",
@@ -321,18 +319,6 @@ impl FromValue for TimeValue {
             Value::Time(value) => Ok(*value),
             _ => Err(HematiteError::ParseError(format!(
                 "Expected TIME, found {:?}",
-                value
-            ))),
-        }
-    }
-}
-
-impl FromValue for TimestampValue {
-    fn from_value(value: &Value) -> Result<Self> {
-        match value {
-            Value::Timestamp(value) => Ok(*value),
-            _ => Err(HematiteError::ParseError(format!(
-                "Expected TIMESTAMP, found {:?}",
                 value
             ))),
         }

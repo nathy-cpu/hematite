@@ -3,7 +3,7 @@
 use crate::error::{HematiteError, Result};
 use crate::query::{
     DateTimeValue, DateValue, DecimalValue, IntervalDaySecondValue, IntervalYearMonthValue,
-    QueryResult, TimeValue, TimeWithTimeZoneValue, TimestampValue, Value,
+    QueryResult, TimeValue, TimeWithTimeZoneValue, Value,
 };
 use std::collections::HashMap;
 
@@ -119,7 +119,6 @@ impl Row {
             Some(Value::Date(value)) => Ok(value.to_string()),
             Some(Value::Time(value)) => Ok(value.to_string()),
             Some(Value::DateTime(value)) => Ok(value.to_string()),
-            Some(Value::Timestamp(value)) => Ok(value.to_string()),
             Some(Value::TimeWithTimeZone(value)) => Ok(value.to_string()),
             Some(Value::IntervalYearMonth(value)) => Ok(value.to_string()),
             Some(Value::IntervalDaySecond(value)) => Ok(value.to_string()),
@@ -305,19 +304,6 @@ impl Row {
             Some(Value::DateTime(value)) => Ok(*value),
             Some(value) => Err(HematiteError::ParseError(format!(
                 "Expected DATETIME, found {:?}",
-                value
-            ))),
-            None => Err(HematiteError::ParseError(
-                "Column index out of bounds".to_string(),
-            )),
-        }
-    }
-
-    pub fn get_timestamp(&self, index: usize) -> Result<TimestampValue> {
-        match self.get(index) {
-            Some(Value::Timestamp(value)) => Ok(*value),
-            Some(value) => Err(HematiteError::ParseError(format!(
-                "Expected TIMESTAMP, found {:?}",
                 value
             ))),
             None => Err(HematiteError::ParseError(

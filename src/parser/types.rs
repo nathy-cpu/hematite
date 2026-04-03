@@ -32,7 +32,6 @@ pub enum SqlTypeName {
     Date,
     Time,
     DateTime,
-    Timestamp,
     TimeWithTimeZone,
 }
 
@@ -73,7 +72,6 @@ impl SqlTypeName {
             SqlTypeName::Date => "DATE".to_string(),
             SqlTypeName::Time => "TIME".to_string(),
             SqlTypeName::DateTime => "DATETIME".to_string(),
-            SqlTypeName::Timestamp => "TIMESTAMP".to_string(),
             SqlTypeName::TimeWithTimeZone => "TIME WITH TIME ZONE".to_string(),
         }
     }
@@ -134,7 +132,6 @@ impl LiteralValue {
             (LiteralValue::Text(_), SqlTypeName::Date) => true,
             (LiteralValue::Text(_), SqlTypeName::Time) => true,
             (LiteralValue::Text(_), SqlTypeName::DateTime) => true,
-            (LiteralValue::Text(_), SqlTypeName::Timestamp) => true,
             (LiteralValue::Text(_), SqlTypeName::TimeWithTimeZone) => true,
             (LiteralValue::Text(_), SqlTypeName::Decimal { .. }) => true,
             (LiteralValue::Boolean(_), SqlTypeName::Boolean) => true,

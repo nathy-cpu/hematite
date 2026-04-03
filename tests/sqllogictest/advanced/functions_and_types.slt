@@ -6,7 +6,7 @@ CREATE TABLE typed_values (
   day_value DATE,
   time_value TIME,
   dt_value DATETIME,
-  ts_value TIMESTAMP,
+  ts_value DATETIME,
   zone_time TIME WITH TIME ZONE,
   state ENUM('draft', 'live')
 );
@@ -21,7 +21,7 @@ INSERT INTO typed_values (
   DATE('2026-03-28'),
   TIME('10:11:12'),
   CAST('2026-03-28 13:14:15' AS DATETIME),
-  CAST('2026-03-28 13:14:15' AS TIMESTAMP),
+  CAST('2026-03-28 13:14:15' AS DATETIME),
   CAST('10:11:12+03:00' AS TIME WITH TIME ZONE),
   'draft'
 );

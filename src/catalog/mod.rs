@@ -45,5 +45,5 @@ pub use serialization::{IndexKeyCodec, RowCodec, RowSerializer};
 pub use table::{SecondaryIndex, Table};
 pub use types::{
     DataType, DateTimeValue, DateValue, DecimalValue, Float128Value, IntervalDaySecondValue,
-    IntervalYearMonthValue, JournalMode, TimeValue, TimeWithTimeZoneValue, TimestampValue, Value,
+    IntervalYearMonthValue, JournalMode, TimeValue, TimeWithTimeZoneValue, Value,
 };

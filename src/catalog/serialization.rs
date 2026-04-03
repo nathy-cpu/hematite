@@ -1,8 +1,7 @@
 //! Relational row and index-key encoding.
 
 use crate::catalog::{
-    DateTimeValue, DateValue, DecimalValue, Float128Value, TimeValue, TimeWithTimeZoneValue,
-    TimestampValue, Value,
+    DateTimeValue, DateValue, DecimalValue, Float128Value, TimeValue, TimeWithTimeZoneValue, Value,
 };
 use crate::error::{HematiteError, Result};
 
@@ -93,10 +92,6 @@ impl RowCodec {
                 Value::DateTime(datetime) => {
                     buffer.push(10);
                     buffer.extend_from_slice(&datetime.seconds_since_epoch().to_le_bytes());
-                }
-                Value::Timestamp(timestamp) => {
-                    buffer.push(13);
-                    buffer.extend_from_slice(&timestamp.seconds_since_epoch().to_le_bytes());
                 }
                 Value::TimeWithTimeZone(value) => {
                     buffer.push(14);
@@ -258,10 +253,11 @@ impl RowCodec {
                     )))
                 }
                 13 => {
-                    let bytes = read_exact(data, &mut offset, payload_end, 8, "Timestamp value")?;
-                    Value::Timestamp(TimestampValue::from_seconds_since_epoch(
-                        i64::from_le_bytes(bytes.try_into().unwrap()),
-                    ))
+                    let bytes =
+                        read_exact(data, &mut offset, payload_end, 8, "legacy Timestamp value")?;
+                    Value::DateTime(DateTimeValue::from_seconds_since_epoch(i64::from_le_bytes(
+                        bytes.try_into().unwrap(),
+                    )))
                 }
                 14 => {
                     let seconds = u32::from_le_bytes(
@@ -465,10 +461,6 @@ fn encode_key_value(buffer: &mut Vec<u8>, value: &Value) {
         }
         Value::DateTime(value) => {
             buffer.push(10);
-            buffer.extend_from_slice(&(i64::to_be_bytes(value.seconds_since_epoch() ^ i64::MIN)));
-        }
-        Value::Timestamp(value) => {
-            buffer.push(13);
             buffer.extend_from_slice(&(i64::to_be_bytes(value.seconds_since_epoch() ^ i64::MIN)));
         }
         Value::TimeWithTimeZone(value) => {

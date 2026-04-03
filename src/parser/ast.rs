@@ -4366,7 +4366,6 @@ fn sql_type_name_for_catalog_type(data_type: crate::catalog::DataType) -> SqlTyp
         crate::catalog::DataType::Date => SqlTypeName::Date,
         crate::catalog::DataType::Time => SqlTypeName::Time,
         crate::catalog::DataType::DateTime => SqlTypeName::DateTime,
-        crate::catalog::DataType::Timestamp => SqlTypeName::Timestamp,
         crate::catalog::DataType::TimeWithTimeZone => SqlTypeName::TimeWithTimeZone,
     }
 }

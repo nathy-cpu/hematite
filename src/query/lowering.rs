@@ -46,7 +46,6 @@ pub(crate) fn raise_literal_value(value: &Value) -> LiteralValue {
         Value::Date(value) => LiteralValue::Text(value.to_string()),
         Value::Time(value) => LiteralValue::Text(value.to_string()),
         Value::DateTime(value) => LiteralValue::Text(value.to_string()),
-        Value::Timestamp(value) => LiteralValue::Text(value.to_string()),
         Value::TimeWithTimeZone(value) => LiteralValue::Text(value.to_string()),
         Value::IntervalYearMonth(value) => LiteralValue::Text(value.to_string()),
         Value::IntervalDaySecond(value) => LiteralValue::Text(value.to_string()),
@@ -81,7 +80,6 @@ pub(crate) fn lower_type_name(data_type: SqlTypeName) -> DataType {
         SqlTypeName::Date => DataType::Date,
         SqlTypeName::Time => DataType::Time,
         SqlTypeName::DateTime => DataType::DateTime,
-        SqlTypeName::Timestamp => DataType::Timestamp,
         SqlTypeName::TimeWithTimeZone => DataType::TimeWithTimeZone,
     }
 }

@@ -1048,6 +1048,16 @@ mod parser_tests {
     }
 
     #[test]
+    fn test_parse_rejects_timestamp_type_name() {
+        let err = parse_create("CREATE TABLE users (created_at TIMESTAMP);").unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::HematiteError::ParseError(message)
+                if message.contains("Legacy type 'TIMESTAMP' is not supported; use 'DATETIME'")
+        ));
+    }
+
+    #[test]
     fn test_parse_select_with_where() -> Result<()> {
         let select = parse_select("SELECT id FROM users WHERE id = 1;")?;
         assert!(select.where_clause.is_some());
@@ -1795,10 +1805,10 @@ mod parser_tests {
     #[test]
     fn test_parse_additional_temporal_binary_and_enum_types() -> Result<()> {
         let create = parse_create(
-            "CREATE TABLE typed (id INT PRIMARY KEY, at TIME, stamped TIMESTAMP, zone_time TIME WITH TIME ZONE, code BINARY(4), bytes VARBINARY(16), state ENUM('draft', 'live'));",
+            "CREATE TABLE typed (id INT PRIMARY KEY, at TIME, stamped DATETIME, zone_time TIME WITH TIME ZONE, code BINARY(4), bytes VARBINARY(16), state ENUM('draft', 'live'));",
         )?;
         assert_eq!(create.columns[1].data_type, SqlTypeName::Time);
-        assert_eq!(create.columns[2].data_type, SqlTypeName::Timestamp);
+        assert_eq!(create.columns[2].data_type, SqlTypeName::DateTime);
         assert_eq!(create.columns[3].data_type, SqlTypeName::TimeWithTimeZone);
         assert_eq!(create.columns[4].data_type, SqlTypeName::Binary(4));
         assert_eq!(create.columns[5].data_type, SqlTypeName::VarBinary(16));
