@@ -288,6 +288,39 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_binary_columns_compare_with_zero_padding_semantics() -> Result<()> {
+        let db = TestDbFile::new("_test_binary_columns_compare_with_zero_padding_semantics");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute(
+            "CREATE TABLE typed (\
+                id INT PRIMARY KEY,\
+                code BINARY(4),\
+                payload VARBINARY(4)\
+            );",
+        )?;
+        conn.execute("INSERT INTO typed (id, code, payload) VALUES (1, X'4142', X'4142');")?;
+
+        let binary_match = conn.execute("SELECT id FROM typed WHERE code = X'4142';")?;
+        assert_eq!(binary_match.rows, vec![vec![crate::catalog::Value::Integer(1)]]);
+
+        let varbinary_match = conn.execute("SELECT id FROM typed WHERE payload = X'4142';")?;
+        assert_eq!(
+            varbinary_match.rows,
+            vec![vec![crate::catalog::Value::Integer(1)]]
+        );
+
+        let padded_binary_match = conn.execute("SELECT id FROM typed WHERE code = X'41420000';")?;
+        assert_eq!(
+            padded_binary_match.rows,
+            vec![vec![crate::catalog::Value::Integer(1)]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_temporal_scalar_functions_and_arithmetic() -> Result<()> {
         let db = TestDbFile::new("_test_temporal_scalar_functions_and_arithmetic");
         let mut conn = Connection::new(db.path())?;

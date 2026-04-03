@@ -99,6 +99,7 @@ impl ResolvedSource {
 #[derive(Debug, Clone, Copy)]
 struct TextComparisonContext {
     trim_trailing_spaces: bool,
+    trim_trailing_zero_bytes: bool,
     case_insensitive: bool,
 }
 
@@ -231,6 +232,7 @@ impl SelectExecutor {
             .source_column_metadata(sources, flat_index)
             .map(|(data_type, collation)| TextComparisonContext {
                 trim_trailing_spaces: matches!(data_type, DataType::Char(_)),
+                trim_trailing_zero_bytes: matches!(data_type, DataType::Binary(_)),
                 case_insensitive: collation_is_nocase(collation.as_deref()),
             }))
     }
@@ -246,6 +248,7 @@ impl SelectExecutor {
         Ok(match (left_context, right_context) {
             (Some(left), Some(right)) => Some(TextComparisonContext {
                 trim_trailing_spaces: left.trim_trailing_spaces || right.trim_trailing_spaces,
+                trim_trailing_zero_bytes: left.trim_trailing_zero_bytes || right.trim_trailing_zero_bytes,
                 case_insensitive: left.case_insensitive || right.case_insensitive,
             }),
             (Some(context), None) | (None, Some(context)) => Some(context),
@@ -7455,6 +7458,25 @@ fn apply_text_comparison_context(value: &str, text_context: Option<TextCompariso
     normalized
 }
 
+fn apply_blob_comparison_context(
+    value: &[u8],
+    text_context: Option<TextComparisonContext>,
+) -> Vec<u8> {
+    if text_context.is_some_and(|context| context.trim_trailing_zero_bytes) {
+        value
+            .iter()
+            .copied()
+            .rev()
+            .skip_while(|byte| *byte == 0)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
+    } else {
+        value.to_vec()
+    }
+}
+
 fn like_matches_with_context(
     pattern: &str,
     text: &str,
@@ -7480,6 +7502,10 @@ fn sql_values_equal(
         return apply_text_comparison_context(left, text_context)
             == apply_text_comparison_context(right, text_context);
     }
+    if let (Value::Blob(left), Value::Blob(right)) = (left, right) {
+        return apply_blob_comparison_context(left, text_context)
+            == apply_blob_comparison_context(right, text_context);
+    }
 
     left == right
 }
@@ -7499,6 +7525,12 @@ fn sql_partial_cmp(
         return Some(
             apply_text_comparison_context(left, text_context)
                 .cmp(&apply_text_comparison_context(right, text_context)),
+        );
+    }
+    if let (Value::Blob(left), Value::Blob(right)) = (left, right) {
+        return Some(
+            apply_blob_comparison_context(left, text_context)
+                .cmp(&apply_blob_comparison_context(right, text_context)),
         );
     }
 

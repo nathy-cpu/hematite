@@ -87,8 +87,8 @@ impl Column {
             (DataType::UInt16, Value::UInteger(value)) => u16::try_from(*value).is_ok(),
             (DataType::Char(length), Value::Text(text)) => text.chars().count() == *length as usize,
             (DataType::VarChar(length), Value::Text(text)) => text.chars().count() <= *length as usize,
-            (DataType::Binary(length), Value::Blob(bytes))
-            | (DataType::VarBinary(length), Value::Blob(bytes)) => bytes.len() <= *length as usize,
+            (DataType::Binary(length), Value::Blob(bytes)) => bytes.len() == *length as usize,
+            (DataType::VarBinary(length), Value::Blob(bytes)) => bytes.len() <= *length as usize,
             (DataType::Enum(values), Value::Enum(value)) => values.contains(value),
             (DataType::Decimal { precision, scale }, Value::Decimal(value)) => {
                 value.fits_precision_scale(*precision, *scale)
@@ -254,6 +254,12 @@ pub(crate) fn pad_text_to_char_length(value: &str, length: u32) -> String {
         padded.push_str(&" ".repeat(length as usize - char_count));
         padded
     }
+}
+
+pub(crate) fn pad_binary_to_length(value: &[u8], length: u32) -> Vec<u8> {
+    let mut padded = value.to_vec();
+    padded.resize(length as usize, 0);
+    padded
 }
 
 pub(crate) fn normalize_text_for_collation(value: &str, collation: Option<&str>) -> String {

@@ -10,7 +10,9 @@ use super::engine::CatalogEngine;
 use super::record::StoredRow;
 use super::serialization::IndexKeyCodec;
 use super::table_store;
-use crate::catalog::column::{normalize_text_for_collation, pad_text_to_char_length};
+use crate::catalog::column::{
+    normalize_text_for_collation, pad_binary_to_length, pad_text_to_char_length,
+};
 
 const INVALID_ROOT_PAGE_ID: u32 = u32::MAX;
 
@@ -374,6 +376,9 @@ fn normalize_index_value(column: &Column, value: &Value) -> Value {
             crate::catalog::DataType::Text | crate::catalog::DataType::VarChar(_),
             Value::Text(text),
         ) => Value::Text(normalize_text_for_collation(text, column.collation.as_deref())),
+        (crate::catalog::DataType::Binary(length), Value::Blob(bytes)) => {
+            Value::Blob(pad_binary_to_length(bytes, *length))
+        }
         _ => value.clone(),
     }
 }
