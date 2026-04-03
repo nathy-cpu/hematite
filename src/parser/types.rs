@@ -28,10 +28,6 @@ pub enum SqlTypeName {
         precision: Option<u32>,
         scale: Option<u32>,
     },
-    Numeric {
-        precision: Option<u32>,
-        scale: Option<u32>,
-    },
     Blob,
     Date,
     Time,
@@ -72,9 +68,6 @@ impl SqlTypeName {
             SqlTypeName::Float128 => "FLOAT128".to_string(),
             SqlTypeName::Decimal { precision, scale } => {
                 format_numeric_type("DECIMAL", *precision, *scale)
-            }
-            SqlTypeName::Numeric { precision, scale } => {
-                format_numeric_type("NUMERIC", *precision, *scale)
             }
             SqlTypeName::Blob => "BLOB".to_string(),
             SqlTypeName::Date => "DATE".to_string(),
@@ -127,12 +120,10 @@ impl LiteralValue {
             (LiteralValue::Integer(value), SqlTypeName::UInt64) => *value >= 0,
             (LiteralValue::Integer(value), SqlTypeName::UInt128) => *value >= 0,
             (LiteralValue::Integer(_), SqlTypeName::Decimal { .. }) => true,
-            (LiteralValue::Integer(_), SqlTypeName::Numeric { .. }) => true,
             (LiteralValue::Float(_), SqlTypeName::Float32) => true,
             (LiteralValue::Float(_), SqlTypeName::Float) => true,
             (LiteralValue::Float(_), SqlTypeName::Float128) => true,
             (LiteralValue::Float(_), SqlTypeName::Decimal { .. }) => true,
-            (LiteralValue::Float(_), SqlTypeName::Numeric { .. }) => true,
             (LiteralValue::Text(_), SqlTypeName::Text) => true,
             (LiteralValue::Text(_), SqlTypeName::Char(_)) => true,
             (LiteralValue::Text(_), SqlTypeName::VarChar(_)) => true,
@@ -146,7 +137,6 @@ impl LiteralValue {
             (LiteralValue::Text(_), SqlTypeName::Timestamp) => true,
             (LiteralValue::Text(_), SqlTypeName::TimeWithTimeZone) => true,
             (LiteralValue::Text(_), SqlTypeName::Decimal { .. }) => true,
-            (LiteralValue::Text(_), SqlTypeName::Numeric { .. }) => true,
             (LiteralValue::Boolean(_), SqlTypeName::Boolean) => true,
             (LiteralValue::Null, _) => true,
             _ => false,

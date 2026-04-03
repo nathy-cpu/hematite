@@ -78,8 +78,7 @@ impl Column {
             (DataType::Binary(length), Value::Blob(bytes))
             | (DataType::VarBinary(length), Value::Blob(bytes)) => bytes.len() <= *length as usize,
             (DataType::Enum(values), Value::Enum(value)) => values.contains(value),
-            (DataType::Decimal { precision, scale }, Value::Decimal(value))
-            | (DataType::Numeric { precision, scale }, Value::Decimal(value)) => {
+            (DataType::Decimal { precision, scale }, Value::Decimal(value)) => {
                 value.fits_precision_scale(*precision, *scale)
             }
             _ => true,
@@ -112,9 +111,7 @@ impl Column {
                         DataType::Float32 => Value::Float32(0.0),
                         DataType::Float => Value::Float(0.0),
                         DataType::Float128 => Value::Float128(Float128Value::zero()),
-                        DataType::Decimal { .. } | DataType::Numeric { .. } => {
-                            Value::Decimal(DecimalValue::zero())
-                        }
+                        DataType::Decimal { .. } => Value::Decimal(DecimalValue::zero()),
                         DataType::Date => Value::Date(DateValue::epoch()),
                         DataType::Time => Value::Time(TimeValue::midnight()),
                         DataType::DateTime => Value::DateTime(DateTimeValue::epoch()),
@@ -256,11 +253,6 @@ fn write_data_type(buffer: &mut Vec<u8>, data_type: &DataType) {
             write_optional_u32(buffer, *precision);
             write_optional_u32(buffer, *scale);
         }
-        DataType::Numeric { precision, scale } => {
-            buffer.push(15);
-            write_optional_u32(buffer, *precision);
-            write_optional_u32(buffer, *scale);
-        }
         DataType::Blob => buffer.push(16),
         DataType::Date => buffer.push(17),
         DataType::Time => buffer.push(18),
@@ -313,9 +305,9 @@ fn read_data_type(buffer: &[u8], offset: &mut usize) -> Result<DataType, Hematit
             precision: read_optional_u32(buffer, offset, "DECIMAL precision")?,
             scale: read_optional_u32(buffer, offset, "DECIMAL scale")?,
         },
-        15 => DataType::Numeric {
-            precision: read_optional_u32(buffer, offset, "NUMERIC precision")?,
-            scale: read_optional_u32(buffer, offset, "NUMERIC scale")?,
+        15 => DataType::Decimal {
+            precision: read_optional_u32(buffer, offset, "legacy NUMERIC precision")?,
+            scale: read_optional_u32(buffer, offset, "legacy NUMERIC scale")?,
         },
         16 => DataType::Blob,
         17 => DataType::Date,

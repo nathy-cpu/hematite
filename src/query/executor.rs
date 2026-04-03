@@ -4929,8 +4929,7 @@ fn coerce_column_value(column: &Column, value: Value) -> Result<Value> {
             };
             Ok(make_float_value(data_type, number))
         }
-        (DataType::Decimal { precision, scale }, value)
-        | (DataType::Numeric { precision, scale }, value) => {
+        (DataType::Decimal { precision, scale }, value) => {
             let decimal = coerce_decimal_value(value)?;
             if !decimal.fits_precision_scale(*precision, *scale) {
                 return Err(HematiteError::ParseError(format!(
@@ -6251,8 +6250,7 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
                 )))
             }
         }
-        (DataType::Decimal { precision, scale }, value)
-        | (DataType::Numeric { precision, scale }, value) => {
+        (DataType::Decimal { precision, scale }, value) => {
             let decimal = coerce_decimal_value(value)?;
             if !decimal.fits_precision_scale(precision, scale) {
                 return Err(HematiteError::ParseError(format!(

@@ -4362,9 +4362,6 @@ fn sql_type_name_for_catalog_type(data_type: crate::catalog::DataType) -> SqlTyp
         crate::catalog::DataType::Decimal { precision, scale } => {
             SqlTypeName::Decimal { precision, scale }
         }
-        crate::catalog::DataType::Numeric { precision, scale } => {
-            SqlTypeName::Numeric { precision, scale }
-        }
         crate::catalog::DataType::Blob => SqlTypeName::Blob,
         crate::catalog::DataType::Date => SqlTypeName::Date,
         crate::catalog::DataType::Time => SqlTypeName::Time,

@@ -77,7 +77,6 @@ pub(crate) fn lower_type_name(data_type: SqlTypeName) -> DataType {
         SqlTypeName::Float => DataType::Float,
         SqlTypeName::Float128 => DataType::Float128,
         SqlTypeName::Decimal { precision, scale } => DataType::Decimal { precision, scale },
-        SqlTypeName::Numeric { precision, scale } => DataType::Numeric { precision, scale },
         SqlTypeName::Blob => DataType::Blob,
         SqlTypeName::Date => DataType::Date,
         SqlTypeName::Time => DataType::Time,

@@ -2485,13 +2485,6 @@ impl Parser {
                 let (precision, scale) = self.parse_optional_numeric_precision()?;
                 return Ok(SqlTypeName::Decimal { precision, scale });
             }
-            Token::Numeric => {
-                self.consume_token(&token)?;
-                self.consume_optional_double_precision()?;
-                self.consume_optional_unsigned()?;
-                let (precision, scale) = self.parse_optional_numeric_precision()?;
-                return Ok(SqlTypeName::Numeric { precision, scale });
-            }
             Token::Blob => SqlTypeName::Blob,
             Token::Date => SqlTypeName::Date,
             Token::Time => {
@@ -2525,6 +2518,12 @@ impl Parser {
                 if let Some((legacy, replacement)) = legacy_integer_type_replacement(&name) {
                     return Err(HematiteError::ParseError(format!(
                         "Legacy integer type '{}' is not supported; use '{}'",
+                        legacy, replacement
+                    )));
+                }
+                if let Some((legacy, replacement)) = removed_type_replacement(&name) {
+                    return Err(HematiteError::ParseError(format!(
+                        "Legacy type '{}' is not supported; use '{}'",
                         legacy, replacement
                     )));
                 }
@@ -2938,7 +2937,6 @@ const ALL_UPPERCASE_KEYWORDS: &[&str] = &[
     "FLOAT128",
     "BOOL",
     "DECIMAL",
-    "NUMERIC",
     "BLOB",
     "DATE",
     "TIME",
@@ -3010,7 +3008,6 @@ const DATA_TYPE_KEYWORDS: &[&str] = &[
     "FLOAT64",
     "FLOAT128",
     "DECIMAL",
-    "NUMERIC",
     "BLOB",
     "DATE",
     "TIME",
@@ -3047,6 +3044,14 @@ fn legacy_integer_type_replacement(name: &str) -> Option<(&'static str, &'static
         Some(("INTEGER", "INT or INT32"))
     } else if name.eq_ignore_ascii_case("BIGINT") {
         Some(("BIGINT", "INT64"))
+    } else {
+        None
+    }
+}
+
+fn removed_type_replacement(name: &str) -> Option<(&'static str, &'static str)> {
+    if name.eq_ignore_ascii_case("NUMERIC") {
+        Some(("NUMERIC", "DECIMAL"))
     } else {
         None
     }
@@ -3138,7 +3143,6 @@ fn token_keyword_name(token: &Token) -> Option<&'static str> {
         Token::UInt => Some("UINT"),
         Token::Bool => Some("BOOL"),
         Token::Decimal => Some("DECIMAL"),
-        Token::Numeric => Some("NUMERIC"),
         Token::Blob => Some("BLOB"),
         Token::Date => Some("DATE"),
         Token::Time => Some("TIME"),

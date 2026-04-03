@@ -31,10 +31,6 @@ pub enum DataType {
         precision: Option<u32>,
         scale: Option<u32>,
     },
-    Numeric {
-        precision: Option<u32>,
-        scale: Option<u32>,
-    },
     Blob,
     Date,
     Time,
@@ -64,9 +60,7 @@ impl DataType {
             DataType::Float32 => 4,
             DataType::Float => 8,
             DataType::Float128 => 16,
-            DataType::Decimal { precision, .. } | DataType::Numeric { precision, .. } => {
-                precision.unwrap_or(32) as usize
-            }
+            DataType::Decimal { precision, .. } => precision.unwrap_or(32) as usize,
             DataType::Blob => 255,
             DataType::Date => 4,
             DataType::Time => 4,
@@ -108,9 +102,6 @@ impl DataType {
             DataType::Decimal { precision, scale } => {
                 format_numeric_type("DECIMAL", *precision, *scale)
             }
-            DataType::Numeric { precision, scale } => {
-                format_numeric_type("NUMERIC", *precision, *scale)
-            }
             DataType::Blob => "BLOB".to_string(),
             DataType::Date => "DATE".to_string(),
             DataType::Time => "TIME".to_string(),
@@ -143,7 +134,6 @@ impl DataType {
             DataType::Float => "FLOAT",
             DataType::Float128 => "FLOAT128",
             DataType::Decimal { .. } => "DECIMAL",
-            DataType::Numeric { .. } => "NUMERIC",
             DataType::Blob => "BLOB",
             DataType::Date => "DATE",
             DataType::Time => "TIME",
@@ -155,9 +145,7 @@ impl DataType {
 
     pub fn decimal_constraints(&self) -> Option<(Option<u32>, Option<u32>)> {
         match self {
-            DataType::Decimal { precision, scale } | DataType::Numeric { precision, scale } => {
-                Some((*precision, *scale))
-            }
+            DataType::Decimal { precision, scale } => Some((*precision, *scale)),
             _ => None,
         }
     }
@@ -1666,8 +1654,7 @@ impl Value {
             (Value::Float32(_), DataType::Float32) => true,
             (Value::Float(_), DataType::Float) => true,
             (Value::Float128(_), DataType::Float128) => true,
-            (Value::Decimal(value), DataType::Decimal { precision, scale })
-            | (Value::Decimal(value), DataType::Numeric { precision, scale }) => {
+            (Value::Decimal(value), DataType::Decimal { precision, scale }) => {
                 value.fits_precision_scale(precision, scale)
             }
             (Value::Blob(_), DataType::Blob) => true,

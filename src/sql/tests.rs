@@ -1410,7 +1410,7 @@ mod connection_tests {
         let mut conn = Connection::new(db.path())?;
 
         conn.execute(
-            "CREATE TABLE metrics (id INT64 UNSIGNED PRIMARY KEY, ratio FLOAT32, amount DECIMAL(10, 2), code CHAR(8), tiny INT8, small INT16, exact NUMERIC(6));",
+            "CREATE TABLE metrics (id INT64 UNSIGNED PRIMARY KEY, ratio FLOAT32, amount DECIMAL(10, 2), code CHAR(8), tiny INT8, small INT16, exact DECIMAL(6));",
         )?;
         conn.execute(
             "INSERT INTO metrics (id, ratio, amount, code, tiny, small, exact) VALUES (1, 1.5, 2.5, 'AB', 3, 4, 5.5);",

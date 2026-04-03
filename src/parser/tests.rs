@@ -1038,6 +1038,16 @@ mod parser_tests {
     }
 
     #[test]
+    fn test_parse_rejects_numeric_type_name() {
+        let err = parse_create("CREATE TABLE users (amount NUMERIC(10, 2));").unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::HematiteError::ParseError(message)
+                if message.contains("Legacy type 'NUMERIC' is not supported; use 'DECIMAL'")
+        ));
+    }
+
+    #[test]
     fn test_parse_select_with_where() -> Result<()> {
         let select = parse_select("SELECT id FROM users WHERE id = 1;")?;
         assert!(select.where_clause.is_some());
@@ -1710,7 +1720,7 @@ mod parser_tests {
     #[test]
     fn test_parse_additional_mysql_type_aliases() -> Result<()> {
         let create = parse_create(
-            "CREATE TABLE metrics (id INT64 UNSIGNED PRIMARY KEY, ratio FLOAT32, amount DECIMAL(10, 2), code CHAR(8), tiny INT8, small INT16, exact NUMERIC(6));",
+            "CREATE TABLE metrics (id INT64 UNSIGNED PRIMARY KEY, ratio FLOAT32, amount DECIMAL(10, 2), code CHAR(8), tiny INT8, small INT16, exact DECIMAL(6));",
         )?;
         assert_eq!(create.columns[0].data_type, SqlTypeName::UInt64);
         assert_eq!(create.columns[1].data_type, SqlTypeName::Float32);
@@ -1726,7 +1736,7 @@ mod parser_tests {
         assert_eq!(create.columns[5].data_type, SqlTypeName::Int16);
         assert_eq!(
             create.columns[6].data_type,
-            SqlTypeName::Numeric {
+            SqlTypeName::Decimal {
                 precision: Some(6),
                 scale: None
             }
