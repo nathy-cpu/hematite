@@ -443,6 +443,8 @@ impl Connection {
                 Ok(ColumnDefinition {
                     name: name.clone(),
                     data_type: Self::infer_select_into_type(name, &result.rows, index)?,
+                    character_set: None,
+                    collation: None,
                     nullable: true,
                     primary_key: false,
                     auto_increment: false,
@@ -1487,6 +1489,8 @@ impl Connection {
         create_columns.push(ColumnDefinition {
             name: synthetic_pk,
             data_type: SqlTypeName::Int,
+            character_set: None,
+            collation: None,
             nullable: false,
             primary_key: true,
             auto_increment: true,

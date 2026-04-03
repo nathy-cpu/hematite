@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use crate::catalog::{Table, Value};
+use crate::catalog::{Column, Table, Value};
 use crate::error::{HematiteError, Result};
 
 use super::cursor::IndexCursor;
@@ -10,6 +10,7 @@ use super::engine::CatalogEngine;
 use super::record::StoredRow;
 use super::serialization::IndexKeyCodec;
 use super::table_store;
+use crate::catalog::column::{normalize_text_for_collation, pad_text_to_char_length};
 
 const INVALID_ROOT_PAGE_ID: u32 = u32::MAX;
 
@@ -47,12 +48,13 @@ pub(crate) fn lookup_primary_key_rowid(
     table: &Table,
     key_values: &[Value],
 ) -> Result<Option<u64>> {
+    let key_values = normalize_primary_key_values(table, key_values);
     let mut tree = open_required_tree(
         engine,
         table.primary_key_index_root_page_id,
         &format!("primary-key index for table '{}'", table.name),
     )?;
-    match tree.get(&IndexKeyCodec::encode_key(key_values)?)? {
+    match tree.get(&IndexKeyCodec::encode_key(&key_values)?)? {
         Some(value) => IndexKeyCodec::decode_row_id(&value).map(Some),
         None => Ok(None),
     }
@@ -64,6 +66,7 @@ pub(crate) fn register_primary_key_row(
     row: StoredRow,
 ) -> Result<()> {
     let key_values = table.get_primary_key_values(&row.values)?;
+    let key_values = normalize_primary_key_values(table, &key_values);
     let mut tree = open_required_tree(
         engine,
         table.primary_key_index_root_page_id,
@@ -103,12 +106,13 @@ pub(crate) fn lookup_secondary_index_rowids(
     key_values: &[Value],
 ) -> Result<Vec<u64>> {
     let index = get_secondary_index(table, index_name)?;
+    let key_values = normalize_secondary_index_values(table, index, key_values);
     let tree = open_required_tree(
         engine,
         index.root_page_id,
         &format!("secondary index '{}' on table '{}'", index.name, table.name),
     )?;
-    tree.entries_with_prefix(&IndexKeyCodec::encode_key(key_values)?)?
+    tree.entries_with_prefix(&IndexKeyCodec::encode_key(&key_values)?)?
         .into_iter()
         .map(|(_key, value)| IndexKeyCodec::decode_row_id(&value))
         .collect()
@@ -121,6 +125,7 @@ pub(crate) fn register_secondary_index_row(
 ) -> Result<()> {
     for index in &table.secondary_indexes {
         let key_values = secondary_index_values(index, &row);
+        let key_values = normalize_secondary_index_values(table, index, &key_values);
         let mut tree = open_required_tree(
             engine,
             index.root_page_id,
@@ -151,6 +156,7 @@ pub(crate) fn rebuild_primary_key_index(
     let mut tree = engine.open_tree(root_page_id)?;
     for row in rows {
         let key_values = table.get_primary_key_values(&row.values)?;
+        let key_values = normalize_primary_key_values(table, &key_values);
         let encoded = IndexKeyCodec::encode_key(&key_values)?;
         if !seen.insert(encoded) {
             return Err(HematiteError::StorageError(format!(
@@ -181,6 +187,7 @@ pub(crate) fn rebuild_secondary_indexes(
         let mut tree = engine.open_tree(root_page_id)?;
         for row in rows {
             let key_values = secondary_index_values(index, row);
+            let key_values = normalize_secondary_index_values(table, index, &key_values);
             let encoded_key = IndexKeyCodec::encode_key(&key_values)?;
             if index.unique && !seen.insert(encoded_key) {
                 return Err(HematiteError::StorageError(format!(
@@ -203,6 +210,7 @@ pub(crate) fn delete_primary_key_row(
     row: &StoredRow,
 ) -> Result<bool> {
     let key_values = table.get_primary_key_values(&row.values)?;
+    let key_values = normalize_primary_key_values(table, &key_values);
     let mut tree = open_required_tree(
         engine,
         table.primary_key_index_root_page_id,
@@ -220,6 +228,7 @@ pub(crate) fn delete_secondary_index_row(
 ) -> Result<()> {
     for index in &table.secondary_indexes {
         let key_values = secondary_index_values(index, row);
+        let key_values = normalize_secondary_index_values(table, index, &key_values);
         let mut tree = engine.open_tree(index.root_page_id)?;
         let _ = tree.delete(&IndexKeyCodec::encode_secondary_key(
             &key_values,
@@ -278,6 +287,7 @@ pub(crate) fn validate_table_indexes(engine: &mut CatalogEngine, table: &Table) 
     let rows = table_store::read_rows_with_ids(engine, &table.name)?;
     for row in &rows {
         let key_values = table.get_primary_key_values(&row.values)?;
+        let key_values = normalize_primary_key_values(table, &key_values);
         let mut tree = open_required_tree(
             engine,
             table.primary_key_index_root_page_id,
@@ -305,6 +315,7 @@ pub(crate) fn validate_table_indexes(engine: &mut CatalogEngine, table: &Table) 
     for index in &table.secondary_indexes {
         for row in &rows {
             let key_values = secondary_index_values(index, row);
+            let key_values = normalize_secondary_index_values(table, index, &key_values);
             let tree = open_required_tree(
                 engine,
                 index.root_page_id,
@@ -327,6 +338,44 @@ pub(crate) fn validate_table_indexes(engine: &mut CatalogEngine, table: &Table) 
     }
 
     Ok(())
+}
+
+fn normalize_primary_key_values(table: &Table, key_values: &[Value]) -> Vec<Value> {
+    table
+        .primary_key_columns
+        .iter()
+        .zip(key_values.iter())
+        .map(|(column_index, value)| normalize_index_value(&table.columns[*column_index], value))
+        .collect()
+}
+
+fn normalize_secondary_index_values(
+    table: &Table,
+    index: &crate::catalog::SecondaryIndex,
+    key_values: &[Value],
+) -> Vec<Value> {
+    index
+        .column_indices
+        .iter()
+        .zip(key_values.iter())
+        .map(|(column_index, value)| normalize_index_value(&table.columns[*column_index], value))
+        .collect()
+}
+
+fn normalize_index_value(column: &Column, value: &Value) -> Value {
+    match (&column.data_type, value) {
+        (crate::catalog::DataType::Char(length), Value::Text(text)) => Value::Text(
+            normalize_text_for_collation(
+                &pad_text_to_char_length(text, *length),
+                column.collation.as_deref(),
+            ),
+        ),
+        (
+            crate::catalog::DataType::Text | crate::catalog::DataType::VarChar(_),
+            Value::Text(text),
+        ) => Value::Text(normalize_text_for_collation(text, column.collation.as_deref())),
+        _ => value.clone(),
+    }
 }
 
 fn open_required_tree(

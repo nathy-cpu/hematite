@@ -1424,7 +1424,7 @@ mod connection_tests {
                 crate::catalog::Value::UBigInt(1),
                 crate::catalog::Value::Float32(1.5),
                 crate::catalog::Value::Decimal(crate::catalog::DecimalValue::parse("2.5")?),
-                crate::catalog::Value::Text("AB".to_string()),
+                crate::catalog::Value::Text("AB      ".to_string()),
                 crate::catalog::Value::Integer(3),
                 crate::catalog::Value::Integer(4),
                 crate::catalog::Value::Decimal(crate::catalog::DecimalValue::parse("5.5")?),
@@ -5000,6 +5000,111 @@ mod connection_tests {
             .is_err());
 
         conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_char_columns_pad_and_compare_without_trailing_spaces() -> Result<()> {
+        let db = TestDbFile::new("_test_char_columns_pad_and_compare_without_trailing_spaces");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE typed (id INT PRIMARY KEY, code CHAR(4));")?;
+        conn.execute("INSERT INTO typed (id, code) VALUES (1, 'AB');")?;
+
+        let stored = conn.execute("SELECT code FROM typed WHERE id = 1;")?;
+        assert_eq!(
+            stored.rows,
+            vec![vec![crate::catalog::Value::Text("AB  ".to_string())]]
+        );
+
+        let lookup = conn.execute("SELECT id FROM typed WHERE code = 'AB';")?;
+        assert_eq!(lookup.rows, vec![vec![crate::catalog::Value::Integer(1)]]);
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_cast_into_char_and_varchar_accepts_non_text_values() -> Result<()> {
+        let db = TestDbFile::new("_test_cast_into_char_and_varchar_accepts_non_text_values");
+        let mut conn = Connection::new(db.path())?;
+        conn.execute("CREATE TABLE seed (id INT PRIMARY KEY);")?;
+        conn.execute("INSERT INTO seed (id) VALUES (1);")?;
+
+        let result = conn.execute(
+            "SELECT CAST(42 AS VARCHAR(10)), CAST(TRUE AS CHAR(5)), CAST(DATE('2024-01-02') AS VARCHAR(16)) FROM seed WHERE id = 1;",
+        )?;
+        assert_eq!(
+            result.rows,
+            vec![vec![
+                crate::catalog::Value::Text("42".to_string()),
+                crate::catalog::Value::Text("TRUE ".to_string()),
+                crate::catalog::Value::Text("2024-01-02".to_string()),
+            ]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_text_collation_affects_comparison_like_and_unique_indexes() -> Result<()> {
+        let db =
+            TestDbFile::new("_test_text_collation_affects_comparison_like_and_unique_indexes");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute(
+            "CREATE TABLE users (
+                id INT PRIMARY KEY,
+                name VARCHAR(16) CHARACTER SET utf8mb4 COLLATE NOCASE UNIQUE
+            );",
+        )?;
+        conn.execute("INSERT INTO users (id, name) VALUES (1, 'Alice');")?;
+        assert!(conn
+            .execute("INSERT INTO users (id, name) VALUES (2, 'alice');")
+            .is_err());
+
+        let equals = conn.execute("SELECT id FROM users WHERE name = 'ALICE';")?;
+        assert_eq!(equals.rows, vec![vec![crate::catalog::Value::Integer(1)]]);
+
+        let like = conn.execute("SELECT id FROM users WHERE name LIKE 'al%';")?;
+        assert_eq!(like.rows, vec![vec![crate::catalog::Value::Integer(1)]]);
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_show_create_table_persists_text_metadata() -> Result<()> {
+        let db = TestDbFile::new("_test_show_create_table_persists_text_metadata");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute(
+            "CREATE TABLE users (
+                id INT PRIMARY KEY,
+                code CHAR(4) COLLATE utf8mb4_bin,
+                name VARCHAR(16) CHARACTER SET utf8mb4 COLLATE NOCASE
+            );",
+        )?;
+        let show_create = conn.execute("SHOW CREATE TABLE users;")?;
+        let sql = match &show_create.rows[0][1] {
+            crate::catalog::Value::Text(sql) => sql.clone(),
+            other => panic!("expected SHOW CREATE TABLE SQL text, found {:?}", other),
+        };
+        assert!(sql.contains("code CHAR(4) COLLATE utf8mb4_bin"));
+        assert!(sql.contains("name VARCHAR(16) CHARACTER SET utf8mb4 COLLATE NOCASE"));
+
+        conn.close()?;
+
+        let mut reopened = Connection::new(db.path())?;
+        let show_create = reopened.execute("SHOW CREATE TABLE users;")?;
+        let sql = match &show_create.rows[0][1] {
+            crate::catalog::Value::Text(sql) => sql.clone(),
+            other => panic!("expected SHOW CREATE TABLE SQL text, found {:?}", other),
+        };
+        assert!(sql.contains("code CHAR(4) COLLATE utf8mb4_bin"));
+        assert!(sql.contains("name VARCHAR(16) CHARACTER SET utf8mb4 COLLATE NOCASE"));
+        reopened.close()?;
         Ok(())
     }
 

@@ -75,6 +75,13 @@ impl SqlTypeName {
             SqlTypeName::TimeWithTimeZone => "TIME WITH TIME ZONE".to_string(),
         }
     }
+
+    pub fn supports_text_metadata(&self) -> bool {
+        matches!(
+            self,
+            SqlTypeName::Text | SqlTypeName::Char(_) | SqlTypeName::VarChar(_)
+        )
+    }
 }
 
 fn format_numeric_type(name: &str, precision: Option<u32>, scale: Option<u32>) -> String {

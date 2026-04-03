@@ -2083,7 +2083,7 @@ impl Parser {
                 }
                 if self.peek_identifier_keyword("CHARACTER") {
                     self.consume_identifier_keyword("CHARACTER")?;
-                    self.consume_identifier_keyword("SET")?;
+                    self.consume_token(&Token::Set)?;
                     self.consume_optional_equals()?;
                     self.parse_identifier()?;
                     continue;
@@ -2098,7 +2098,7 @@ impl Parser {
 
             if self.peek_identifier_keyword("CHARACTER") {
                 self.consume_identifier_keyword("CHARACTER")?;
-                self.consume_identifier_keyword("SET")?;
+                self.consume_token(&Token::Set)?;
                 self.consume_optional_equals()?;
                 self.parse_identifier()?;
                 continue;
@@ -2246,11 +2246,29 @@ impl Parser {
         let mut auto_increment = false;
         let mut unique = false;
         let mut default_value = None;
+        let mut character_set = None;
+        let mut collation = None;
         let mut check_constraint = None;
         let mut references = None;
 
         while let Ok(token) = self.peek_token() {
             match token {
+                Token::Identifier(_) if self.peek_identifier_keyword("CHARSET") => {
+                    self.consume_identifier_keyword("CHARSET")?;
+                    self.consume_optional_equals()?;
+                    character_set = Some(self.parse_identifier()?);
+                }
+                Token::Identifier(_) if self.peek_identifier_keyword("CHARACTER") => {
+                    self.consume_identifier_keyword("CHARACTER")?;
+                    self.consume_token(&Token::Set)?;
+                    self.consume_optional_equals()?;
+                    character_set = Some(self.parse_identifier()?);
+                }
+                Token::Identifier(_) if self.peek_identifier_keyword("COLLATE") => {
+                    self.consume_identifier_keyword("COLLATE")?;
+                    self.consume_optional_equals()?;
+                    collation = Some(self.parse_identifier()?);
+                }
                 Token::Not => {
                     self.consume_token(&Token::Not)?;
                     if self.peek_token()? == Token::Null {
@@ -2291,6 +2309,8 @@ impl Parser {
         Ok(ColumnDefinition {
             name,
             data_type,
+            character_set,
+            collation,
             nullable,
             primary_key,
             auto_increment,

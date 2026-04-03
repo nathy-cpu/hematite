@@ -1774,6 +1774,18 @@ mod parser_tests {
     }
 
     #[test]
+    fn test_parse_column_character_set_and_collation() -> Result<()> {
+        let create = parse_create(
+            "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(12) CHARACTER SET utf8mb4 COLLATE NOCASE, note TEXT COLLATE utf8mb4_bin);",
+        )?;
+        assert_eq!(create.columns[1].character_set.as_deref(), Some("utf8mb4"));
+        assert_eq!(create.columns[1].collation.as_deref(), Some("NOCASE"));
+        assert_eq!(create.columns[2].character_set, None);
+        assert_eq!(create.columns[2].collation.as_deref(), Some("utf8mb4_bin"));
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_new_integer_type_names() -> Result<()> {
         let create = parse_create(
             "CREATE TABLE ints (id INT PRIMARY KEY, tiny INT8, small INT16, normal INT32, large INT64, massive INT128);",
@@ -1928,6 +1940,8 @@ mod parser_tests {
             AlterOperation::AddColumn(ColumnDefinition {
                 name,
                 data_type: SqlTypeName::Boolean,
+                character_set: None,
+                collation: None,
                 nullable: false,
                 primary_key: false,
                 auto_increment: false,

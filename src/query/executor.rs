@@ -19,6 +19,7 @@
 //! This layer should stay storage-agnostic at the page level. If a change here requires knowledge
 //! of B-tree node layout or pager internals, the boundary below catalog has started to leak.
 
+use crate::catalog::column::{collation_is_nocase, pad_text_to_char_length};
 use crate::catalog::table::{
     CheckConstraint, ForeignKeyAction as CatalogForeignKeyAction, ForeignKeyConstraint,
 };
@@ -83,6 +84,8 @@ pub struct SelectExecutor {
 struct ResolvedSource {
     name: String,
     columns: Vec<String>,
+    column_types: Vec<DataType>,
+    column_collations: Vec<Option<String>>,
     alias: Option<String>,
     offset: usize,
 }
@@ -91,6 +94,12 @@ impl ResolvedSource {
     fn width(&self) -> usize {
         self.columns.len()
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TextComparisonContext {
+    trim_trailing_spaces: bool,
+    case_insensitive: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -205,6 +214,63 @@ impl SelectExecutor {
                 column_reference
             ))),
         }
+    }
+
+    fn text_comparison_context_for_expression(
+        &self,
+        sources: &[ResolvedSource],
+        expr: &Expression,
+    ) -> Result<Option<TextComparisonContext>> {
+        let Expression::Column(column_reference) = expr else {
+            return Ok(None);
+        };
+        let Some(flat_index) = self.resolve_column_index(sources, column_reference)? else {
+            return Ok(None);
+        };
+        Ok(self
+            .source_column_metadata(sources, flat_index)
+            .map(|(data_type, collation)| TextComparisonContext {
+                trim_trailing_spaces: matches!(data_type, DataType::Char(_)),
+                case_insensitive: collation_is_nocase(collation.as_deref()),
+            }))
+    }
+
+    fn merged_text_comparison_context(
+        &self,
+        sources: &[ResolvedSource],
+        left: &Expression,
+        right: &Expression,
+    ) -> Result<Option<TextComparisonContext>> {
+        let left_context = self.text_comparison_context_for_expression(sources, left)?;
+        let right_context = self.text_comparison_context_for_expression(sources, right)?;
+        Ok(match (left_context, right_context) {
+            (Some(left), Some(right)) => Some(TextComparisonContext {
+                trim_trailing_spaces: left.trim_trailing_spaces || right.trim_trailing_spaces,
+                case_insensitive: left.case_insensitive || right.case_insensitive,
+            }),
+            (Some(context), None) | (None, Some(context)) => Some(context),
+            (None, None) => None,
+        })
+    }
+
+    fn source_column_metadata(
+        &self,
+        sources: &[ResolvedSource],
+        flat_index: usize,
+    ) -> Option<(DataType, Option<String>)> {
+        for source in sources {
+            if flat_index < source.offset {
+                continue;
+            }
+            let relative = flat_index - source.offset;
+            if relative < source.columns.len() {
+                return Some((
+                    source.column_types.get(relative)?.clone(),
+                    source.column_collations.get(relative)?.clone(),
+                ));
+            }
+        }
+        None
     }
 
     fn resolve_column_value(
@@ -347,7 +413,9 @@ impl SelectExecutor {
             } => {
                 let left_val = self.evaluate_expression(ctx, cache, sources, left, row)?;
                 let right_val = self.evaluate_expression(ctx, cache, sources, right, row)?;
-                Ok(self.compare_values(&left_val, operator, &right_val))
+                let text_context =
+                    self.merged_text_comparison_context(sources, left, right)?;
+                Ok(self.compare_values(&left_val, operator, &right_val, text_context))
             }
             Expression::InList {
                 expr,
@@ -361,7 +429,7 @@ impl SelectExecutor {
                         self.evaluate_expression(ctx, cache, sources, value_expr, row)
                     })
                     .collect::<Result<Vec<_>>>()?;
-                Ok(self.evaluate_in_candidates(probe, candidates, *is_not))
+                Ok(self.evaluate_in_candidates(probe, candidates, *is_not, None))
             }
             Expression::InSubquery {
                 expr,
@@ -376,7 +444,7 @@ impl SelectExecutor {
                     .into_iter()
                     .map(|row| row.into_iter().next().unwrap_or(Value::Null))
                     .collect::<Vec<_>>();
-                Ok(self.evaluate_in_candidates(probe, candidates, *is_not))
+                Ok(self.evaluate_in_candidates(probe, candidates, *is_not, None))
             }
             Expression::Between {
                 expr,
@@ -387,11 +455,14 @@ impl SelectExecutor {
                 let value = self.evaluate_expression(ctx, cache, sources, expr, row)?;
                 let lower_value = self.evaluate_expression(ctx, cache, sources, lower, row)?;
                 let upper_value = self.evaluate_expression(ctx, cache, sources, upper, row)?;
+                let text_context =
+                    self.text_comparison_context_for_expression(sources, expr)?;
                 Ok(evaluate_between_values(
                     value,
                     lower_value,
                     upper_value,
                     *is_not,
+                    text_context,
                 ))
             }
             Expression::Like {
@@ -401,7 +472,9 @@ impl SelectExecutor {
             } => {
                 let value = self.evaluate_expression(ctx, cache, sources, expr, row)?;
                 let pattern_value = self.evaluate_expression(ctx, cache, sources, pattern, row)?;
-                Ok(evaluate_like_values(value, pattern_value, *is_not))
+                let text_context =
+                    self.text_comparison_context_for_expression(sources, expr)?;
+                Ok(evaluate_like_values(value, pattern_value, *is_not, text_context))
             }
             Expression::Exists { subquery, is_not } => {
                 let subquery_result =
@@ -452,8 +525,9 @@ impl SelectExecutor {
         left_val: &Value,
         operator: &ComparisonOperator,
         right_val: &Value,
+        text_context: Option<TextComparisonContext>,
     ) -> Option<bool> {
-        compare_condition_values(left_val, operator, right_val)
+        compare_condition_values(left_val, operator, right_val, text_context)
     }
 
     fn like_matches(pattern: &str, text: &str) -> bool {
@@ -497,8 +571,9 @@ impl SelectExecutor {
         probe: Value,
         candidates: impl IntoIterator<Item = Value>,
         is_not: bool,
+        text_context: Option<TextComparisonContext>,
     ) -> Option<bool> {
-        evaluate_in_candidates(probe, candidates, is_not)
+        evaluate_in_candidates(probe, candidates, is_not, text_context)
     }
 
     fn execute_subquery(
@@ -842,7 +917,9 @@ impl SelectExecutor {
             } => {
                 let left_val = self.evaluate_expression(ctx, cache, sources, left, row)?;
                 let right_val = self.evaluate_expression(ctx, cache, sources, right, row)?;
-                Ok(self.compare_values(&left_val, operator, &right_val))
+                let text_context =
+                    self.merged_text_comparison_context(sources, left, right)?;
+                Ok(self.compare_values(&left_val, operator, &right_val, text_context))
             }
             Condition::InList {
                 expr,
@@ -856,7 +933,9 @@ impl SelectExecutor {
                         self.evaluate_expression(ctx, cache, sources, value_expr, row)
                     })
                     .collect::<Result<Vec<_>>>()?;
-                Ok(self.evaluate_in_candidates(probe, candidates, *is_not))
+                let text_context =
+                    self.text_comparison_context_for_expression(sources, expr)?;
+                Ok(self.evaluate_in_candidates(probe, candidates, *is_not, text_context))
             }
             Condition::InSubquery {
                 expr,
@@ -871,7 +950,9 @@ impl SelectExecutor {
                     .into_iter()
                     .map(|row| row.into_iter().next().unwrap_or(Value::Null))
                     .collect::<Vec<_>>();
-                Ok(self.evaluate_in_candidates(probe, candidates, *is_not))
+                let text_context =
+                    self.text_comparison_context_for_expression(sources, expr)?;
+                Ok(self.evaluate_in_candidates(probe, candidates, *is_not, text_context))
             }
             Condition::Between {
                 expr,
@@ -887,10 +968,12 @@ impl SelectExecutor {
                     return Ok(None);
                 }
 
-                let lower_ok =
-                    sql_partial_cmp(&value, &lower_value).map(|ordering| !ordering.is_lt());
-                let upper_ok =
-                    sql_partial_cmp(&value, &upper_value).map(|ordering| !ordering.is_gt());
+                let text_context =
+                    self.text_comparison_context_for_expression(sources, expr)?;
+                let lower_ok = sql_partial_cmp(&value, &lower_value, text_context)
+                    .map(|ordering| !ordering.is_lt());
+                let upper_ok = sql_partial_cmp(&value, &upper_value, text_context)
+                    .map(|ordering| !ordering.is_gt());
 
                 match (lower_ok, upper_ok) {
                     (Some(true), Some(true)) => Ok(Some(!is_not)),
@@ -905,10 +988,12 @@ impl SelectExecutor {
             } => {
                 let value = self.evaluate_expression(ctx, cache, sources, expr, row)?;
                 let pattern_value = self.evaluate_expression(ctx, cache, sources, pattern, row)?;
+                let text_context =
+                    self.text_comparison_context_for_expression(sources, expr)?;
 
                 match (value, pattern_value) {
                     (Value::Text(text), Value::Text(pattern)) => {
-                        let matched = Self::like_matches(&pattern, &text);
+                        let matched = like_matches_with_context(&pattern, &text, text_context);
                         Ok(Some(if *is_not { !matched } else { matched }))
                     }
                     (left, right) if left.is_null() || right.is_null() => Ok(None),
@@ -1158,6 +1243,8 @@ impl SelectExecutor {
                 source: ResolvedSource {
                     name: table_name.to_string(),
                     columns: result.columns.clone(),
+                    column_types: vec![DataType::Text; result.columns.len()],
+                    column_collations: vec![None; result.columns.len()],
                     alias,
                     offset,
                 },
@@ -1166,10 +1253,13 @@ impl SelectExecutor {
         }
 
         if let Some(cte) = self.statement.lookup_cte(table_name) {
+            let columns = self.query_output_columns(&cte.query, ctx)?;
             return Ok(NamedSource {
                 source: ResolvedSource {
                     name: table_name.to_string(),
-                    columns: self.query_output_columns(&cte.query, ctx)?,
+                    column_types: vec![DataType::Text; columns.len()],
+                    column_collations: vec![None; columns.len()],
+                    columns,
                     alias,
                     offset,
                 },
@@ -1188,6 +1278,16 @@ impl SelectExecutor {
                     .columns
                     .iter()
                     .map(|column| column.name.clone())
+                    .collect(),
+                column_types: table
+                    .columns
+                    .iter()
+                    .map(|column| column.data_type.clone())
+                    .collect(),
+                column_collations: table
+                    .columns
+                    .iter()
+                    .map(|column| column.collation.clone())
                     .collect(),
                 alias,
                 offset,
@@ -1354,6 +1454,8 @@ impl SelectExecutor {
                     vec![ResolvedSource {
                         name: alias.clone(),
                         columns: result.columns.clone(),
+                        column_types: vec![DataType::Text; result.columns.len()],
+                        column_collations: vec![None; result.columns.len()],
                         alias: None,
                         offset: 0,
                     }],
@@ -1523,7 +1625,15 @@ impl SelectExecutor {
                         continue;
                     };
 
-                    let ordering = self.compare_sort_values(&left[index], &right[index]);
+                    let text_context = self
+                        .text_comparison_context_for_expression(
+                            &sources,
+                            &Expression::Column(item.column.clone()),
+                        )
+                        .ok()
+                        .flatten();
+                    let ordering =
+                        self.compare_sort_values(&left[index], &right[index], text_context);
                     if ordering != Ordering::Equal {
                         return match item.direction {
                             SortDirection::Asc => ordering,
@@ -1592,12 +1702,17 @@ impl SelectExecutor {
         Ok((sources, filtered_rows))
     }
 
-    fn compare_sort_values(&self, left: &Value, right: &Value) -> Ordering {
+    fn compare_sort_values(
+        &self,
+        left: &Value,
+        right: &Value,
+        text_context: Option<TextComparisonContext>,
+    ) -> Ordering {
         match (left.is_null(), right.is_null()) {
             (true, true) => Ordering::Equal,
             (true, false) => Ordering::Less,
             (false, true) => Ordering::Greater,
-            (false, false) => sql_partial_cmp(left, right).unwrap_or(Ordering::Equal),
+            (false, false) => sql_partial_cmp(left, right, text_context).unwrap_or(Ordering::Equal),
         }
     }
 
@@ -1703,7 +1818,16 @@ impl SelectExecutor {
                     };
 
                     let ordering =
-                        self.compare_sort_values(&left[column_index], &right[column_index]);
+                        self.compare_sort_values(
+                            &left[column_index],
+                            &right[column_index],
+                            self.text_comparison_context_for_expression(
+                                sources,
+                                &Expression::Column(item.column.clone()),
+                            )
+                            .ok()
+                            .flatten(),
+                        );
                     if ordering != Ordering::Equal {
                         return match item.direction {
                             SortDirection::Asc => ordering,
@@ -1785,7 +1909,17 @@ impl SelectExecutor {
                     HematiteError::ParseError(format!("Column '{}' not found", item.column))
                 })?;
 
-            if self.compare_sort_values(&left[index], &right[index]) != Ordering::Equal {
+            if self.compare_sort_values(
+                &left[index],
+                &right[index],
+                self.text_comparison_context_for_expression(
+                    sources,
+                    &Expression::Column(item.column.clone()),
+                )
+                .ok()
+                .flatten(),
+            ) != Ordering::Equal
+            {
                 return Ok(true);
             }
         }
@@ -2040,7 +2174,7 @@ impl SelectExecutor {
                     continue;
                 };
 
-                let ordering = self.compare_sort_values(&left[index], &right[index]);
+                let ordering = self.compare_sort_values(&left[index], &right[index], None);
                 if ordering != Ordering::Equal {
                     return match item.direction {
                         SortDirection::Asc => ordering,
@@ -2264,7 +2398,14 @@ impl SelectExecutor {
                     output_columns,
                     group_rows,
                 )?;
-                Ok(compare_condition_values(&left_val, operator, &right_val))
+                let text_context =
+                    self.merged_text_comparison_context(sources, left, right)?;
+                Ok(compare_condition_values(
+                    &left_val,
+                    operator,
+                    &right_val,
+                    text_context,
+                ))
             }
             Expression::InList {
                 expr,
@@ -2294,7 +2435,14 @@ impl SelectExecutor {
                         )
                     })
                     .collect::<Result<Vec<_>>>()?;
-                Ok(evaluate_in_candidates(probe, candidates, *is_not))
+                let text_context =
+                    self.text_comparison_context_for_expression(sources, expr)?;
+                Ok(evaluate_in_candidates(
+                    probe,
+                    candidates,
+                    *is_not,
+                    text_context,
+                ))
             }
             Expression::InSubquery {
                 expr,
@@ -2317,7 +2465,14 @@ impl SelectExecutor {
                     .into_iter()
                     .map(|row| row.into_iter().next().unwrap_or(Value::Null))
                     .collect::<Vec<_>>();
-                Ok(evaluate_in_candidates(probe, candidates, *is_not))
+                let text_context =
+                    self.text_comparison_context_for_expression(sources, expr)?;
+                Ok(evaluate_in_candidates(
+                    probe,
+                    candidates,
+                    *is_not,
+                    text_context,
+                ))
             }
             Expression::Between {
                 expr,
@@ -2352,11 +2507,14 @@ impl SelectExecutor {
                     output_columns,
                     group_rows,
                 )?;
+                let text_context =
+                    self.text_comparison_context_for_expression(sources, expr)?;
                 Ok(evaluate_between_values(
                     value,
                     lower_value,
                     upper_value,
                     *is_not,
+                    text_context,
                 ))
             }
             Expression::Like {
@@ -2382,7 +2540,9 @@ impl SelectExecutor {
                     output_columns,
                     group_rows,
                 )?;
-                Ok(evaluate_like_values(value, pattern_value, *is_not))
+                let text_context =
+                    self.text_comparison_context_for_expression(sources, expr)?;
+                Ok(evaluate_like_values(value, pattern_value, *is_not, text_context))
             }
             Expression::Exists { subquery, is_not } => {
                 let subquery_result =
@@ -2491,7 +2651,9 @@ impl SelectExecutor {
                     output_columns,
                     group_rows,
                 )?;
-                Ok(self.compare_values(&left_val, operator, &right_val))
+                let text_context =
+                    self.merged_text_comparison_context(sources, left, right)?;
+                Ok(self.compare_values(&left_val, operator, &right_val, text_context))
             }
             Condition::InList {
                 expr,
@@ -2521,7 +2683,9 @@ impl SelectExecutor {
                         )
                     })
                     .collect::<Result<Vec<_>>>()?;
-                Ok(self.evaluate_in_candidates(probe, candidates, *is_not))
+                let text_context =
+                    self.text_comparison_context_for_expression(sources, expr)?;
+                Ok(self.evaluate_in_candidates(probe, candidates, *is_not, text_context))
             }
             Condition::InSubquery {
                 expr,
@@ -2544,7 +2708,9 @@ impl SelectExecutor {
                     .into_iter()
                     .map(|row| row.into_iter().next().unwrap_or(Value::Null))
                     .collect::<Vec<_>>();
-                Ok(self.evaluate_in_candidates(probe, candidates, *is_not))
+                let text_context =
+                    self.text_comparison_context_for_expression(sources, expr)?;
+                Ok(self.evaluate_in_candidates(probe, candidates, *is_not, text_context))
             }
             Condition::Between {
                 expr,
@@ -2584,10 +2750,12 @@ impl SelectExecutor {
                     return Ok(None);
                 }
 
-                let lower_ok =
-                    sql_partial_cmp(&value, &lower_value).map(|ordering| !ordering.is_lt());
-                let upper_ok =
-                    sql_partial_cmp(&value, &upper_value).map(|ordering| !ordering.is_gt());
+                let text_context =
+                    self.text_comparison_context_for_expression(sources, expr)?;
+                let lower_ok = sql_partial_cmp(&value, &lower_value, text_context)
+                    .map(|ordering| !ordering.is_lt());
+                let upper_ok = sql_partial_cmp(&value, &upper_value, text_context)
+                    .map(|ordering| !ordering.is_gt());
 
                 match (lower_ok, upper_ok) {
                     (Some(true), Some(true)) => Ok(Some(!is_not)),
@@ -3155,7 +3323,7 @@ impl InsertExecutor {
             } => {
                 let left_val = self.evaluate_value_expression(left)?;
                 let right_val = self.evaluate_value_expression(right)?;
-                Ok(compare_condition_values(&left_val, operator, &right_val))
+                Ok(compare_condition_values(&left_val, operator, &right_val, None))
             }
             Expression::InList {
                 expr,
@@ -3167,7 +3335,7 @@ impl InsertExecutor {
                     .iter()
                     .map(|value_expr| self.evaluate_value_expression(value_expr))
                     .collect::<Result<Vec<_>>>()?;
-                Ok(evaluate_in_candidates(probe, candidates, *is_not))
+                Ok(evaluate_in_candidates(probe, candidates, *is_not, None))
             }
             Expression::InSubquery { .. } => Err(HematiteError::ParseError(
                 "INSERT expressions cannot use subqueries in boolean expressions".to_string(),
@@ -3186,6 +3354,7 @@ impl InsertExecutor {
                     lower_value,
                     upper_value,
                     *is_not,
+                    None,
                 ))
             }
             Expression::Like {
@@ -3195,7 +3364,7 @@ impl InsertExecutor {
             } => {
                 let value = self.evaluate_value_expression(expr)?;
                 let pattern_value = self.evaluate_value_expression(pattern)?;
-                Ok(evaluate_like_values(value, pattern_value, *is_not))
+                Ok(evaluate_like_values(value, pattern_value, *is_not, None))
             }
             Expression::Exists { .. } => Err(HematiteError::ParseError(
                 "INSERT expressions cannot use EXISTS in boolean expressions".to_string(),
@@ -3979,6 +4148,8 @@ impl CreateExecutor {
                 col_def.name.clone(),
                 lower_type_name(col_def.data_type.clone()),
             )
+            .character_set(col_def.character_set.clone())
+            .collation(col_def.collation.clone())
             .nullable(col_def.nullable)
             .primary_key(col_def.primary_key)
             .auto_increment(col_def.auto_increment);
@@ -4256,6 +4427,8 @@ impl QueryExecutor for AlterExecutor {
                     column_def.name.clone(),
                     lower_type_name(column_def.data_type.clone()),
                 )
+                .character_set(column_def.character_set.clone())
+                .collation(column_def.collation.clone())
                 .nullable(column_def.nullable)
                 .primary_key(column_def.primary_key);
                 let column = if let Some(default_value) = &column_def.default_value {
@@ -4628,7 +4801,7 @@ fn out_of_range_error(column: &Column, type_name: &str) -> HematiteError {
     ))
 }
 
-fn coerce_text_value(value: String, max_chars: u32, label: &str) -> Result<Value> {
+fn coerce_varchar_value(value: String, max_chars: u32, label: &str) -> Result<Value> {
     if value.chars().count() > max_chars as usize {
         return Err(HematiteError::ParseError(format!(
             "{} exceeds declared character length {}",
@@ -4636,6 +4809,44 @@ fn coerce_text_value(value: String, max_chars: u32, label: &str) -> Result<Value
         )));
     }
     Ok(Value::Text(value))
+}
+
+fn coerce_char_value(value: String, length: u32, label: &str) -> Result<Value> {
+    if value.chars().count() > length as usize {
+        return Err(HematiteError::ParseError(format!(
+            "{} exceeds declared character length {}",
+            label, length
+        )));
+    }
+    Ok(Value::Text(pad_text_to_char_length(&value, length)))
+}
+
+fn cast_value_to_text_string(value: Value) -> Result<String> {
+    match value {
+        Value::Integer(value) => Ok(value.to_string()),
+        Value::BigInt(value) => Ok(value.to_string()),
+        Value::Int128(value) => Ok(value.to_string()),
+        Value::UInteger(value) => Ok(value.to_string()),
+        Value::UBigInt(value) => Ok(value.to_string()),
+        Value::UInt128(value) => Ok(value.to_string()),
+        Value::Float32(value) => Ok(value.to_string()),
+        Value::Float(value) => Ok(value.to_string()),
+        Value::Float128(value) => Ok(value.to_string()),
+        Value::Enum(value) | Value::Text(value) => Ok(value),
+        Value::Boolean(true) => Ok("TRUE".to_string()),
+        Value::Boolean(false) => Ok("FALSE".to_string()),
+        Value::Decimal(value) => Ok(value.to_string()),
+        Value::Date(value) => Ok(value.to_string()),
+        Value::Time(value) => Ok(value.to_string()),
+        Value::DateTime(value) => Ok(value.to_string()),
+        Value::TimeWithTimeZone(value) => Ok(value.to_string()),
+        Value::Blob(value) => Ok(String::from_utf8_lossy(&value).into_owned()),
+        Value::Null => Err(HematiteError::ParseError(
+            "Cannot CAST NULL to text without preserving NULL".to_string(),
+        )),
+        Value::IntervalYearMonth(value) => Ok(value.to_string()),
+        Value::IntervalDaySecond(value) => Ok(value.to_string()),
+    }
 }
 
 fn coerce_binary_value(value: Value, max_len: u32, label: &str, fixed: bool) -> Result<Value> {
@@ -4900,8 +5111,10 @@ fn coerce_column_value(column: &Column, value: Value) -> Result<Value> {
             column.name
         ))),
         (DataType::Text, Value::Text(s)) => Ok(Value::Text(s)),
-        (DataType::Char(length), Value::Text(s)) => coerce_text_value(s, *length, &column.name),
-        (DataType::VarChar(length), Value::Text(s)) => coerce_text_value(s, *length, &column.name),
+        (DataType::Char(length), Value::Text(s)) => coerce_char_value(s, *length, &column.name),
+        (DataType::VarChar(length), Value::Text(s)) => {
+            coerce_varchar_value(s, *length, &column.name)
+        }
         (DataType::Binary(length), value) => {
             coerce_binary_value(value, *length, &column.name, true)
         }
@@ -6114,30 +6327,12 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
             .parse::<u128>()
             .map(Value::UInt128)
             .map_err(|_| HematiteError::ParseError(format!("Cannot CAST '{}' AS UINT128", value))),
-        (DataType::Text, Value::Integer(value)) => Ok(Value::Text(value.to_string())),
-        (DataType::Text, Value::BigInt(value)) => Ok(Value::Text(value.to_string())),
-        (DataType::Text, Value::Int128(value)) => Ok(Value::Text(value.to_string())),
-        (DataType::Text, Value::UInteger(value)) => Ok(Value::Text(value.to_string())),
-        (DataType::Text, Value::UBigInt(value)) => Ok(Value::Text(value.to_string())),
-        (DataType::Text, Value::UInt128(value)) => Ok(Value::Text(value.to_string())),
-        (DataType::Text, Value::Float32(value)) => Ok(Value::Text(value.to_string())),
-        (DataType::Text, Value::Float(value)) => Ok(Value::Text(value.to_string())),
-        (DataType::Text, Value::Float128(value)) => Ok(Value::Text(value.to_string())),
-        (DataType::Text, Value::Enum(value)) => Ok(Value::Text(value)),
-        (DataType::Text, Value::Boolean(true)) => Ok(Value::Text("TRUE".to_string())),
-        (DataType::Text, Value::Boolean(false)) => Ok(Value::Text("FALSE".to_string())),
-        (DataType::Text, Value::Text(value)) => Ok(Value::Text(value)),
-        (DataType::Text, Value::Decimal(value)) => Ok(Value::Text(value.to_string())),
-        (DataType::Text, Value::Date(value)) => Ok(Value::Text(value.to_string())),
-        (DataType::Text, Value::Time(value)) => Ok(Value::Text(value.to_string())),
-        (DataType::Text, Value::DateTime(value)) => Ok(Value::Text(value.to_string())),
-        (DataType::Text, Value::TimeWithTimeZone(value)) => Ok(Value::Text(value.to_string())),
-        (DataType::Text, Value::Blob(value)) => {
-            Ok(Value::Text(String::from_utf8_lossy(&value).into_owned()))
+        (DataType::Text, value) => cast_value_to_text_string(value).map(Value::Text),
+        (DataType::Char(length), value) => {
+            coerce_char_value(cast_value_to_text_string(value)?, length, "CAST")
         }
-        (DataType::Char(length), Value::Text(value))
-        | (DataType::VarChar(length), Value::Text(value)) => {
-            coerce_text_value(value, length, "CAST")
+        (DataType::VarChar(length), value) => {
+            coerce_varchar_value(cast_value_to_text_string(value)?, length, "CAST")
         }
         (DataType::Binary(length), value) => coerce_binary_value(value, length, "CAST", true),
         (DataType::VarBinary(length), value) => coerce_binary_value(value, length, "CAST", false),
@@ -6424,7 +6619,7 @@ fn evaluate_nullif(args: Vec<Value>) -> Result<Value> {
     if right.is_null() {
         return Ok(left);
     }
-    if sql_values_equal(&left, &right) {
+    if sql_values_equal(&left, &right, None) {
         Ok(Value::Null)
     } else {
         Ok(left)
@@ -6948,7 +7143,7 @@ fn evaluate_extremum(function_name: &str, args: Vec<Value>, pick_greater: bool) 
     let mut values = args.into_iter();
     let mut best = values.next().expect("validated extremum arity");
     for value in values {
-        let ordering = sql_partial_cmp(&value, &best).ok_or_else(|| {
+        let ordering = sql_partial_cmp(&value, &best, None).ok_or_else(|| {
             HematiteError::ParseError(format!(
                 "{} requires mutually comparable arguments",
                 function_name
@@ -7246,23 +7441,65 @@ fn round_float(value: f64, precision: i32) -> f64 {
     }
 }
 
-fn sql_values_equal(left: &Value, right: &Value) -> bool {
+fn apply_text_comparison_context(value: &str, text_context: Option<TextComparisonContext>) -> String {
+    let mut normalized = if text_context.is_some_and(|context| context.trim_trailing_spaces) {
+        value.trim_end_matches(' ').to_string()
+    } else {
+        value.to_string()
+    };
+
+    if text_context.is_some_and(|context| context.case_insensitive) {
+        normalized = normalized.to_lowercase();
+    }
+
+    normalized
+}
+
+fn like_matches_with_context(
+    pattern: &str,
+    text: &str,
+    text_context: Option<TextComparisonContext>,
+) -> bool {
+    let pattern = apply_text_comparison_context(pattern, text_context);
+    let text = apply_text_comparison_context(text, text_context);
+    SelectExecutor::like_matches(&pattern, &text)
+}
+
+fn sql_values_equal(
+    left: &Value,
+    right: &Value,
+    text_context: Option<TextComparisonContext>,
+) -> bool {
     if let Some(ordering) = sql_decimal_cmp(left, right) {
         return ordering == Ordering::Equal;
     }
     if let Some((left, right)) = sql_numeric_pair(left, right) {
         return left == right;
     }
+    if let (Value::Text(left), Value::Text(right)) = (left, right) {
+        return apply_text_comparison_context(left, text_context)
+            == apply_text_comparison_context(right, text_context);
+    }
 
     left == right
 }
 
-fn sql_partial_cmp(left: &Value, right: &Value) -> Option<Ordering> {
+fn sql_partial_cmp(
+    left: &Value,
+    right: &Value,
+    text_context: Option<TextComparisonContext>,
+) -> Option<Ordering> {
     if let Some(ordering) = sql_decimal_cmp(left, right) {
         return Some(ordering);
     }
     if let Some((left, right)) = sql_numeric_pair(left, right) {
         return left.partial_cmp(&right);
+    }
+    if let (Value::Text(left), Value::Text(right)) = (left, right) {
+        return Some(
+            apply_text_comparison_context(left, text_context)
+                .cmp(&apply_text_comparison_context(right, text_context)),
+        );
     }
 
     left.partial_cmp(right)
@@ -7322,19 +7559,26 @@ fn compare_condition_values(
     left: &Value,
     operator: &ComparisonOperator,
     right: &Value,
+    text_context: Option<TextComparisonContext>,
 ) -> Option<bool> {
     if left.is_null() || right.is_null() {
         return None;
     }
 
     match operator {
-        ComparisonOperator::Equal => Some(sql_values_equal(left, right)),
-        ComparisonOperator::NotEqual => Some(!sql_values_equal(left, right)),
-        ComparisonOperator::LessThan => sql_partial_cmp(left, right).map(|ord| ord.is_lt()),
-        ComparisonOperator::LessThanOrEqual => sql_partial_cmp(left, right).map(|ord| ord.is_le()),
-        ComparisonOperator::GreaterThan => sql_partial_cmp(left, right).map(|ord| ord.is_gt()),
+        ComparisonOperator::Equal => Some(sql_values_equal(left, right, text_context)),
+        ComparisonOperator::NotEqual => Some(!sql_values_equal(left, right, text_context)),
+        ComparisonOperator::LessThan => {
+            sql_partial_cmp(left, right, text_context).map(|ord| ord.is_lt())
+        }
+        ComparisonOperator::LessThanOrEqual => {
+            sql_partial_cmp(left, right, text_context).map(|ord| ord.is_le())
+        }
+        ComparisonOperator::GreaterThan => {
+            sql_partial_cmp(left, right, text_context).map(|ord| ord.is_gt())
+        }
         ComparisonOperator::GreaterThanOrEqual => {
-            sql_partial_cmp(left, right).map(|ord| ord.is_ge())
+            sql_partial_cmp(left, right, text_context).map(|ord| ord.is_ge())
         }
     }
 }
@@ -7359,6 +7603,7 @@ fn evaluate_in_candidates(
     probe: Value,
     candidates: impl IntoIterator<Item = Value>,
     is_not: bool,
+    text_context: Option<TextComparisonContext>,
 ) -> Option<bool> {
     if probe.is_null() {
         return None;
@@ -7371,7 +7616,7 @@ fn evaluate_in_candidates(
             saw_null = true;
             continue;
         }
-        if sql_values_equal(&candidate, &probe) {
+        if sql_values_equal(&candidate, &probe, text_context) {
             matched = true;
             break;
         }
@@ -7386,13 +7631,19 @@ fn evaluate_in_candidates(
     }
 }
 
-fn evaluate_between_values(value: Value, lower: Value, upper: Value, is_not: bool) -> Option<bool> {
+fn evaluate_between_values(
+    value: Value,
+    lower: Value,
+    upper: Value,
+    is_not: bool,
+    text_context: Option<TextComparisonContext>,
+) -> Option<bool> {
     if value.is_null() || lower.is_null() || upper.is_null() {
         return None;
     }
 
-    let lower_ok = sql_partial_cmp(&value, &lower).map(|ordering| !ordering.is_lt());
-    let upper_ok = sql_partial_cmp(&value, &upper).map(|ordering| !ordering.is_gt());
+    let lower_ok = sql_partial_cmp(&value, &lower, text_context).map(|ordering| !ordering.is_lt());
+    let upper_ok = sql_partial_cmp(&value, &upper, text_context).map(|ordering| !ordering.is_gt());
 
     match (lower_ok, upper_ok) {
         (Some(true), Some(true)) => Some(!is_not),
@@ -7401,10 +7652,15 @@ fn evaluate_between_values(value: Value, lower: Value, upper: Value, is_not: boo
     }
 }
 
-fn evaluate_like_values(value: Value, pattern: Value, is_not: bool) -> Option<bool> {
+fn evaluate_like_values(
+    value: Value,
+    pattern: Value,
+    is_not: bool,
+    text_context: Option<TextComparisonContext>,
+) -> Option<bool> {
     match (value, pattern) {
         (Value::Text(text), Value::Text(pattern)) => {
-            let matched = SelectExecutor::like_matches(&pattern, &text);
+            let matched = like_matches_with_context(&pattern, &text, text_context);
             Some(if is_not { !matched } else { matched })
         }
         (left, right) if left.is_null() || right.is_null() => None,

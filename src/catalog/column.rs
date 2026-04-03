@@ -12,6 +12,8 @@ pub struct Column {
     pub id: ColumnId,
     pub name: String,
     pub data_type: DataType,
+    pub character_set: Option<String>,
+    pub collation: Option<String>,
     pub nullable: bool,
     pub primary_key: bool,
     pub auto_increment: bool,
@@ -24,6 +26,8 @@ impl Column {
             id,
             name,
             data_type,
+            character_set: None,
+            collation: None,
             nullable: true,
             primary_key: false,
             auto_increment: false,
@@ -57,6 +61,16 @@ impl Column {
         self
     }
 
+    pub fn character_set(mut self, character_set: Option<String>) -> Self {
+        self.character_set = character_set;
+        self
+    }
+
+    pub fn collation(mut self, collation: Option<String>) -> Self {
+        self.collation = collation;
+        self
+    }
+
     pub fn validate_value(&self, value: &Value) -> bool {
         if value.is_null() {
             return self.nullable;
@@ -71,10 +85,8 @@ impl Column {
             (DataType::Int16, Value::Integer(value)) => i16::try_from(*value).is_ok(),
             (DataType::UInt8, Value::UInteger(value)) => u8::try_from(*value).is_ok(),
             (DataType::UInt16, Value::UInteger(value)) => u16::try_from(*value).is_ok(),
-            (DataType::Char(length), Value::Text(text))
-            | (DataType::VarChar(length), Value::Text(text)) => {
-                text.chars().count() <= *length as usize
-            }
+            (DataType::Char(length), Value::Text(text)) => text.chars().count() == *length as usize,
+            (DataType::VarChar(length), Value::Text(text)) => text.chars().count() <= *length as usize,
             (DataType::Binary(length), Value::Blob(bytes))
             | (DataType::VarBinary(length), Value::Blob(bytes)) => bytes.len() <= *length as usize,
             (DataType::Enum(values), Value::Enum(value)) => values.contains(value),
@@ -99,9 +111,11 @@ impl Column {
                         DataType::UInt8 | DataType::UInt16 | DataType::UInt => Value::UInteger(0),
                         DataType::UInt64 => Value::UBigInt(0),
                         DataType::UInt128 => Value::UInt128(0),
-                        DataType::Text | DataType::Char(_) | DataType::VarChar(_) => {
-                            Value::Text(String::new())
+                        DataType::Text => Value::Text(String::new()),
+                        DataType::Char(length) => {
+                            Value::Text(pad_text_to_char_length("", *length))
                         }
+                        DataType::VarChar(_) => Value::Text(String::new()),
                         DataType::Binary(length) => Value::Blob(vec![0; *length as usize]),
                         DataType::VarBinary(_) | DataType::Blob => Value::Blob(Vec::new()),
                         DataType::Enum(values) => {
@@ -147,8 +161,20 @@ impl Column {
         if self.auto_increment {
             flags |= 0x04;
         }
+        if self.character_set.is_some() {
+            flags |= 0x08;
+        }
+        if self.collation.is_some() {
+            flags |= 0x10;
+        }
         buffer.push(flags);
 
+        if let Some(character_set) = &self.character_set {
+            write_string(buffer, character_set);
+        }
+        if let Some(collation) = &self.collation {
+            write_string(buffer, collation);
+        }
         write_optional_value(buffer, self.default_value.as_ref());
         Ok(())
     }
@@ -191,6 +217,16 @@ impl Column {
         let nullable = (flags & 0x01) != 0;
         let primary_key = (flags & 0x02) != 0;
         let auto_increment = (flags & 0x04) != 0;
+        let character_set = if (flags & 0x08) != 0 {
+            Some(read_string(buffer, offset, "column character set")?)
+        } else {
+            None
+        };
+        let collation = if (flags & 0x10) != 0 {
+            Some(read_string(buffer, offset, "column collation")?)
+        } else {
+            None
+        };
 
         let default_value = read_optional_value(buffer, offset)?;
 
@@ -198,12 +234,42 @@ impl Column {
             id,
             name,
             data_type,
+            character_set,
+            collation,
             nullable,
             primary_key,
             auto_increment,
             default_value,
         })
     }
+}
+
+pub(crate) fn pad_text_to_char_length(value: &str, length: u32) -> String {
+    let char_count = value.chars().count();
+    if char_count >= length as usize {
+        value.to_string()
+    } else {
+        let mut padded = String::with_capacity(value.len() + (length as usize - char_count));
+        padded.push_str(value);
+        padded.push_str(&" ".repeat(length as usize - char_count));
+        padded
+    }
+}
+
+pub(crate) fn normalize_text_for_collation(value: &str, collation: Option<&str>) -> String {
+    if collation_is_nocase(collation) {
+        value.to_lowercase()
+    } else {
+        value.to_string()
+    }
+}
+
+pub(crate) fn collation_is_nocase(collation: Option<&str>) -> bool {
+    let Some(collation) = collation else {
+        return false;
+    };
+    let normalized = collation.to_ascii_lowercase();
+    normalized == "nocase" || normalized.ends_with("_nocase")
 }
 
 fn write_data_type(buffer: &mut Vec<u8>, data_type: &DataType) {
@@ -329,6 +395,11 @@ fn write_optional_u32(buffer: &mut Vec<u8>, value: Option<u32>) {
     buffer.extend_from_slice(&value.unwrap_or(u32::MAX).to_le_bytes());
 }
 
+fn write_string(buffer: &mut Vec<u8>, value: &str) {
+    buffer.extend_from_slice(&(value.len() as u32).to_le_bytes());
+    buffer.extend_from_slice(value.as_bytes());
+}
+
 fn read_optional_u32(
     buffer: &[u8],
     offset: &mut usize,
@@ -353,6 +424,13 @@ fn read_u32(buffer: &[u8], offset: &mut usize, label: &str) -> Result<u32, Hemat
     );
     *offset += 4;
     Ok(value)
+}
+
+fn read_string(buffer: &[u8], offset: &mut usize, label: &str) -> Result<String, HematiteError> {
+    let len = read_u32(buffer, offset, label)? as usize;
+    let bytes = read_fixed(buffer, offset, len, label)?;
+    String::from_utf8(bytes.to_vec())
+        .map_err(|_| HematiteError::CorruptedData(format!("Invalid UTF-8 in {label}")))
 }
 
 fn write_optional_value(buffer: &mut Vec<u8>, value: Option<&Value>) {

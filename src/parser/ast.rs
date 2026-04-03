@@ -552,6 +552,8 @@ pub enum AlterOperation {
 pub struct ColumnDefinition {
     pub name: String,
     pub data_type: SqlTypeName,
+    pub character_set: Option<String>,
+    pub collation: Option<String>,
     pub nullable: bool,
     pub primary_key: bool,
     pub auto_increment: bool,
@@ -3067,6 +3069,14 @@ impl CreateStatement {
             if column_names.contains(&col.name) {
                 return Err(HematiteError::ParseError(format!(
                     "Duplicate column name '{}'",
+                    col.name
+                )));
+            }
+            if (!col.character_set.is_none() || !col.collation.is_none())
+                && !col.data_type.supports_text_metadata()
+            {
+                return Err(HematiteError::ParseError(format!(
+                    "Column '{}' can only use CHARACTER SET or COLLATE with CHAR, VARCHAR, or TEXT",
                     col.name
                 )));
             }

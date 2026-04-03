@@ -567,6 +567,8 @@ mod executor_tests {
             columns: vec![ColumnDefinition {
                 name: "id".to_string(),
                 data_type: SqlTypeName::Int,
+                character_set: None,
+                collation: None,
                 nullable: false,
                 primary_key: true,
                 auto_increment: false,
@@ -612,6 +614,8 @@ mod executor_tests {
                 ColumnDefinition {
                     name: "id".to_string(),
                     data_type: SqlTypeName::Int,
+                    character_set: None,
+                    collation: None,
                     nullable: false,
                     primary_key: true,
                     auto_increment: false,
@@ -623,6 +627,8 @@ mod executor_tests {
                 ColumnDefinition {
                     name: "parent_id".to_string(),
                     data_type: SqlTypeName::Int,
+                    character_set: None,
+                    collation: None,
                     nullable: true,
                     primary_key: false,
                     auto_increment: false,
@@ -1700,6 +1706,8 @@ mod planner_tests {
             columns: vec![ColumnDefinition {
                 name: "id".to_string(),
                 data_type: SqlTypeName::Int,
+                character_set: None,
+                collation: None,
                 nullable: false,
                 primary_key: true,
                 auto_increment: false,

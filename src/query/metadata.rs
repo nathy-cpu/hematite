@@ -254,6 +254,12 @@ fn render_create_table_sql(table: &Table) -> String {
 
     for (index, column) in table.columns.iter().enumerate() {
         let mut parts = vec![format!("{} {}", column.name, column.data_type.name())];
+        if let Some(character_set) = &column.character_set {
+            parts.push(format!("CHARACTER SET {}", character_set));
+        }
+        if let Some(collation) = &column.collation {
+            parts.push(format!("COLLATE {}", collation));
+        }
         if !column.nullable {
             parts.push("NOT NULL".to_string());
         }
