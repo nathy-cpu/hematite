@@ -1,0 +1,57 @@
+# Adapted from:
+# https://github.com/duckdb/duckdb/blob/main/test/sql/join/inner/test_join.test
+
+statement ok
+CREATE TABLE inner_join_test (a INTEGER PRIMARY KEY, b INTEGER);
+
+statement ok
+INSERT INTO inner_join_test (a, b) VALUES (11, 1), (12, 2), (13, 3);
+
+statement ok
+CREATE TABLE inner_join_test2 (id INTEGER PRIMARY KEY, b INTEGER, c INTEGER);
+
+statement ok
+INSERT INTO inner_join_test2 (id, b, c) VALUES (1, 1, 10), (2, 1, 20), (3, 2, 30);
+
+query III nosort
+SELECT a, inner_join_test.b, c
+FROM inner_join_test, inner_join_test2
+WHERE inner_join_test.b = inner_join_test2.b
+ORDER BY c;
+----
+11 1 10
+11 1 20
+12 2 30
+
+statement error
+SELECT b FROM inner_join_test, inner_join_test2 WHERE inner_join_test.b > inner_join_test2.b;
+
+query III nosort
+SELECT a, inner_join_test.b, c
+FROM inner_join_test
+INNER JOIN inner_join_test2 ON inner_join_test.b = inner_join_test2.b
+ORDER BY c;
+----
+11 1 10
+11 1 20
+12 2 30
+
+query III nosort
+SELECT a, inner_join_test.b, c
+FROM inner_join_test
+INNER JOIN inner_join_test2 ON inner_join_test2.b = inner_join_test.b AND 2 = 2
+ORDER BY c;
+----
+11 1 10
+11 1 20
+12 2 30
+
+query III nosort
+SELECT a, inner_join_test.b, c
+FROM inner_join_test
+INNER JOIN inner_join_test2 ON inner_join_test.b = 2
+ORDER BY c;
+----
+12 2 10
+12 2 20
+12 2 30

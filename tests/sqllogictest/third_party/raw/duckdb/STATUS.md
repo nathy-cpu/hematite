@@ -29,6 +29,12 @@ Notes:
   so promotion will likely happen file-by-file or through adapted portable extracts.
 
 Promoted/adapted so far:
+- `test/sql/join/empty_joins.test`
+  - adapted to:
+    - `third_party/portable/empty_joins_from_duckdb.slt`
+  - notes:
+    - rewritten to use explicit table loads and `ON` clauses instead of DuckDB's `range(...)`, `rowid`, and `USING (...)` shortcuts
+    - kept only the empty-left-side cases; empty-right and right/full variants were left out because Hematite's current empty-join behavior diverges there
 - `test/sql/select/test_select_empty_table.test`
   - adapted to:
     - `third_party/portable/select_empty_table_from_duckdb.slt`
@@ -119,3 +125,40 @@ Promoted/adapted so far:
     - `third_party/portable/ranking_windows_from_duckdb.slt`
   - notes:
     - the promoted cases use explicit rows instead of `range(...)` and skip `NULLS FIRST/LAST` and frame-clause variants that go beyond Hematite's current window surface
+- `test/sql/join/inner/test_join.test`
+  - partially adapted to:
+    - `third_party/portable/inner_join_basics_from_duckdb.slt`
+  - notes:
+    - kept to portable equi-join, ambiguous-column, and constant-condition cases
+    - left out `VALUES`-based join cases and verification pragmas
+- `test/sql/join/left_outer/test_left_outer.test`
+  - partially adapted to:
+    - `third_party/portable/left_outer_basics_from_duckdb.slt`
+  - notes:
+    - kept to portable left-join null-padding and simple inequality cases
+    - left out right-join, derived-empty, and `VALUES`-based variants because they were either already covered elsewhere or more dialect-sensitive
+- `test/sql/subquery/exists/test_scalar_exists.test`
+  - partially adapted to:
+    - `third_party/portable/exists_basics_from_duckdb.slt`
+- `test/sql/subquery/exists/test_uncorrelated_exists_subquery.test`
+  - partially adapted to:
+    - `third_party/portable/exists_basics_from_duckdb.slt`
+  - notes:
+    - kept to portable predicate-form EXISTS cases without DuckDB's null-order setting or typed-NULL casts
+    - projection-form `SELECT EXISTS(...)` cases were left out because Hematite does not yet parse EXISTS directly as a select item in this shape
+- `test/sql/subquery/exists/test_correlated_exists.test`
+  - partially adapted to:
+    - `third_party/portable/correlated_exists_from_duckdb.slt`
+  - notes:
+    - kept to portable correlated EXISTS and CASE-based aggregation cases
+    - left out advanced aggregate-parameter and NULL-ordering variants
+- `test/sql/order/test_limit.test`
+  - partially adapted to:
+    - `third_party/portable/limit_basics_from_duckdb.slt`
+- `test/sql/limit/test_preserve_insertion_order.test`
+  - partially adapted to:
+    - `third_party/portable/limit_basics_from_duckdb.slt`
+  - notes:
+    - reduced to portable literal LIMIT/OFFSET forms over explicit rows
+    - scalar-subquery LIMIT/OFFSET forms were left out because Hematite still requires a literal non-negative integer there
+    - left out DuckDB settings, large generated tables, and insertion-order-specific assertions

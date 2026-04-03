@@ -1,0 +1,24 @@
+# Adapted from:
+# https://github.com/duckdb/duckdb/blob/main/test/sql/subquery/exists/test_scalar_exists.test
+# https://github.com/duckdb/duckdb/blob/main/test/sql/subquery/exists/test_uncorrelated_exists_subquery.test
+
+statement ok
+CREATE TABLE exists_test (i INTEGER PRIMARY KEY);
+
+statement ok
+INSERT INTO exists_test (i) VALUES (1), (2), (3);
+
+query I nosort
+SELECT * FROM exists_test WHERE EXISTS(SELECT * FROM exists_test) ORDER BY i;
+----
+1
+2
+3
+
+query I nosort
+SELECT * FROM exists_test WHERE EXISTS(SELECT * FROM exists_test WHERE i > 10) ORDER BY i;
+----
+
+query I nosort
+SELECT * FROM exists_test WHERE NOT EXISTS(SELECT * FROM exists_test) ORDER BY i;
+----
