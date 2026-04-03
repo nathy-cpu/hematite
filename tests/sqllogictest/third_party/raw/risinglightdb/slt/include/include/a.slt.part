@@ -1,6 +1,0 @@
-query T
-select * from example_basic
-----
-Alice
-Bob
-Eve

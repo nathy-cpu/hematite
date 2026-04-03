@@ -1,4 +1,3 @@
 # Runnable sqllogictest corpus roots, relative to tests/sqllogictest
 core
 advanced
-third_party/portable
