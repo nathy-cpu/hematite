@@ -21,9 +21,9 @@ pub enum SqlTypeName {
     VarBinary(u32),
     Enum(Vec<String>),
     Boolean,
+    Float32,
     Float,
-    Real,
-    Double,
+    Float128,
     Decimal {
         precision: Option<u32>,
         scale: Option<u32>,
@@ -67,9 +67,9 @@ impl SqlTypeName {
                     .join(", ")
             ),
             SqlTypeName::Boolean => "BOOLEAN".to_string(),
+            SqlTypeName::Float32 => "FLOAT32".to_string(),
             SqlTypeName::Float => "FLOAT".to_string(),
-            SqlTypeName::Real => "REAL".to_string(),
-            SqlTypeName::Double => "DOUBLE".to_string(),
+            SqlTypeName::Float128 => "FLOAT128".to_string(),
             SqlTypeName::Decimal { precision, scale } => {
                 format_numeric_type("DECIMAL", *precision, *scale)
             }
@@ -128,9 +128,9 @@ impl LiteralValue {
             (LiteralValue::Integer(value), SqlTypeName::UInt128) => *value >= 0,
             (LiteralValue::Integer(_), SqlTypeName::Decimal { .. }) => true,
             (LiteralValue::Integer(_), SqlTypeName::Numeric { .. }) => true,
+            (LiteralValue::Float(_), SqlTypeName::Float32) => true,
             (LiteralValue::Float(_), SqlTypeName::Float) => true,
-            (LiteralValue::Float(_), SqlTypeName::Real) => true,
-            (LiteralValue::Float(_), SqlTypeName::Double) => true,
+            (LiteralValue::Float(_), SqlTypeName::Float128) => true,
             (LiteralValue::Float(_), SqlTypeName::Decimal { .. }) => true,
             (LiteralValue::Float(_), SqlTypeName::Numeric { .. }) => true,
             (LiteralValue::Text(_), SqlTypeName::Text) => true,

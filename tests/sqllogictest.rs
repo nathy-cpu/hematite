@@ -69,7 +69,9 @@ fn infer_column_types(rows: &[hematite::sql::result::Row]) -> Vec<sqllogictest::
             | Value::Boolean(_) => {
                 sqllogictest::DefaultColumnType::Integer
             }
-            Value::Float(_) | Value::Decimal(_) => sqllogictest::DefaultColumnType::FloatingPoint,
+            Value::Float32(_) | Value::Float(_) | Value::Float128(_) | Value::Decimal(_) => {
+                sqllogictest::DefaultColumnType::FloatingPoint
+            }
             _ => sqllogictest::DefaultColumnType::Text,
         })
         .collect()
@@ -93,7 +95,9 @@ fn render_value(value: Value) -> String {
                 "false".to_string()
             }
         }
+        Value::Float32(value) => value.to_string(),
         Value::Float(value) => value.to_string(),
+        Value::Float128(value) => value.to_string(),
         Value::Decimal(value) => value.to_string(),
         Value::Blob(value) => format!("{value:02X?}").replace([',', ' ', '[', ']'], ""),
         Value::Date(value) => value.to_string(),

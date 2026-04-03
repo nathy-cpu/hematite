@@ -172,7 +172,9 @@ impl FromValue for bool {
 impl FromValue for f64 {
     fn from_value(value: &Value) -> Result<Self> {
         match value {
+            Value::Float32(f) => Ok(*f as f64),
             Value::Float(f) => Ok(*f),
+            Value::Float128(f) => Ok(*f),
             Value::Integer(i) => Ok(*i as f64), // Allow integer to float conversion
             Value::UInteger(i) => Ok(*i as f64),
             Value::BigInt(i) => Ok(*i as f64),

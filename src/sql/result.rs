@@ -148,7 +148,9 @@ impl Row {
 
     pub fn get_float(&self, index: usize) -> Result<f64> {
         match self.get(index) {
+            Some(Value::Float32(f)) => Ok(*f as f64),
             Some(Value::Float(f)) => Ok(*f),
+            Some(Value::Float128(f)) => Ok(*f),
             Some(Value::Integer(i)) => Ok(*i as f64), // Allow integer to float conversion
             Some(Value::UInteger(i)) => Ok(*i as f64),
             Some(Value::BigInt(i)) => Ok(*i as f64),

@@ -1884,7 +1884,15 @@ impl SelectExecutor {
                             int_sum += *i as i64;
                             float_sum += *i as f64;
                         }
+                        Value::Float32(f) => {
+                            has_float = true;
+                            float_sum += *f as f64;
+                        }
                         Value::Float(f) => {
+                            has_float = true;
+                            float_sum += *f;
+                        }
+                        Value::Float128(f) => {
                             has_float = true;
                             float_sum += *f;
                         }
@@ -1910,7 +1918,9 @@ impl SelectExecutor {
                 for value in values {
                     match value {
                         Value::Integer(i) => sum += *i as f64,
+                        Value::Float32(f) => sum += *f as f64,
                         Value::Float(f) => sum += *f,
+                        Value::Float128(f) => sum += *f,
                         _ => {
                             return Err(HematiteError::ParseError(format!(
                                 "AVG() requires numeric values, found {:?}",
@@ -4602,12 +4612,47 @@ fn coerce_decimal_value(value: Value) -> Result<DecimalValue> {
         Value::UInteger(value) => Ok(DecimalValue::from_u32(value)),
         Value::UBigInt(value) => Ok(DecimalValue::from_u64(value)),
         Value::UInt128(value) => Ok(DecimalValue::from_u128(value)),
+        Value::Float32(value) => DecimalValue::from_f64(value as f64),
         Value::Float(value) => DecimalValue::from_f64(value),
+        Value::Float128(value) => DecimalValue::from_f64(value),
         Value::Text(value) => DecimalValue::parse(&value),
         value => Err(HematiteError::ParseError(format!(
             "Expected DECIMAL-compatible value, found {:?}",
             value
         ))),
+    }
+}
+
+fn numeric_value_as_f64(value: &Value) -> Option<f64> {
+    match value {
+        Value::Integer(value) => Some(*value as f64),
+        Value::BigInt(value) => Some(*value as f64),
+        Value::Int128(value) => Some(*value as f64),
+        Value::UInteger(value) => Some(*value as f64),
+        Value::UBigInt(value) => Some(*value as f64),
+        Value::UInt128(value) => Some(*value as f64),
+        Value::Float32(value) => Some(*value as f64),
+        Value::Float(value) => Some(*value),
+        Value::Float128(value) => Some(*value),
+        _ => None,
+    }
+}
+
+fn make_float_value(data_type: &DataType, value: f64) -> Value {
+    match data_type {
+        DataType::Float32 => Value::Float32(value as f32),
+        DataType::Float => Value::Float(value),
+        DataType::Float128 => Value::Float128(value),
+        _ => unreachable!("non-float type used for float value construction"),
+    }
+}
+
+fn float_type_name(data_type: &DataType) -> &'static str {
+    match data_type {
+        DataType::Float32 => "FLOAT32",
+        DataType::Float => "FLOAT",
+        DataType::Float128 => "FLOAT128",
+        _ => unreachable!("non-float type used for float naming"),
     }
 }
 
@@ -4772,6 +4817,11 @@ fn coerce_column_value(column: &Column, value: Value) -> Result<Value> {
         (DataType::UInt128, Value::UInteger(i)) => Ok(Value::UInt128(i as u128)),
         (DataType::UInt128, Value::UBigInt(i)) => Ok(Value::UInt128(i as u128)),
         (DataType::UInt128, Value::UInt128(i)) => Ok(Value::UInt128(i)),
+        (_, Value::Null) if column.nullable => Ok(Value::Null),
+        (_, Value::Null) => Err(HematiteError::ParseError(format!(
+            "Column '{}' cannot be NULL",
+            column.name
+        ))),
         (DataType::Text, Value::Text(s)) => Ok(Value::Text(s)),
         (DataType::Char(length), Value::Text(s)) => coerce_text_value(s, *length, &column.name),
         (DataType::VarChar(length), Value::Text(s)) => coerce_text_value(s, *length, &column.name),
@@ -4783,27 +4833,15 @@ fn coerce_column_value(column: &Column, value: Value) -> Result<Value> {
         }
         (DataType::Enum(values), value) => coerce_enum_value(value, values, &column.name),
         (DataType::Boolean, Value::Boolean(b)) => Ok(Value::Boolean(b)),
-        (DataType::Float, Value::Float(f)) => Ok(Value::Float(f)),
-        (DataType::Real, Value::Float(f)) => Ok(Value::Float(f)),
-        (DataType::Double, Value::Float(f)) => Ok(Value::Float(f)),
-        (DataType::Float, Value::Integer(i)) => Ok(Value::Float(i as f64)),
-        (DataType::Real, Value::Integer(i)) => Ok(Value::Float(i as f64)),
-        (DataType::Double, Value::Integer(i)) => Ok(Value::Float(i as f64)),
-        (DataType::Float, Value::BigInt(i)) => Ok(Value::Float(i as f64)),
-        (DataType::Real, Value::BigInt(i)) => Ok(Value::Float(i as f64)),
-        (DataType::Double, Value::BigInt(i)) => Ok(Value::Float(i as f64)),
-        (DataType::Float, Value::Int128(i)) => Ok(Value::Float(i as f64)),
-        (DataType::Real, Value::Int128(i)) => Ok(Value::Float(i as f64)),
-        (DataType::Double, Value::Int128(i)) => Ok(Value::Float(i as f64)),
-        (DataType::Float, Value::UInteger(i)) => Ok(Value::Float(i as f64)),
-        (DataType::Real, Value::UInteger(i)) => Ok(Value::Float(i as f64)),
-        (DataType::Double, Value::UInteger(i)) => Ok(Value::Float(i as f64)),
-        (DataType::Float, Value::UBigInt(i)) => Ok(Value::Float(i as f64)),
-        (DataType::Real, Value::UBigInt(i)) => Ok(Value::Float(i as f64)),
-        (DataType::Double, Value::UBigInt(i)) => Ok(Value::Float(i as f64)),
-        (DataType::Float, Value::UInt128(i)) => Ok(Value::Float(i as f64)),
-        (DataType::Real, Value::UInt128(i)) => Ok(Value::Float(i as f64)),
-        (DataType::Double, Value::UInt128(i)) => Ok(Value::Float(i as f64)),
+        (data_type @ (DataType::Float32 | DataType::Float | DataType::Float128), value) => {
+            let Some(number) = numeric_value_as_f64(&value) else {
+                return Err(HematiteError::ParseError(format!(
+                    "Type mismatch: column '{}' expects {:?}, got {:?}",
+                    column.name, column.data_type, value
+                )));
+            };
+            Ok(make_float_value(data_type, number))
+        }
         (DataType::Decimal { precision, scale }, value)
         | (DataType::Numeric { precision, scale }, value) => {
             let decimal = coerce_decimal_value(value)?;
@@ -4836,11 +4874,6 @@ fn coerce_column_value(column: &Column, value: Value) -> Result<Value> {
         (DataType::TimeWithTimeZone, Value::Text(s)) => Ok(Value::TimeWithTimeZone(
             validate_time_with_time_zone_string(&s)?,
         )),
-        (_, Value::Null) if column.nullable => Ok(Value::Null),
-        (_, Value::Null) => Err(HematiteError::ParseError(format!(
-            "Column '{}' cannot be NULL",
-            column.name
-        ))),
         (_, value) => Err(HematiteError::ParseError(format!(
             "Type mismatch: column '{}' expects {:?}, got {:?}",
             column.name, column.data_type, value
@@ -5435,6 +5468,12 @@ fn evaluate_arithmetic_values(
         return Ok(value);
     }
 
+    if left.is_float_like() || right.is_float_like() {
+        if let (Some(left), Some(right)) = (numeric_value_as_f64(&left), numeric_value_as_f64(&right)) {
+            return evaluate_float_arithmetic(operator, left, right);
+        }
+    }
+
     match (left, right) {
         (Value::Integer(left), Value::Integer(right)) => match operator {
             ArithmeticOperator::Add => {
@@ -5467,15 +5506,6 @@ fn evaluate_arithmetic_values(
                 }
             }
         },
-        (Value::Integer(left), Value::Float(right)) => {
-            evaluate_float_arithmetic(operator, left as f64, right)
-        }
-        (Value::Float(left), Value::Integer(right)) => {
-            evaluate_float_arithmetic(operator, left, right as f64)
-        }
-        (Value::Float(left), Value::Float(right)) => {
-            evaluate_float_arithmetic(operator, left, right)
-        }
         (left, right) => Err(HematiteError::ParseError(format!(
             "Arithmetic requires numeric values, found {:?} and {:?}",
             left, right
@@ -5823,7 +5853,9 @@ fn negate_numeric_value(value: Value) -> Result<Value> {
             }
             Ok(Value::Int128(-(value as i128)))
         }
+        Value::Float32(value) => Ok(Value::Float32(-value)),
         Value::Float(value) => Ok(Value::Float(-value)),
+        Value::Float128(value) => Ok(Value::Float128(-value)),
         Value::Null => Ok(Value::Null),
         value => Err(HematiteError::ParseError(format!(
             "Unary '-' requires a numeric value, found {:?}",
@@ -5881,7 +5913,9 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
                 HematiteError::ParseError("Cannot CAST out-of-range INT128 AS INT".to_string())
             })
         }
+        (DataType::Int, Value::Float32(value)) => Ok(Value::Integer(value as i32)),
         (DataType::Int, Value::Float(value)) => Ok(Value::Integer(value as i32)),
+        (DataType::Int, Value::Float128(value)) => Ok(Value::Integer(value as i32)),
         (DataType::Int, Value::Boolean(true)) => Ok(Value::Integer(1)),
         (DataType::Int, Value::Boolean(false)) => Ok(Value::Integer(0)),
         (DataType::Int, Value::Text(value)) => value
@@ -5895,7 +5929,9 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
                 HematiteError::ParseError("Cannot CAST out-of-range INT128 AS INT64".to_string())
             })
         }
+        (DataType::Int64, Value::Float32(value)) => Ok(Value::BigInt(value as i64)),
         (DataType::Int64, Value::Float(value)) => Ok(Value::BigInt(value as i64)),
+        (DataType::Int64, Value::Float128(value)) => Ok(Value::BigInt(value as i64)),
         (DataType::Int64, Value::Boolean(true)) => Ok(Value::BigInt(1)),
         (DataType::Int64, Value::Boolean(false)) => Ok(Value::BigInt(0)),
         (DataType::Int64, Value::Text(value)) => value
@@ -5905,7 +5941,9 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
         (DataType::Int128, Value::Integer(value)) => Ok(Value::Int128(value as i128)),
         (DataType::Int128, Value::BigInt(value)) => Ok(Value::Int128(value as i128)),
         (DataType::Int128, Value::Int128(value)) => Ok(Value::Int128(value)),
+        (DataType::Int128, Value::Float32(value)) => Ok(Value::Int128(value as i128)),
         (DataType::Int128, Value::Float(value)) => Ok(Value::Int128(value as i128)),
+        (DataType::Int128, Value::Float128(value)) => Ok(Value::Int128(value as i128)),
         (DataType::Int128, Value::Boolean(true)) => Ok(Value::Int128(1)),
         (DataType::Int128, Value::Boolean(false)) => Ok(Value::Int128(0)),
         (DataType::Int128, Value::Text(value)) => value
@@ -5944,7 +5982,13 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
                 HematiteError::ParseError("Cannot CAST out-of-range UINT128 AS UINT".to_string())
             })
         }
+        (DataType::UInt, Value::Float32(value)) if value >= 0.0 => {
+            Ok(Value::UInteger(value as u32))
+        }
         (DataType::UInt, Value::Float(value)) if value >= 0.0 => Ok(Value::UInteger(value as u32)),
+        (DataType::UInt, Value::Float128(value)) if value >= 0.0 => {
+            Ok(Value::UInteger(value as u32))
+        }
         (DataType::UInt, Value::Boolean(true)) => Ok(Value::UInteger(1)),
         (DataType::UInt, Value::Boolean(false)) => Ok(Value::UInteger(0)),
         (DataType::UInt, Value::Text(value)) => value
@@ -5965,7 +6009,15 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
                 HematiteError::ParseError("Cannot CAST out-of-range UINT128 AS UINT64".to_string())
             })
         }
-        (DataType::UInt64, Value::Float(value)) if value >= 0.0 => Ok(Value::UBigInt(value as u64)),
+        (DataType::UInt64, Value::Float32(value)) if value >= 0.0 => {
+            Ok(Value::UBigInt(value as u64))
+        }
+        (DataType::UInt64, Value::Float(value)) if value >= 0.0 => {
+            Ok(Value::UBigInt(value as u64))
+        }
+        (DataType::UInt64, Value::Float128(value)) if value >= 0.0 => {
+            Ok(Value::UBigInt(value as u64))
+        }
         (DataType::UInt64, Value::Boolean(true)) => Ok(Value::UBigInt(1)),
         (DataType::UInt64, Value::Boolean(false)) => Ok(Value::UBigInt(0)),
         (DataType::UInt64, Value::Text(value)) => value
@@ -5978,7 +6030,15 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
         (DataType::UInt128, Value::UInteger(value)) => Ok(Value::UInt128(value as u128)),
         (DataType::UInt128, Value::UBigInt(value)) => Ok(Value::UInt128(value as u128)),
         (DataType::UInt128, Value::UInt128(value)) => Ok(Value::UInt128(value)),
-        (DataType::UInt128, Value::Float(value)) if value >= 0.0 => Ok(Value::UInt128(value as u128)),
+        (DataType::UInt128, Value::Float32(value)) if value >= 0.0 => {
+            Ok(Value::UInt128(value as u128))
+        }
+        (DataType::UInt128, Value::Float(value)) if value >= 0.0 => {
+            Ok(Value::UInt128(value as u128))
+        }
+        (DataType::UInt128, Value::Float128(value)) if value >= 0.0 => {
+            Ok(Value::UInt128(value as u128))
+        }
         (DataType::UInt128, Value::Boolean(true)) => Ok(Value::UInt128(1)),
         (DataType::UInt128, Value::Boolean(false)) => Ok(Value::UInt128(0)),
         (DataType::UInt128, Value::Text(value)) => value
@@ -5991,7 +6051,9 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
         (DataType::Text, Value::UInteger(value)) => Ok(Value::Text(value.to_string())),
         (DataType::Text, Value::UBigInt(value)) => Ok(Value::Text(value.to_string())),
         (DataType::Text, Value::UInt128(value)) => Ok(Value::Text(value.to_string())),
+        (DataType::Text, Value::Float32(value)) => Ok(Value::Text(value.to_string())),
         (DataType::Text, Value::Float(value)) => Ok(Value::Text(value.to_string())),
+        (DataType::Text, Value::Float128(value)) => Ok(Value::Text(value.to_string())),
         (DataType::Text, Value::Enum(value)) => Ok(Value::Text(value)),
         (DataType::Text, Value::Boolean(true)) => Ok(Value::Text("TRUE".to_string())),
         (DataType::Text, Value::Boolean(false)) => Ok(Value::Text("FALSE".to_string())),
@@ -6019,7 +6081,9 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
         (DataType::Boolean, Value::UInteger(value)) => Ok(Value::Boolean(value != 0)),
         (DataType::Boolean, Value::UBigInt(value)) => Ok(Value::Boolean(value != 0)),
         (DataType::Boolean, Value::UInt128(value)) => Ok(Value::Boolean(value != 0)),
+        (DataType::Boolean, Value::Float32(value)) => Ok(Value::Boolean(value != 0.0)),
         (DataType::Boolean, Value::Float(value)) => Ok(Value::Boolean(value != 0.0)),
+        (DataType::Boolean, Value::Float128(value)) => Ok(Value::Boolean(value != 0.0)),
         (DataType::Boolean, Value::Text(value)) => match value.to_ascii_uppercase().as_str() {
             "TRUE" | "1" => Ok(Value::Boolean(true)),
             "FALSE" | "0" => Ok(Value::Boolean(false)),
@@ -6028,41 +6092,35 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
                 value
             ))),
         },
-        (DataType::Float, Value::Float(value)) => Ok(Value::Float(value)),
-        (DataType::Float, Value::Integer(value)) => Ok(Value::Float(value as f64)),
-        (DataType::Float, Value::BigInt(value)) => Ok(Value::Float(value as f64)),
-        (DataType::Float, Value::Int128(value)) => Ok(Value::Float(value as f64)),
-        (DataType::Float, Value::UInteger(value)) => Ok(Value::Float(value as f64)),
-        (DataType::Float, Value::UBigInt(value)) => Ok(Value::Float(value as f64)),
-        (DataType::Float, Value::UInt128(value)) => Ok(Value::Float(value as f64)),
-        (DataType::Float, Value::Boolean(true)) => Ok(Value::Float(1.0)),
-        (DataType::Float, Value::Boolean(false)) => Ok(Value::Float(0.0)),
-        (DataType::Float, Value::Text(value)) => value
-            .parse::<f64>()
-            .map(Value::Float)
-            .map_err(|_| HematiteError::ParseError(format!("Cannot CAST '{}' AS FLOAT", value))),
-        (DataType::Real, Value::Float(value)) => Ok(Value::Float(value)),
-        (DataType::Real, Value::Integer(value)) => Ok(Value::Float(value as f64)),
-        (DataType::Real, Value::BigInt(value)) => Ok(Value::Float(value as f64)),
-        (DataType::Real, Value::Int128(value)) => Ok(Value::Float(value as f64)),
-        (DataType::Real, Value::UInteger(value)) => Ok(Value::Float(value as f64)),
-        (DataType::Real, Value::UBigInt(value)) => Ok(Value::Float(value as f64)),
-        (DataType::Real, Value::UInt128(value)) => Ok(Value::Float(value as f64)),
-        (DataType::Real, Value::Text(value)) => value
-            .parse::<f64>()
-            .map(Value::Float)
-            .map_err(|_| HematiteError::ParseError(format!("Cannot CAST '{}' AS REAL", value))),
-        (DataType::Double, Value::Float(value)) => Ok(Value::Float(value)),
-        (DataType::Double, Value::Integer(value)) => Ok(Value::Float(value as f64)),
-        (DataType::Double, Value::BigInt(value)) => Ok(Value::Float(value as f64)),
-        (DataType::Double, Value::Int128(value)) => Ok(Value::Float(value as f64)),
-        (DataType::Double, Value::UInteger(value)) => Ok(Value::Float(value as f64)),
-        (DataType::Double, Value::UBigInt(value)) => Ok(Value::Float(value as f64)),
-        (DataType::Double, Value::UInt128(value)) => Ok(Value::Float(value as f64)),
-        (DataType::Double, Value::Text(value)) => value
-            .parse::<f64>()
-            .map(Value::Float)
-            .map_err(|_| HematiteError::ParseError(format!("Cannot CAST '{}' AS DOUBLE", value))),
+        (data_type @ (DataType::Float32 | DataType::Float | DataType::Float128), Value::Text(value)) => {
+            value
+                .parse::<f64>()
+                .map(|value| make_float_value(&data_type, value))
+                .map_err(|_| {
+                    HematiteError::ParseError(format!(
+                        "Cannot CAST '{}' AS {}",
+                        value,
+                        float_type_name(&data_type)
+                    ))
+                })
+        }
+        (data_type @ (DataType::Float32 | DataType::Float | DataType::Float128), Value::Boolean(true)) => {
+            Ok(make_float_value(&data_type, 1.0))
+        }
+        (data_type @ (DataType::Float32 | DataType::Float | DataType::Float128), Value::Boolean(false)) => {
+            Ok(make_float_value(&data_type, 0.0))
+        }
+        (data_type @ (DataType::Float32 | DataType::Float | DataType::Float128), value) => {
+            if let Some(number) = numeric_value_as_f64(&value) {
+                Ok(make_float_value(&data_type, number))
+            } else {
+                Err(HematiteError::ParseError(format!(
+                    "Cannot CAST '{:?}' AS {}",
+                    value,
+                    float_type_name(&data_type)
+                )))
+            }
+        }
         (DataType::Decimal { precision, scale }, value)
         | (DataType::Numeric { precision, scale }, value) => {
             let decimal = coerce_decimal_value(value)?;
@@ -6382,7 +6440,9 @@ fn evaluate_abs(args: Vec<Value>) -> Result<Value> {
         Value::UInteger(value) => Ok(Value::UInteger(value)),
         Value::UBigInt(value) => Ok(Value::UBigInt(value)),
         Value::UInt128(value) => Ok(Value::UInt128(value)),
+        Value::Float32(value) => Ok(Value::Float32(value.abs())),
         Value::Float(value) => Ok(Value::Float(value.abs())),
+        Value::Float128(value) => Ok(Value::Float128(value.abs())),
         _ => unreachable!("validated numeric input"),
     })
 }
@@ -6416,7 +6476,9 @@ fn evaluate_round(args: Vec<Value>) -> Result<Value> {
         Value::UInteger(value) => round_uinteger(value, precision),
         Value::UBigInt(value) => round_ubigint(value, precision),
         Value::UInt128(value) => round_uint128(value, precision),
+        Value::Float32(value) => Ok(Value::Float32(round_float(value as f64, precision) as f32)),
         Value::Float(value) => Ok(Value::Float(round_float(value, precision))),
+        Value::Float128(value) => Ok(Value::Float128(round_float(value, precision))),
         value => Err(HematiteError::ParseError(format!(
             "ROUND requires a numeric value, found {:?}",
             value
@@ -6562,7 +6624,9 @@ where
         | Value::UInteger(_)
         | Value::UBigInt(_)
         | Value::UInt128(_)
-        | Value::Float(_) => f(value),
+        | Value::Float32(_)
+        | Value::Float(_)
+        | Value::Float128(_) => f(value),
         value => Err(HematiteError::ParseError(format!(
             "{} requires a numeric value, found {:?}",
             name, value
@@ -6572,13 +6636,6 @@ where
 
 fn expect_numeric_argument(function_name: &str, value: Value) -> Result<f64> {
     match value {
-        Value::Integer(value) => Ok(value as f64),
-        Value::BigInt(value) => Ok(value as f64),
-        Value::Int128(value) => Ok(value as f64),
-        Value::UInteger(value) => Ok(value as f64),
-        Value::UBigInt(value) => Ok(value as f64),
-        Value::UInt128(value) => Ok(value as f64),
-        Value::Float(value) => Ok(value),
         Value::Decimal(value) => value.to_string().parse::<f64>().map_err(|_| {
             HematiteError::ParseError(format!(
                 "{} requires a numeric value, found {:?}",
@@ -6586,6 +6643,7 @@ fn expect_numeric_argument(function_name: &str, value: Value) -> Result<f64> {
                 Value::Decimal(value.clone())
             ))
         }),
+        value if numeric_value_as_f64(&value).is_some() => Ok(numeric_value_as_f64(&value).unwrap()),
         value => Err(HematiteError::ParseError(format!(
             "{} requires a numeric value, found {:?}",
             function_name, value
@@ -6611,7 +6669,9 @@ fn coerce_value_to_string(function_name: &str, value: Value) -> Result<String> {
         Value::UInteger(value) => Ok(value.to_string()),
         Value::UBigInt(value) => Ok(value.to_string()),
         Value::UInt128(value) => Ok(value.to_string()),
+        Value::Float32(value) => Ok(value.to_string()),
         Value::Float(value) => Ok(value.to_string()),
+        Value::Float128(value) => Ok(value.to_string()),
         Value::Boolean(true) => Ok("TRUE".to_string()),
         Value::Boolean(false) => Ok("FALSE".to_string()),
         Value::Blob(value) => Ok(String::from_utf8_lossy(&value).into_owned()),
@@ -6638,6 +6698,9 @@ fn expect_text_argument(function_name: &str, value: Value) -> Result<String> {
         Value::UInteger(value) => Ok(value.to_string()),
         Value::UBigInt(value) => Ok(value.to_string()),
         Value::UInt128(value) => Ok(value.to_string()),
+        Value::Float32(value) => Ok(value.to_string()),
+        Value::Float(value) => Ok(value.to_string()),
+        Value::Float128(value) => Ok(value.to_string()),
         value => Err(HematiteError::ParseError(format!(
             "{} requires a text value, found {:?}",
             function_name, value
@@ -6692,6 +6755,9 @@ fn expect_integer_argument(function_name: &str, value: Value, label: &str) -> Re
                 Value::UInt128(value)
             ))
         }),
+        Value::Float32(value) => Ok(value as i32),
+        Value::Float(value) => Ok(value as i32),
+        Value::Float128(value) => Ok(value as i32),
         value => Err(HematiteError::ParseError(format!(
             "{} {} requires an integer value, found {:?}",
             function_name, label, value
@@ -6949,7 +7015,9 @@ fn evaluate_ceil(args: Vec<Value>) -> Result<Value> {
         Value::UInteger(value) => Ok(Value::UInteger(value)),
         Value::UBigInt(value) => Ok(Value::UBigInt(value)),
         Value::UInt128(value) => Ok(Value::UInt128(value)),
+        Value::Float32(value) => Ok(Value::Float32(value.ceil())),
         Value::Float(value) => Ok(Value::Float(value.ceil())),
+        Value::Float128(value) => Ok(Value::Float128(value.ceil())),
         _ => unreachable!("validated numeric input"),
     })
 }
@@ -6962,7 +7030,9 @@ fn evaluate_floor(args: Vec<Value>) -> Result<Value> {
         Value::UInteger(value) => Ok(Value::UInteger(value)),
         Value::UBigInt(value) => Ok(Value::UBigInt(value)),
         Value::UInt128(value) => Ok(Value::UInt128(value)),
+        Value::Float32(value) => Ok(Value::Float32(value.floor())),
         Value::Float(value) => Ok(Value::Float(value.floor())),
+        Value::Float128(value) => Ok(Value::Float128(value.floor())),
         _ => unreachable!("validated numeric input"),
     })
 }
@@ -7104,58 +7174,7 @@ fn sql_partial_cmp(left: &Value, right: &Value) -> Option<Ordering> {
 }
 
 fn sql_numeric_pair(left: &Value, right: &Value) -> Option<(f64, f64)> {
-    match (left, right) {
-        (Value::Integer(left), Value::Integer(right)) => Some((*left as f64, *right as f64)),
-        (Value::Integer(left), Value::BigInt(right)) => Some((*left as f64, *right as f64)),
-        (Value::Integer(left), Value::Int128(right)) => Some((*left as f64, *right as f64)),
-        (Value::Integer(left), Value::UInteger(right)) => Some((*left as f64, *right as f64)),
-        (Value::Integer(left), Value::UBigInt(right)) => Some((*left as f64, *right as f64)),
-        (Value::Integer(left), Value::UInt128(right)) => Some((*left as f64, *right as f64)),
-        (Value::Integer(left), Value::Float(right)) => Some((*left as f64, *right)),
-        (Value::BigInt(left), Value::Integer(right)) => Some((*left as f64, *right as f64)),
-        (Value::BigInt(left), Value::BigInt(right)) => Some((*left as f64, *right as f64)),
-        (Value::BigInt(left), Value::Int128(right)) => Some((*left as f64, *right as f64)),
-        (Value::BigInt(left), Value::UInteger(right)) => Some((*left as f64, *right as f64)),
-        (Value::BigInt(left), Value::UBigInt(right)) => Some((*left as f64, *right as f64)),
-        (Value::BigInt(left), Value::UInt128(right)) => Some((*left as f64, *right as f64)),
-        (Value::BigInt(left), Value::Float(right)) => Some((*left as f64, *right)),
-        (Value::Int128(left), Value::Integer(right)) => Some((*left as f64, *right as f64)),
-        (Value::Int128(left), Value::BigInt(right)) => Some((*left as f64, *right as f64)),
-        (Value::Int128(left), Value::Int128(right)) => Some((*left as f64, *right as f64)),
-        (Value::Int128(left), Value::UInteger(right)) => Some((*left as f64, *right as f64)),
-        (Value::Int128(left), Value::UBigInt(right)) => Some((*left as f64, *right as f64)),
-        (Value::Int128(left), Value::UInt128(right)) => Some((*left as f64, *right as f64)),
-        (Value::Int128(left), Value::Float(right)) => Some((*left as f64, *right)),
-        (Value::UInteger(left), Value::Integer(right)) => Some((*left as f64, *right as f64)),
-        (Value::UInteger(left), Value::BigInt(right)) => Some((*left as f64, *right as f64)),
-        (Value::UInteger(left), Value::Int128(right)) => Some((*left as f64, *right as f64)),
-        (Value::UInteger(left), Value::UInteger(right)) => Some((*left as f64, *right as f64)),
-        (Value::UInteger(left), Value::UBigInt(right)) => Some((*left as f64, *right as f64)),
-        (Value::UInteger(left), Value::UInt128(right)) => Some((*left as f64, *right as f64)),
-        (Value::UInteger(left), Value::Float(right)) => Some((*left as f64, *right)),
-        (Value::UBigInt(left), Value::Integer(right)) => Some((*left as f64, *right as f64)),
-        (Value::UBigInt(left), Value::BigInt(right)) => Some((*left as f64, *right as f64)),
-        (Value::UBigInt(left), Value::Int128(right)) => Some((*left as f64, *right as f64)),
-        (Value::UBigInt(left), Value::UInteger(right)) => Some((*left as f64, *right as f64)),
-        (Value::UBigInt(left), Value::UBigInt(right)) => Some((*left as f64, *right as f64)),
-        (Value::UBigInt(left), Value::UInt128(right)) => Some((*left as f64, *right as f64)),
-        (Value::UBigInt(left), Value::Float(right)) => Some((*left as f64, *right)),
-        (Value::UInt128(left), Value::Integer(right)) => Some((*left as f64, *right as f64)),
-        (Value::UInt128(left), Value::BigInt(right)) => Some((*left as f64, *right as f64)),
-        (Value::UInt128(left), Value::Int128(right)) => Some((*left as f64, *right as f64)),
-        (Value::UInt128(left), Value::UInteger(right)) => Some((*left as f64, *right as f64)),
-        (Value::UInt128(left), Value::UBigInt(right)) => Some((*left as f64, *right as f64)),
-        (Value::UInt128(left), Value::UInt128(right)) => Some((*left as f64, *right as f64)),
-        (Value::UInt128(left), Value::Float(right)) => Some((*left as f64, *right)),
-        (Value::Float(left), Value::Integer(right)) => Some((*left, *right as f64)),
-        (Value::Float(left), Value::BigInt(right)) => Some((*left, *right as f64)),
-        (Value::Float(left), Value::Int128(right)) => Some((*left, *right as f64)),
-        (Value::Float(left), Value::UInteger(right)) => Some((*left, *right as f64)),
-        (Value::Float(left), Value::UBigInt(right)) => Some((*left, *right as f64)),
-        (Value::Float(left), Value::UInt128(right)) => Some((*left, *right as f64)),
-        (Value::Float(left), Value::Float(right)) => Some((*left, *right)),
-        _ => None,
-    }
+    Some((numeric_value_as_f64(left)?, numeric_value_as_f64(right)?))
 }
 
 fn sql_decimal_cmp(left: &Value, right: &Value) -> Option<Ordering> {
@@ -7167,7 +7186,9 @@ fn sql_decimal_cmp(left: &Value, right: &Value) -> Option<Ordering> {
         Value::UInteger(value) => DecimalValue::from_u32(*value),
         Value::UBigInt(value) => DecimalValue::from_u64(*value),
         Value::UInt128(value) => DecimalValue::from_u128(*value),
+        Value::Float32(value) => DecimalValue::from_f64(*value as f64).ok()?,
         Value::Float(value) => DecimalValue::from_f64(*value).ok()?,
+        Value::Float128(value) => DecimalValue::from_f64(*value).ok()?,
         _ => return None,
     };
     let right = match right {
@@ -7178,7 +7199,9 @@ fn sql_decimal_cmp(left: &Value, right: &Value) -> Option<Ordering> {
         Value::UInteger(value) => DecimalValue::from_u32(*value),
         Value::UBigInt(value) => DecimalValue::from_u64(*value),
         Value::UInt128(value) => DecimalValue::from_u128(*value),
+        Value::Float32(value) => DecimalValue::from_f64(*value as f64).ok()?,
         Value::Float(value) => DecimalValue::from_f64(*value).ok()?,
+        Value::Float128(value) => DecimalValue::from_f64(*value).ok()?,
         _ => return None,
     };
     Some(left.cmp(&right))

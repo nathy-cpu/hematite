@@ -1337,7 +1337,7 @@ mod connection_tests {
         let mut conn = Connection::new(db.path())?;
 
         conn.execute(
-            "CREATE TABLE `user data` (`id` INT PRIMARY KEY, `active` BOOL NOT NULL DEFAULT TRUE, `score` DOUBLE, `name` VARCHAR(32));",
+            "CREATE TABLE `user data` (`id` INT PRIMARY KEY, `active` BOOL NOT NULL DEFAULT TRUE, `score` FLOAT128, `name` VARCHAR(32));",
         )?;
         conn.execute(
             "INSERT INTO `user data` (`id`, `active`, `score`, `name`) VALUES (1, TRUE, 2.5, 'alice');",
@@ -1352,7 +1352,7 @@ mod connection_tests {
             vec![vec![
                 crate::catalog::Value::Integer(1),
                 crate::catalog::Value::Boolean(true),
-                crate::catalog::Value::Float(2.5),
+                crate::catalog::Value::Float128(2.5),
                 crate::catalog::Value::Text("alice".to_string()),
             ]]
         );
@@ -1367,7 +1367,7 @@ mod connection_tests {
         let mut conn = Connection::new(db.path())?;
 
         conn.execute(
-            "CREATE TABLE metrics (id INT64 UNSIGNED PRIMARY KEY, ratio REAL, amount DECIMAL(10, 2), code CHAR(8), tiny INT8, small INT16, exact NUMERIC(6));",
+            "CREATE TABLE metrics (id INT64 UNSIGNED PRIMARY KEY, ratio FLOAT32, amount DECIMAL(10, 2), code CHAR(8), tiny INT8, small INT16, exact NUMERIC(6));",
         )?;
         conn.execute(
             "INSERT INTO metrics (id, ratio, amount, code, tiny, small, exact) VALUES (1, 1.5, 2.5, 'AB', 3, 4, 5.5);",
@@ -1379,7 +1379,7 @@ mod connection_tests {
             result.rows,
             vec![vec![
                 crate::catalog::Value::UBigInt(1),
-                crate::catalog::Value::Float(1.5),
+                crate::catalog::Value::Float32(1.5),
                 crate::catalog::Value::Decimal(crate::catalog::DecimalValue::parse("2.5")?),
                 crate::catalog::Value::Text("AB".to_string()),
                 crate::catalog::Value::Integer(3),

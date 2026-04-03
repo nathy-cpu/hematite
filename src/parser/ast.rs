@@ -4356,9 +4356,9 @@ fn sql_type_name_for_catalog_type(data_type: crate::catalog::DataType) -> SqlTyp
         crate::catalog::DataType::VarBinary(length) => SqlTypeName::VarBinary(length),
         crate::catalog::DataType::Enum(values) => SqlTypeName::Enum(values),
         crate::catalog::DataType::Boolean => SqlTypeName::Boolean,
+        crate::catalog::DataType::Float32 => SqlTypeName::Float32,
         crate::catalog::DataType::Float => SqlTypeName::Float,
-        crate::catalog::DataType::Real => SqlTypeName::Real,
-        crate::catalog::DataType::Double => SqlTypeName::Double,
+        crate::catalog::DataType::Float128 => SqlTypeName::Float128,
         crate::catalog::DataType::Decimal { precision, scale } => {
             SqlTypeName::Decimal { precision, scale }
         }

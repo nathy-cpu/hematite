@@ -111,7 +111,9 @@ impl Column {
                             Value::Enum(values.first().cloned().unwrap_or_default())
                         }
                         DataType::Boolean => Value::Boolean(false),
-                        DataType::Float | DataType::Real | DataType::Double => Value::Float(0.0),
+                        DataType::Float32 => Value::Float32(0.0),
+                        DataType::Float => Value::Float(0.0),
+                        DataType::Float128 => Value::Float128(0.0),
                         DataType::Decimal { .. } | DataType::Numeric { .. } => {
                             Value::Decimal(DecimalValue::zero())
                         }
@@ -249,8 +251,8 @@ fn write_data_type(buffer: &mut Vec<u8>, data_type: &DataType) {
         }
         DataType::Boolean => buffer.push(10),
         DataType::Float => buffer.push(11),
-        DataType::Real => buffer.push(12),
-        DataType::Double => buffer.push(13),
+        DataType::Float32 => buffer.push(12),
+        DataType::Float128 => buffer.push(13),
         DataType::Decimal { precision, scale } => {
             buffer.push(14);
             write_optional_u32(buffer, *precision);
@@ -307,8 +309,8 @@ fn read_data_type(buffer: &[u8], offset: &mut usize) -> Result<DataType, Hematit
         }
         10 => DataType::Boolean,
         11 => DataType::Float,
-        12 => DataType::Real,
-        13 => DataType::Double,
+        12 => DataType::Float32,
+        13 => DataType::Float128,
         14 => DataType::Decimal {
             precision: read_optional_u32(buffer, offset, "DECIMAL precision")?,
             scale: read_optional_u32(buffer, offset, "DECIMAL scale")?,
@@ -389,6 +391,15 @@ fn write_optional_value(buffer: &mut Vec<u8>, value: Option<&Value>) {
         Some(Value::Float(value)) => {
             buffer.push(3);
             buffer.extend_from_slice(&value.to_le_bytes());
+        }
+        Some(Value::Float32(value)) => {
+            buffer.push(20);
+            buffer.extend_from_slice(&value.to_le_bytes());
+        }
+        Some(Value::Float128(value)) => {
+            buffer.push(21);
+            buffer.extend_from_slice(&value.to_le_bytes());
+            buffer.extend_from_slice(&0u64.to_le_bytes());
         }
         Some(Value::BigInt(value)) => {
             buffer.push(4);
@@ -499,6 +510,23 @@ fn read_optional_value(buffer: &[u8], offset: &mut usize) -> Result<Option<Value
                     .unwrap(),
             );
             Some(Value::Float(value))
+        }
+        20 => {
+            let value = f32::from_le_bytes(
+                read_fixed(buffer, offset, 4, "default float32")?
+                    .try_into()
+                    .unwrap(),
+            );
+            Some(Value::Float32(value))
+        }
+        21 => {
+            let value = f64::from_le_bytes(
+                read_fixed(buffer, offset, 8, "default float128")?
+                    .try_into()
+                    .unwrap(),
+            );
+            let _padding = read_fixed(buffer, offset, 8, "default float128 padding")?;
+            Some(Value::Float128(value))
         }
         4 => {
             let value = i64::from_le_bytes(

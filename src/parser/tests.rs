@@ -322,7 +322,7 @@ mod lexer_tests {
     #[test]
     fn test_backtick_identifier_and_type_alias_tokens() -> Result<()> {
         let mut lexer = Lexer::new(
-            "CREATE TABLE `user data` (`id` INT PRIMARY KEY, `active` BOOL, `score` DOUBLE, `name` VARCHAR(32));"
+            "CREATE TABLE `user data` (`id` INT PRIMARY KEY, `active` BOOL, `score` FLOAT128, `name` VARCHAR(32));"
                 .to_string(),
         );
         lexer.tokenize()?;
@@ -341,7 +341,7 @@ mod lexer_tests {
             Token::Bool,
             Token::Comma,
             Token::Identifier("score".to_string()),
-            Token::Double,
+            Token::Float128,
             Token::Comma,
             Token::Identifier("name".to_string()),
             Token::Varchar,
@@ -1684,7 +1684,7 @@ mod parser_tests {
     #[test]
     fn test_parse_create_with_backticks_and_type_aliases() -> Result<()> {
         let create = parse_create(
-            "CREATE TABLE `user data` (`id` INT PRIMARY KEY UNIQUE, `active` BOOL NOT NULL, `score` DOUBLE DEFAULT 1.5, `name` VARCHAR(32) DEFAULT 'x');",
+            "CREATE TABLE `user data` (`id` INT PRIMARY KEY UNIQUE, `active` BOOL NOT NULL, `score` FLOAT128 DEFAULT 1.5, `name` VARCHAR(32) DEFAULT 'x');",
         )?;
         assert_eq!(create.table, "user data");
         assert_eq!(create.columns.len(), 4);
@@ -1693,7 +1693,7 @@ mod parser_tests {
         assert!(create.columns[0].unique);
         assert_eq!(create.columns[1].data_type, SqlTypeName::Boolean);
         assert!(!create.columns[1].nullable);
-        assert_eq!(create.columns[2].data_type, SqlTypeName::Double);
+        assert_eq!(create.columns[2].data_type, SqlTypeName::Float128);
         assert_eq!(
             create.columns[2].default_value,
             Some(LiteralValue::Float(1.5))
@@ -1711,10 +1711,10 @@ mod parser_tests {
     #[test]
     fn test_parse_additional_mysql_type_aliases() -> Result<()> {
         let create = parse_create(
-            "CREATE TABLE metrics (id INT64 UNSIGNED PRIMARY KEY, ratio REAL, amount DECIMAL(10, 2), code CHAR(8), tiny INT8, small INT16, exact NUMERIC(6));",
+            "CREATE TABLE metrics (id INT64 UNSIGNED PRIMARY KEY, ratio FLOAT32, amount DECIMAL(10, 2), code CHAR(8), tiny INT8, small INT16, exact NUMERIC(6));",
         )?;
         assert_eq!(create.columns[0].data_type, SqlTypeName::UInt64);
-        assert_eq!(create.columns[1].data_type, SqlTypeName::Real);
+        assert_eq!(create.columns[1].data_type, SqlTypeName::Float32);
         assert_eq!(
             create.columns[2].data_type,
             SqlTypeName::Decimal {

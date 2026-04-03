@@ -61,9 +61,18 @@ impl RowCodec {
                     buffer.push(3);
                     buffer.push(u8::from(*b));
                 }
+                Value::Float32(f) => {
+                    buffer.push(21);
+                    buffer.extend_from_slice(&f.to_le_bytes());
+                }
                 Value::Float(f) => {
                     buffer.push(4);
                     buffer.extend_from_slice(&f.to_le_bytes());
+                }
+                Value::Float128(f) => {
+                    buffer.push(22);
+                    buffer.extend_from_slice(&f.to_le_bytes());
+                    buffer.extend_from_slice(&0u64.to_le_bytes());
                 }
                 Value::Decimal(decimal) => {
                     buffer.push(7);
@@ -197,6 +206,22 @@ impl RowCodec {
                 4 => {
                     let bytes = read_exact(data, &mut offset, payload_end, 8, "Float value")?;
                     Value::Float(f64::from_le_bytes(bytes.try_into().unwrap()))
+                }
+                21 => {
+                    let bytes = read_exact(data, &mut offset, payload_end, 4, "Float32 value")?;
+                    Value::Float32(f32::from_le_bytes(bytes.try_into().unwrap()))
+                }
+                22 => {
+                    let bytes =
+                        read_exact(data, &mut offset, payload_end, 8, "Float128 value")?;
+                    let _padding = read_exact(
+                        data,
+                        &mut offset,
+                        payload_end,
+                        8,
+                        "Float128 padding",
+                    )?;
+                    Value::Float128(f64::from_le_bytes(bytes.try_into().unwrap()))
                 }
                 5 => Value::Null,
                 6 => {
@@ -407,9 +432,18 @@ fn encode_key_value(buffer: &mut Vec<u8>, value: &Value) {
             buffer.push(20);
             buffer.extend_from_slice(&value.to_be_bytes());
         }
+        Value::Float32(value) => {
+            buffer.push(21);
+            buffer.extend_from_slice(&ordered_f32_bytes(*value));
+        }
         Value::Float(value) => {
             buffer.push(5);
             buffer.extend_from_slice(&ordered_f64_bytes(*value));
+        }
+        Value::Float128(value) => {
+            buffer.push(22);
+            buffer.extend_from_slice(&ordered_f64_bytes(*value));
+            buffer.extend_from_slice(&0u64.to_be_bytes());
         }
         Value::Decimal(value) => {
             buffer.push(6);
@@ -466,6 +500,16 @@ fn ordered_f64_bytes(value: f64) -> [u8; 8] {
     let bits = value.to_bits();
     let transformed = if (bits >> 63) == 0 {
         bits ^ (1u64 << 63)
+    } else {
+        !bits
+    };
+    transformed.to_be_bytes()
+}
+
+fn ordered_f32_bytes(value: f32) -> [u8; 4] {
+    let bits = value.to_bits();
+    let transformed = if (bits >> 31) == 0 {
+        bits ^ (1u32 << 31)
     } else {
         !bits
     };
