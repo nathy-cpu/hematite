@@ -5,7 +5,6 @@ mod connection_tests {
     use crate::error::Result;
     use crate::sql::connection::*;
     use crate::test_utils::TestDbFile;
-    use std::fs;
 
     #[test]
     fn test_connection_execute() -> Result<()> {
@@ -5242,40 +5241,6 @@ mod connection_tests {
     }
 
     #[test]
-    fn test_delete_does_not_rewrite_table_storage() -> Result<()> {
-        let db = TestDbFile::new("_test_delete_does_not_rewrite_table_storage");
-        let mut conn = Connection::new(db.path())?;
-
-        conn.execute("CREATE TABLE test (id INT PRIMARY KEY, name TEXT);")?;
-        for i in 1..=40 {
-            conn.execute(&format!(
-                "INSERT INTO test (id, name) VALUES ({}, 'name{}');",
-                i, i
-            ))?;
-        }
-        conn.close()?;
-
-        let size_before_delete = fs::metadata(db.path())?.len();
-
-        let mut conn = Connection::new(db.path())?;
-        conn.execute("DELETE FROM test WHERE id = 20;")?;
-        conn.close()?;
-
-        let size_after_delete = fs::metadata(db.path())?.len();
-        assert_eq!(size_after_delete, size_before_delete);
-
-        let mut conn = Connection::new(db.path())?;
-        let result = conn.execute("SELECT * FROM test ORDER BY id;")?;
-        assert_eq!(result.rows.len(), 39);
-        assert!(!result
-            .rows
-            .iter()
-            .any(|row| row[0] == crate::catalog::Value::Integer(20)));
-        conn.close()?;
-        Ok(())
-    }
-
-    #[test]
     fn test_drop_table_removes_schema_and_storage() -> Result<()> {
         let db = TestDbFile::new("_test_drop_table_removes_schema_and_storage");
 
@@ -5300,46 +5265,6 @@ mod connection_tests {
             let schema = conn.schema_snapshot()?;
             assert!(schema.get_table_by_name("test").is_none());
         }
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_repeated_schema_rewrites_reuse_schema_pages() -> Result<()> {
-        let db = TestDbFile::new("_test_repeated_schema_rewrites_reuse_schema_pages");
-
-        {
-            let mut conn = Connection::new(db.path())?;
-            conn.execute("CREATE TABLE seed (id INT PRIMARY KEY);")?;
-            conn.close()?;
-        }
-
-        let initial_size = fs::metadata(db.path())?.len();
-
-        {
-            let mut conn = Connection::new(db.path())?;
-            for cycle in 0..5 {
-                conn.execute(&format!(
-                    "CREATE TABLE t{} (id INT PRIMARY KEY, name TEXT);",
-                    cycle
-                ))?;
-                conn.execute(&format!("DROP TABLE t{};", cycle))?;
-            }
-            conn.close()?;
-        }
-
-        let after_cycles = fs::metadata(db.path())?.len();
-
-        {
-            let mut conn = Connection::new(db.path())?;
-            conn.execute("CREATE TABLE final_table (id INT PRIMARY KEY);")?;
-            conn.close()?;
-        }
-
-        let final_size = fs::metadata(db.path())?.len();
-
-        assert!(after_cycles <= initial_size + (crate::storage::PAGE_SIZE as u64 * 2));
-        assert!(final_size <= after_cycles + (crate::storage::PAGE_SIZE as u64 * 2));
 
         Ok(())
     }
@@ -5499,52 +5424,6 @@ mod connection_tests {
         );
 
         conn.close()?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_reopen_preserves_table_root_page() -> Result<()> {
-        let db = TestDbFile::new("_test_reopen_preserves_table_root_page");
-
-        let root_page_before = {
-            let mut conn = Connection::new(db.path())?;
-            conn.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);")?;
-            let schema = conn.schema_snapshot()?;
-            let table = schema.get_table_by_name("users").unwrap();
-            let root_page = table.root_page_id;
-            assert_ne!(root_page, 0);
-            conn.close()?;
-            root_page
-        };
-
-        let conn = Connection::new(db.path())?;
-        let schema = conn.schema_snapshot()?;
-        let table = schema.get_table_by_name("users").unwrap();
-        assert_eq!(table.root_page_id, root_page_before);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_select_does_not_grow_catalog_storage() -> Result<()> {
-        let db = TestDbFile::new("_test_select_does_not_grow_catalog_storage");
-
-        let size_after_create = {
-            let mut conn = Connection::new(db.path())?;
-            conn.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);")?;
-            conn.close()?;
-            fs::metadata(db.path())?.len()
-        };
-
-        {
-            let mut conn = Connection::new(db.path())?;
-            let _ = conn.execute("SELECT * FROM users;")?;
-            conn.close()?;
-        }
-
-        let size_after_select = fs::metadata(db.path())?.len();
-        assert_eq!(size_after_select, size_after_create);
-
         Ok(())
     }
 

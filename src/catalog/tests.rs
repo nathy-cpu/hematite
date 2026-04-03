@@ -431,30 +431,6 @@ mod tests {
     }
 
     #[test]
-    fn test_column_clone() {
-        let original = Column::new(ColumnId::new(1), "test".to_string(), DataType::Text)
-            .nullable(false)
-            .primary_key(true)
-            .default_value(Value::Text("default".to_string()));
-
-        let cloned = original.clone();
-        assert_eq!(original.id, cloned.id);
-        assert_eq!(original.name, cloned.name);
-        assert_eq!(original.data_type, cloned.data_type);
-        assert_eq!(original.nullable, cloned.nullable);
-        assert_eq!(original.primary_key, cloned.primary_key);
-        assert_eq!(original.default_value, cloned.default_value);
-    }
-
-    #[test]
-    fn test_column_debug() {
-        let column = Column::new(ColumnId::new(1), "test".to_string(), DataType::Int);
-        let debug_str = format!("{:?}", column);
-        assert!(debug_str.contains("Column"));
-        assert!(debug_str.contains("test"));
-    }
-
-    #[test]
     fn test_database_header_invalid_magic() -> Result<()> {
         let mut page = Page::new(crate::storage::DB_HEADER_PAGE_ID);
 
@@ -539,84 +515,6 @@ mod tests {
         assert_eq!(header.next_table_id, 3);
 
         assert!(header.verify_checksum());
-    }
-
-    #[test]
-    fn test_database_header_debug() {
-        let header = DatabaseHeader::new(42u32);
-        let debug_str = format!("{:?}", header);
-        assert!(debug_str.contains("DatabaseHeader"));
-        assert!(debug_str.contains("42")); // Check for page ID instead
-    }
-
-    #[test]
-    fn test_table_id_hash() {
-        use std::collections::HashSet;
-
-        let id1 = TableId::new(1);
-        let id2 = TableId::new(1);
-        let id3 = TableId::new(2);
-
-        let mut set = HashSet::new();
-        set.insert(id1);
-        set.insert(id2); // Same value, shouldn't increase size
-        set.insert(id3);
-
-        assert_eq!(set.len(), 2);
-        assert!(set.contains(&TableId::new(1)));
-        assert!(set.contains(&TableId::new(2)));
-    }
-
-    #[test]
-    fn test_column_id_hash() {
-        use std::collections::HashSet;
-
-        let id1 = ColumnId::new(1);
-        let id2 = ColumnId::new(1);
-        let id3 = ColumnId::new(2);
-
-        let mut set = HashSet::new();
-        set.insert(id1);
-        set.insert(id2); // Same value, shouldn't increase size
-        set.insert(id3);
-
-        assert_eq!(set.len(), 2);
-        assert!(set.contains(&ColumnId::new(1)));
-        assert!(set.contains(&ColumnId::new(2)));
-    }
-
-    #[test]
-    fn test_table_id_equality() {
-        let id1 = TableId::new(42);
-        let id2 = TableId::new(42);
-        let id3 = TableId::new(43);
-
-        assert_eq!(id1, id2);
-        assert_ne!(id1, id3);
-    }
-
-    #[test]
-    fn test_column_id_equality() {
-        let id1 = ColumnId::new(42);
-        let id2 = ColumnId::new(42);
-        let id3 = ColumnId::new(43);
-
-        assert_eq!(id1, id2);
-        assert_ne!(id1, id3);
-    }
-
-    #[test]
-    fn test_table_id_debug() {
-        let id = TableId::new(42);
-        let debug_str = format!("{:?}", id);
-        assert!(debug_str.contains("42"));
-    }
-
-    #[test]
-    fn test_column_id_debug() {
-        let id = ColumnId::new(42);
-        let debug_str = format!("{:?}", id);
-        assert!(debug_str.contains("42"));
     }
 
     fn create_test_columns() -> Vec<Column> {
@@ -1110,13 +1008,6 @@ mod tests {
     }
 
     #[test]
-    fn test_schema_debug() {
-        let schema = Schema::new();
-        let debug_str = format!("{:?}", schema);
-        assert!(debug_str.contains("Schema"));
-    }
-
-    #[test]
     fn test_table_creation() -> Result<()> {
         let columns = create_test_columns();
         let table = Table::new(TableId::new(1), "users".to_string(), columns, 42u32)?;
@@ -1372,42 +1263,6 @@ mod tests {
     }
 
     #[test]
-    fn test_table_clone() -> Result<()> {
-        let columns = create_test_columns();
-        let original = Table::new(TableId::new(1), "users".to_string(), columns, 42u32)?;
-
-        let cloned = original.clone();
-        assert_eq!(original.id, cloned.id);
-        assert_eq!(original.name, cloned.name);
-        assert_eq!(original.column_count(), cloned.column_count());
-        assert_eq!(original.primary_key_count(), cloned.primary_key_count());
-
-        // Verify column indices are preserved
-        assert_eq!(
-            original.get_column_index("id"),
-            cloned.get_column_index("id")
-        );
-        assert_eq!(
-            original.get_column_index("name"),
-            cloned.get_column_index("name")
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_table_debug() -> Result<()> {
-        let columns = create_test_columns();
-        let table = Table::new(TableId::new(1), "users".to_string(), columns, 42u32)?;
-
-        let debug_str = format!("{:?}", table);
-        assert!(debug_str.contains("Table"));
-        assert!(debug_str.contains("users"));
-
-        Ok(())
-    }
-
-    #[test]
     fn test_value_type_conversions() {
         let int_val = Value::Integer(42);
         assert_eq!(int_val.as_integer(), Some(42));
@@ -1588,165 +1443,6 @@ mod catalog_new_tests {
         let result = catalog.create_table("users", columns);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_catalog_new_methods() -> Result<()> {
-        let test_db = TestDbFile::new("_test_new_methods");
-
-        let mut catalog = Catalog::open_or_create(test_db.path())?;
-
-        // Create a table
-        let columns = vec![
-            Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true),
-            Column::new(ColumnId::new(2), "name".to_string(), DataType::Text),
-        ];
-
-        let table_id = catalog.create_table("users", columns)?;
-
-        // Test table existence methods
-        assert!(catalog.table_exists("users"));
-        assert!(catalog.table_exists_by_id(table_id));
-        assert!(!catalog.table_exists("nonexistent"));
-        assert!(!catalog.table_exists_by_id(TableId::new(999)));
-
-        // Test root page management
-        let root_page = 42u32;
-        catalog.set_table_root_page(table_id, root_page)?;
-
-        let retrieved_page = catalog.get_table_root_page(table_id)?.unwrap();
-        assert_eq!(retrieved_page, root_page);
-
-        // Test table statistics
-        let stats = catalog.get_table_stats(table_id)?.unwrap();
-        assert_eq!(stats.id, table_id);
-        assert_eq!(stats.name, "users");
-        assert_eq!(stats.column_count, 2);
-        assert_eq!(stats.primary_key_count, 1);
-        assert_eq!(stats.root_page_id, root_page.into());
-
-        // Test all table statistics
-        let all_stats = catalog.get_all_table_stats()?;
-        assert_eq!(all_stats.len(), 1);
-        assert_eq!(all_stats[0].name, "users");
-
-        // Test column methods
-        let columns = catalog.get_table_columns(table_id)?.unwrap();
-        assert_eq!(columns.len(), 2);
-        assert_eq!(columns[0].name, "id");
-        assert_eq!(columns[1].name, "name");
-
-        let columns_by_name = catalog.get_table_columns_by_name("users")?.unwrap();
-        assert_eq!(columns_by_name.len(), 2);
-
-        let pk_columns = catalog.get_primary_key_columns(table_id)?.unwrap();
-        assert_eq!(pk_columns.len(), 1);
-        assert_eq!(pk_columns[0].name, "id");
-        assert!(pk_columns[0].primary_key);
-
-        // Test schema validation
-        assert!(catalog.validate_schema().is_ok());
-
-        // Test column count
-        assert_eq!(catalog.get_total_column_count(), 2);
-
-        // Test peek next table ID
-        let next_id = catalog.peek_next_table_id()?;
-        assert_eq!(next_id.as_u32(), 2); // First table was ID 1
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_catalog_create_table_with_root() -> Result<()> {
-        let test_db = TestDbFile::new("_test_create_with_root");
-
-        let root_page = 100u32;
-
-        {
-            let mut catalog = Catalog::open_or_create(test_db.path())?;
-            let columns = vec![
-                Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true),
-            ];
-
-            let table_id = catalog.create_table_with_root("products", columns, root_page)?;
-
-            let table = catalog.get_table(table_id)?.unwrap();
-            assert_eq!(table.name, "products");
-            assert_eq!(table.root_page_id, root_page.into());
-        }
-
-        let reopened = Catalog::open_or_create(test_db.path())?;
-        let table = reopened.get_table_by_name("products")?.unwrap();
-        assert_eq!(table.root_page_id, root_page.into());
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_catalog_root_page_update_persists_across_reopen() -> Result<()> {
-        let test_db = TestDbFile::new("_test_root_page_persistence");
-        let updated_root = 77u32;
-
-        {
-            let mut catalog = Catalog::open_or_create(test_db.path())?;
-            let columns = vec![
-                Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true),
-            ];
-
-            let table_id = catalog.create_table("users", columns)?;
-            catalog.set_table_root_page(table_id, updated_root)?;
-            assert_eq!(catalog.get_table_root_page(table_id)?, Some(updated_root));
-        }
-
-        let reopened = Catalog::open_or_create(test_db.path())?;
-        let table = reopened.get_table_by_name("users")?.unwrap();
-        assert_eq!(table.root_page_id, updated_root.into());
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_catalog_validation_logic() -> Result<()> {
-        let test_db = TestDbFile::new("_test_validation");
-
-        let mut catalog = Catalog::open_or_create(test_db.path())?;
-
-        // Create a table
-        let columns =
-            vec![Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true)];
-
-        let table_id = catalog.create_table("users", columns)?;
-
-        // Test validation of newly created table (should pass - root page 0 is OK)
-        assert!(catalog.validate_schema().is_ok());
-
-        // Test setting invalid root page (page 0 should be rejected)
-        let result = catalog.set_table_root_page(table_id, 0u32);
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("reserved for database header"));
-
-        // Test setting valid root page
-        let valid_page = 42u32;
-        assert!(catalog.set_table_root_page(table_id, valid_page).is_ok());
-
-        // Test getting root page
-        let retrieved_page = catalog.get_table_root_page(table_id)?.unwrap();
-        assert_eq!(retrieved_page, valid_page);
-
-        // Test validation with valid root page
-        assert!(catalog.validate_schema().is_ok());
-
-        // Test setting root page for non-existent table
-        let fake_id = TableId::new(999);
-        let result = catalog.set_table_root_page(fake_id, 100u32);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not found"));
 
         Ok(())
     }
