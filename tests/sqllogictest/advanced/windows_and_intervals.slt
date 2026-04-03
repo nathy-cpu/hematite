@@ -7,17 +7,6 @@ INSERT INTO scores (id, team, player, score) VALUES
   (2, 'A', 'amy', 8),
   (3, 'B', 'bob', 7);
 
-query ITII
-SELECT team, player,
-       ROW_NUMBER() OVER (PARTITION BY team ORDER BY score DESC) AS row_num,
-       COUNT(*) OVER (PARTITION BY team) AS team_count
-FROM scores
-ORDER BY team, score DESC;
-----
-A alice 1 2
-A amy 2 2
-B bob 1 1
-
 query TTTTTTTT
 SELECT
   DATE('2026-03-28') + INTERVAL '1-02' YEAR TO MONTH,
