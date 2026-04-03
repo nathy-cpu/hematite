@@ -651,110 +651,19 @@ impl Connection {
     }
 
     fn expand_views_in_condition(condition: &mut Condition, schema: &Schema) -> Result<()> {
-        match condition {
-            Condition::Comparison { left, right, .. } => {
-                Self::expand_views_in_expression(left, schema)?;
-                Self::expand_views_in_expression(right, schema)?;
-            }
-            Condition::InList { expr, values, .. } => {
-                Self::expand_views_in_expression(expr, schema)?;
-                for value in values {
-                    Self::expand_views_in_expression(value, schema)?;
-                }
-            }
-            Condition::InSubquery { expr, subquery, .. } => {
-                Self::expand_views_in_expression(expr, schema)?;
-                *subquery = Box::new(Self::expand_views_in_select((**subquery).clone(), schema)?);
-            }
-            Condition::Between {
-                expr, lower, upper, ..
-            } => {
-                Self::expand_views_in_expression(expr, schema)?;
-                Self::expand_views_in_expression(lower, schema)?;
-                Self::expand_views_in_expression(upper, schema)?;
-            }
-            Condition::Like { expr, pattern, .. } => {
-                Self::expand_views_in_expression(expr, schema)?;
-                Self::expand_views_in_expression(pattern, schema)?;
-            }
-            Condition::Exists { subquery, .. } => {
-                *subquery = Box::new(Self::expand_views_in_select((**subquery).clone(), schema)?);
-            }
-            Condition::NullCheck { expr, .. } => {
-                Self::expand_views_in_expression(expr, schema)?;
-            }
-            Condition::Not(inner) => Self::expand_views_in_condition(inner, schema)?,
-            Condition::Logical { left, right, .. } => {
-                Self::expand_views_in_condition(left, schema)?;
-                Self::expand_views_in_condition(right, schema)?;
-            }
-        }
-        Ok(())
+        let mut expand = |subquery: &mut SelectStatement| -> Result<()> {
+            *subquery = Self::expand_views_in_select(subquery.clone(), schema)?;
+            Ok(())
+        };
+        Self::rewrite_nested_subqueries_in_condition(condition, &mut expand)
     }
 
     fn expand_views_in_expression(expr: &mut Expression, schema: &Schema) -> Result<()> {
-        match expr {
-            Expression::ScalarSubquery(subquery) => {
-                *subquery = Box::new(Self::expand_views_in_select((**subquery).clone(), schema)?);
-            }
-            Expression::Cast { expr, .. }
-            | Expression::UnaryMinus(expr)
-            | Expression::UnaryNot(expr)
-            | Expression::NullCheck { expr, .. } => Self::expand_views_in_expression(expr, schema)?,
-            Expression::Case {
-                branches,
-                else_expr,
-            } => {
-                for branch in branches {
-                    Self::expand_views_in_expression(&mut branch.condition, schema)?;
-                    Self::expand_views_in_expression(&mut branch.result, schema)?;
-                }
-                if let Some(else_expr) = else_expr {
-                    Self::expand_views_in_expression(else_expr, schema)?;
-                }
-            }
-            Expression::ScalarFunctionCall { args, .. } => {
-                for arg in args {
-                    Self::expand_views_in_expression(arg, schema)?;
-                }
-            }
-            Expression::Binary { left, right, .. }
-            | Expression::Comparison { left, right, .. }
-            | Expression::Logical { left, right, .. } => {
-                Self::expand_views_in_expression(left, schema)?;
-                Self::expand_views_in_expression(right, schema)?;
-            }
-            Expression::InList { expr, values, .. } => {
-                Self::expand_views_in_expression(expr, schema)?;
-                for value in values {
-                    Self::expand_views_in_expression(value, schema)?;
-                }
-            }
-            Expression::InSubquery { expr, subquery, .. } => {
-                Self::expand_views_in_expression(expr, schema)?;
-                *subquery = Box::new(Self::expand_views_in_select((**subquery).clone(), schema)?);
-            }
-            Expression::Between {
-                expr, lower, upper, ..
-            } => {
-                Self::expand_views_in_expression(expr, schema)?;
-                Self::expand_views_in_expression(lower, schema)?;
-                Self::expand_views_in_expression(upper, schema)?;
-            }
-            Expression::Like { expr, pattern, .. } => {
-                Self::expand_views_in_expression(expr, schema)?;
-                Self::expand_views_in_expression(pattern, schema)?;
-            }
-            Expression::Exists { subquery, .. } => {
-                *subquery = Box::new(Self::expand_views_in_select((**subquery).clone(), schema)?);
-            }
-            Expression::AggregateCall { .. }
-            | Expression::Column(_)
-            | Expression::Literal(_)
-            | Expression::IntervalLiteral { .. }
-            | Expression::Parameter(_) => {}
-        }
-        Ok(())
+        let mut expand = |subquery: &mut SelectStatement| -> Result<()> {
+            *subquery = Self::expand_views_in_select(subquery.clone(), schema)?;
+            Ok(())
+        };
+        Self::rewrite_nested_subqueries_in_expression(expr, &mut expand)
     }
 
     fn normalize_statement(statement: Statement, schema: &Schema) -> Result<Statement> {
@@ -875,116 +784,136 @@ impl Connection {
         condition: &mut Condition,
         schema: &Schema,
     ) -> Result<()> {
-        match condition {
-            Condition::Comparison { left, right, .. } => {
-                Self::rewrite_nested_select_aliases_in_expression(left, schema)?;
-                Self::rewrite_nested_select_aliases_in_expression(right, schema)?;
-            }
-            Condition::InList { expr, values, .. } => {
-                Self::rewrite_nested_select_aliases_in_expression(expr, schema)?;
-                for value in values {
-                    Self::rewrite_nested_select_aliases_in_expression(value, schema)?;
-                }
-            }
-            Condition::InSubquery { expr, subquery, .. } => {
-                Self::rewrite_nested_select_aliases_in_expression(expr, schema)?;
-                Self::rewrite_select_aliases_in_select(subquery, schema)?;
-            }
-            Condition::Between {
-                expr, lower, upper, ..
-            } => {
-                Self::rewrite_nested_select_aliases_in_expression(expr, schema)?;
-                Self::rewrite_nested_select_aliases_in_expression(lower, schema)?;
-                Self::rewrite_nested_select_aliases_in_expression(upper, schema)?;
-            }
-            Condition::Like { expr, pattern, .. } => {
-                Self::rewrite_nested_select_aliases_in_expression(expr, schema)?;
-                Self::rewrite_nested_select_aliases_in_expression(pattern, schema)?;
-            }
-            Condition::Exists { subquery, .. } => {
-                Self::rewrite_select_aliases_in_select(subquery, schema)?;
-            }
-            Condition::NullCheck { expr, .. } => {
-                Self::rewrite_nested_select_aliases_in_expression(expr, schema)?;
-            }
-            Condition::Not(inner) => {
-                Self::rewrite_nested_select_aliases_in_condition(inner, schema)?
-            }
-            Condition::Logical { left, right, .. } => {
-                Self::rewrite_nested_select_aliases_in_condition(left, schema)?;
-                Self::rewrite_nested_select_aliases_in_condition(right, schema)?;
-            }
-        }
-        Ok(())
+        let mut rewrite = |subquery: &mut SelectStatement| {
+            Self::rewrite_select_aliases_in_select(subquery, schema)
+        };
+        Self::rewrite_nested_subqueries_in_condition(condition, &mut rewrite)
     }
 
     fn rewrite_nested_select_aliases_in_expression(
         expr: &mut Expression,
         schema: &Schema,
     ) -> Result<()> {
-        match expr {
-            Expression::ScalarSubquery(subquery) => {
-                Self::rewrite_select_aliases_in_select(subquery, schema)
+        let mut rewrite = |subquery: &mut SelectStatement| {
+            Self::rewrite_select_aliases_in_select(subquery, schema)
+        };
+        Self::rewrite_nested_subqueries_in_expression(expr, &mut rewrite)
+    }
+
+    fn rewrite_nested_subqueries_in_condition<F>(
+        condition: &mut Condition,
+        on_subquery: &mut F,
+    ) -> Result<()>
+    where
+        F: FnMut(&mut SelectStatement) -> Result<()>,
+    {
+        match condition {
+            Condition::Comparison { left, right, .. } => {
+                Self::rewrite_nested_subqueries_in_expression(left, on_subquery)?;
+                Self::rewrite_nested_subqueries_in_expression(right, on_subquery)?;
             }
+            Condition::InList { expr, values, .. } => {
+                Self::rewrite_nested_subqueries_in_expression(expr, on_subquery)?;
+                for value in values {
+                    Self::rewrite_nested_subqueries_in_expression(value, on_subquery)?;
+                }
+            }
+            Condition::InSubquery { expr, subquery, .. } => {
+                Self::rewrite_nested_subqueries_in_expression(expr, on_subquery)?;
+                on_subquery(subquery)?;
+            }
+            Condition::Between {
+                expr, lower, upper, ..
+            } => {
+                Self::rewrite_nested_subqueries_in_expression(expr, on_subquery)?;
+                Self::rewrite_nested_subqueries_in_expression(lower, on_subquery)?;
+                Self::rewrite_nested_subqueries_in_expression(upper, on_subquery)?;
+            }
+            Condition::Like { expr, pattern, .. } => {
+                Self::rewrite_nested_subqueries_in_expression(expr, on_subquery)?;
+                Self::rewrite_nested_subqueries_in_expression(pattern, on_subquery)?;
+            }
+            Condition::Exists { subquery, .. } => on_subquery(subquery)?,
+            Condition::NullCheck { expr, .. } => {
+                Self::rewrite_nested_subqueries_in_expression(expr, on_subquery)?;
+            }
+            Condition::Not(inner) => {
+                Self::rewrite_nested_subqueries_in_condition(inner, on_subquery)?
+            }
+            Condition::Logical { left, right, .. } => {
+                Self::rewrite_nested_subqueries_in_condition(left, on_subquery)?;
+                Self::rewrite_nested_subqueries_in_condition(right, on_subquery)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn rewrite_nested_subqueries_in_expression<F>(
+        expr: &mut Expression,
+        on_subquery: &mut F,
+    ) -> Result<()>
+    where
+        F: FnMut(&mut SelectStatement) -> Result<()>,
+    {
+        match expr {
+            Expression::ScalarSubquery(subquery) => on_subquery(subquery),
             Expression::Cast { expr, .. }
             | Expression::UnaryMinus(expr)
             | Expression::UnaryNot(expr)
             | Expression::NullCheck { expr, .. } => {
-                Self::rewrite_nested_select_aliases_in_expression(expr, schema)
+                Self::rewrite_nested_subqueries_in_expression(expr, on_subquery)
             }
             Expression::Case {
                 branches,
                 else_expr,
             } => {
                 for branch in branches {
-                    Self::rewrite_nested_select_aliases_in_expression(
+                    Self::rewrite_nested_subqueries_in_expression(
                         &mut branch.condition,
-                        schema,
+                        on_subquery,
                     )?;
-                    Self::rewrite_nested_select_aliases_in_expression(&mut branch.result, schema)?;
+                    Self::rewrite_nested_subqueries_in_expression(&mut branch.result, on_subquery)?;
                 }
                 if let Some(else_expr) = else_expr {
-                    Self::rewrite_nested_select_aliases_in_expression(else_expr, schema)?;
+                    Self::rewrite_nested_subqueries_in_expression(else_expr, on_subquery)?;
                 }
                 Ok(())
             }
             Expression::ScalarFunctionCall { args, .. } => {
                 for arg in args {
-                    Self::rewrite_nested_select_aliases_in_expression(arg, schema)?;
+                    Self::rewrite_nested_subqueries_in_expression(arg, on_subquery)?;
                 }
                 Ok(())
             }
             Expression::Binary { left, right, .. }
             | Expression::Comparison { left, right, .. }
             | Expression::Logical { left, right, .. } => {
-                Self::rewrite_nested_select_aliases_in_expression(left, schema)?;
-                Self::rewrite_nested_select_aliases_in_expression(right, schema)
+                Self::rewrite_nested_subqueries_in_expression(left, on_subquery)?;
+                Self::rewrite_nested_subqueries_in_expression(right, on_subquery)
             }
             Expression::InList { expr, values, .. } => {
-                Self::rewrite_nested_select_aliases_in_expression(expr, schema)?;
+                Self::rewrite_nested_subqueries_in_expression(expr, on_subquery)?;
                 for value in values {
-                    Self::rewrite_nested_select_aliases_in_expression(value, schema)?;
+                    Self::rewrite_nested_subqueries_in_expression(value, on_subquery)?;
                 }
                 Ok(())
             }
             Expression::InSubquery { expr, subquery, .. } => {
-                Self::rewrite_nested_select_aliases_in_expression(expr, schema)?;
-                Self::rewrite_select_aliases_in_select(subquery, schema)
+                Self::rewrite_nested_subqueries_in_expression(expr, on_subquery)?;
+                on_subquery(subquery)
             }
             Expression::Between {
                 expr, lower, upper, ..
             } => {
-                Self::rewrite_nested_select_aliases_in_expression(expr, schema)?;
-                Self::rewrite_nested_select_aliases_in_expression(lower, schema)?;
-                Self::rewrite_nested_select_aliases_in_expression(upper, schema)
+                Self::rewrite_nested_subqueries_in_expression(expr, on_subquery)?;
+                Self::rewrite_nested_subqueries_in_expression(lower, on_subquery)?;
+                Self::rewrite_nested_subqueries_in_expression(upper, on_subquery)
             }
             Expression::Like { expr, pattern, .. } => {
-                Self::rewrite_nested_select_aliases_in_expression(expr, schema)?;
-                Self::rewrite_nested_select_aliases_in_expression(pattern, schema)
+                Self::rewrite_nested_subqueries_in_expression(expr, on_subquery)?;
+                Self::rewrite_nested_subqueries_in_expression(pattern, on_subquery)
             }
-            Expression::Exists { subquery, .. } => {
-                Self::rewrite_select_aliases_in_select(subquery, schema)
-            }
+            Expression::Exists { subquery, .. } => on_subquery(subquery),
             Expression::AggregateCall { .. }
             | Expression::Column(_)
             | Expression::Literal(_)
