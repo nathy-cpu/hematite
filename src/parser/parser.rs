@@ -2497,15 +2497,8 @@ impl Parser {
             Token::Boolean | Token::Bool => SqlTypeName::Boolean,
             Token::Float32 => SqlTypeName::Float32,
             Token::Float | Token::Float64 => SqlTypeName::Float,
-            Token::Float128 => {
-                return Err(HematiteError::ParseError(
-                    "Legacy type 'FLOAT128' is not supported; use 'FLOAT'".to_string(),
-                ))
-            }
             Token::Decimal => {
                 self.consume_token(&token)?;
-                self.consume_optional_double_precision()?;
-                self.consume_optional_unsigned()?;
                 let (precision, scale) = self.parse_optional_numeric_precision()?;
                 return Ok(SqlTypeName::Decimal { precision, scale });
             }
@@ -2538,18 +2531,6 @@ impl Parser {
                 return Ok(SqlTypeName::Enum(self.parse_enum_variants()?));
             }
             Token::Identifier(name) => {
-                if let Some((legacy, replacement)) = legacy_integer_type_replacement(&name) {
-                    return Err(HematiteError::ParseError(format!(
-                        "Legacy integer type '{}' is not supported; use '{}'",
-                        legacy, replacement
-                    )));
-                }
-                if let Some((legacy, replacement)) = removed_type_replacement(&name) {
-                    return Err(HematiteError::ParseError(format!(
-                        "Legacy type '{}' is not supported; use '{}'",
-                        legacy, replacement
-                    )));
-                }
                 if let Some(keyword) = uppercase_keyword_match(&name, &DATA_TYPE_KEYWORDS) {
                     return Err(HematiteError::ParseError(format!(
                         "Keyword '{}' must be capitalized as '{}'",
@@ -2570,13 +2551,6 @@ impl Parser {
         };
 
         self.consume_token(&token)?;
-        self.consume_optional_double_precision()?;
-        if !matches!(
-            token,
-            Token::Int | Token::Int32 | Token::Int64 | Token::Int128 | Token::Int8 | Token::Int16
-        ) {
-            self.consume_optional_unsigned()?;
-        }
         Ok(data_type)
     }
 
@@ -2586,25 +2560,6 @@ impl Parser {
         signed_type: SqlTypeName,
     ) -> Result<SqlTypeName> {
         self.consume_token(&token)?;
-        if matches!(
-            signed_type,
-            SqlTypeName::Int8
-                | SqlTypeName::Int16
-                | SqlTypeName::Int
-                | SqlTypeName::Int64
-                | SqlTypeName::Int128
-        ) && matches!(self.peek_token(), Ok(Token::Unsigned))
-        {
-            self.consume_token(&Token::Unsigned)?;
-            return Ok(match signed_type {
-                SqlTypeName::Int8 => SqlTypeName::UInt8,
-                SqlTypeName::Int16 => SqlTypeName::UInt16,
-                SqlTypeName::Int => SqlTypeName::UInt,
-                SqlTypeName::Int64 => SqlTypeName::UInt64,
-                SqlTypeName::Int128 => SqlTypeName::UInt128,
-                _ => signed_type,
-            });
-        }
         Ok(signed_type)
     }
 
@@ -2698,20 +2653,6 @@ impl Parser {
                 label, token
             ))),
         }
-    }
-
-    fn consume_optional_double_precision(&mut self) -> Result<()> {
-        if matches!(self.peek_token(), Ok(Token::Precision)) {
-            self.consume_token(&Token::Precision)?;
-        }
-        Ok(())
-    }
-
-    fn consume_optional_unsigned(&mut self) -> Result<()> {
-        if matches!(self.peek_token(), Ok(Token::Unsigned)) {
-            self.consume_token(&Token::Unsigned)?;
-        }
-        Ok(())
     }
 
     fn parse_default_value(&mut self) -> Result<LiteralValue> {
@@ -2973,8 +2914,6 @@ const ALL_UPPERCASE_KEYWORDS: &[&str] = &[
     "BINARY",
     "VARBINARY",
     "ENUM",
-    "PRECISION",
-    "UNSIGNED",
     "AUTO_INCREMENT",
     "UNIQUE",
     "PRIMARY",
@@ -3058,32 +2997,6 @@ fn capitalization_hint_for_token(token: &Token) -> Option<String> {
     }
 }
 
-fn legacy_integer_type_replacement(name: &str) -> Option<(&'static str, &'static str)> {
-    if name.eq_ignore_ascii_case("TINYINT") {
-        Some(("TINYINT", "INT8"))
-    } else if name.eq_ignore_ascii_case("SMALLINT") {
-        Some(("SMALLINT", "INT16"))
-    } else if name.eq_ignore_ascii_case("INTEGER") {
-        Some(("INTEGER", "INT or INT32"))
-    } else if name.eq_ignore_ascii_case("BIGINT") {
-        Some(("BIGINT", "INT64"))
-    } else {
-        None
-    }
-}
-
-fn removed_type_replacement(name: &str) -> Option<(&'static str, &'static str)> {
-    if name.eq_ignore_ascii_case("NUMERIC") {
-        Some(("NUMERIC", "DECIMAL"))
-    } else if name.eq_ignore_ascii_case("TIMESTAMP") {
-        Some(("TIMESTAMP", "DATETIME"))
-    } else if name.eq_ignore_ascii_case("FLOAT128") {
-        Some(("FLOAT128", "FLOAT"))
-    } else {
-        None
-    }
-}
-
 fn token_keyword_name(token: &Token) -> Option<&'static str> {
     match token {
         Token::Begin => Some("BEGIN"),
@@ -3156,7 +3069,6 @@ fn token_keyword_name(token: &Token) -> Option<&'static str> {
         Token::Float => Some("FLOAT"),
         Token::Float32 => Some("FLOAT32"),
         Token::Float64 => Some("FLOAT64"),
-        Token::Float128 => Some("FLOAT128"),
         Token::Int8 => Some("INT8"),
         Token::Int16 => Some("INT16"),
         Token::Int64 => Some("INT64"),
@@ -3180,8 +3092,6 @@ fn token_keyword_name(token: &Token) -> Option<&'static str> {
         Token::BinaryType => Some("BINARY"),
         Token::VarBinary => Some("VARBINARY"),
         Token::Enum => Some("ENUM"),
-        Token::Precision => Some("PRECISION"),
-        Token::Unsigned => Some("UNSIGNED"),
         Token::AutoIncrement => Some("AUTO_INCREMENT"),
         Token::Unique => Some("UNIQUE"),
         Token::Primary => Some("PRIMARY"),

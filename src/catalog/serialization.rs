@@ -1,6 +1,5 @@
 //! Relational row and index-key encoding.
 
-use crate::catalog::types::Float128Value;
 use crate::catalog::{
     DateTimeValue, DateValue, DecimalValue, TimeValue, TimeWithTimeZoneValue, Value,
 };
@@ -203,11 +202,6 @@ impl RowCodec {
                     let bytes = read_exact(data, &mut offset, payload_end, 4, "Float32 value")?;
                     Value::Float32(f32::from_le_bytes(bytes.try_into().unwrap()))
                 }
-                22 => {
-                    let bytes = read_exact(data, &mut offset, payload_end, 16, "Float128 value")?;
-                    let bits = u128::from_le_bytes(bytes.try_into().unwrap());
-                    Value::Float(Float128Value::from_storage_bits(bits)?.to_f64()?)
-                }
                 5 => Value::Null,
                 6 => {
                     let bytes = read_exact(data, &mut offset, payload_end, 8, "BigInt value")?;
@@ -245,13 +239,6 @@ impl RowCodec {
                 }
                 10 => {
                     let bytes = read_exact(data, &mut offset, payload_end, 8, "DateTime value")?;
-                    Value::DateTime(DateTimeValue::from_seconds_since_epoch(i64::from_le_bytes(
-                        bytes.try_into().unwrap(),
-                    )))
-                }
-                13 => {
-                    let bytes =
-                        read_exact(data, &mut offset, payload_end, 8, "legacy Timestamp value")?;
                     Value::DateTime(DateTimeValue::from_seconds_since_epoch(i64::from_le_bytes(
                         bytes.try_into().unwrap(),
                     )))

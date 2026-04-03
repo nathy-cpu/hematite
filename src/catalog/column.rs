@@ -1,8 +1,7 @@
 //! Column definitions for database tables.
 
 use super::types::{
-    DataType, DateTimeValue, DateValue, DecimalValue, Float128Value, TimeValue,
-    TimeWithTimeZoneValue, Value,
+    DataType, DateTimeValue, DateValue, DecimalValue, TimeValue, TimeWithTimeZoneValue, Value,
 };
 use super::ColumnId;
 use crate::error::HematiteError;
@@ -368,20 +367,14 @@ fn read_data_type(buffer: &[u8], offset: &mut usize) -> Result<DataType, Hematit
         10 => DataType::Boolean,
         11 => DataType::Float,
         12 => DataType::Float32,
-        13 => DataType::Float,
         14 => DataType::Decimal {
             precision: read_optional_u32(buffer, offset, "DECIMAL precision")?,
             scale: read_optional_u32(buffer, offset, "DECIMAL scale")?,
-        },
-        15 => DataType::Decimal {
-            precision: read_optional_u32(buffer, offset, "legacy NUMERIC precision")?,
-            scale: read_optional_u32(buffer, offset, "legacy NUMERIC scale")?,
         },
         16 => DataType::Blob,
         17 => DataType::Date,
         18 => DataType::Time,
         19 => DataType::DateTime,
-        20 => DataType::DateTime,
         21 => DataType::TimeWithTimeZone,
         24 => DataType::Int128,
         25 => DataType::UInt,
@@ -580,16 +573,6 @@ fn read_optional_value(buffer: &[u8], offset: &mut usize) -> Result<Option<Value
             );
             Some(Value::Float32(value))
         }
-        21 => {
-            let bits = u128::from_le_bytes(
-                read_fixed(buffer, offset, 16, "default float128")?
-                    .try_into()
-                    .unwrap(),
-            );
-            Some(Value::Float(
-                Float128Value::from_storage_bits(bits)?.to_f64()?,
-            ))
-        }
         4 => {
             let value = i64::from_le_bytes(
                 read_fixed(buffer, offset, 8, "default bigint")?
@@ -665,16 +648,6 @@ fn read_optional_value(buffer: &[u8], offset: &mut usize) -> Result<Option<Value
         8 => {
             let seconds = i64::from_le_bytes(
                 read_fixed(buffer, offset, 8, "default datetime")?
-                    .try_into()
-                    .unwrap(),
-            );
-            Some(Value::DateTime(DateTimeValue::from_seconds_since_epoch(
-                seconds,
-            )))
-        }
-        12 => {
-            let seconds = i64::from_le_bytes(
-                read_fixed(buffer, offset, 8, "legacy default timestamp")?
                     .try_into()
                     .unwrap(),
             );

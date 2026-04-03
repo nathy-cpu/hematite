@@ -1434,22 +1434,6 @@ mod connection_tests {
     }
 
     #[test]
-    fn test_float128_type_name_is_rejected() -> Result<()> {
-        let db = TestDbFile::new("_test_float128_type_name_is_rejected");
-        let mut conn = Connection::new(db.path())?;
-
-        let result = conn.execute("CREATE TABLE metrics (id INT PRIMARY KEY, precise FLOAT128);");
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Legacy type 'FLOAT128' is not supported; use 'FLOAT'"));
-
-        conn.close()?;
-        Ok(())
-    }
-
-    #[test]
     fn test_float_round_trip_uses_float_values() -> Result<()> {
         let db = TestDbFile::new("_test_float_round_trip_uses_float_values");
         let mut conn = Connection::new(db.path())?;
@@ -1465,12 +1449,12 @@ mod connection_tests {
     }
 
     #[test]
-    fn test_additional_mysql_type_aliases() -> Result<()> {
-        let db = TestDbFile::new("_test_additional_mysql_type_aliases");
+    fn test_current_numeric_type_names() -> Result<()> {
+        let db = TestDbFile::new("_test_current_numeric_type_names");
         let mut conn = Connection::new(db.path())?;
 
         conn.execute(
-            "CREATE TABLE metrics (id INT64 UNSIGNED PRIMARY KEY, ratio FLOAT32, amount DECIMAL(10, 2), code CHAR(8), tiny INT8, small INT16, exact DECIMAL(6));",
+            "CREATE TABLE metrics (id UINT64 PRIMARY KEY, ratio FLOAT32, amount DECIMAL(10, 2), code CHAR(8), tiny INT8, small INT16, exact DECIMAL(6));",
         )?;
         conn.execute(
             "INSERT INTO metrics (id, ratio, amount, code, tiny, small, exact) VALUES (1, 1.5, 2.5, 'AB', 3, 4, 5.5);",

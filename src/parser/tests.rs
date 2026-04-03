@@ -1034,57 +1034,6 @@ mod parser_tests {
     }
 
     #[test]
-    fn test_parse_rejects_legacy_integer_type_names() {
-        for (legacy_name, replacement) in [
-            ("TINYINT", "INT8"),
-            ("SMALLINT", "INT16"),
-            ("INTEGER", "INT or INT32"),
-            ("BIGINT", "INT64"),
-        ] {
-            let sql = format!("CREATE TABLE users (id {} PRIMARY KEY);", legacy_name);
-            let err = parse_create(&sql).unwrap_err();
-            assert!(matches!(
-                err,
-                crate::error::HematiteError::ParseError(message)
-                    if message.contains(&format!(
-                        "Legacy integer type '{}' is not supported; use '{}'",
-                        legacy_name, replacement
-                    ))
-            ));
-        }
-    }
-
-    #[test]
-    fn test_parse_rejects_numeric_type_name() {
-        let err = parse_create("CREATE TABLE users (amount NUMERIC(10, 2));").unwrap_err();
-        assert!(matches!(
-            err,
-            crate::error::HematiteError::ParseError(message)
-                if message.contains("Legacy type 'NUMERIC' is not supported; use 'DECIMAL'")
-        ));
-    }
-
-    #[test]
-    fn test_parse_rejects_timestamp_type_name() {
-        let err = parse_create("CREATE TABLE users (created_at TIMESTAMP);").unwrap_err();
-        assert!(matches!(
-            err,
-            crate::error::HematiteError::ParseError(message)
-                if message.contains("Legacy type 'TIMESTAMP' is not supported; use 'DATETIME'")
-        ));
-    }
-
-    #[test]
-    fn test_parse_rejects_float128_type_name() {
-        let err = parse_create("CREATE TABLE users (value FLOAT128);").unwrap_err();
-        assert!(matches!(
-            err,
-            crate::error::HematiteError::ParseError(message)
-                if message.contains("Legacy type 'FLOAT128' is not supported; use 'FLOAT'")
-        ));
-    }
-
-    #[test]
     fn test_parse_select_with_where() -> Result<()> {
         let select = parse_select("SELECT id FROM users WHERE id = 1;")?;
         assert!(select.where_clause.is_some());
@@ -1767,9 +1716,9 @@ mod parser_tests {
     }
 
     #[test]
-    fn test_parse_additional_mysql_type_aliases() -> Result<()> {
+    fn test_parse_current_numeric_type_names() -> Result<()> {
         let create = parse_create(
-            "CREATE TABLE metrics (id INT64 UNSIGNED PRIMARY KEY, ratio FLOAT32, amount DECIMAL(10, 2), code CHAR(8), tiny INT8, small INT16, exact DECIMAL(6));",
+            "CREATE TABLE metrics (id UINT64 PRIMARY KEY, ratio FLOAT32, amount DECIMAL(10, 2), code CHAR(8), tiny INT8, small INT16, exact DECIMAL(6));",
         )?;
         assert_eq!(create.columns[0].data_type, SqlTypeName::UInt64);
         assert_eq!(create.columns[1].data_type, SqlTypeName::Float32);
@@ -1841,7 +1790,7 @@ mod parser_tests {
     #[test]
     fn test_parse_unsigned_integer_type_names() -> Result<()> {
         let create = parse_create(
-            "CREATE TABLE uints (id UINT PRIMARY KEY, tiny UINT8, small UINT16, normal UINT32, large UINT64, massive UINT128, legacy UINT64 UNSIGNED);",
+            "CREATE TABLE uints (id UINT PRIMARY KEY, tiny UINT8, small UINT16, normal UINT32, large UINT64, massive UINT128, canonical UINT64);",
         )?;
         assert_eq!(create.columns[0].data_type, SqlTypeName::UInt);
         assert_eq!(create.columns[1].data_type, SqlTypeName::UInt8);
