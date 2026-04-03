@@ -3745,34 +3745,22 @@ impl QueryExecutor for UpdateExecutor {
         validate_statement(&Statement::Update(self.statement.clone()), &ctx.catalog)?;
 
         let table = catalog_table(ctx, &self.statement.table)?;
-
+        let LocatedMutationRows {
+            sources,
+            stored_rows: original_rows,
+            joined_rows,
+        } = locate_mutation_rows(
+            ctx,
+            &table,
+            &self.statement.table,
+            self.statement.target_binding_name(),
+            self.statement.source.as_ref(),
+            self.statement.where_clause.clone(),
+            &self.access_path,
+        )?;
         let locator_statement =
             locator_select_statement(self.statement.source(), self.statement.where_clause.clone());
-        let mut select_executor = SelectExecutor::new(locator_statement, self.access_path.clone());
-        let uses_join_source = matches!(
-            self.statement.source.as_ref(),
-            Some(source) if !matches!(source, TableReference::Table(_, _))
-        );
-
-        let (sources, original_rows, joined_rows) = if uses_join_source {
-            let (sources, rows) = locate_rows_for_join_source(
-                ctx,
-                &table,
-                self.statement.target_binding_name(),
-                &mut select_executor,
-            )?;
-            let (stored_rows, joined_rows): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
-            (sources, stored_rows, Some(joined_rows))
-        } else {
-            let rows = locate_rows_for_access_path(
-                ctx,
-                &table,
-                &self.statement.table,
-                &self.access_path,
-                &select_executor,
-            )?;
-            (select_executor.resolve_sources(ctx)?, rows, None)
-        };
+        let select_executor = SelectExecutor::new(locator_statement, self.access_path.clone());
         let original_rows_snapshot = original_rows.clone();
         let mut updated_rows_data = Vec::with_capacity(original_rows.len());
         let mut updated_rows = 0usize;
@@ -3862,6 +3850,16 @@ impl DeleteExecutor {
             access_path,
         }
     }
+}
+
+struct LocatedMutationRows {
+    sources: Vec<ResolvedSource>,
+    stored_rows: Vec<StoredRow>,
+    joined_rows: Option<Vec<Vec<Value>>>,
+}
+
+fn uses_join_mutation_source(source: Option<&TableReference>) -> bool {
+    matches!(source, Some(source) if !matches!(source, TableReference::Table(_, _)))
 }
 
 fn locate_rowids_for_access_path(
@@ -4023,6 +4021,43 @@ fn locate_rows_for_join_source(
     Ok((sources, rows))
 }
 
+fn locate_mutation_rows(
+    ctx: &mut ExecutionContext<'_>,
+    table: &Table,
+    table_name: &str,
+    target_binding: &str,
+    source: Option<&TableReference>,
+    where_clause: Option<WhereClause>,
+    access_path: &SelectAccessPath,
+) -> Result<LocatedMutationRows> {
+    let locator_statement = locator_select_statement(
+        source
+            .cloned()
+            .unwrap_or_else(|| TableReference::Table(table_name.to_string(), None)),
+        where_clause,
+    );
+    let mut select_executor = SelectExecutor::new(locator_statement, access_path.clone());
+
+    if uses_join_mutation_source(source) {
+        let (sources, rows) =
+            locate_rows_for_join_source(ctx, table, target_binding, &mut select_executor)?;
+        let (stored_rows, joined_rows): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
+        Ok(LocatedMutationRows {
+            sources,
+            stored_rows,
+            joined_rows: Some(joined_rows),
+        })
+    } else {
+        let stored_rows =
+            locate_rows_for_access_path(ctx, table, table_name, access_path, &select_executor)?;
+        Ok(LocatedMutationRows {
+            sources: select_executor.resolve_sources(ctx)?,
+            stored_rows,
+            joined_rows: None,
+        })
+    }
+}
+
 fn target_rowid_from_join_row(
     ctx: &mut ExecutionContext<'_>,
     table: &Table,
@@ -4049,32 +4084,16 @@ impl QueryExecutor for DeleteExecutor {
         validate_statement(&Statement::Delete(self.statement.clone()), &ctx.catalog)?;
 
         let table = catalog_table(ctx, &self.statement.table)?;
-
-        let locator_statement =
-            locator_select_statement(self.statement.source(), self.statement.where_clause.clone());
-        let mut select_executor = SelectExecutor::new(locator_statement, self.access_path.clone());
-        let uses_join_source = matches!(
+        let rows_to_delete = locate_mutation_rows(
+            ctx,
+            &table,
+            &self.statement.table,
+            self.statement.target_binding_name(),
             self.statement.source.as_ref(),
-            Some(source) if !matches!(source, TableReference::Table(_, _))
-        );
-
-        let rows_to_delete = if uses_join_source {
-            let (_, rows) = locate_rows_for_join_source(
-                ctx,
-                &table,
-                self.statement.target_binding_name(),
-                &mut select_executor,
-            )?;
-            rows.into_iter().map(|(row, _)| row).collect()
-        } else {
-            locate_rows_for_access_path(
-                ctx,
-                &table,
-                &self.statement.table,
-                &self.access_path,
-                &select_executor,
-            )?
-        };
+            self.statement.where_clause.clone(),
+            &self.access_path,
+        )?
+        .stored_rows;
 
         for row in &rows_to_delete {
             apply_parent_delete_foreign_key_actions(ctx, &table, &row.values)?;
