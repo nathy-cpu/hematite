@@ -2504,6 +2504,38 @@ impl Parser {
             }
             Token::Blob => SqlTypeName::Blob,
             Token::Date => SqlTypeName::Date,
+            Token::Interval => {
+                self.consume_token(&token)?;
+                let start = match self.peek_token()? {
+                    Token::Identifier(name) => name,
+                    other => {
+                        return Err(HematiteError::ParseError(format!(
+                            "Expected INTERVAL qualifier after INTERVAL, found: {:?}",
+                            other
+                        )))
+                    }
+                };
+                self.consume_token(&Token::Identifier(start.clone()))?;
+                self.consume_token(&Token::To)?;
+                let end = match self.peek_token()? {
+                    Token::Identifier(name) => name,
+                    other => {
+                        return Err(HematiteError::ParseError(format!(
+                            "Expected INTERVAL qualifier after TO, found: {:?}",
+                            other
+                        )))
+                    }
+                };
+                self.consume_token(&Token::Identifier(end.clone()))?;
+                return match (start.as_str(), end.as_str()) {
+                    ("YEAR", "MONTH") => Ok(SqlTypeName::IntervalYearMonth),
+                    ("DAY", "SECOND") => Ok(SqlTypeName::IntervalDaySecond),
+                    _ => Err(HematiteError::ParseError(format!(
+                        "Unsupported INTERVAL data type qualifier '{} TO {}'",
+                        start, end
+                    ))),
+                };
+            }
             Token::Time => {
                 self.consume_token(&token)?;
                 if matches!(self.peek_token(), Ok(Token::With)) {

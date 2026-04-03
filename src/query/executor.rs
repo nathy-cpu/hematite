@@ -4882,6 +4882,7 @@ fn numeric_value_as_f64(value: &Value) -> Option<f64> {
         Value::UInt128(value) => Some(*value as f64),
         Value::Float32(value) => Some(*value as f64),
         Value::Float(value) => Some(*value),
+        Value::Decimal(value) => value.to_f64(),
         _ => None,
     }
 }
@@ -6065,6 +6066,7 @@ fn negate_numeric_value(value: Value) -> Result<Value> {
         }
         Value::Float32(value) => Ok(Value::Float32(-value)),
         Value::Float(value) => Ok(Value::Float(-value)),
+        Value::Decimal(value) => Ok(Value::Decimal(value.negate())),
         Value::Null => Ok(Value::Null),
         value => Err(HematiteError::ParseError(format!(
             "Unary '-' requires a numeric value, found {:?}",
@@ -6120,10 +6122,8 @@ fn is_unsigned_integral_value(value: &Value) -> bool {
 
 fn decimal_integral_result_to_value(value: DecimalValue, prefer_unsigned: bool) -> Result<Value> {
     debug_assert!(value.is_integral());
-    let text = value.to_string();
-
     if value.negative() {
-        return text.parse::<i128>().map(minimal_signed_value).map_err(|_| {
+        return value.to_integral_i128().map(minimal_signed_value).ok_or_else(|| {
             HematiteError::ParseError(
                 "Arithmetic overflowed the supported signed integer range".to_string(),
             )
@@ -6131,22 +6131,20 @@ fn decimal_integral_result_to_value(value: DecimalValue, prefer_unsigned: bool) 
     }
 
     if prefer_unsigned {
-        return text
-            .parse::<u128>()
-            .map(minimal_unsigned_value)
-            .map_err(|_| {
-                HematiteError::ParseError(
-                    "Arithmetic overflowed the supported unsigned integer range".to_string(),
-                )
-            });
+        return value.to_integral_u128().map(minimal_unsigned_value).ok_or_else(|| {
+            HematiteError::ParseError(
+                "Arithmetic overflowed the supported unsigned integer range".to_string(),
+            )
+        });
     }
 
-    if let Ok(signed) = text.parse::<i128>() {
+    if let Some(signed) = value.to_integral_i128() {
         Ok(minimal_signed_value(signed))
     } else {
-        text.parse::<u128>()
+        value
+            .to_integral_u128()
             .map(minimal_unsigned_value)
-            .map_err(|_| {
+            .ok_or_else(|| {
                 HematiteError::ParseError(
                     "Arithmetic overflowed the supported integer range".to_string(),
                 )
@@ -6463,6 +6461,12 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
         }
         (DataType::TimeWithTimeZone, Value::Text(value)) => Ok(Value::TimeWithTimeZone(
             validate_time_with_time_zone_string(&value)?,
+        )),
+        (DataType::IntervalYearMonth, value) => Ok(Value::IntervalYearMonth(
+            IntervalYearMonthValue::parse(&cast_value_to_text_string(value)?)?,
+        )),
+        (DataType::IntervalDaySecond, value) => Ok(Value::IntervalDaySecond(
+            IntervalDaySecondValue::parse(&cast_value_to_text_string(value)?)?,
         )),
         (data_type, value) => Err(HematiteError::ParseError(format!(
             "Cannot CAST {:?} AS {}",

@@ -370,6 +370,16 @@ impl DecimalValue {
         ))
     }
 
+    pub fn negate(&self) -> Self {
+        if self.is_zero() {
+            Self::zero()
+        } else {
+            let mut negated = self.clone();
+            negated.negative = !negated.negative;
+            negated
+        }
+    }
+
     pub fn precision(&self) -> u32 {
         self.digits.len() as u32
     }
@@ -413,6 +423,51 @@ impl DecimalValue {
 
     pub fn negative(&self) -> bool {
         self.negative
+    }
+
+    pub fn to_f64(&self) -> Option<f64> {
+        self.to_string().parse::<f64>().ok()
+    }
+
+    pub fn to_integral_u128(&self) -> Option<u128> {
+        if !self.is_integral() || self.negative {
+            return None;
+        }
+
+        let mut value = 0u128;
+        for digit in &self.digits {
+            value = value.checked_mul(10)?.checked_add(*digit as u128)?;
+        }
+        Some(value)
+    }
+
+    pub fn to_integral_i128(&self) -> Option<i128> {
+        if !self.is_integral() {
+            return None;
+        }
+
+        let magnitude = self.to_integral_u128_abs()?;
+        if self.negative {
+            if magnitude == (i128::MAX as u128) + 1 {
+                Some(i128::MIN)
+            } else {
+                i128::try_from(magnitude).ok().map(|value| -value)
+            }
+        } else {
+            i128::try_from(magnitude).ok()
+        }
+    }
+
+    fn to_integral_u128_abs(&self) -> Option<u128> {
+        if !self.is_integral() {
+            return None;
+        }
+
+        let mut value = 0u128;
+        for digit in &self.digits {
+            value = value.checked_mul(10)?.checked_add(*digit as u128)?;
+        }
+        Some(value)
     }
 }
 

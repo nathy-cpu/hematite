@@ -82,5 +82,7 @@ pub(crate) fn lower_type_name(data_type: SqlTypeName) -> DataType {
         SqlTypeName::Time => DataType::Time,
         SqlTypeName::DateTime => DataType::DateTime,
         SqlTypeName::TimeWithTimeZone => DataType::TimeWithTimeZone,
+        SqlTypeName::IntervalYearMonth => DataType::IntervalYearMonth,
+        SqlTypeName::IntervalDaySecond => DataType::IntervalDaySecond,
     }
 }

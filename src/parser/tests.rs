@@ -1394,13 +1394,17 @@ mod parser_tests {
     fn test_parse_interval_literals() -> Result<()> {
         let select = parse_select(
             "SELECT DATE('2026-03-28') + INTERVAL '1-02' YEAR TO MONTH, \
-             CAST('2026-03-28 10:00:00' AS DATETIME) - INTERVAL '2 03:04:05' DAY TO SECOND \
+             CAST('2026-03-28 10:00:00' AS DATETIME) - INTERVAL '2 03:04:05' DAY TO SECOND, \
+             CAST('1-02' AS INTERVAL YEAR TO MONTH), \
+             CAST('2 03:04:05' AS INTERVAL DAY TO SECOND) \
              FROM users;",
         )?;
 
-        assert_eq!(select.columns.len(), 2);
+        assert_eq!(select.columns.len(), 4);
         assert!(matches!(select.columns[0], SelectItem::Expression(_)));
         assert!(matches!(select.columns[1], SelectItem::Expression(_)));
+        assert!(matches!(select.columns[2], SelectItem::Expression(_)));
+        assert!(matches!(select.columns[3], SelectItem::Expression(_)));
         Ok(())
     }
 

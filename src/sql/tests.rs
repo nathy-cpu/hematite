@@ -4436,6 +4436,40 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_interval_casts_and_decimal_float_arithmetic() -> Result<()> {
+        let db = TestDbFile::new("_test_interval_casts_and_decimal_float_arithmetic");
+        let mut conn = Connection::new(db.path())?;
+        conn.execute("CREATE TABLE one_row (id INT PRIMARY KEY);")?;
+        conn.execute("INSERT INTO one_row (id) VALUES (1);")?;
+
+        let result = conn.execute(
+            "SELECT \
+                CAST('1-02' AS INTERVAL YEAR TO MONTH) AS ym_interval,\
+                CAST('2 03:04:05' AS INTERVAL DAY TO SECOND) AS ds_interval,\
+                CAST('1.5' AS DECIMAL) + CAST('2.25' AS FLOAT) AS decimal_float_sum,\
+                -CAST('5.5' AS DECIMAL) AS negated_decimal \
+             FROM one_row;",
+        )?;
+
+        assert_eq!(
+            result.rows,
+            vec![vec![
+                crate::catalog::Value::IntervalYearMonth(
+                    crate::catalog::IntervalYearMonthValue::parse("1-02")?
+                ),
+                crate::catalog::Value::IntervalDaySecond(
+                    crate::catalog::IntervalDaySecondValue::parse("2 03:04:05")?
+                ),
+                crate::catalog::Value::Float(3.75),
+                crate::catalog::Value::Decimal(crate::catalog::DecimalValue::parse("-5.5")?),
+            ]]
+        );
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_exact_numeric_arithmetic_supports_large_signed_unsigned_and_decimal_values(
     ) -> Result<()> {
         let db = TestDbFile::new(

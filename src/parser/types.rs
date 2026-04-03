@@ -32,6 +32,8 @@ pub enum SqlTypeName {
     Time,
     DateTime,
     TimeWithTimeZone,
+    IntervalYearMonth,
+    IntervalDaySecond,
 }
 
 impl SqlTypeName {
@@ -71,6 +73,8 @@ impl SqlTypeName {
             SqlTypeName::Time => "TIME".to_string(),
             SqlTypeName::DateTime => "DATETIME".to_string(),
             SqlTypeName::TimeWithTimeZone => "TIME WITH TIME ZONE".to_string(),
+            SqlTypeName::IntervalYearMonth => "INTERVAL YEAR TO MONTH".to_string(),
+            SqlTypeName::IntervalDaySecond => "INTERVAL DAY TO SECOND".to_string(),
         }
     }
 
