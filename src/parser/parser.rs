@@ -426,6 +426,7 @@ impl Parser {
             }
             Token::Identifier(_)
             | Token::StringLiteral(_)
+            | Token::BlobLiteral(_)
             | Token::NumberLiteral(_)
             | Token::BooleanLiteral(_)
             | Token::Null
@@ -1255,6 +1256,10 @@ impl Parser {
             Token::StringLiteral(value) => {
                 self.consume_token(&Token::StringLiteral(value.clone()))?;
                 Ok(Expression::Literal(LiteralValue::Text(value)))
+            }
+            Token::BlobLiteral(value) => {
+                self.consume_token(&Token::BlobLiteral(value.clone()))?;
+                Ok(Expression::Literal(LiteralValue::Blob(value)))
             }
             Token::NumberLiteral(value) => {
                 self.consume_token(&Token::NumberLiteral(value.clone()))?;
@@ -2711,6 +2716,10 @@ impl Parser {
             Token::StringLiteral(value) => {
                 self.consume_token(&Token::StringLiteral(value.clone()))?;
                 Ok(LiteralValue::Text(value))
+            }
+            Token::BlobLiteral(value) => {
+                self.consume_token(&Token::BlobLiteral(value.clone()))?;
+                Ok(LiteralValue::Blob(value))
             }
             Token::NumberLiteral(value) => {
                 self.consume_token(&Token::NumberLiteral(value.clone()))?;

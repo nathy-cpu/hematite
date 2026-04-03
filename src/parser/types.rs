@@ -96,6 +96,7 @@ fn format_numeric_type(name: &str, precision: Option<u32>, scale: Option<u32>) -
 pub enum LiteralValue {
     Integer(i128),
     Text(String),
+    Blob(Vec<u8>),
     Boolean(bool),
     Float(String),
     Null,
@@ -106,6 +107,7 @@ impl LiteralValue {
         match self {
             LiteralValue::Integer(_) => SqlTypeName::Int,
             LiteralValue::Text(_) => SqlTypeName::Text,
+            LiteralValue::Blob(_) => SqlTypeName::Blob,
             LiteralValue::Boolean(_) => SqlTypeName::Boolean,
             LiteralValue::Float(_) => SqlTypeName::Float,
             LiteralValue::Null => SqlTypeName::Text,
@@ -141,6 +143,9 @@ impl LiteralValue {
             (LiteralValue::Text(_), SqlTypeName::DateTime) => true,
             (LiteralValue::Text(_), SqlTypeName::TimeWithTimeZone) => true,
             (LiteralValue::Text(_), SqlTypeName::Decimal { .. }) => true,
+            (LiteralValue::Blob(_), SqlTypeName::Binary(_)) => true,
+            (LiteralValue::Blob(_), SqlTypeName::VarBinary(_)) => true,
+            (LiteralValue::Blob(_), SqlTypeName::Blob) => true,
             (LiteralValue::Boolean(_), SqlTypeName::Boolean) => true,
             (LiteralValue::Null, _) => true,
             _ => false,
@@ -157,6 +162,7 @@ impl PartialEq for LiteralValue {
         match (self, other) {
             (LiteralValue::Integer(a), LiteralValue::Integer(b)) => a == b,
             (LiteralValue::Text(a), LiteralValue::Text(b)) => a == b,
+            (LiteralValue::Blob(a), LiteralValue::Blob(b)) => a == b,
             (LiteralValue::Boolean(a), LiteralValue::Boolean(b)) => a == b,
             (LiteralValue::Float(a), LiteralValue::Float(b)) => a == b,
             (LiteralValue::Null, LiteralValue::Null) => true,
@@ -172,6 +178,7 @@ impl PartialOrd for LiteralValue {
         match (self, other) {
             (LiteralValue::Integer(a), LiteralValue::Integer(b)) => a.partial_cmp(b),
             (LiteralValue::Text(a), LiteralValue::Text(b)) => a.partial_cmp(b),
+            (LiteralValue::Blob(a), LiteralValue::Blob(b)) => a.partial_cmp(b),
             (LiteralValue::Boolean(a), LiteralValue::Boolean(b)) => a.partial_cmp(b),
             (LiteralValue::Float(a), LiteralValue::Float(b)) => {
                 compare_normalized_float_literals(a, b)

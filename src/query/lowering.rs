@@ -19,6 +19,7 @@ pub(crate) fn lower_literal_value(value: &LiteralValue) -> Value {
             }
         }
         LiteralValue::Text(value) => Value::Text(value.clone()),
+        LiteralValue::Blob(value) => Value::Blob(value.clone()),
         LiteralValue::Boolean(value) => Value::Boolean(*value),
         LiteralValue::Float(value) => Value::Float128(
             Float128Value::parse(value).expect("parser normalized a valid FLOAT literal"),
@@ -36,13 +37,13 @@ pub(crate) fn raise_literal_value(value: &Value) -> LiteralValue {
         Value::Int128(value) => LiteralValue::Text(value.to_string()),
         Value::UInt128(value) => LiteralValue::Text(value.to_string()),
         Value::Text(value) => LiteralValue::Text(value.clone()),
+        Value::Blob(value) => LiteralValue::Blob(value.clone()),
         Value::Enum(value) => LiteralValue::Text(value.clone()),
         Value::Boolean(value) => LiteralValue::Boolean(*value),
         Value::Float32(value) => LiteralValue::Float(value.to_string()),
         Value::Float(value) => LiteralValue::Float(value.to_string()),
         Value::Float128(value) => LiteralValue::Float(value.to_string()),
         Value::Decimal(value) => LiteralValue::Text(value.to_string()),
-        Value::Blob(value) => LiteralValue::Text(String::from_utf8_lossy(value).into_owned()),
         Value::Date(value) => LiteralValue::Text(value.to_string()),
         Value::Time(value) => LiteralValue::Text(value.to_string()),
         Value::DateTime(value) => LiteralValue::Text(value.to_string()),

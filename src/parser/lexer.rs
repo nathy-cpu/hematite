@@ -155,6 +155,7 @@ pub enum Token {
     // Literals
     Identifier(String),
     StringLiteral(String),
+    BlobLiteral(Vec<u8>),
     NumberLiteral(String),
     BooleanLiteral(bool),
     NullLiteral,
@@ -187,7 +188,9 @@ impl Lexer {
             let ch = self.current_char();
 
             // Handle identifiers and keywords
-            if ch.is_alphabetic() || ch == '_' {
+            if ch == 'X' && self.peek_char() == Some('\'') {
+                self.read_blob_literal()?;
+            } else if ch.is_alphabetic() || ch == '_' {
                 self.read_identifier()?;
             } else if ch == '`' {
                 self.read_quoted_identifier()?;
@@ -450,6 +453,48 @@ impl Lexer {
 
         Err(HematiteError::ParseError(
             "Unterminated string literal".to_string(),
+        ))
+    }
+
+    fn read_blob_literal(&mut self) -> Result<()> {
+        self.advance_char(); // Skip X
+        self.advance_char(); // Skip opening quote
+        let mut literal = String::new();
+
+        while self.position < self.input.len() {
+            let ch = self.current_char();
+            if ch == '\'' {
+                if literal.len() % 2 != 0 {
+                    return Err(HematiteError::ParseError(
+                        "Hex blob literal must contain an even number of digits".to_string(),
+                    ));
+                }
+
+                let mut bytes = Vec::with_capacity(literal.len() / 2);
+                for index in (0..literal.len()).step_by(2) {
+                    let byte = u8::from_str_radix(&literal[index..index + 2], 16).map_err(|_| {
+                        HematiteError::ParseError("Invalid hex blob literal".to_string())
+                    })?;
+                    bytes.push(byte);
+                }
+
+                self.tokens.push(Token::BlobLiteral(bytes));
+                self.advance_char(); // Skip closing quote
+                return Ok(());
+            }
+
+            if !ch.is_ascii_hexdigit() {
+                return Err(HematiteError::ParseError(
+                    "Hex blob literal may only contain hexadecimal digits".to_string(),
+                ));
+            }
+
+            literal.push(ch);
+            self.advance_char();
+        }
+
+        Err(HematiteError::ParseError(
+            "Unterminated hex blob literal".to_string(),
         ))
     }
 

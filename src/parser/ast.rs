@@ -4018,6 +4018,15 @@ impl Expression {
             Expression::Literal(value) => match value {
                 LiteralValue::Integer(i) => i.to_string(),
                 LiteralValue::Text(s) => format!("'{}'", s.replace('\'', "''")),
+                LiteralValue::Blob(bytes) => {
+                    format!(
+                        "X'{}'",
+                        bytes
+                            .iter()
+                            .map(|byte| format!("{byte:02X}"))
+                            .collect::<String>()
+                    )
+                }
                 LiteralValue::Boolean(true) => "TRUE".to_string(),
                 LiteralValue::Boolean(false) => "FALSE".to_string(),
                 LiteralValue::Float(f) => f.to_string(),

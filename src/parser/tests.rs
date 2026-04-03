@@ -357,6 +357,23 @@ mod lexer_tests {
     }
 
     #[test]
+    fn test_hex_blob_literal_tokens() -> Result<()> {
+        let mut lexer = Lexer::new("SELECT X'48656C6C6F' FROM files;".to_string());
+        lexer.tokenize()?;
+
+        let expected = vec![
+            Token::Select,
+            Token::BlobLiteral(b"Hello".to_vec()),
+            Token::From,
+            Token::Identifier("files".to_string()),
+            Token::Semicolon,
+        ];
+
+        assert_eq!(lexer.get_tokens(), &expected);
+        Ok(())
+    }
+
+    #[test]
     fn test_in_statement() -> Result<()> {
         let mut lexer = Lexer::new("SELECT id FROM users WHERE id IN (1, 2, 3);".to_string());
         lexer.tokenize()?;
@@ -1157,6 +1174,18 @@ mod parser_tests {
             }) if args.len() == 2
         ));
         assert_eq!(select.column_aliases[0].as_deref(), Some("display_name"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_hex_blob_literal_expression() -> Result<()> {
+        let select = parse_select("SELECT X'48656C6C6F' AS payload FROM files;")?;
+        assert!(matches!(
+            &select.columns[0],
+            SelectItem::Expression(Expression::Literal(LiteralValue::Blob(bytes)))
+                if bytes == b"Hello"
+        ));
+        assert_eq!(select.column_aliases[0].as_deref(), Some("payload"));
         Ok(())
     }
 
