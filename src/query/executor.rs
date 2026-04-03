@@ -130,6 +130,124 @@ struct CorrelatedScope {
 
 type SubqueryCache = HashMap<usize, QueryResult>;
 
+fn evaluate_case_expression<FBool, FExpr>(
+    branches: &[CaseWhenClause],
+    else_expr: Option<&Expression>,
+    mut eval_bool: FBool,
+    mut eval_expr: FExpr,
+) -> Result<Value>
+where
+    FBool: FnMut(&Expression) -> Result<Option<bool>>,
+    FExpr: FnMut(&Expression) -> Result<Value>,
+{
+    for branch in branches {
+        match eval_bool(&branch.condition)? {
+            Some(true) => return eval_expr(&branch.result),
+            Some(false) | None => {}
+        }
+    }
+
+    match else_expr {
+        Some(else_expr) => eval_expr(else_expr),
+        None => Ok(Value::Null),
+    }
+}
+
+fn evaluate_expression_list<FExpr>(
+    expressions: &[Expression],
+    mut eval_expr: FExpr,
+) -> Result<Vec<Value>>
+where
+    FExpr: FnMut(&Expression) -> Result<Value>,
+{
+    let mut values = Vec::with_capacity(expressions.len());
+    for expr in expressions {
+        values.push(eval_expr(expr)?);
+    }
+    Ok(values)
+}
+
+fn evaluate_scalar_function_call<FExpr>(
+    function: ScalarFunction,
+    args: &[Expression],
+    eval_expr: FExpr,
+) -> Result<Value>
+where
+    FExpr: FnMut(&Expression) -> Result<Value>,
+{
+    evaluate_scalar_function(function, evaluate_expression_list(args, eval_expr)?)
+}
+
+fn evaluate_in_list_predicate<FExpr>(
+    probe_expr: &Expression,
+    candidates: &[Expression],
+    is_not: bool,
+    text_context: Option<TextComparisonContext>,
+    mut eval_expr: FExpr,
+) -> Result<Option<bool>>
+where
+    FExpr: FnMut(&Expression) -> Result<Value>,
+{
+    let probe = eval_expr(probe_expr)?;
+    let candidates = evaluate_expression_list(candidates, eval_expr)?;
+    Ok(evaluate_in_candidates(
+        probe,
+        candidates,
+        is_not,
+        text_context,
+    ))
+}
+
+fn evaluate_between_predicate<FExpr>(
+    expr: &Expression,
+    lower: &Expression,
+    upper: &Expression,
+    is_not: bool,
+    text_context: Option<TextComparisonContext>,
+    mut eval_expr: FExpr,
+) -> Result<Option<bool>>
+where
+    FExpr: FnMut(&Expression) -> Result<Value>,
+{
+    Ok(evaluate_between_values(
+        eval_expr(expr)?,
+        eval_expr(lower)?,
+        eval_expr(upper)?,
+        is_not,
+        text_context,
+    ))
+}
+
+fn evaluate_like_predicate<FExpr>(
+    expr: &Expression,
+    pattern: &Expression,
+    is_not: bool,
+    text_context: Option<TextComparisonContext>,
+    mut eval_expr: FExpr,
+) -> Result<Option<bool>>
+where
+    FExpr: FnMut(&Expression) -> Result<Value>,
+{
+    Ok(evaluate_like_values(
+        eval_expr(expr)?,
+        eval_expr(pattern)?,
+        is_not,
+        text_context,
+    ))
+}
+
+fn conditions_match_with<FEval>(conditions: &[Condition], mut eval_condition: FEval) -> Result<bool>
+where
+    FEval: FnMut(&Condition) -> Result<Option<bool>>,
+{
+    for condition in conditions {
+        if eval_condition(condition)? != Some(true) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 impl SelectExecutor {
     pub fn new(statement: SelectStatement, access_path: SelectAccessPath) -> Self {
         Self {
@@ -365,11 +483,9 @@ impl SelectExecutor {
                 "Aggregate expressions can only be evaluated in grouped query contexts".to_string(),
             )),
             Expression::ScalarFunctionCall { function, args } => {
-                let mut values = Vec::with_capacity(args.len());
-                for arg in args {
-                    values.push(self.evaluate_expression(ctx, cache, sources, arg, row)?);
-                }
-                evaluate_scalar_function(*function, values)
+                evaluate_scalar_function_call(*function, args, |expr| {
+                    self.evaluate_expression(ctx, cache, sources, expr, row)
+                })
             }
             Expression::ScalarSubquery(subquery) => {
                 self.execute_scalar_subquery_cached(ctx, cache, subquery, Some(sources), Some(row))
@@ -424,16 +540,9 @@ impl SelectExecutor {
                 expr,
                 values,
                 is_not,
-            } => {
-                let probe = self.evaluate_expression(ctx, cache, sources, expr, row)?;
-                let candidates = values
-                    .iter()
-                    .map(|value_expr| {
-                        self.evaluate_expression(ctx, cache, sources, value_expr, row)
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                Ok(self.evaluate_in_candidates(probe, candidates, *is_not, None))
-            }
+            } => evaluate_in_list_predicate(expr, values, *is_not, None, |value_expr| {
+                self.evaluate_expression(ctx, cache, sources, value_expr, row)
+            }),
             Expression::InSubquery {
                 expr,
                 subquery,
@@ -454,34 +563,25 @@ impl SelectExecutor {
                 lower,
                 upper,
                 is_not,
-            } => {
-                let value = self.evaluate_expression(ctx, cache, sources, expr, row)?;
-                let lower_value = self.evaluate_expression(ctx, cache, sources, lower, row)?;
-                let upper_value = self.evaluate_expression(ctx, cache, sources, upper, row)?;
-                let text_context = self.text_comparison_context_for_expression(sources, expr)?;
-                Ok(evaluate_between_values(
-                    value,
-                    lower_value,
-                    upper_value,
-                    *is_not,
-                    text_context,
-                ))
-            }
+            } => evaluate_between_predicate(
+                expr,
+                lower,
+                upper,
+                *is_not,
+                self.text_comparison_context_for_expression(sources, expr)?,
+                |value_expr| self.evaluate_expression(ctx, cache, sources, value_expr, row),
+            ),
             Expression::Like {
                 expr,
                 pattern,
                 is_not,
-            } => {
-                let value = self.evaluate_expression(ctx, cache, sources, expr, row)?;
-                let pattern_value = self.evaluate_expression(ctx, cache, sources, pattern, row)?;
-                let text_context = self.text_comparison_context_for_expression(sources, expr)?;
-                Ok(evaluate_like_values(
-                    value,
-                    pattern_value,
-                    *is_not,
-                    text_context,
-                ))
-            }
+            } => evaluate_like_predicate(
+                expr,
+                pattern,
+                *is_not,
+                self.text_comparison_context_for_expression(sources, expr)?,
+                |value_expr| self.evaluate_expression(ctx, cache, sources, value_expr, row),
+            ),
             Expression::Exists { subquery, is_not } => {
                 let subquery_result =
                     self.execute_subquery_cached(ctx, cache, subquery, Some(sources), Some(row))?;
@@ -2217,19 +2317,17 @@ impl SelectExecutor {
                     )
                 }),
             Expression::ScalarFunctionCall { function, args } => {
-                let mut values = Vec::with_capacity(args.len());
-                for arg in args {
-                    values.push(self.evaluate_projected_expression(
+                evaluate_scalar_function_call(*function, args, |expr| {
+                    self.evaluate_projected_expression(
                         ctx,
                         cache,
                         sources,
-                        arg,
+                        expr,
                         row,
                         output_columns,
                         group_rows,
-                    )?);
-                }
-                evaluate_scalar_function(*function, values)
+                    )
+                })
             }
             Expression::Column(name) => {
                 let index = self
@@ -2351,38 +2449,23 @@ impl SelectExecutor {
                 expr,
                 values,
                 is_not,
-            } => {
-                let probe = self.evaluate_projected_expression(
-                    ctx,
-                    cache,
-                    sources,
-                    expr,
-                    row,
-                    output_columns,
-                    group_rows,
-                )?;
-                let candidates = values
-                    .iter()
-                    .map(|value_expr| {
-                        self.evaluate_projected_expression(
-                            ctx,
-                            cache,
-                            sources,
-                            value_expr,
-                            row,
-                            output_columns,
-                            group_rows,
-                        )
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                let text_context = self.text_comparison_context_for_expression(sources, expr)?;
-                Ok(evaluate_in_candidates(
-                    probe,
-                    candidates,
-                    *is_not,
-                    text_context,
-                ))
-            }
+            } => evaluate_in_list_predicate(
+                expr,
+                values,
+                *is_not,
+                self.text_comparison_context_for_expression(sources, expr)?,
+                |value_expr| {
+                    self.evaluate_projected_expression(
+                        ctx,
+                        cache,
+                        sources,
+                        value_expr,
+                        row,
+                        output_columns,
+                        group_rows,
+                    )
+                },
+            ),
             Expression::InSubquery {
                 expr,
                 subquery,
@@ -2417,74 +2500,45 @@ impl SelectExecutor {
                 lower,
                 upper,
                 is_not,
-            } => {
-                let value = self.evaluate_projected_expression(
-                    ctx,
-                    cache,
-                    sources,
-                    expr,
-                    row,
-                    output_columns,
-                    group_rows,
-                )?;
-                let lower_value = self.evaluate_projected_expression(
-                    ctx,
-                    cache,
-                    sources,
-                    lower,
-                    row,
-                    output_columns,
-                    group_rows,
-                )?;
-                let upper_value = self.evaluate_projected_expression(
-                    ctx,
-                    cache,
-                    sources,
-                    upper,
-                    row,
-                    output_columns,
-                    group_rows,
-                )?;
-                let text_context = self.text_comparison_context_for_expression(sources, expr)?;
-                Ok(evaluate_between_values(
-                    value,
-                    lower_value,
-                    upper_value,
-                    *is_not,
-                    text_context,
-                ))
-            }
+            } => evaluate_between_predicate(
+                expr,
+                lower,
+                upper,
+                *is_not,
+                self.text_comparison_context_for_expression(sources, expr)?,
+                |value_expr| {
+                    self.evaluate_projected_expression(
+                        ctx,
+                        cache,
+                        sources,
+                        value_expr,
+                        row,
+                        output_columns,
+                        group_rows,
+                    )
+                },
+            ),
             Expression::Like {
                 expr,
                 pattern,
                 is_not,
-            } => {
-                let value = self.evaluate_projected_expression(
-                    ctx,
-                    cache,
-                    sources,
-                    expr,
-                    row,
-                    output_columns,
-                    group_rows,
-                )?;
-                let pattern_value = self.evaluate_projected_expression(
-                    ctx,
-                    cache,
-                    sources,
-                    pattern,
-                    row,
-                    output_columns,
-                    group_rows,
-                )?;
-                let text_context = self.text_comparison_context_for_expression(sources, expr)?;
-                Ok(evaluate_like_values(
-                    value,
-                    pattern_value,
-                    *is_not,
-                    text_context,
-                ))
-            }
+            } => evaluate_like_predicate(
+                expr,
+                pattern,
+                *is_not,
+                self.text_comparison_context_for_expression(sources, expr)?,
+                |value_expr| {
+                    self.evaluate_projected_expression(
+                        ctx,
+                        cache,
+                        sources,
+                        value_expr,
+                        row,
+                        output_columns,
+                        group_rows,
+                    )
+                },
+            ),
             Expression::Exists { subquery, is_not } => {
                 let subquery_result =
                     self.execute_subquery_cached(ctx, cache, subquery, Some(sources), Some(row))?;
@@ -2983,12 +3037,9 @@ impl SelectExecutor {
         conditions: &[Condition],
         row: &[Value],
     ) -> Result<bool> {
-        for condition in conditions {
-            if self.evaluate_condition(ctx, cache, sources, condition, row)? != Some(true) {
-                return Ok(false);
-            }
-        }
-        Ok(true)
+        conditions_match_with(conditions, |condition| {
+            self.evaluate_condition(ctx, cache, sources, condition, row)
+        })
     }
 
     fn projected_conditions_match(
@@ -3001,8 +3052,8 @@ impl SelectExecutor {
         output_columns: &[String],
         group_rows: &[Vec<Value>],
     ) -> Result<bool> {
-        for condition in conditions {
-            if self.evaluate_projected_condition(
+        conditions_match_with(conditions, |condition| {
+            self.evaluate_projected_condition(
                 ctx,
                 cache,
                 sources,
@@ -3010,12 +3061,8 @@ impl SelectExecutor {
                 row,
                 output_columns,
                 group_rows,
-            )? != Some(true)
-            {
-                return Ok(false);
-            }
-        }
-        Ok(true)
+            )
+        })
     }
 
     fn extract_primary_key_lookup(&self, table: &Table) -> Option<Vec<Value>> {
@@ -3195,19 +3242,12 @@ impl InsertExecutor {
             Expression::Case {
                 branches,
                 else_expr,
-            } => {
-                for branch in branches {
-                    match self.evaluate_boolean_value_expression(&branch.condition)? {
-                        Some(true) => return self.evaluate_value_expression(&branch.result),
-                        Some(false) | None => {}
-                    }
-                }
-
-                match else_expr {
-                    Some(else_expr) => self.evaluate_value_expression(else_expr),
-                    None => Ok(Value::Null),
-                }
-            }
+            } => evaluate_case_expression(
+                branches,
+                else_expr.as_deref(),
+                |condition| self.evaluate_boolean_value_expression(condition),
+                |expr| self.evaluate_value_expression(expr),
+            ),
             Expression::ScalarSubquery(_) => Err(HematiteError::ParseError(
                 "INSERT expressions cannot use scalar subqueries".to_string(),
             )),
@@ -3215,11 +3255,9 @@ impl InsertExecutor {
                 "INSERT expressions cannot use aggregate functions".to_string(),
             )),
             Expression::ScalarFunctionCall { function, args } => {
-                let mut values = Vec::with_capacity(args.len());
-                for arg in args {
-                    values.push(self.evaluate_value_expression(arg)?);
-                }
-                evaluate_scalar_function(*function, values)
+                evaluate_scalar_function_call(*function, args, |expr| {
+                    self.evaluate_value_expression(expr)
+                })
             }
             Expression::UnaryMinus(expr) => {
                 negate_numeric_value(self.evaluate_value_expression(expr)?)
@@ -3268,14 +3306,9 @@ impl InsertExecutor {
                 expr,
                 values,
                 is_not,
-            } => {
-                let probe = self.evaluate_value_expression(expr)?;
-                let candidates = values
-                    .iter()
-                    .map(|value_expr| self.evaluate_value_expression(value_expr))
-                    .collect::<Result<Vec<_>>>()?;
-                Ok(evaluate_in_candidates(probe, candidates, *is_not, None))
-            }
+            } => evaluate_in_list_predicate(expr, values, *is_not, None, |value_expr| {
+                self.evaluate_value_expression(value_expr)
+            }),
             Expression::InSubquery { .. } => Err(HematiteError::ParseError(
                 "INSERT expressions cannot use subqueries in boolean expressions".to_string(),
             )),
@@ -3284,27 +3317,16 @@ impl InsertExecutor {
                 lower,
                 upper,
                 is_not,
-            } => {
-                let value = self.evaluate_value_expression(expr)?;
-                let lower_value = self.evaluate_value_expression(lower)?;
-                let upper_value = self.evaluate_value_expression(upper)?;
-                Ok(evaluate_between_values(
-                    value,
-                    lower_value,
-                    upper_value,
-                    *is_not,
-                    None,
-                ))
-            }
+            } => evaluate_between_predicate(expr, lower, upper, *is_not, None, |value_expr| {
+                self.evaluate_value_expression(value_expr)
+            }),
             Expression::Like {
                 expr,
                 pattern,
                 is_not,
-            } => {
-                let value = self.evaluate_value_expression(expr)?;
-                let pattern_value = self.evaluate_value_expression(pattern)?;
-                Ok(evaluate_like_values(value, pattern_value, *is_not, None))
-            }
+            } => evaluate_like_predicate(expr, pattern, *is_not, None, |value_expr| {
+                self.evaluate_value_expression(value_expr)
+            }),
             Expression::Exists { .. } => Err(HematiteError::ParseError(
                 "INSERT expressions cannot use EXISTS in boolean expressions".to_string(),
             )),
