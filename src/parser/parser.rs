@@ -45,6 +45,15 @@ impl Parser {
 
         let token = self.peek_token()?;
 
+        if let Token::Identifier(name) = &token {
+            if let Some(keyword) = uppercase_keyword_match(name, &TOP_LEVEL_KEYWORDS) {
+                return Err(HematiteError::ParseError(format!(
+                    "Keyword '{}' must be capitalized as '{}'",
+                    name, keyword
+                )));
+            }
+        }
+
         match token {
             Token::Begin => self.parse_begin(),
             Token::Commit => self.parse_commit(),
@@ -2006,6 +2015,12 @@ impl Parser {
             Token::Identifier(name) if name == keyword => {
                 self.consume_token(&Token::Identifier(name.clone()))
             }
+            Token::Identifier(name) if name.eq_ignore_ascii_case(keyword) => Err(
+                HematiteError::ParseError(format!(
+                    "Keyword '{}' must be capitalized as '{}'",
+                    name, keyword
+                )),
+            ),
             token => Err(HematiteError::ParseError(format!(
                 "Expected {}, found: {:?}",
                 keyword, token
@@ -2067,6 +2082,9 @@ impl Parser {
                     self.consume_optional_equals()?;
                     self.parse_identifier()?;
                     continue;
+                }
+                if let Some(message) = capitalization_hint_for_token(&self.peek_token()?) {
+                    return Err(HematiteError::ParseError(message));
                 }
                 return Err(HematiteError::ParseError(
                     "Unsupported DEFAULT table option".to_string(),
@@ -2485,6 +2503,18 @@ impl Parser {
                 self.consume_token(&token)?;
                 return Ok(SqlTypeName::Enum(self.parse_enum_variants()?));
             }
+            Token::Identifier(name) => {
+                if let Some(keyword) = uppercase_keyword_match(&name, &DATA_TYPE_KEYWORDS) {
+                    return Err(HematiteError::ParseError(format!(
+                        "Keyword '{}' must be capitalized as '{}'",
+                        name, keyword
+                    )));
+                }
+                return Err(HematiteError::ParseError(format!(
+                    "Expected data type, found: {:?}",
+                    Token::Identifier(name)
+                )));
+            }
             _ => {
                 return Err(HematiteError::ParseError(format!(
                     "Expected data type, found: {:?}",
@@ -2658,6 +2688,30 @@ impl Parser {
         if token == *expected {
             self.position += 1;
             Ok(())
+        } else if let Token::Identifier(name) = &token {
+            if let Some(keyword) = uppercase_keyword_match(name, ALL_UPPERCASE_KEYWORDS) {
+                Err(HematiteError::ParseError(format!(
+                    "Keyword '{}' must be capitalized as '{}'",
+                    name, keyword
+                )))
+            } else if let Some(keyword) = token_keyword_name(expected) {
+                if name.eq_ignore_ascii_case(keyword) {
+                    Err(HematiteError::ParseError(format!(
+                        "Keyword '{}' must be capitalized as '{}'",
+                        name, keyword
+                    )))
+                } else {
+                    Err(HematiteError::ParseError(format!(
+                        "Expected {:?}, found: {:?}",
+                        expected, token
+                    )))
+                }
+            } else {
+                Err(HematiteError::ParseError(format!(
+                    "Expected {:?}, found: {:?}",
+                    expected, token
+                )))
+            }
         } else {
             Err(HematiteError::ParseError(format!(
                 "Expected {:?}, found: {:?}",
@@ -2678,6 +2732,174 @@ pub fn parse_condition_fragment(sql: &str) -> Result<Condition> {
         ));
     }
     Ok(condition)
+}
+
+const TOP_LEVEL_KEYWORDS: &[&str] = &[
+    "BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE", "EXPLAIN", "DESCRIBE", "SHOW",
+    "SELECT", "UPDATE", "INSERT", "DELETE", "CREATE", "ALTER", "DROP", "WITH",
+];
+
+const ALL_UPPERCASE_KEYWORDS: &[&str] = &[
+    "BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE", "SELECT", "UPDATE", "FROM",
+    "INSERT", "DELETE", "DROP", "EXPLAIN", "DESCRIBE", "SHOW", "TABLES", "VIEWS", "INDEXES",
+    "TRIGGERS", "ALTER", "ADD", "IF", "INTO", "SET", "VALUES", "CREATE", "VIEW", "TRIGGER",
+    "INDEX", "EXISTS", "UNION", "INTERSECT", "EXCEPT", "ALL", "WITH", "RECURSIVE", "LEFT",
+    "RIGHT", "FULL", "OUTER", "INNER", "JOIN", "ON", "AS", "DISTINCT", "CAST", "TABLE",
+    "COLUMN", "WHERE", "GROUP", "HAVING", "ORDER", "BY", "ASC", "DESC", "OVER", "PARTITION",
+    "INTERVAL", "LIMIT", "OFFSET", "COUNT", "SUM", "AVG", "MIN", "MAX", "INTEGER", "TEXT",
+    "BOOLEAN", "FLOAT", "TINYINT", "SMALLINT", "BIGINT", "INT", "BOOL", "DOUBLE", "REAL",
+    "DECIMAL", "NUMERIC", "BLOB", "DATE", "TIME", "DATETIME", "TIMESTAMP", "ZONE", "CHAR",
+    "VARCHAR", "BINARY", "VARBINARY", "ENUM", "PRECISION", "UNSIGNED", "AUTO_INCREMENT",
+    "UNIQUE", "PRIMARY", "KEY", "DUPLICATE", "CONSTRAINT", "CHECK", "FOREIGN", "REFERENCES",
+    "CASCADE", "RESTRICT", "RENAME", "TO", "AFTER", "NOT", "IS", "NULL", "DEFAULT", "IN",
+    "BETWEEN", "LIKE", "CASE", "WHEN", "THEN", "ELSE", "END", "AND", "OR", "USING", "ENGINE",
+    "CHARSET", "CHARACTER", "COLLATE", "BTREE", "HASH",
+];
+
+const DATA_TYPE_KEYWORDS: &[&str] = &[
+    "TINYINT", "SMALLINT", "INTEGER", "INT", "BIGINT", "TEXT", "BOOLEAN", "BOOL", "FLOAT",
+    "REAL", "DOUBLE", "DECIMAL", "NUMERIC", "BLOB", "DATE", "TIME", "DATETIME", "TIMESTAMP",
+    "CHAR", "VARCHAR", "BINARY", "VARBINARY", "ENUM",
+];
+
+fn uppercase_keyword_match<'a>(name: &str, keywords: &'a [&'a str]) -> Option<&'a str> {
+    keywords
+        .iter()
+        .copied()
+        .find(|keyword| name.eq_ignore_ascii_case(keyword) && name != *keyword)
+}
+
+fn capitalization_hint_for_token(token: &Token) -> Option<String> {
+    match token {
+        Token::Identifier(name) => uppercase_keyword_match(name, ALL_UPPERCASE_KEYWORDS).map(
+            |keyword| format!("Keyword '{}' must be capitalized as '{}'", name, keyword),
+        ),
+        _ => None,
+    }
+}
+
+fn token_keyword_name(token: &Token) -> Option<&'static str> {
+    match token {
+        Token::Begin => Some("BEGIN"),
+        Token::Commit => Some("COMMIT"),
+        Token::Rollback => Some("ROLLBACK"),
+        Token::Savepoint => Some("SAVEPOINT"),
+        Token::Release => Some("RELEASE"),
+        Token::Select => Some("SELECT"),
+        Token::Update => Some("UPDATE"),
+        Token::From => Some("FROM"),
+        Token::Insert => Some("INSERT"),
+        Token::Delete => Some("DELETE"),
+        Token::Drop => Some("DROP"),
+        Token::Explain => Some("EXPLAIN"),
+        Token::Describe => Some("DESCRIBE"),
+        Token::Show => Some("SHOW"),
+        Token::Tables => Some("TABLES"),
+        Token::Views => Some("VIEWS"),
+        Token::Indexes => Some("INDEXES"),
+        Token::Triggers => Some("TRIGGERS"),
+        Token::Alter => Some("ALTER"),
+        Token::Add => Some("ADD"),
+        Token::If => Some("IF"),
+        Token::Into => Some("INTO"),
+        Token::Set => Some("SET"),
+        Token::Values => Some("VALUES"),
+        Token::Create => Some("CREATE"),
+        Token::View => Some("VIEW"),
+        Token::Trigger => Some("TRIGGER"),
+        Token::Index => Some("INDEX"),
+        Token::Exists => Some("EXISTS"),
+        Token::Union => Some("UNION"),
+        Token::Intersect => Some("INTERSECT"),
+        Token::Except => Some("EXCEPT"),
+        Token::All => Some("ALL"),
+        Token::With => Some("WITH"),
+        Token::Recursive => Some("RECURSIVE"),
+        Token::Left => Some("LEFT"),
+        Token::Right => Some("RIGHT"),
+        Token::Full => Some("FULL"),
+        Token::Outer => Some("OUTER"),
+        Token::Inner => Some("INNER"),
+        Token::Join => Some("JOIN"),
+        Token::On => Some("ON"),
+        Token::As => Some("AS"),
+        Token::Distinct => Some("DISTINCT"),
+        Token::Cast => Some("CAST"),
+        Token::Table => Some("TABLE"),
+        Token::Column => Some("COLUMN"),
+        Token::Where => Some("WHERE"),
+        Token::Group => Some("GROUP"),
+        Token::Having => Some("HAVING"),
+        Token::Order => Some("ORDER"),
+        Token::By => Some("BY"),
+        Token::Asc => Some("ASC"),
+        Token::Desc => Some("DESC"),
+        Token::Over => Some("OVER"),
+        Token::Partition => Some("PARTITION"),
+        Token::Interval => Some("INTERVAL"),
+        Token::Limit => Some("LIMIT"),
+        Token::Offset => Some("OFFSET"),
+        Token::Count => Some("COUNT"),
+        Token::Sum => Some("SUM"),
+        Token::Avg => Some("AVG"),
+        Token::Min => Some("MIN"),
+        Token::Max => Some("MAX"),
+        Token::Integer => Some("INTEGER"),
+        Token::Text => Some("TEXT"),
+        Token::Boolean => Some("BOOLEAN"),
+        Token::Float => Some("FLOAT"),
+        Token::TinyInt => Some("TINYINT"),
+        Token::SmallInt => Some("SMALLINT"),
+        Token::BigInt => Some("BIGINT"),
+        Token::Int => Some("INT"),
+        Token::Bool => Some("BOOL"),
+        Token::Double => Some("DOUBLE"),
+        Token::Real => Some("REAL"),
+        Token::Decimal => Some("DECIMAL"),
+        Token::Numeric => Some("NUMERIC"),
+        Token::Blob => Some("BLOB"),
+        Token::Date => Some("DATE"),
+        Token::Time => Some("TIME"),
+        Token::DateTime => Some("DATETIME"),
+        Token::Timestamp => Some("TIMESTAMP"),
+        Token::Zone => Some("ZONE"),
+        Token::Char => Some("CHAR"),
+        Token::Varchar => Some("VARCHAR"),
+        Token::BinaryType => Some("BINARY"),
+        Token::VarBinary => Some("VARBINARY"),
+        Token::Enum => Some("ENUM"),
+        Token::Precision => Some("PRECISION"),
+        Token::Unsigned => Some("UNSIGNED"),
+        Token::AutoIncrement => Some("AUTO_INCREMENT"),
+        Token::Unique => Some("UNIQUE"),
+        Token::Primary => Some("PRIMARY"),
+        Token::Key => Some("KEY"),
+        Token::Duplicate => Some("DUPLICATE"),
+        Token::Constraint => Some("CONSTRAINT"),
+        Token::Check => Some("CHECK"),
+        Token::Foreign => Some("FOREIGN"),
+        Token::References => Some("REFERENCES"),
+        Token::Cascade => Some("CASCADE"),
+        Token::Restrict => Some("RESTRICT"),
+        Token::Rename => Some("RENAME"),
+        Token::To => Some("TO"),
+        Token::After => Some("AFTER"),
+        Token::Not => Some("NOT"),
+        Token::Is => Some("IS"),
+        Token::Null => Some("NULL"),
+        Token::Default => Some("DEFAULT"),
+        Token::In => Some("IN"),
+        Token::Between => Some("BETWEEN"),
+        Token::Like => Some("LIKE"),
+        Token::Case => Some("CASE"),
+        Token::When => Some("WHEN"),
+        Token::Then => Some("THEN"),
+        Token::Else => Some("ELSE"),
+        Token::End => Some("END"),
+        Token::And => Some("AND"),
+        Token::Or => Some("OR"),
+        _ => None,
+    }
 }
 
 fn is_window_only_function_name(name: &str) -> bool {

@@ -976,19 +976,43 @@ mod parser_tests {
 
     #[test]
     fn test_parse_rejects_lowercase_keywords() {
-        assert!(parse_statement("select * from users;").is_err());
+        let err = parse_statement("select * from users;").unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::HematiteError::ParseError(message)
+                if message.contains("Keyword 'select' must be capitalized as 'SELECT'")
+        ));
     }
 
     #[test]
     fn test_parse_rejects_lowercase_identifier_keywords() {
-        assert!(parse_create_index("CREATE UNIQUE KEY idx_users_name using btree ON users (name);")
-            .is_err());
-        assert!(
-            parse_create(
-                "CREATE TABLE users (id INT PRIMARY KEY) ENGINE=InnoDB DEFAULT charset=utf8mb4;"
-            )
-            .is_err()
-        );
+        let using_err =
+            parse_create_index("CREATE UNIQUE KEY idx_users_name using btree ON users (name);")
+                .unwrap_err();
+        assert!(matches!(
+            using_err,
+            crate::error::HematiteError::ParseError(message)
+                if message.contains("Keyword 'using' must be capitalized as 'USING'")
+        ));
+
+        let charset_err =
+            parse_create("CREATE TABLE users (id INT PRIMARY KEY) ENGINE=InnoDB DEFAULT charset=utf8mb4;")
+                .unwrap_err();
+        assert!(matches!(
+            charset_err,
+            crate::error::HematiteError::ParseError(message)
+                if message.contains("Keyword 'charset' must be capitalized as 'CHARSET'")
+        ));
+    }
+
+    #[test]
+    fn test_parse_rejects_lowercase_data_type_with_capitalization_hint() {
+        let err = parse_create("CREATE TABLE users (id integer PRIMARY KEY);").unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::HematiteError::ParseError(message)
+                if message.contains("Keyword 'integer' must be capitalized as 'INTEGER'")
+        ));
     }
 
     #[test]

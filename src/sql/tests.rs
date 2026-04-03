@@ -230,6 +230,22 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_lowercase_keywords_return_capitalization_hint() -> Result<()> {
+        let db = TestDbFile::new("_test_lowercase_keywords_return_capitalization_hint");
+        let mut conn = Connection::new(db.path())?;
+
+        let err = conn.execute("select * from users;").unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::HematiteError::ParseError(message)
+                if message.contains("Keyword 'select' must be capitalized as 'SELECT'")
+        ));
+
+        conn.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_additional_temporal_binary_and_enum_types_round_trip() -> Result<()> {
         let db = TestDbFile::new("_test_additional_temporal_binary_and_enum_types_round_trip");
         let mut conn = Connection::new(db.path())?;
