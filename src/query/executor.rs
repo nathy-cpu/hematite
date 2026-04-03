@@ -25,8 +25,8 @@ use crate::catalog::table::{
 };
 use crate::catalog::StoredRow;
 use crate::catalog::{
-    Column, DataType, DateTimeValue, DateValue, DecimalValue, Float128Value,
-    IntervalDaySecondValue, IntervalYearMonthValue, Table, TimeValue, TimeWithTimeZoneValue, Value,
+    Column, DataType, DateTimeValue, DateValue, DecimalValue, IntervalDaySecondValue,
+    IntervalYearMonthValue, Table, TimeValue, TimeWithTimeZoneValue, Value,
 };
 use crate::error::{HematiteError, Result};
 use crate::parser::ast::*;
@@ -248,7 +248,8 @@ impl SelectExecutor {
         Ok(match (left_context, right_context) {
             (Some(left), Some(right)) => Some(TextComparisonContext {
                 trim_trailing_spaces: left.trim_trailing_spaces || right.trim_trailing_spaces,
-                trim_trailing_zero_bytes: left.trim_trailing_zero_bytes || right.trim_trailing_zero_bytes,
+                trim_trailing_zero_bytes: left.trim_trailing_zero_bytes
+                    || right.trim_trailing_zero_bytes,
                 case_insensitive: left.case_insensitive || right.case_insensitive,
             }),
             (Some(context), None) | (None, Some(context)) => Some(context),
@@ -416,8 +417,7 @@ impl SelectExecutor {
             } => {
                 let left_val = self.evaluate_expression(ctx, cache, sources, left, row)?;
                 let right_val = self.evaluate_expression(ctx, cache, sources, right, row)?;
-                let text_context =
-                    self.merged_text_comparison_context(sources, left, right)?;
+                let text_context = self.merged_text_comparison_context(sources, left, right)?;
                 Ok(self.compare_values(&left_val, operator, &right_val, text_context))
             }
             Expression::InList {
@@ -458,8 +458,7 @@ impl SelectExecutor {
                 let value = self.evaluate_expression(ctx, cache, sources, expr, row)?;
                 let lower_value = self.evaluate_expression(ctx, cache, sources, lower, row)?;
                 let upper_value = self.evaluate_expression(ctx, cache, sources, upper, row)?;
-                let text_context =
-                    self.text_comparison_context_for_expression(sources, expr)?;
+                let text_context = self.text_comparison_context_for_expression(sources, expr)?;
                 Ok(evaluate_between_values(
                     value,
                     lower_value,
@@ -475,9 +474,13 @@ impl SelectExecutor {
             } => {
                 let value = self.evaluate_expression(ctx, cache, sources, expr, row)?;
                 let pattern_value = self.evaluate_expression(ctx, cache, sources, pattern, row)?;
-                let text_context =
-                    self.text_comparison_context_for_expression(sources, expr)?;
-                Ok(evaluate_like_values(value, pattern_value, *is_not, text_context))
+                let text_context = self.text_comparison_context_for_expression(sources, expr)?;
+                Ok(evaluate_like_values(
+                    value,
+                    pattern_value,
+                    *is_not,
+                    text_context,
+                ))
             }
             Expression::Exists { subquery, is_not } => {
                 let subquery_result =
@@ -920,8 +923,7 @@ impl SelectExecutor {
             } => {
                 let left_val = self.evaluate_expression(ctx, cache, sources, left, row)?;
                 let right_val = self.evaluate_expression(ctx, cache, sources, right, row)?;
-                let text_context =
-                    self.merged_text_comparison_context(sources, left, right)?;
+                let text_context = self.merged_text_comparison_context(sources, left, right)?;
                 Ok(self.compare_values(&left_val, operator, &right_val, text_context))
             }
             Condition::InList {
@@ -936,8 +938,7 @@ impl SelectExecutor {
                         self.evaluate_expression(ctx, cache, sources, value_expr, row)
                     })
                     .collect::<Result<Vec<_>>>()?;
-                let text_context =
-                    self.text_comparison_context_for_expression(sources, expr)?;
+                let text_context = self.text_comparison_context_for_expression(sources, expr)?;
                 Ok(self.evaluate_in_candidates(probe, candidates, *is_not, text_context))
             }
             Condition::InSubquery {
@@ -953,8 +954,7 @@ impl SelectExecutor {
                     .into_iter()
                     .map(|row| row.into_iter().next().unwrap_or(Value::Null))
                     .collect::<Vec<_>>();
-                let text_context =
-                    self.text_comparison_context_for_expression(sources, expr)?;
+                let text_context = self.text_comparison_context_for_expression(sources, expr)?;
                 Ok(self.evaluate_in_candidates(probe, candidates, *is_not, text_context))
             }
             Condition::Between {
@@ -971,8 +971,7 @@ impl SelectExecutor {
                     return Ok(None);
                 }
 
-                let text_context =
-                    self.text_comparison_context_for_expression(sources, expr)?;
+                let text_context = self.text_comparison_context_for_expression(sources, expr)?;
                 let lower_ok = sql_partial_cmp(&value, &lower_value, text_context)
                     .map(|ordering| !ordering.is_lt());
                 let upper_ok = sql_partial_cmp(&value, &upper_value, text_context)
@@ -991,8 +990,7 @@ impl SelectExecutor {
             } => {
                 let value = self.evaluate_expression(ctx, cache, sources, expr, row)?;
                 let pattern_value = self.evaluate_expression(ctx, cache, sources, pattern, row)?;
-                let text_context =
-                    self.text_comparison_context_for_expression(sources, expr)?;
+                let text_context = self.text_comparison_context_for_expression(sources, expr)?;
 
                 match (value, pattern_value) {
                     (Value::Text(text), Value::Text(pattern)) => {
@@ -1820,17 +1818,16 @@ impl SelectExecutor {
                         continue;
                     };
 
-                    let ordering =
-                        self.compare_sort_values(
-                            &left[column_index],
-                            &right[column_index],
-                            self.text_comparison_context_for_expression(
-                                sources,
-                                &Expression::Column(item.column.clone()),
-                            )
-                            .ok()
-                            .flatten(),
-                        );
+                    let ordering = self.compare_sort_values(
+                        &left[column_index],
+                        &right[column_index],
+                        self.text_comparison_context_for_expression(
+                            sources,
+                            &Expression::Column(item.column.clone()),
+                        )
+                        .ok()
+                        .flatten(),
+                    );
                     if ordering != Ordering::Equal {
                         return match item.direction {
                             SortDirection::Asc => ordering,
@@ -2013,45 +2010,21 @@ impl SelectExecutor {
             AggregateFunction::Sum => {
                 let mut int_sum: i64 = 0;
                 let mut float_sum: f64 = 0.0;
-                let mut float128_sum: Option<Float128Value> = None;
                 let mut has_float = false;
-                let mut has_float128 = false;
 
                 for value in &values {
                     match value {
                         Value::Integer(i) => {
                             int_sum += *i as i64;
                             float_sum += *i as f64;
-                            if let Some(sum) = &mut float128_sum {
-                                *sum = sum.add(&Float128Value::from_integer((*i).into()))?;
-                            }
                         }
                         Value::Float32(f) => {
                             has_float = true;
                             float_sum += *f as f64;
-                            if let Some(sum) = &mut float128_sum {
-                                *sum = sum.add(
-                                    &Float128Value::from_f64(*f as f64)
-                                        .expect("finite FLOAT32 converts to FLOAT128"),
-                                )?;
-                            }
                         }
                         Value::Float(f) => {
                             has_float = true;
                             float_sum += *f;
-                            if let Some(sum) = &mut float128_sum {
-                                *sum = sum.add(
-                                    &Float128Value::from_f64(*f)
-                                        .expect("finite FLOAT converts to FLOAT128"),
-                                )?;
-                            }
-                        }
-                        Value::Float128(f) => {
-                            has_float128 = true;
-                            float128_sum = Some(match float128_sum.take() {
-                                Some(sum) => sum.add(f)?,
-                                None => f.clone(),
-                            });
                         }
                         _ => {
                             return Err(HematiteError::ParseError(format!(
@@ -2062,9 +2035,7 @@ impl SelectExecutor {
                     }
                 }
 
-                if has_float128 {
-                    Ok(float128_sum.map(Value::Float128))
-                } else if has_float {
+                if has_float {
                     Ok(Some(Value::Float(float_sum)))
                 } else {
                     Ok(Some(Value::Integer(int_sum as i32)))
@@ -2072,42 +2043,18 @@ impl SelectExecutor {
             }
             AggregateFunction::Avg => {
                 let mut sum: f64 = 0.0;
-                let mut float128_sum: Option<Float128Value> = None;
-                let mut has_float128 = false;
                 let count = values.len() as f64;
 
                 for value in &values {
                     match value {
                         Value::Integer(i) => {
                             sum += *i as f64;
-                            if let Some(sum128) = &mut float128_sum {
-                                *sum128 = sum128.add(&Float128Value::from_integer((*i).into()))?;
-                            }
                         }
                         Value::Float32(f) => {
                             sum += *f as f64;
-                            if let Some(sum128) = &mut float128_sum {
-                                *sum128 = sum128.add(
-                                    &Float128Value::from_f64(*f as f64)
-                                        .expect("finite FLOAT32 converts to FLOAT128"),
-                                )?;
-                            }
                         }
                         Value::Float(f) => {
                             sum += *f;
-                            if let Some(sum128) = &mut float128_sum {
-                                *sum128 = sum128.add(
-                                    &Float128Value::from_f64(*f)
-                                        .expect("finite FLOAT converts to FLOAT128"),
-                                )?;
-                            }
-                        }
-                        Value::Float128(f) => {
-                            has_float128 = true;
-                            float128_sum = Some(match float128_sum.take() {
-                                Some(sum128) => sum128.add(f)?,
-                                None => f.clone(),
-                            });
                         }
                         _ => {
                             return Err(HematiteError::ParseError(format!(
@@ -2118,16 +2065,7 @@ impl SelectExecutor {
                     }
                 }
 
-                if has_float128 {
-                    let divisor = Float128Value::from_integer(values.len() as i128);
-                    Ok(Some(Value::Float128(
-                        float128_sum
-                            .expect("float128 aggregate sum present")
-                            .divide(&divisor)?,
-                    )))
-                } else {
-                    Ok(Some(Value::Float(sum / count)))
-                }
+                Ok(Some(Value::Float(sum / count)))
             }
         }
     }
@@ -2401,8 +2339,7 @@ impl SelectExecutor {
                     output_columns,
                     group_rows,
                 )?;
-                let text_context =
-                    self.merged_text_comparison_context(sources, left, right)?;
+                let text_context = self.merged_text_comparison_context(sources, left, right)?;
                 Ok(compare_condition_values(
                     &left_val,
                     operator,
@@ -2438,8 +2375,7 @@ impl SelectExecutor {
                         )
                     })
                     .collect::<Result<Vec<_>>>()?;
-                let text_context =
-                    self.text_comparison_context_for_expression(sources, expr)?;
+                let text_context = self.text_comparison_context_for_expression(sources, expr)?;
                 Ok(evaluate_in_candidates(
                     probe,
                     candidates,
@@ -2468,8 +2404,7 @@ impl SelectExecutor {
                     .into_iter()
                     .map(|row| row.into_iter().next().unwrap_or(Value::Null))
                     .collect::<Vec<_>>();
-                let text_context =
-                    self.text_comparison_context_for_expression(sources, expr)?;
+                let text_context = self.text_comparison_context_for_expression(sources, expr)?;
                 Ok(evaluate_in_candidates(
                     probe,
                     candidates,
@@ -2510,8 +2445,7 @@ impl SelectExecutor {
                     output_columns,
                     group_rows,
                 )?;
-                let text_context =
-                    self.text_comparison_context_for_expression(sources, expr)?;
+                let text_context = self.text_comparison_context_for_expression(sources, expr)?;
                 Ok(evaluate_between_values(
                     value,
                     lower_value,
@@ -2543,9 +2477,13 @@ impl SelectExecutor {
                     output_columns,
                     group_rows,
                 )?;
-                let text_context =
-                    self.text_comparison_context_for_expression(sources, expr)?;
-                Ok(evaluate_like_values(value, pattern_value, *is_not, text_context))
+                let text_context = self.text_comparison_context_for_expression(sources, expr)?;
+                Ok(evaluate_like_values(
+                    value,
+                    pattern_value,
+                    *is_not,
+                    text_context,
+                ))
             }
             Expression::Exists { subquery, is_not } => {
                 let subquery_result =
@@ -2654,8 +2592,7 @@ impl SelectExecutor {
                     output_columns,
                     group_rows,
                 )?;
-                let text_context =
-                    self.merged_text_comparison_context(sources, left, right)?;
+                let text_context = self.merged_text_comparison_context(sources, left, right)?;
                 Ok(self.compare_values(&left_val, operator, &right_val, text_context))
             }
             Condition::InList {
@@ -2686,8 +2623,7 @@ impl SelectExecutor {
                         )
                     })
                     .collect::<Result<Vec<_>>>()?;
-                let text_context =
-                    self.text_comparison_context_for_expression(sources, expr)?;
+                let text_context = self.text_comparison_context_for_expression(sources, expr)?;
                 Ok(self.evaluate_in_candidates(probe, candidates, *is_not, text_context))
             }
             Condition::InSubquery {
@@ -2711,8 +2647,7 @@ impl SelectExecutor {
                     .into_iter()
                     .map(|row| row.into_iter().next().unwrap_or(Value::Null))
                     .collect::<Vec<_>>();
-                let text_context =
-                    self.text_comparison_context_for_expression(sources, expr)?;
+                let text_context = self.text_comparison_context_for_expression(sources, expr)?;
                 Ok(self.evaluate_in_candidates(probe, candidates, *is_not, text_context))
             }
             Condition::Between {
@@ -2753,8 +2688,7 @@ impl SelectExecutor {
                     return Ok(None);
                 }
 
-                let text_context =
-                    self.text_comparison_context_for_expression(sources, expr)?;
+                let text_context = self.text_comparison_context_for_expression(sources, expr)?;
                 let lower_ok = sql_partial_cmp(&value, &lower_value, text_context)
                     .map(|ordering| !ordering.is_lt());
                 let upper_ok = sql_partial_cmp(&value, &upper_value, text_context)
@@ -3326,7 +3260,9 @@ impl InsertExecutor {
             } => {
                 let left_val = self.evaluate_value_expression(left)?;
                 let right_val = self.evaluate_value_expression(right)?;
-                Ok(compare_condition_values(&left_val, operator, &right_val, None))
+                Ok(compare_condition_values(
+                    &left_val, operator, &right_val, None,
+                ))
             }
             Expression::InList {
                 expr,
@@ -4834,7 +4770,6 @@ fn cast_value_to_text_string(value: Value) -> Result<String> {
         Value::UInt128(value) => Ok(value.to_string()),
         Value::Float32(value) => Ok(value.to_string()),
         Value::Float(value) => Ok(value.to_string()),
-        Value::Float128(value) => Ok(value.to_string()),
         Value::Enum(value) | Value::Text(value) => Ok(value),
         Value::Boolean(true) => Ok("TRUE".to_string()),
         Value::Boolean(false) => Ok("FALSE".to_string()),
@@ -4888,7 +4823,6 @@ fn coerce_decimal_value(value: Value) -> Result<DecimalValue> {
         Value::UInt128(value) => Ok(DecimalValue::from_u128(value)),
         Value::Float32(value) => DecimalValue::from_f64(value as f64),
         Value::Float(value) => DecimalValue::from_f64(value),
-        Value::Float128(value) => value.to_decimal(),
         Value::Text(value) => DecimalValue::parse(&value),
         value => Err(HematiteError::ParseError(format!(
             "Expected DECIMAL-compatible value, found {:?}",
@@ -4907,22 +4841,6 @@ fn numeric_value_as_f64(value: &Value) -> Option<f64> {
         Value::UInt128(value) => Some(*value as f64),
         Value::Float32(value) => Some(*value as f64),
         Value::Float(value) => Some(*value),
-        Value::Float128(value) => value.to_f64().ok(),
-        _ => None,
-    }
-}
-
-fn numeric_value_as_float128(value: &Value) -> Option<Float128Value> {
-    match value {
-        Value::Integer(value) => Some(Float128Value::from_integer((*value).into())),
-        Value::BigInt(value) => Some(Float128Value::from_integer((*value).into())),
-        Value::Int128(value) => Some(Float128Value::from_integer(*value)),
-        Value::UInteger(value) => Some(Float128Value::from_unsigned((*value).into())),
-        Value::UBigInt(value) => Some(Float128Value::from_unsigned((*value).into())),
-        Value::UInt128(value) => Some(Float128Value::from_unsigned(*value)),
-        Value::Float32(value) => Float128Value::from_f64(*value as f64).ok(),
-        Value::Float(value) => Float128Value::from_f64(*value).ok(),
-        Value::Float128(value) => Some(value.clone()),
         _ => None,
     }
 }
@@ -4931,9 +4849,6 @@ fn make_float_value(data_type: &DataType, value: f64) -> Value {
     match data_type {
         DataType::Float32 => Value::Float32(value as f32),
         DataType::Float => Value::Float(value),
-        DataType::Float128 => Value::Float128(
-            Float128Value::from_f64(value).expect("finite FLOAT value should convert to FLOAT128"),
-        ),
         _ => unreachable!("non-float type used for float value construction"),
     }
 }
@@ -4942,7 +4857,6 @@ fn float_type_name(data_type: &DataType) -> &'static str {
     match data_type {
         DataType::Float32 => "FLOAT32",
         DataType::Float => "FLOAT",
-        DataType::Float128 => "FLOAT128",
         _ => unreachable!("non-float type used for float naming"),
     }
 }
@@ -5126,15 +5040,6 @@ fn coerce_column_value(column: &Column, value: Value) -> Result<Value> {
         }
         (DataType::Enum(values), value) => coerce_enum_value(value, values, &column.name),
         (DataType::Boolean, Value::Boolean(b)) => Ok(Value::Boolean(b)),
-        (DataType::Float128, value) => {
-            let Some(number) = numeric_value_as_float128(&value) else {
-                return Err(HematiteError::ParseError(format!(
-                    "Type mismatch: column '{}' expects {:?}, got {:?}",
-                    column.name, column.data_type, value
-                )));
-            };
-            Ok(Value::Float128(number))
-        }
         (data_type @ (DataType::Float32 | DataType::Float), value) => {
             let Some(number) = numeric_value_as_f64(&value) else {
                 return Err(HematiteError::ParseError(format!(
@@ -5767,15 +5672,6 @@ fn evaluate_arithmetic_values(
         return Ok(value);
     }
 
-    if matches!(left, Value::Float128(_)) || matches!(right, Value::Float128(_)) {
-        if let (Some(left), Some(right)) = (
-            numeric_value_as_float128(&left),
-            numeric_value_as_float128(&right),
-        ) {
-            return evaluate_float128_arithmetic(operator, left, right);
-        }
-    }
-
     if left.is_float_like() || right.is_float_like() {
         if let (Some(left), Some(right)) =
             (numeric_value_as_f64(&left), numeric_value_as_f64(&right))
@@ -6125,7 +6021,6 @@ fn negate_numeric_value(value: Value) -> Result<Value> {
         }
         Value::Float32(value) => Ok(Value::Float32(-value)),
         Value::Float(value) => Ok(Value::Float(-value)),
-        Value::Float128(value) => Ok(Value::Float128(value.negated())),
         Value::Null => Ok(Value::Null),
         value => Err(HematiteError::ParseError(format!(
             "Unary '-' requires a numeric value, found {:?}",
@@ -6159,25 +6054,6 @@ fn evaluate_float_arithmetic(
     Ok(Value::Float(value))
 }
 
-fn evaluate_float128_arithmetic(
-    operator: &ArithmeticOperator,
-    left: Float128Value,
-    right: Float128Value,
-) -> Result<Value> {
-    let value = match operator {
-        ArithmeticOperator::Add => left.add(&right)?,
-        ArithmeticOperator::Subtract => left.subtract(&right)?,
-        ArithmeticOperator::Multiply => left.multiply(&right)?,
-        ArithmeticOperator::Divide => left.divide(&right)?,
-        ArithmeticOperator::Modulo => {
-            return Err(HematiteError::ParseError(
-                "Modulo is not supported for FLOAT128 values".to_string(),
-            ))
-        }
-    };
-    Ok(Value::Float128(value))
-}
-
 fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
     match (data_type.clone(), value) {
         (_, Value::Null) => Ok(Value::Null),
@@ -6188,9 +6064,8 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
             }),
         (DataType::Int8, Value::Blob(bytes)) => decode_signed_blob(&bytes, 1, "INT8")
             .and_then(|value| {
-                i8::try_from(value).map_err(|_| {
-                    HematiteError::ParseError("Cannot CAST blob AS INT8".to_string())
-                })
+                i8::try_from(value)
+                    .map_err(|_| HematiteError::ParseError("Cannot CAST blob AS INT8".to_string()))
             })
             .map(|value| Value::Integer(value as i32)),
         (DataType::Int16, Value::Integer(value)) => i16::try_from(value)
@@ -6200,9 +6075,8 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
             }),
         (DataType::Int16, Value::Blob(bytes)) => decode_signed_blob(&bytes, 2, "INT16")
             .and_then(|value| {
-                i16::try_from(value).map_err(|_| {
-                    HematiteError::ParseError("Cannot CAST blob AS INT16".to_string())
-                })
+                i16::try_from(value)
+                    .map_err(|_| HematiteError::ParseError("Cannot CAST blob AS INT16".to_string()))
             })
             .map(|value| Value::Integer(value as i32)),
         (DataType::Int, Value::Integer(value)) => Ok(Value::Integer(value)),
@@ -6218,7 +6092,6 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
         }
         (DataType::Int, Value::Float32(value)) => Ok(Value::Integer(value as i32)),
         (DataType::Int, Value::Float(value)) => Ok(Value::Integer(value as i32)),
-        (DataType::Int, Value::Float128(value)) => Ok(Value::Integer(value.to_i32()?)),
         (DataType::Int, Value::Boolean(true)) => Ok(Value::Integer(1)),
         (DataType::Int, Value::Boolean(false)) => Ok(Value::Integer(0)),
         (DataType::Int, Value::Text(value)) => value
@@ -6227,9 +6100,8 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
             .map_err(|_| HematiteError::ParseError(format!("Cannot CAST '{}' AS INT", value))),
         (DataType::Int, Value::Blob(bytes)) => decode_signed_blob(&bytes, 4, "INT")
             .and_then(|value| {
-                i32::try_from(value).map_err(|_| {
-                    HematiteError::ParseError("Cannot CAST blob AS INT".to_string())
-                })
+                i32::try_from(value)
+                    .map_err(|_| HematiteError::ParseError("Cannot CAST blob AS INT".to_string()))
             })
             .map(Value::Integer),
         (DataType::Int64, Value::Integer(value)) => Ok(Value::BigInt(value as i64)),
@@ -6241,7 +6113,6 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
         }
         (DataType::Int64, Value::Float32(value)) => Ok(Value::BigInt(value as i64)),
         (DataType::Int64, Value::Float(value)) => Ok(Value::BigInt(value as i64)),
-        (DataType::Int64, Value::Float128(value)) => Ok(Value::BigInt(value.to_i64()?)),
         (DataType::Int64, Value::Boolean(true)) => Ok(Value::BigInt(1)),
         (DataType::Int64, Value::Boolean(false)) => Ok(Value::BigInt(0)),
         (DataType::Int64, Value::Text(value)) => value
@@ -6250,9 +6121,8 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
             .map_err(|_| HematiteError::ParseError(format!("Cannot CAST '{}' AS INT64", value))),
         (DataType::Int64, Value::Blob(bytes)) => decode_signed_blob(&bytes, 8, "INT64")
             .and_then(|value| {
-                i64::try_from(value).map_err(|_| {
-                    HematiteError::ParseError("Cannot CAST blob AS INT64".to_string())
-                })
+                i64::try_from(value)
+                    .map_err(|_| HematiteError::ParseError("Cannot CAST blob AS INT64".to_string()))
             })
             .map(Value::BigInt),
         (DataType::Int128, Value::Integer(value)) => Ok(Value::Int128(value as i128)),
@@ -6260,7 +6130,6 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
         (DataType::Int128, Value::Int128(value)) => Ok(Value::Int128(value)),
         (DataType::Int128, Value::Float32(value)) => Ok(Value::Int128(value as i128)),
         (DataType::Int128, Value::Float(value)) => Ok(Value::Int128(value as i128)),
-        (DataType::Int128, Value::Float128(value)) => Ok(Value::Int128(value.to_i128()?)),
         (DataType::Int128, Value::Boolean(true)) => Ok(Value::Int128(1)),
         (DataType::Int128, Value::Boolean(false)) => Ok(Value::Int128(0)),
         (DataType::Int128, Value::Text(value)) => value
@@ -6277,9 +6146,8 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
             }),
         (DataType::UInt8, Value::Blob(bytes)) => decode_unsigned_blob(&bytes, 1, "UINT8")
             .and_then(|value| {
-                u8::try_from(value).map_err(|_| {
-                    HematiteError::ParseError("Cannot CAST blob AS UINT8".to_string())
-                })
+                u8::try_from(value)
+                    .map_err(|_| HematiteError::ParseError("Cannot CAST blob AS UINT8".to_string()))
             })
             .map(|value| Value::UInteger(value as u32)),
         (DataType::UInt16, Value::Integer(value)) if value >= 0 => u16::try_from(value)
@@ -6320,7 +6188,6 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
             Ok(Value::UInteger(value as u32))
         }
         (DataType::UInt, Value::Float(value)) if value >= 0.0 => Ok(Value::UInteger(value as u32)),
-        (DataType::UInt, Value::Float128(value)) => Ok(Value::UInteger(value.to_u32()?)),
         (DataType::UInt, Value::Boolean(true)) => Ok(Value::UInteger(1)),
         (DataType::UInt, Value::Boolean(false)) => Ok(Value::UInteger(0)),
         (DataType::UInt, Value::Text(value)) => value
@@ -6329,9 +6196,8 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
             .map_err(|_| HematiteError::ParseError(format!("Cannot CAST '{}' AS UINT", value))),
         (DataType::UInt, Value::Blob(bytes)) => decode_unsigned_blob(&bytes, 4, "UINT")
             .and_then(|value| {
-                u32::try_from(value).map_err(|_| {
-                    HematiteError::ParseError("Cannot CAST blob AS UINT".to_string())
-                })
+                u32::try_from(value)
+                    .map_err(|_| HematiteError::ParseError("Cannot CAST blob AS UINT".to_string()))
             })
             .map(Value::UInteger),
         (DataType::UInt64, Value::Integer(value)) if value >= 0 => Ok(Value::UBigInt(value as u64)),
@@ -6352,7 +6218,6 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
             Ok(Value::UBigInt(value as u64))
         }
         (DataType::UInt64, Value::Float(value)) if value >= 0.0 => Ok(Value::UBigInt(value as u64)),
-        (DataType::UInt64, Value::Float128(value)) => Ok(Value::UBigInt(value.to_u64()?)),
         (DataType::UInt64, Value::Boolean(true)) => Ok(Value::UBigInt(1)),
         (DataType::UInt64, Value::Boolean(false)) => Ok(Value::UBigInt(0)),
         (DataType::UInt64, Value::Text(value)) => value
@@ -6384,7 +6249,6 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
         (DataType::UInt128, Value::Float(value)) if value >= 0.0 => {
             Ok(Value::UInt128(value as u128))
         }
-        (DataType::UInt128, Value::Float128(value)) => Ok(Value::UInt128(value.to_u128()?)),
         (DataType::UInt128, Value::Boolean(true)) => Ok(Value::UInt128(1)),
         (DataType::UInt128, Value::Boolean(false)) => Ok(Value::UInt128(0)),
         (DataType::UInt128, Value::Text(value)) => value
@@ -6413,7 +6277,6 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
         (DataType::Boolean, Value::UInt128(value)) => Ok(Value::Boolean(value != 0)),
         (DataType::Boolean, Value::Float32(value)) => Ok(Value::Boolean(value != 0.0)),
         (DataType::Boolean, Value::Float(value)) => Ok(Value::Boolean(value != 0.0)),
-        (DataType::Boolean, Value::Float128(value)) => Ok(Value::Boolean(!value.is_zero())),
         (DataType::Boolean, Value::Text(value)) => match value.to_ascii_uppercase().as_str() {
             "TRUE" | "1" => Ok(Value::Boolean(true)),
             "FALSE" | "0" => Ok(Value::Boolean(false)),
@@ -6422,23 +6285,6 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
                 value
             ))),
         },
-        (DataType::Float128, Value::Text(value)) => Float128Value::parse(&value)
-            .map(Value::Float128)
-            .map_err(|_| HematiteError::ParseError(format!("Cannot CAST '{}' AS FLOAT128", value))),
-        (DataType::Float128, Value::Boolean(true)) => {
-            Ok(Value::Float128(Float128Value::from_integer(1)))
-        }
-        (DataType::Float128, Value::Boolean(false)) => Ok(Value::Float128(Float128Value::zero())),
-        (DataType::Float128, value) => {
-            if let Some(number) = numeric_value_as_float128(&value) {
-                Ok(Value::Float128(number))
-            } else {
-                Err(HematiteError::ParseError(format!(
-                    "Cannot CAST '{:?}' AS FLOAT128",
-                    value
-                )))
-            }
-        }
         (data_type @ (DataType::Float32 | DataType::Float), Value::Text(value)) => value
             .parse::<f64>()
             .map(|value| make_float_value(&data_type, value))
@@ -6753,9 +6599,9 @@ fn evaluate_bit_length(args: Vec<Value>) -> Result<Value> {
             Value::Null => return Ok(Value::Null),
             _ => unreachable!("validated OCTET_LENGTH shape"),
         };
-        len.checked_mul(8)
-            .map(Value::Integer)
-            .ok_or_else(|| HematiteError::ParseError("BIT_LENGTH result overflowed INT".to_string()))
+        len.checked_mul(8).map(Value::Integer).ok_or_else(|| {
+            HematiteError::ParseError("BIT_LENGTH result overflowed INT".to_string())
+        })
     })
 }
 
@@ -6848,7 +6694,6 @@ fn evaluate_abs(args: Vec<Value>) -> Result<Value> {
         Value::UInt128(value) => Ok(Value::UInt128(value)),
         Value::Float32(value) => Ok(Value::Float32(value.abs())),
         Value::Float(value) => Ok(Value::Float(value.abs())),
-        Value::Float128(value) => Ok(Value::Float128(value.abs())),
         _ => unreachable!("validated numeric input"),
     })
 }
@@ -6884,7 +6729,6 @@ fn evaluate_round(args: Vec<Value>) -> Result<Value> {
         Value::UInt128(value) => round_uint128(value, precision),
         Value::Float32(value) => Ok(Value::Float32(round_float(value as f64, precision) as f32)),
         Value::Float(value) => Ok(Value::Float(round_float(value, precision))),
-        Value::Float128(value) => Ok(Value::Float128(value.round(precision)?)),
         value => Err(HematiteError::ParseError(format!(
             "ROUND requires a numeric value, found {:?}",
             value
@@ -7031,8 +6875,7 @@ where
         | Value::UBigInt(_)
         | Value::UInt128(_)
         | Value::Float32(_)
-        | Value::Float(_)
-        | Value::Float128(_) => f(value),
+        | Value::Float(_) => f(value),
         value => Err(HematiteError::ParseError(format!(
             "{} requires a numeric value, found {:?}",
             name, value
@@ -7078,7 +6921,6 @@ fn coerce_value_to_string(function_name: &str, value: Value) -> Result<String> {
         Value::UInt128(value) => Ok(value.to_string()),
         Value::Float32(value) => Ok(value.to_string()),
         Value::Float(value) => Ok(value.to_string()),
-        Value::Float128(value) => Ok(value.to_string()),
         Value::Boolean(true) => Ok("TRUE".to_string()),
         Value::Boolean(false) => Ok("FALSE".to_string()),
         Value::Blob(value) => Ok(String::from_utf8_lossy(&value).into_owned()),
@@ -7106,7 +6948,6 @@ fn expect_text_argument(function_name: &str, value: Value) -> Result<String> {
         Value::UInt128(value) => Ok(value.to_string()),
         Value::Float32(value) => Ok(value.to_string()),
         Value::Float(value) => Ok(value.to_string()),
-        Value::Float128(value) => Ok(value.to_string()),
         value => Err(HematiteError::ParseError(format!(
             "{} requires a text value, found {:?}",
             function_name, value
@@ -7163,7 +7004,6 @@ fn expect_integer_argument(function_name: &str, value: Value, label: &str) -> Re
         }),
         Value::Float32(value) => Ok(value as i32),
         Value::Float(value) => Ok(value as i32),
-        Value::Float128(value) => value.to_i32(),
         value => Err(HematiteError::ParseError(format!(
             "{} {} requires an integer value, found {:?}",
             function_name, label, value
@@ -7449,7 +7289,6 @@ fn evaluate_ceil(args: Vec<Value>) -> Result<Value> {
         Value::UInt128(value) => Ok(Value::UInt128(value)),
         Value::Float32(value) => Ok(Value::Float32(value.ceil())),
         Value::Float(value) => Ok(Value::Float(value.ceil())),
-        Value::Float128(value) => Ok(Value::Float128(value.ceil()?)),
         _ => unreachable!("validated numeric input"),
     })
 }
@@ -7464,7 +7303,6 @@ fn evaluate_floor(args: Vec<Value>) -> Result<Value> {
         Value::UInt128(value) => Ok(Value::UInt128(value)),
         Value::Float32(value) => Ok(Value::Float32(value.floor())),
         Value::Float(value) => Ok(Value::Float(value.floor())),
-        Value::Float128(value) => Ok(Value::Float128(value.floor()?)),
         _ => unreachable!("validated numeric input"),
     })
 }
@@ -7483,14 +7321,6 @@ fn evaluate_power(args: Vec<Value>) -> Result<Value> {
         return Ok(Value::Null);
     }
 
-    if matches!(base, Value::Float128(_)) || matches!(exponent, Value::Float128(_)) {
-        let base = numeric_value_as_float128(&base).ok_or_else(|| {
-            HematiteError::ParseError(format!("POWER requires a numeric value, found {:?}", base))
-        })?;
-        let exponent = expect_exact_integer_exponent(exponent)?;
-        return Ok(Value::Float128(base.powi(exponent)?));
-    }
-
     let base = expect_numeric_argument("POWER", base)?;
     let exponent = expect_numeric_argument("POWER", exponent)?;
     let value = base.powf(exponent);
@@ -7501,29 +7331,6 @@ fn evaluate_power(args: Vec<Value>) -> Result<Value> {
     }
 
     Ok(Value::Float(value))
-}
-
-fn expect_exact_integer_exponent(value: Value) -> Result<i32> {
-    match value {
-        Value::Integer(value) => Ok(value),
-        Value::BigInt(value) => i32::try_from(value)
-            .map_err(|_| HematiteError::ParseError("POWER exponent overflowed INT".to_string())),
-        Value::Int128(value) => i32::try_from(value)
-            .map_err(|_| HematiteError::ParseError("POWER exponent overflowed INT".to_string())),
-        Value::UInteger(value) => i32::try_from(value)
-            .map_err(|_| HematiteError::ParseError("POWER exponent overflowed INT".to_string())),
-        Value::UBigInt(value) => i32::try_from(value)
-            .map_err(|_| HematiteError::ParseError("POWER exponent overflowed INT".to_string())),
-        Value::UInt128(value) => i32::try_from(value)
-            .map_err(|_| HematiteError::ParseError("POWER exponent overflowed INT".to_string())),
-        Value::Float32(value) if value.fract() == 0.0 => Ok(value as i32),
-        Value::Float(value) if value.fract() == 0.0 => Ok(value as i32),
-        Value::Float128(value) if value.exponent() >= 0 => value.to_i32(),
-        value => Err(HematiteError::ParseError(format!(
-            "POWER with FLOAT128 requires an exact integer exponent, found {:?}",
-            value
-        ))),
-    }
 }
 
 fn round_integer(value: i32, precision: i32) -> Result<Value> {
@@ -7614,7 +7421,10 @@ fn round_float(value: f64, precision: i32) -> f64 {
     }
 }
 
-fn apply_text_comparison_context(value: &str, text_context: Option<TextComparisonContext>) -> String {
+fn apply_text_comparison_context(
+    value: &str,
+    text_context: Option<TextComparisonContext>,
+) -> String {
     let mut normalized = if text_context.is_some_and(|context| context.trim_trailing_spaces) {
         value.trim_end_matches(' ').to_string()
     } else {
@@ -7755,7 +7565,6 @@ fn sql_decimal_cmp(left: &Value, right: &Value) -> Option<Ordering> {
         Value::UInt128(value) => DecimalValue::from_u128(*value),
         Value::Float32(value) => DecimalValue::from_f64(*value as f64).ok()?,
         Value::Float(value) => DecimalValue::from_f64(*value).ok()?,
-        Value::Float128(value) => value.to_decimal().ok()?,
         _ => return None,
     };
     let right = match right {
@@ -7768,7 +7577,6 @@ fn sql_decimal_cmp(left: &Value, right: &Value) -> Option<Ordering> {
         Value::UInt128(value) => DecimalValue::from_u128(*value),
         Value::Float32(value) => DecimalValue::from_f64(*value as f64).ok()?,
         Value::Float(value) => DecimalValue::from_f64(*value).ok()?,
-        Value::Float128(value) => value.to_decimal().ok()?,
         _ => return None,
     };
     Some(left.cmp(&right))

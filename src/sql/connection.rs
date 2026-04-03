@@ -176,7 +176,6 @@ impl Connection {
             UInt128,
             Float32,
             Float,
-            Float128,
             Decimal,
         }
 
@@ -266,23 +265,6 @@ impl Connection {
                     | (Numeric(Float), Value::UInt128(_))
                     | (Numeric(Float), Value::Float32(_))
                     | (Numeric(Float), Value::Float(_)) => Ok(Numeric(Float)),
-                    (Numeric(Int), Value::Float128(_))
-                    | (Numeric(Int64), Value::Float128(_))
-                    | (Numeric(Int128), Value::Float128(_))
-                    | (Numeric(UInt), Value::Float128(_))
-                    | (Numeric(UInt64), Value::Float128(_))
-                    | (Numeric(UInt128), Value::Float128(_))
-                    | (Numeric(Float32), Value::Float128(_))
-                    | (Numeric(Float), Value::Float128(_))
-                    | (Numeric(Float128), Value::Integer(_))
-                    | (Numeric(Float128), Value::BigInt(_))
-                    | (Numeric(Float128), Value::Int128(_))
-                    | (Numeric(Float128), Value::UInteger(_))
-                    | (Numeric(Float128), Value::UBigInt(_))
-                    | (Numeric(Float128), Value::UInt128(_))
-                    | (Numeric(Float128), Value::Float32(_))
-                    | (Numeric(Float128), Value::Float(_))
-                    | (Numeric(Float128), Value::Float128(_)) => Ok(Numeric(Float128)),
                     (Numeric(Int), Value::Decimal(_))
                     | (Numeric(Int64), Value::Decimal(_))
                     | (Numeric(Int128), Value::Decimal(_))
@@ -291,7 +273,6 @@ impl Connection {
                     | (Numeric(UInt128), Value::Decimal(_))
                     | (Numeric(Float32), Value::Decimal(_))
                     | (Numeric(Float), Value::Decimal(_))
-                    | (Numeric(Float128), Value::Decimal(_))
                     | (Numeric(Decimal), Value::Integer(_))
                     | (Numeric(Decimal), Value::BigInt(_))
                     | (Numeric(Decimal), Value::Int128(_))
@@ -300,7 +281,6 @@ impl Connection {
                     | (Numeric(Decimal), Value::UInt128(_))
                     | (Numeric(Decimal), Value::Float32(_))
                     | (Numeric(Decimal), Value::Float(_))
-                    | (Numeric(Decimal), Value::Float128(_))
                     | (Numeric(Decimal), Value::Decimal(_)) => Ok(Numeric(Decimal)),
                     (
                         String {
@@ -356,7 +336,6 @@ impl Connection {
                     Value::UInt128(_) => Numeric(UInt128),
                     Value::Float32(_) => Numeric(Float32),
                     Value::Float(_) => Numeric(Float),
-                    Value::Float128(_) => Numeric(Float128),
                     Value::Decimal(_) => Numeric(Decimal),
                     Value::Text(text) => String {
                         saw_enum: false,
@@ -392,7 +371,6 @@ impl Connection {
                     InferredKind::Numeric(NumericKind::UInt128) => SqlTypeName::UInt128,
                     InferredKind::Numeric(NumericKind::Float32) => SqlTypeName::Float32,
                     InferredKind::Numeric(NumericKind::Float) => SqlTypeName::Float,
-                    InferredKind::Numeric(NumericKind::Float128) => SqlTypeName::Float128,
                     InferredKind::Numeric(NumericKind::Decimal) => SqlTypeName::Decimal {
                         precision: None,
                         scale: None,

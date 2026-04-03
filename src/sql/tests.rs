@@ -302,7 +302,10 @@ mod connection_tests {
         conn.execute("INSERT INTO typed (id, code, payload) VALUES (1, X'4142', X'4142');")?;
 
         let binary_match = conn.execute("SELECT id FROM typed WHERE code = X'4142';")?;
-        assert_eq!(binary_match.rows, vec![vec![crate::catalog::Value::Integer(1)]]);
+        assert_eq!(
+            binary_match.rows,
+            vec![vec![crate::catalog::Value::Integer(1)]]
+        );
 
         let varbinary_match = conn.execute("SELECT id FROM typed WHERE payload = X'4142';")?;
         assert_eq!(
@@ -1406,7 +1409,7 @@ mod connection_tests {
         let mut conn = Connection::new(db.path())?;
 
         conn.execute(
-            "CREATE TABLE `user data` (`id` INT PRIMARY KEY, `active` BOOL NOT NULL DEFAULT TRUE, `score` FLOAT128, `name` VARCHAR(32));",
+            "CREATE TABLE `user data` (`id` INT PRIMARY KEY, `active` BOOL NOT NULL DEFAULT TRUE, `score` FLOAT, `name` VARCHAR(32));",
         )?;
         conn.execute(
             "INSERT INTO `user data` (`id`, `active`, `score`, `name`) VALUES (1, TRUE, 2.5, 'alice');",
@@ -1421,7 +1424,7 @@ mod connection_tests {
             vec![vec![
                 crate::catalog::Value::Integer(1),
                 crate::catalog::Value::Boolean(true),
-                crate::catalog::Value::Float128(crate::catalog::Float128Value::parse("2.5")?),
+                crate::catalog::Value::Float(2.5),
                 crate::catalog::Value::Text("alice".to_string()),
             ]]
         );
@@ -1431,45 +1434,31 @@ mod connection_tests {
     }
 
     #[test]
-    fn test_float128_round_trip_preserves_high_precision() -> Result<()> {
-        let db = TestDbFile::new("_test_float128_round_trip_preserves_high_precision");
+    fn test_float128_type_name_is_rejected() -> Result<()> {
+        let db = TestDbFile::new("_test_float128_type_name_is_rejected");
         let mut conn = Connection::new(db.path())?;
 
-        conn.execute("CREATE TABLE metrics (id INT PRIMARY KEY, precise FLOAT128);")?;
-        conn.execute(
-            "INSERT INTO metrics (id, precise) VALUES (1, 1.234567890123456789012345678901234);",
-        )?;
-
-        let result = conn.execute("SELECT precise FROM metrics;")?;
-        assert_eq!(
-            result.rows,
-            vec![vec![crate::catalog::Value::Float128(
-                crate::catalog::Float128Value::parse("1.234567890123456789012345678901234")?,
-            )]]
-        );
+        let result = conn.execute("CREATE TABLE metrics (id INT PRIMARY KEY, precise FLOAT128);");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Legacy type 'FLOAT128' is not supported; use 'FLOAT'"));
 
         conn.close()?;
         Ok(())
     }
 
     #[test]
-    fn test_float128_arithmetic_stays_exact() -> Result<()> {
-        let db = TestDbFile::new("_test_float128_arithmetic_stays_exact");
+    fn test_float_round_trip_uses_float_values() -> Result<()> {
+        let db = TestDbFile::new("_test_float_round_trip_uses_float_values");
         let mut conn = Connection::new(db.path())?;
 
-        conn.execute("CREATE TABLE metrics (id INT PRIMARY KEY, precise FLOAT128);")?;
-        conn.execute(
-            "INSERT INTO metrics (id, precise) VALUES (1, 1.234567890123456789012345678901234);",
-        )?;
+        conn.execute("CREATE TABLE metrics (id INT PRIMARY KEY, precise FLOAT);")?;
+        conn.execute("INSERT INTO metrics (id, precise) VALUES (1, 1.25);")?;
 
-        let result =
-            conn.execute("SELECT precise + 0.000000000000000000000000000000001 FROM metrics;")?;
-        assert_eq!(
-            result.rows,
-            vec![vec![crate::catalog::Value::Float128(
-                crate::catalog::Float128Value::parse("1.234567890123456789012345678901235")?,
-            )]]
-        );
+        let result = conn.execute("SELECT precise + 0.25 FROM metrics;")?;
+        assert_eq!(result.rows, vec![vec![crate::catalog::Value::Float(1.5)]]);
 
         conn.close()?;
         Ok(())
@@ -5120,8 +5109,7 @@ mod connection_tests {
 
     #[test]
     fn test_text_collation_affects_comparison_like_and_unique_indexes() -> Result<()> {
-        let db =
-            TestDbFile::new("_test_text_collation_affects_comparison_like_and_unique_indexes");
+        let db = TestDbFile::new("_test_text_collation_affects_comparison_like_and_unique_indexes");
         let mut conn = Connection::new(db.path())?;
 
         conn.execute(

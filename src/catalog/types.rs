@@ -26,7 +26,6 @@ pub enum DataType {
     Boolean,
     Float32,
     Float,
-    Float128,
     Decimal {
         precision: Option<u32>,
         scale: Option<u32>,
@@ -58,7 +57,6 @@ impl DataType {
             DataType::Boolean => 1,
             DataType::Float32 => 4,
             DataType::Float => 8,
-            DataType::Float128 => 16,
             DataType::Decimal { precision, .. } => precision.unwrap_or(32) as usize,
             DataType::Blob => 4096,
             DataType::Date => 4,
@@ -96,7 +94,6 @@ impl DataType {
             DataType::Boolean => "BOOLEAN".to_string(),
             DataType::Float32 => "FLOAT32".to_string(),
             DataType::Float => "FLOAT".to_string(),
-            DataType::Float128 => "FLOAT128".to_string(),
             DataType::Decimal { precision, scale } => {
                 format_numeric_type("DECIMAL", *precision, *scale)
             }
@@ -129,7 +126,6 @@ impl DataType {
             DataType::Boolean => "BOOLEAN",
             DataType::Float32 => "FLOAT32",
             DataType::Float => "FLOAT",
-            DataType::Float128 => "FLOAT128",
             DataType::Decimal { .. } => "DECIMAL",
             DataType::Blob => "BLOB",
             DataType::Date => "DATE",
@@ -1545,7 +1541,6 @@ pub enum Value {
     Boolean(bool),
     Float32(f32),
     Float(f64),
-    Float128(Float128Value),
     Decimal(DecimalValue),
     Blob(Vec<u8>),
     Date(DateValue),
@@ -1571,7 +1566,6 @@ impl Value {
             Value::Boolean(_) => DataType::Boolean,
             Value::Float32(_) => DataType::Float32,
             Value::Float(_) => DataType::Float,
-            Value::Float128(_) => DataType::Float128,
             Value::Decimal(_) => DataType::Decimal {
                 precision: None,
                 scale: None,
@@ -1608,7 +1602,6 @@ impl Value {
             (Value::Boolean(_), DataType::Boolean) => true,
             (Value::Float32(_), DataType::Float32) => true,
             (Value::Float(_), DataType::Float) => true,
-            (Value::Float128(_), DataType::Float128) => true,
             (Value::Decimal(value), DataType::Decimal { precision, scale }) => {
                 value.fits_precision_scale(precision, scale)
             }
@@ -1655,7 +1648,6 @@ impl Value {
         match self {
             Value::Float32(f) => Some(*f as f64),
             Value::Float(f) => Some(*f),
-            Value::Float128(f) => f.to_f64().ok(),
             _ => None,
         }
     }
@@ -1734,10 +1726,7 @@ impl Value {
     }
 
     pub fn is_float_like(&self) -> bool {
-        matches!(
-            self,
-            Value::Float32(_) | Value::Float(_) | Value::Float128(_)
-        )
+        matches!(self, Value::Float32(_) | Value::Float(_))
     }
 }
 
@@ -1766,21 +1755,8 @@ impl PartialOrd for Value {
             (Value::Boolean(a), Value::Boolean(b)) => a.partial_cmp(b),
             (Value::Float32(a), Value::Float32(b)) => a.partial_cmp(b),
             (Value::Float(a), Value::Float(b)) => a.partial_cmp(b),
-            (Value::Float128(a), Value::Float128(b)) => a.partial_cmp(b),
             (Value::Float32(a), Value::Float(b)) => (*a as f64).partial_cmp(b),
             (Value::Float(b), Value::Float32(a)) => b.partial_cmp(&(*a as f64)),
-            (Value::Float32(a), Value::Float128(b)) => {
-                Float128Value::from_f64(*a as f64).ok()?.partial_cmp(b)
-            }
-            (Value::Float128(a), Value::Float32(b)) => {
-                a.partial_cmp(&Float128Value::from_f64(*b as f64).ok()?)
-            }
-            (Value::Float(a), Value::Float128(b)) => {
-                Float128Value::from_f64(*a).ok()?.partial_cmp(b)
-            }
-            (Value::Float128(a), Value::Float(b)) => {
-                a.partial_cmp(&Float128Value::from_f64(*b).ok()?)
-            }
             (Value::Decimal(a), Value::Decimal(b)) => a.partial_cmp(b),
             (Value::Blob(a), Value::Blob(b)) => a.partial_cmp(b),
             (Value::Date(a), Value::Date(b)) => a.partial_cmp(b),

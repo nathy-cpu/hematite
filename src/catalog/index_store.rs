@@ -366,16 +366,19 @@ fn normalize_secondary_index_values(
 
 fn normalize_index_value(column: &Column, value: &Value) -> Value {
     match (&column.data_type, value) {
-        (crate::catalog::DataType::Char(length), Value::Text(text)) => Value::Text(
-            normalize_text_for_collation(
+        (crate::catalog::DataType::Char(length), Value::Text(text)) => {
+            Value::Text(normalize_text_for_collation(
                 &pad_text_to_char_length(text, *length),
                 column.collation.as_deref(),
-            ),
-        ),
+            ))
+        }
         (
             crate::catalog::DataType::Text | crate::catalog::DataType::VarChar(_),
             Value::Text(text),
-        ) => Value::Text(normalize_text_for_collation(text, column.collation.as_deref())),
+        ) => Value::Text(normalize_text_for_collation(
+            text,
+            column.collation.as_deref(),
+        )),
         (crate::catalog::DataType::Binary(length), Value::Blob(bytes)) => {
             Value::Blob(pad_binary_to_length(bytes, *length))
         }

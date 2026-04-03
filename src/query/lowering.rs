@@ -4,7 +4,7 @@
 //! that carries semantic meaning downward should pass through this file so the layer boundary stays
 //! obvious and centralized.
 
-use crate::catalog::{DataType, Float128Value, Value};
+use crate::catalog::{DataType, Value};
 use crate::parser::{LiteralValue, SqlTypeName};
 
 pub(crate) fn lower_literal_value(value: &LiteralValue) -> Value {
@@ -21,8 +21,10 @@ pub(crate) fn lower_literal_value(value: &LiteralValue) -> Value {
         LiteralValue::Text(value) => Value::Text(value.clone()),
         LiteralValue::Blob(value) => Value::Blob(value.clone()),
         LiteralValue::Boolean(value) => Value::Boolean(*value),
-        LiteralValue::Float(value) => Value::Float128(
-            Float128Value::parse(value).expect("parser normalized a valid FLOAT literal"),
+        LiteralValue::Float(value) => Value::Float(
+            value
+                .parse::<f64>()
+                .expect("parser normalized a valid FLOAT literal"),
         ),
         LiteralValue::Null => Value::Null,
     }
@@ -42,7 +44,6 @@ pub(crate) fn raise_literal_value(value: &Value) -> LiteralValue {
         Value::Boolean(value) => LiteralValue::Boolean(*value),
         Value::Float32(value) => LiteralValue::Float(value.to_string()),
         Value::Float(value) => LiteralValue::Float(value.to_string()),
-        Value::Float128(value) => LiteralValue::Float(value.to_string()),
         Value::Decimal(value) => LiteralValue::Text(value.to_string()),
         Value::Date(value) => LiteralValue::Text(value.to_string()),
         Value::Time(value) => LiteralValue::Text(value.to_string()),
@@ -75,7 +76,6 @@ pub(crate) fn lower_type_name(data_type: SqlTypeName) -> DataType {
         SqlTypeName::Boolean => DataType::Boolean,
         SqlTypeName::Float32 => DataType::Float32,
         SqlTypeName::Float => DataType::Float,
-        SqlTypeName::Float128 => DataType::Float128,
         SqlTypeName::Decimal { precision, scale } => DataType::Decimal { precision, scale },
         SqlTypeName::Blob => DataType::Blob,
         SqlTypeName::Date => DataType::Date,

@@ -4389,7 +4389,6 @@ fn sql_type_name_for_catalog_type(data_type: crate::catalog::DataType) -> SqlTyp
         crate::catalog::DataType::Boolean => SqlTypeName::Boolean,
         crate::catalog::DataType::Float32 => SqlTypeName::Float32,
         crate::catalog::DataType::Float => SqlTypeName::Float,
-        crate::catalog::DataType::Float128 => SqlTypeName::Float128,
         crate::catalog::DataType::Decimal { precision, scale } => {
             SqlTypeName::Decimal { precision, scale }
         }

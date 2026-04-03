@@ -86,7 +86,9 @@ impl Column {
             (DataType::UInt8, Value::UInteger(value)) => u8::try_from(*value).is_ok(),
             (DataType::UInt16, Value::UInteger(value)) => u16::try_from(*value).is_ok(),
             (DataType::Char(length), Value::Text(text)) => text.chars().count() == *length as usize,
-            (DataType::VarChar(length), Value::Text(text)) => text.chars().count() <= *length as usize,
+            (DataType::VarChar(length), Value::Text(text)) => {
+                text.chars().count() <= *length as usize
+            }
             (DataType::Binary(length), Value::Blob(bytes)) => bytes.len() == *length as usize,
             (DataType::VarBinary(length), Value::Blob(bytes)) => bytes.len() <= *length as usize,
             (DataType::Enum(values), Value::Enum(value)) => values.contains(value),
@@ -112,9 +114,7 @@ impl Column {
                         DataType::UInt64 => Value::UBigInt(0),
                         DataType::UInt128 => Value::UInt128(0),
                         DataType::Text => Value::Text(String::new()),
-                        DataType::Char(length) => {
-                            Value::Text(pad_text_to_char_length("", *length))
-                        }
+                        DataType::Char(length) => Value::Text(pad_text_to_char_length("", *length)),
                         DataType::VarChar(_) => Value::Text(String::new()),
                         DataType::Binary(length) => Value::Blob(vec![0; *length as usize]),
                         DataType::VarBinary(_) | DataType::Blob => Value::Blob(Vec::new()),
@@ -124,7 +124,6 @@ impl Column {
                         DataType::Boolean => Value::Boolean(false),
                         DataType::Float32 => Value::Float32(0.0),
                         DataType::Float => Value::Float(0.0),
-                        DataType::Float128 => Value::Float128(Float128Value::zero()),
                         DataType::Decimal { .. } => Value::Decimal(DecimalValue::zero()),
                         DataType::Date => Value::Date(DateValue::epoch()),
                         DataType::Time => Value::Time(TimeValue::midnight()),
@@ -318,7 +317,6 @@ fn write_data_type(buffer: &mut Vec<u8>, data_type: &DataType) {
         DataType::Boolean => buffer.push(10),
         DataType::Float => buffer.push(11),
         DataType::Float32 => buffer.push(12),
-        DataType::Float128 => buffer.push(13),
         DataType::Decimal { precision, scale } => {
             buffer.push(14);
             write_optional_u32(buffer, *precision);
@@ -370,7 +368,7 @@ fn read_data_type(buffer: &[u8], offset: &mut usize) -> Result<DataType, Hematit
         10 => DataType::Boolean,
         11 => DataType::Float,
         12 => DataType::Float32,
-        13 => DataType::Float128,
+        13 => DataType::Float,
         14 => DataType::Decimal {
             precision: read_optional_u32(buffer, offset, "DECIMAL precision")?,
             scale: read_optional_u32(buffer, offset, "DECIMAL scale")?,
@@ -467,10 +465,6 @@ fn write_optional_value(buffer: &mut Vec<u8>, value: Option<&Value>) {
         Some(Value::Float32(value)) => {
             buffer.push(20);
             buffer.extend_from_slice(&value.to_le_bytes());
-        }
-        Some(Value::Float128(value)) => {
-            buffer.push(21);
-            buffer.extend_from_slice(&value.storage_bits().to_le_bytes());
         }
         Some(Value::BigInt(value)) => {
             buffer.push(4);
@@ -592,7 +586,9 @@ fn read_optional_value(buffer: &[u8], offset: &mut usize) -> Result<Option<Value
                     .try_into()
                     .unwrap(),
             );
-            Some(Value::Float128(Float128Value::from_storage_bits(bits)?))
+            Some(Value::Float(
+                Float128Value::from_storage_bits(bits)?.to_f64()?,
+            ))
         }
         4 => {
             let value = i64::from_le_bytes(

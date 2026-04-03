@@ -2497,7 +2497,11 @@ impl Parser {
             Token::Boolean | Token::Bool => SqlTypeName::Boolean,
             Token::Float32 => SqlTypeName::Float32,
             Token::Float | Token::Float64 => SqlTypeName::Float,
-            Token::Float128 => SqlTypeName::Float128,
+            Token::Float128 => {
+                return Err(HematiteError::ParseError(
+                    "Legacy type 'FLOAT128' is not supported; use 'FLOAT'".to_string(),
+                ))
+            }
             Token::Decimal => {
                 self.consume_token(&token)?;
                 self.consume_optional_double_precision()?;
@@ -2957,7 +2961,6 @@ const ALL_UPPERCASE_KEYWORDS: &[&str] = &[
     "FLOAT",
     "FLOAT32",
     "FLOAT64",
-    "FLOAT128",
     "BOOL",
     "DECIMAL",
     "BLOB",
@@ -3028,7 +3031,6 @@ const DATA_TYPE_KEYWORDS: &[&str] = &[
     "FLOAT",
     "FLOAT32",
     "FLOAT64",
-    "FLOAT128",
     "DECIMAL",
     "BLOB",
     "DATE",
@@ -3075,6 +3077,8 @@ fn removed_type_replacement(name: &str) -> Option<(&'static str, &'static str)> 
         Some(("NUMERIC", "DECIMAL"))
     } else if name.eq_ignore_ascii_case("TIMESTAMP") {
         Some(("TIMESTAMP", "DATETIME"))
+    } else if name.eq_ignore_ascii_case("FLOAT128") {
+        Some(("FLOAT128", "FLOAT"))
     } else {
         None
     }

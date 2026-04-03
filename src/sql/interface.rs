@@ -172,7 +172,6 @@ impl FromValue for f64 {
         match value {
             Value::Float32(f) => Ok(*f as f64),
             Value::Float(f) => Ok(*f),
-            Value::Float128(f) => f.to_f64(),
             Value::Integer(i) => Ok(*i as f64), // Allow integer to float conversion
             Value::UInteger(i) => Ok(*i as f64),
             Value::BigInt(i) => Ok(*i as f64),

@@ -322,7 +322,7 @@ mod lexer_tests {
     #[test]
     fn test_backtick_identifier_and_type_alias_tokens() -> Result<()> {
         let mut lexer = Lexer::new(
-            "CREATE TABLE `user data` (`id` INT PRIMARY KEY, `active` BOOL, `score` FLOAT128, `name` VARCHAR(32));"
+            "CREATE TABLE `user data` (`id` INT PRIMARY KEY, `active` BOOL, `score` FLOAT, `name` VARCHAR(32));"
                 .to_string(),
         );
         lexer.tokenize()?;
@@ -341,7 +341,7 @@ mod lexer_tests {
             Token::Bool,
             Token::Comma,
             Token::Identifier("score".to_string()),
-            Token::Float128,
+            Token::Float,
             Token::Comma,
             Token::Identifier("name".to_string()),
             Token::Varchar,
@@ -1075,6 +1075,16 @@ mod parser_tests {
     }
 
     #[test]
+    fn test_parse_rejects_float128_type_name() {
+        let err = parse_create("CREATE TABLE users (value FLOAT128);").unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::HematiteError::ParseError(message)
+                if message.contains("Legacy type 'FLOAT128' is not supported; use 'FLOAT'")
+        ));
+    }
+
+    #[test]
     fn test_parse_select_with_where() -> Result<()> {
         let select = parse_select("SELECT id FROM users WHERE id = 1;")?;
         assert!(select.where_clause.is_some());
@@ -1732,7 +1742,7 @@ mod parser_tests {
     #[test]
     fn test_parse_create_with_backticks_and_type_aliases() -> Result<()> {
         let create = parse_create(
-            "CREATE TABLE `user data` (`id` INT PRIMARY KEY UNIQUE, `active` BOOL NOT NULL, `score` FLOAT128 DEFAULT 1.5, `name` VARCHAR(32) DEFAULT 'x');",
+            "CREATE TABLE `user data` (`id` INT PRIMARY KEY UNIQUE, `active` BOOL NOT NULL, `score` FLOAT DEFAULT 1.5, `name` VARCHAR(32) DEFAULT 'x');",
         )?;
         assert_eq!(create.table, "user data");
         assert_eq!(create.columns.len(), 4);
@@ -1741,7 +1751,7 @@ mod parser_tests {
         assert!(create.columns[0].unique);
         assert_eq!(create.columns[1].data_type, SqlTypeName::Boolean);
         assert!(!create.columns[1].nullable);
-        assert_eq!(create.columns[2].data_type, SqlTypeName::Float128);
+        assert_eq!(create.columns[2].data_type, SqlTypeName::Float);
         assert_eq!(
             create.columns[2].default_value,
             Some(LiteralValue::Float("1.5".to_string()))

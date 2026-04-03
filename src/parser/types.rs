@@ -23,7 +23,6 @@ pub enum SqlTypeName {
     Boolean,
     Float32,
     Float,
-    Float128,
     Decimal {
         precision: Option<u32>,
         scale: Option<u32>,
@@ -64,7 +63,6 @@ impl SqlTypeName {
             SqlTypeName::Boolean => "BOOLEAN".to_string(),
             SqlTypeName::Float32 => "FLOAT32".to_string(),
             SqlTypeName::Float => "FLOAT".to_string(),
-            SqlTypeName::Float128 => "FLOAT128".to_string(),
             SqlTypeName::Decimal { precision, scale } => {
                 format_numeric_type("DECIMAL", *precision, *scale)
             }
@@ -129,7 +127,6 @@ impl LiteralValue {
             (LiteralValue::Integer(_), SqlTypeName::Decimal { .. }) => true,
             (LiteralValue::Float(_), SqlTypeName::Float32) => true,
             (LiteralValue::Float(_), SqlTypeName::Float) => true,
-            (LiteralValue::Float(_), SqlTypeName::Float128) => true,
             (LiteralValue::Float(_), SqlTypeName::Decimal { .. }) => true,
             (LiteralValue::Text(_), SqlTypeName::Text) => true,
             (LiteralValue::Text(_), SqlTypeName::Char(_)) => true,

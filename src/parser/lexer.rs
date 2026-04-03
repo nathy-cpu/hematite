@@ -472,9 +472,10 @@ impl Lexer {
 
                 let mut bytes = Vec::with_capacity(literal.len() / 2);
                 for index in (0..literal.len()).step_by(2) {
-                    let byte = u8::from_str_radix(&literal[index..index + 2], 16).map_err(|_| {
-                        HematiteError::ParseError("Invalid hex blob literal".to_string())
-                    })?;
+                    let byte =
+                        u8::from_str_radix(&literal[index..index + 2], 16).map_err(|_| {
+                            HematiteError::ParseError("Invalid hex blob literal".to_string())
+                        })?;
                     bytes.push(byte);
                 }
 
