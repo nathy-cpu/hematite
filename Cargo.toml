@@ -2,6 +2,12 @@
 name = "hematite"
 version = "0.1.0"
 edition = "2021"
+description = "A small embeddable SQL database written in Rust."
+license = "MIT"
+readme = "README.md"
+documentation = "https://docs.rs/hematite"
+keywords = ["database", "sql", "embedded", "storage"]
+categories = ["database-implementations"]
 
 [lib]
 name = "hematite"
