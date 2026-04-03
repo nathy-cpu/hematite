@@ -35,6 +35,8 @@ pub enum DataType {
     Time,
     DateTime,
     TimeWithTimeZone,
+    IntervalYearMonth,
+    IntervalDaySecond,
 }
 
 impl DataType {
@@ -63,6 +65,8 @@ impl DataType {
             DataType::Time => 4,
             DataType::DateTime => 8,
             DataType::TimeWithTimeZone => 6,
+            DataType::IntervalYearMonth => 4,
+            DataType::IntervalDaySecond => 8,
         }
     }
 
@@ -102,6 +106,8 @@ impl DataType {
             DataType::Time => "TIME".to_string(),
             DataType::DateTime => "DATETIME".to_string(),
             DataType::TimeWithTimeZone => "TIME WITH TIME ZONE".to_string(),
+            DataType::IntervalYearMonth => "INTERVAL YEAR TO MONTH".to_string(),
+            DataType::IntervalDaySecond => "INTERVAL DAY TO SECOND".to_string(),
         }
     }
 
@@ -132,6 +138,8 @@ impl DataType {
             DataType::Time => "TIME",
             DataType::DateTime => "DATETIME",
             DataType::TimeWithTimeZone => "TIME WITH TIME ZONE",
+            DataType::IntervalYearMonth => "INTERVAL YEAR TO MONTH",
+            DataType::IntervalDaySecond => "INTERVAL DAY TO SECOND",
         }
     }
 
@@ -824,7 +832,8 @@ impl Value {
             Value::Time(_) => DataType::Time,
             Value::DateTime(_) => DataType::DateTime,
             Value::TimeWithTimeZone(_) => DataType::TimeWithTimeZone,
-            Value::IntervalYearMonth(_) | Value::IntervalDaySecond(_) => DataType::Text,
+            Value::IntervalYearMonth(_) => DataType::IntervalYearMonth,
+            Value::IntervalDaySecond(_) => DataType::IntervalDaySecond,
             Value::Null => DataType::Text,
         }
     }
@@ -859,6 +868,8 @@ impl Value {
             (Value::Time(_), DataType::Time) => true,
             (Value::DateTime(_), DataType::DateTime) => true,
             (Value::TimeWithTimeZone(_), DataType::TimeWithTimeZone) => true,
+            (Value::IntervalYearMonth(_), DataType::IntervalYearMonth) => true,
+            (Value::IntervalDaySecond(_), DataType::IntervalDaySecond) => true,
             (Value::Null, _) => true,
             _ => false,
         }

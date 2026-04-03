@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::catalog::table::{CheckConstraint, ForeignKeyAction, ForeignKeyConstraint};
-    use crate::catalog::types::{DataType, Value};
+    use crate::catalog::types::{DataType, IntervalDaySecondValue, IntervalYearMonthValue, Value};
     use crate::catalog::{
         Catalog, Column, ColumnId, DatabaseHeader, NamedConstraintKind, Schema, Table, TableId,
         Trigger, TriggerEvent, View,
@@ -230,6 +230,14 @@ mod tests {
         assert_eq!(Value::Text("hello".to_string()).data_type(), DataType::Text);
         assert_eq!(Value::Boolean(true).data_type(), DataType::Boolean);
         assert_eq!(Value::Float(3.14).data_type(), DataType::Float);
+        assert_eq!(
+            Value::IntervalYearMonth(IntervalYearMonthValue::new(14)).data_type(),
+            DataType::IntervalYearMonth
+        );
+        assert_eq!(
+            Value::IntervalDaySecond(IntervalDaySecondValue::new(86_401)).data_type(),
+            DataType::IntervalDaySecond
+        );
         assert_eq!(Value::Null.data_type(), DataType::Text); // NULL maps to Text
     }
 

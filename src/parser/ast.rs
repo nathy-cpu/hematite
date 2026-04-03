@@ -4397,6 +4397,10 @@ fn sql_type_name_for_catalog_type(data_type: crate::catalog::DataType) -> SqlTyp
         crate::catalog::DataType::Time => SqlTypeName::Time,
         crate::catalog::DataType::DateTime => SqlTypeName::DateTime,
         crate::catalog::DataType::TimeWithTimeZone => SqlTypeName::TimeWithTimeZone,
+        crate::catalog::DataType::IntervalYearMonth
+        | crate::catalog::DataType::IntervalDaySecond => {
+            panic!("interval runtime types do not map to schema SQL type names")
+        }
     }
 }
 

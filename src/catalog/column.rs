@@ -130,6 +130,9 @@ impl Column {
                         DataType::TimeWithTimeZone => {
                             Value::TimeWithTimeZone(TimeWithTimeZoneValue::utc_midnight())
                         }
+                        DataType::IntervalYearMonth | DataType::IntervalDaySecond => {
+                            panic!("interval runtime types are not valid column data types")
+                        }
                     }
                 }
             }
@@ -326,6 +329,9 @@ fn write_data_type(buffer: &mut Vec<u8>, data_type: &DataType) {
         DataType::Time => buffer.push(18),
         DataType::DateTime => buffer.push(19),
         DataType::TimeWithTimeZone => buffer.push(21),
+        DataType::IntervalYearMonth | DataType::IntervalDaySecond => {
+            panic!("interval runtime types cannot be serialized as column data types")
+        }
     }
 }
 
