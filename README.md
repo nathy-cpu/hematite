@@ -18,10 +18,10 @@ Add the crate to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-hematite = { package = "hematite-rs", version = "0.1" }
+hematite = { package = "hematite-db", version = "0.1" }
 ```
 
-The published package name is `hematite-rs`, while the library is imported in Rust code as
+The published package name is `hematite-db`, while the library is imported in Rust code as
 `hematite`.
 
 ### Basic Usage

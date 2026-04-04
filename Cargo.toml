@@ -1,11 +1,11 @@
 [package]
-name = "hematite-rs"
+name = "hematite-db"
 version = "0.1.0"
 edition = "2021"
 description = "A small embeddable SQL database."
 license = "MIT"
 readme = "README.md"
-documentation = "https://docs.rs/hematite-rs"
+documentation = "https://docs.rs/hematite-db"
 repository = "https://github.com/nathy-cpu/hematite"
 keywords = ["database", "sql", "embedded", "storage"]
 categories = ["database-implementations"]
