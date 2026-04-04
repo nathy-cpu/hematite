@@ -453,7 +453,7 @@ impl ExecutedStatement {
         if query_result.columns.is_empty() {
             Self::Statement(StatementResult::new(
                 query_result.affected_rows,
-                "Statement executed successfully".to_string(),
+                "Ok".to_string(),
             ))
         } else {
             Self::Query(ResultSet::new(query_result.columns, query_result.rows))

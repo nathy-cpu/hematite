@@ -6123,19 +6123,25 @@ fn is_unsigned_integral_value(value: &Value) -> bool {
 fn decimal_integral_result_to_value(value: DecimalValue, prefer_unsigned: bool) -> Result<Value> {
     debug_assert!(value.is_integral());
     if value.negative() {
-        return value.to_integral_i128().map(minimal_signed_value).ok_or_else(|| {
-            HematiteError::ParseError(
-                "Arithmetic overflowed the supported signed integer range".to_string(),
-            )
-        });
+        return value
+            .to_integral_i128()
+            .map(minimal_signed_value)
+            .ok_or_else(|| {
+                HematiteError::ParseError(
+                    "Arithmetic overflowed the supported signed integer range".to_string(),
+                )
+            });
     }
 
     if prefer_unsigned {
-        return value.to_integral_u128().map(minimal_unsigned_value).ok_or_else(|| {
-            HematiteError::ParseError(
-                "Arithmetic overflowed the supported unsigned integer range".to_string(),
-            )
-        });
+        return value
+            .to_integral_u128()
+            .map(minimal_unsigned_value)
+            .ok_or_else(|| {
+                HematiteError::ParseError(
+                    "Arithmetic overflowed the supported unsigned integer range".to_string(),
+                )
+            });
     }
 
     if let Some(signed) = value.to_integral_i128() {

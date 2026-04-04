@@ -3,7 +3,7 @@
 Hematite has its own SQL dialect.
 
 It borrows ideas from mainstream SQL databases, and it accepts some MySQL-inspired syntax, but it
-is not trying to be a strict clone of MySQL, PostgreSQL, or SQLite.
+is not trying to be a strict clone of MySQL.
 
 ## Key Dialect Rules
 
@@ -110,6 +110,7 @@ Hematite uses an explicit custom type system.
 - `CHAR(n)`
 - `VARCHAR(n)`
 - `ENUM(...)`
+- `BOOLEAN` (`BOOL` as alias)
 
 ### Binary Types
 
@@ -117,25 +118,14 @@ Hematite uses an explicit custom type system.
 - `VARBINARY(n)`
 - `BLOB`
 
-### Temporal Types
+### Temporal and Interval Types
 
 - `DATE`
 - `TIME`
 - `DATETIME`
 - `TIME WITH TIME ZONE`
-- runtime-only interval values:
-  - `INTERVAL YEAR TO MONTH`
-  - `INTERVAL DAY TO SECOND`
-
-## Supported But Intentionally Opinionated
-
-These are not bugs; they are dialect choices or simplifications.
-
-- uppercase keywords are required
-- `DATETIME` is kept; `TIMESTAMP` is not
-- `DECIMAL` exists; `NUMERIC` does not
-- the library exposes a single embedded-database execution model, not server concepts like users,
-  roles, or network protocols
+- `INTERVAL YEAR TO MONTH`
+- `INTERVAL DAY TO SECOND`
 
 ## Supported But Simplified
 
@@ -151,15 +141,14 @@ These exist, but their semantics are deliberately smaller than in some larger sy
 
 Important things that are still absent:
 
-- server/network protocol support
-- user and privilege management
 - stored procedures
 - user-defined functions
 - full information-schema style system catalogs
-- every dialect feature from MySQL/PostgreSQL/SQLite
 
-## Things The Project Does Not Intend To Chase Aggressively
+## Things The Project Does Not Intend To Chase
 
+- server/network protocol support
+- user and privilege management
 - full compatibility with another database’s parser quirks
 - every admin command from a server RDBMS
 - extremely broad SQL dialect compatibility at the cost of code size and clarity
