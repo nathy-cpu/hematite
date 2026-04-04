@@ -85,6 +85,7 @@ fn find_user(db: &mut Hematite, user_id: i32) -> hematite::Result<()> {
 ```
 
 ### Persistent Storage
+
 By default, `Hematite::new_in_memory()` creates a transient database. For persistence, simply specify a file path:
 
 ```rust
@@ -92,6 +93,7 @@ let mut db = Hematite::new("prod_data.db")?;
 ```
 
 ### Struct Mapping
+
 Map database rows directly to Rust structs by implementing the `FromRow` trait.
 
 ```rust
@@ -117,6 +119,7 @@ fn list_users(db: &mut Hematite) -> Result<Vec<User>> {
 ```
 
 ### ASCII Table Rendering
+
 For CLI tools or debugging, you can render a result set as a formatted ASCII table:
 
 ```rust
@@ -139,6 +142,7 @@ println!("{}", results.render_ascii_table());
 Hematite ships with a lightweight CLI tool (`hematite_cli`) for schema exploration and ad-hoc queries.
 
 ### Interactive Shell
+
 Start the interactive REPL with a database file:
 
 ```bash
@@ -146,6 +150,7 @@ cargo run --bin hematite_cli -- demo.db
 ```
 
 ### One-off Commands
+
 Execute a single SQL command without entering the shell:
 
 ```bash
@@ -157,6 +162,7 @@ cargo run --bin hematite_cli -- demo.db "SELECT * FROM users;"
 Hematite supports powerful SQL constructs that are often missing in "small" databases:
 
 ### Recursive CTEs
+
 Find all subordinates in an organizational hierarchy.
 
 ```sql
@@ -171,6 +177,7 @@ SELECT * FROM subordinates;
 ```
 
 ### Window Functions
+
 Calculate a running total of sales.
 
 ```sql
@@ -182,6 +189,7 @@ FROM sales;
 ```
 
 ### Precision Math and Intervals
+
 Handle financial calculations and temporal offsets accurately.
 
 ```sql

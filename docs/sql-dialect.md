@@ -127,6 +127,67 @@ Hematite uses an explicit custom type system.
 - `INTERVAL YEAR TO MONTH`
 - `INTERVAL DAY TO SECOND`
 
+## Supported Functions
+
+### Comparison & Conditional
+
+- `COALESCE(v1, v2, ...)`: Returns the first non-null value.
+- `IFNULL(v, default)`: Alias for `COALESCE(v, default)` with two arguments.
+- `NULLIF(v1, v2)`: Returns `NULL` if `v1 = v2`, otherwise returns `v1`.
+- `GREATEST(v1, v2, ...)`: Returns the maximum value in the list.
+- `LEAST(v1, v2, ...)`: Returns the minimum value in the list.
+
+### String Functions
+
+- `LOWER(str)` / `UPPER(str)`: Case conversion.
+- `TRIM(str)`: Removes leading and trailing whitespace.
+- `LENGTH(str)`: Returns number of characters (for text) or bytes (for blobs).
+- `OCTET_LENGTH(str)`: Returns number of bytes.
+- `BIT_LENGTH(str)`: Returns number of bits.
+- `CONCAT(s1, s2, ...)`: Joins strings together.
+- `CONCAT_WS(sep, s1, s2, ...)`: Joins strings with a separator.
+- `SUBSTRING(str, start, [len])`: Extracts a portion of a string.
+- `LEFT(str, len)` / `RIGHT(str, len)`: Extracts from the start or end.
+- `REPLACE(str, from, to)`: Replaces occurrences of a substring.
+- `REPEAT(str, count)`: Repeats a string.
+- `REVERSE(str)`: Reverses a string.
+- `LOCATE(sub, str, [pos])`: Finds the position of a substring.
+- `HEX(blob)` / `UNHEX(str)`: Hexadecimal encoding and decoding. (little-endian)
+
+### Math Functions
+
+- `ABS(n)`: Absolute value.
+- `ROUND(n, [d])`: Rounds to `d` decimal places (defaults to 0).
+- `CEIL(n)` / `FLOOR(n)`: Upward and downward integer rounding.
+- `POWER(base, exp)`: Exponentiation.
+
+### Temporal Functions
+
+- `DATE(v)` / `TIME(v)`: Extracts date or time component.
+- `YEAR(v)`, `MONTH(v)`, `DAY(v)`: Extracts date components.
+- `HOUR(v)`, `MINUTE(v)`, `SECOND(v)`: Extracts time components.
+- `TIME_TO_SEC(time)` / `SEC_TO_TIME(sec)`: Conversion between time and seconds.
+- `UNIX_TIMESTAMP([v])`: Returns seconds since the Unix epoch.
+
+### Aggregate Functions
+
+- `COUNT(*)` / `COUNT(col)`
+- `SUM(col)`
+- `AVG(col)`
+- `MIN(col)`
+- `MAX(col)`
+
+### Window Functions
+
+- `ROW_NUMBER()`
+- `RANK()`
+- `DENSE_RANK()`
+- `SUM(...) OVER (...)`
+- `AVG(...) OVER (...)`
+- `COUNT(...) OVER (...)`
+- `MIN(...) OVER (...)`
+- `MAX(...) OVER (...)`
+
 ## Supported But Simplified
 
 These exist, but their semantics are deliberately smaller than in some larger systems.
