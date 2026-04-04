@@ -84,6 +84,56 @@ fn find_user(db: &mut Hematite, user_id: i32) -> hematite::Result<()> {
 }
 ```
 
+### Persistent Storage
+By default, `Hematite::new_in_memory()` creates a transient database. For persistence, simply specify a file path:
+
+```rust
+let mut db = Hematite::new("prod_data.db")?;
+```
+
+### Struct Mapping
+Map database rows directly to Rust structs by implementing the `FromRow` trait.
+
+```rust
+use hematite::{Hematite, FromRow, Row, Result};
+
+struct User {
+    id: i32,
+    name: String,
+}
+
+impl FromRow for User {
+    fn from_row(row: &Row) -> Result<Self> {
+        Ok(Self {
+            id: row.get_int(0)?,
+            name: row.get_string(1)?,
+        })
+    }
+}
+
+fn list_users(db: &mut Hematite) -> Result<Vec<User>> {
+    db.query_as("SELECT id, name FROM users;")
+}
+```
+
+### ASCII Table Rendering
+For CLI tools or debugging, you can render a result set as a formatted ASCII table:
+
+```rust
+let results = db.query("SELECT id, name, balance FROM users;")?;
+println!("{}", results.render_ascii_table());
+```
+
+```text
++------+------+---------+
+| id   | name | balance |
++------+------+---------+
+| 1    | Ada  | 1000.50 |
+| 2    | Bob  | 250.75  |
++------+------+---------+
+2 row(s)
+```
+
 ## CLI Usage
 
 Hematite ships with a lightweight CLI tool (`hematite_cli`) for schema exploration and ad-hoc queries.
