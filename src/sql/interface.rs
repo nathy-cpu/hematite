@@ -5,7 +5,7 @@ use crate::query::{
     DateTimeValue, DateValue, DecimalValue, JournalMode, TimeValue, TimeWithTimeZoneValue, Value,
 };
 use crate::sql::connection::{Connection, PreparedStatement, Transaction};
-use crate::sql::result::{ExecutedStatement, ResultSet, Row, StatementResult};
+use crate::sql::result::{ExecutedStatement, FromRow, ResultSet, Row, StatementResult};
 use crate::sql::script::ScriptIter;
 
 /// High-level interface for SQL operations
@@ -72,6 +72,23 @@ impl Hematite {
                 Err(HematiteError::ParseError("No value found".to_string()))
             }
         })
+    }
+
+    pub fn query_as<T>(&mut self, sql: &str) -> Result<Vec<T>>
+    where
+        T: FromRow,
+    {
+        self.query(sql)?.to_structs()
+    }
+
+    pub fn query_one_as<T>(&mut self, sql: &str) -> Result<Option<T>>
+    where
+        T: FromRow,
+    {
+        self.query(sql)?
+            .get_row(0)
+            .map(T::from_row)
+            .transpose()
     }
 
     /// Prepare a SQL statement for repeated execution

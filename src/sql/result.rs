@@ -54,6 +54,10 @@ impl ResultSet {
         self.column_index.get(column_name).copied()
     }
 
+    pub fn to_structs<T: FromRow>(&self) -> Result<Vec<T>> {
+        self.rows.iter().map(T::from_row).collect()
+    }
+
     pub fn render_ascii_table(&self) -> String {
         if self.columns.is_empty() {
             return format!("{} row(s)", self.len());
@@ -141,6 +145,10 @@ impl Row {
         } else {
             None
         }
+    }
+
+    pub fn to_struct<T: FromRow>(&self) -> Result<T> {
+        T::from_row(self)
     }
 
     pub fn get_int(&self, index: usize) -> Result<i32> {
@@ -394,6 +402,10 @@ impl Row {
             )),
         }
     }
+}
+
+pub trait FromRow: Sized {
+    fn from_row(row: &Row) -> Result<Self>;
 }
 
 impl IntoIterator for Row {

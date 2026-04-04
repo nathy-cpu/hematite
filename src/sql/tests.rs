@@ -5478,8 +5478,26 @@ mod connection_tests {
 mod interface_tests {
     use crate::error::Result;
     use crate::sql::interface::*;
+    use crate::sql::FromRow;
     use crate::sql::ExecutedStatement;
     use crate::test_utils::TestDbFile;
+
+    #[derive(Debug, PartialEq)]
+    struct User {
+        id: i32,
+        name: String,
+        active: bool,
+    }
+
+    impl FromRow for User {
+        fn from_row(row: &crate::sql::Row) -> Result<Self> {
+            Ok(Self {
+                id: row.get_int(0)?,
+                name: row.get_string(1)?,
+                active: row.get_bool(2)?,
+            })
+        }
+    }
 
     #[test]
     fn test_hematite_basic_operations() -> Result<()> {
@@ -5517,6 +5535,47 @@ mod interface_tests {
         // Query single value using simple SELECT
         let result_set = db.query("SELECT * FROM test;")?;
         assert_eq!(result_set.len(), 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_hematite_query_as_and_query_one_as() -> Result<()> {
+        let test_db = TestDbFile::new("_test_query_as_and_query_one_as");
+        let mut db = Hematite::new(test_db.path())?;
+
+        db.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT, active BOOLEAN);")?;
+        db.execute("INSERT INTO users (id, name, active) VALUES (1, 'Alice', TRUE);")?;
+        db.execute("INSERT INTO users (id, name, active) VALUES (2, 'Bob', FALSE);")?;
+
+        let users: Vec<User> =
+            db.query_as("SELECT id, name, active FROM users ORDER BY id ASC;")?;
+        assert_eq!(
+            users,
+            vec![
+                User {
+                    id: 1,
+                    name: "Alice".to_string(),
+                    active: true,
+                },
+                User {
+                    id: 2,
+                    name: "Bob".to_string(),
+                    active: false,
+                },
+            ]
+        );
+
+        let user: Option<User> =
+            db.query_one_as("SELECT id, name, active FROM users WHERE id = 2;")?;
+        assert_eq!(
+            user,
+            Some(User {
+                id: 2,
+                name: "Bob".to_string(),
+                active: false,
+            })
+        );
 
         Ok(())
     }
@@ -5770,6 +5829,21 @@ mod result_tests {
         Ok(())
     }
 
+    #[derive(Debug, PartialEq)]
+    struct MiniUser {
+        id: i32,
+        name: String,
+    }
+
+    impl FromRow for MiniUser {
+        fn from_row(row: &Row) -> Result<Self> {
+            Ok(Self {
+                id: row.get_int(0)?,
+                name: row.get_string(1)?,
+            })
+        }
+    }
+
     #[test]
     fn test_row() -> Result<()> {
         let values = vec![
@@ -5791,6 +5865,40 @@ mod result_tests {
         // Test type conversion errors
         assert!(row.get_string(0).is_err());
         assert!(row.get_bool(0).is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_row_and_result_set_struct_mapping() -> Result<()> {
+        let columns = vec!["id".to_string(), "name".to_string()];
+        let rows = vec![
+            vec![Value::Integer(1), Value::Text("Alice".to_string())],
+            vec![Value::Integer(2), Value::Text("Bob".to_string())],
+        ];
+
+        let result_set = ResultSet::new(columns, rows);
+        assert_eq!(
+            result_set.to_structs::<MiniUser>()?,
+            vec![
+                MiniUser {
+                    id: 1,
+                    name: "Alice".to_string(),
+                },
+                MiniUser {
+                    id: 2,
+                    name: "Bob".to_string(),
+                },
+            ]
+        );
+
+        assert_eq!(
+            result_set.get_row(0).unwrap().to_struct::<MiniUser>()?,
+            MiniUser {
+                id: 1,
+                name: "Alice".to_string(),
+            }
+        );
 
         Ok(())
     }
