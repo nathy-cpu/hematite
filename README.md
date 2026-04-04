@@ -202,11 +202,49 @@ SHOW CREATE TABLE users;
 EXPLAIN SELECT * FROM users WHERE id = 1;
 ```
 
+## Current Limitations
+
+Hematite already supports a broad SQL surface, but there are still important things users often
+expect from an embedded database that are not supported yet.
+
+### Application Ergonomics
+
+- **Manual struct mapping**: Typed row mapping exists, but users currently need to implement `FromRow` manually.
+- **No derive macros yet**: There is no `#[derive(FromRow)]`-style support yet.
+- **No schema-from-struct workflow**: Hematite does not yet generate tables from Rust structs.
+- **No built-in JSON row/result API**: There is no first-class JSON export/import convenience layer yet.
+
+### Embedded App Workflow
+
+- **No migration framework**: DDL is supported, but there is no built-in migration/versioning workflow.
+- **No backup / restore helpers**: There is not yet a high-level API for backups, dumps, or restore flows.
+- **No import/export tools**: CSV import/export and similar convenience tooling are not built in.
+- **No async API**: The crate is synchronous today.
+
+### Database Features Users May Expect
+
+- **Views are read-only**
+- **Trigger bodies are intentionally limited** to single-statement row-level `AFTER` triggers
+- **No JSON type or JSON operators**
+- **No stored procedures or user-defined functions**
+- **No generated columns**
+- **No full information-schema subsystem**
+
+### Deployment Model
+
+- **Embedded only**: Hematite is not a client/server database.
+- **No users, roles, or network protocol**
+- **No replication or clustering**
+
+These are known limits, not accidents. The project intentionally favors a small, understandable,
+embedded-first design over chasing every feature found in larger database systems.
+
 ## Documentation
 
 - [Architecture](docs/architecture.md)
 - [Codebase Guide](docs/codebase-guide.md)
 - [SQL Dialect](docs/sql-dialect.md)
+- [Contributing](CONTRIBUTING.md)
 
 ## Status
 
