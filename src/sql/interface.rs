@@ -85,10 +85,7 @@ impl Hematite {
     where
         T: FromRow,
     {
-        self.query(sql)?
-            .get_row(0)
-            .map(T::from_row)
-            .transpose()
+        self.query(sql)?.get_row(0).map(T::from_row).transpose()
     }
 
     /// Prepare a SQL statement for repeated execution

@@ -5478,8 +5478,8 @@ mod connection_tests {
 mod interface_tests {
     use crate::error::Result;
     use crate::sql::interface::*;
-    use crate::sql::FromRow;
     use crate::sql::ExecutedStatement;
+    use crate::sql::FromRow;
     use crate::test_utils::TestDbFile;
 
     #[derive(Debug, PartialEq)]
@@ -5995,10 +5995,7 @@ mod result_tests {
             columns: Vec::new(),
             rows: Vec::new(),
         });
-        assert_eq!(
-            statement.render_ascii(),
-            "Statement executed successfully (2)"
-        );
+        assert_eq!(statement.render_ascii(), "Ok (2)");
         Ok(())
     }
 }
