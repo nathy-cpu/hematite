@@ -138,6 +138,16 @@ pub(crate) struct PagerSnapshot {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PagerState {
+    Open,
+    Reader,
+    WriterLocked,
+    WriterCacheMod,
+    WriterDbMod,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PagerLockMode {
     None,
     Shared { depth: usize },
@@ -183,6 +193,7 @@ pub struct Pager {
     wal_read_snapshot: Option<VisibleWalState>,
     latest_wal_state: Option<VisibleWalState>,
     transaction: Option<PagerTransaction>,
+    state: PagerState,
     buffer_pool_capacity: usize,
 }
 
@@ -229,6 +240,7 @@ impl Pager {
             wal_read_snapshot: None,
             latest_wal_state: None,
             transaction: None,
+            state: PagerState::Open,
             buffer_pool_capacity: cache_capacity,
         };
         pager.recover_if_needed()?;
@@ -253,11 +265,22 @@ impl Pager {
             wal_read_snapshot: None,
             latest_wal_state: None,
             transaction: None,
+            state: PagerState::Open,
             buffer_pool_capacity: cache_capacity,
         })
     }
 
+    fn check_error_state(&self) -> Result<()> {
+        if self.state == PagerState::Error {
+            return Err(crate::error::HematiteError::StorageError(
+                "Pager is in an error state and requires rollback or restart".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn read_page(&mut self, page_id: PageId) -> Result<Page> {
+        self.check_error_state()?;
         if let Some(page) = self.buffer_pool.get(page_id) {
             return Ok(page.clone());
         }
@@ -316,6 +339,7 @@ impl Pager {
     }
 
     pub fn write_page(&mut self, page: Page) -> Result<()> {
+        self.check_error_state()?;
         let page_id = page.id;
         self.snapshot_original_page(page_id)?;
         if page_id != STORAGE_METADATA_PAGE_ID {
@@ -328,6 +352,7 @@ impl Pager {
     }
 
     pub fn allocate_page(&mut self) -> Result<PageId> {
+        self.check_error_state()?;
         if self.journal_mode == JournalMode::Wal {
             if let Some(transaction) = &mut self.transaction {
                 if let Some(page_id) = transaction.wal_free_pages.pop() {
@@ -342,6 +367,7 @@ impl Pager {
     }
 
     pub fn deallocate_page(&mut self, page_id: PageId) -> Result<()> {
+        self.check_error_state()?;
         self.snapshot_original_page(page_id)?;
         self.buffer_pool.remove(page_id);
         self.dirty_pages.remove(&page_id);
@@ -362,6 +388,7 @@ impl Pager {
     }
 
     pub fn flush(&mut self) -> Result<()> {
+        self.check_error_state()?;
         if self.journal_mode == JournalMode::Wal && self.transaction.is_some() {
             return Err(crate::error::HematiteError::StorageError(
                 "Cannot flush pager pages directly during an active WAL transaction".to_string(),
@@ -378,7 +405,10 @@ impl Pager {
             }
 
             if let Some(page) = self.buffer_pool.get(page_id) {
-                self.file_manager.write_page(page)?;
+                if let Err(e) = self.file_manager.write_page(page) {
+                    self.state = PagerState::Error;
+                    return Err(e);
+                }
             }
             self.dirty_pages.remove(&page_id);
         }
@@ -386,15 +416,26 @@ impl Pager {
         // Metadata is written last so it cannot describe page state that has not reached disk.
         if metadata_page_dirty {
             if let Some(page) = self.buffer_pool.get(STORAGE_METADATA_PAGE_ID) {
-                self.file_manager.write_page(page)?;
+                if let Err(e) = self.file_manager.write_page(page) {
+                    self.state = PagerState::Error;
+                    return Err(e);
+                }
             }
             self.dirty_pages.remove(&STORAGE_METADATA_PAGE_ID);
         }
-        self.file_manager.flush()?;
-        self.persist_checksums()
+        if let Err(e) = self.file_manager.flush() {
+            self.state = PagerState::Error;
+            return Err(e);
+        }
+        if let Err(e) = self.persist_checksums() {
+            self.state = PagerState::Error;
+            return Err(e);
+        }
+        Ok(())
     }
 
     pub fn begin_transaction(&mut self) -> Result<()> {
+        self.check_error_state()?;
         if self.transaction.is_some() {
             return Err(crate::error::HematiteError::StorageError(
                 "Pager transaction is already active".to_string(),
@@ -420,6 +461,7 @@ impl Pager {
     }
 
     pub fn commit_transaction(&mut self) -> Result<()> {
+        self.check_error_state()?;
         if self.transaction.is_none() {
             return Err(crate::error::HematiteError::StorageError(
                 "Pager transaction is not active".to_string(),
@@ -483,6 +525,7 @@ impl Pager {
     }
 
     pub fn begin_read(&mut self) -> Result<()> {
+        self.check_error_state()?;
         let previous_lock_mode = self.lock_mode;
         self.acquire_shared_lock()?;
         if let Err(err) = self.refresh_persisted_view() {
@@ -564,6 +607,7 @@ impl Pager {
     }
 
     pub fn checkpoint_wal(&mut self) -> Result<()> {
+        self.check_error_state()?;
         if self.journal_mode != JournalMode::Wal {
             return Ok(());
         }
