@@ -568,6 +568,62 @@ impl BTreeNode {
         Ok(())
     }
 
+    pub fn try_update_leaf_in_place(
+        &mut self,
+        page: &mut Page,
+        key: &BTreeKey,
+        new_value: &BTreeValue,
+    ) -> Result<bool> {
+        if self.node_type != NodeType::Leaf {
+            return Ok(false);
+        }
+
+        let existing_index = match self.keys.iter().position(|k| k == key) {
+            Some(i) => i,
+            None => return Ok(false),
+        };
+
+        let old_value_len = self.values[existing_index].data.len();
+        if old_value_len != new_value.data.len() {
+            return Ok(false);
+        }
+
+        // Needs to have a decoded page to do direct manipulation
+        if self.raw_page.is_none() {
+            self.to_page(page)?;
+            self.raw_page = Some(page.clone());
+        }
+
+        self.values[existing_index] = new_value.clone();
+
+        let mut offset = BTREE_PAGE_HEADER_SIZE;
+        for k in &self.keys {
+            offset += 2 + k.data.len();
+        }
+        for i in 0..existing_index {
+            offset += 2 + self.values[i].data.len();
+        }
+
+        offset += 2; // skip value len
+        page.data[offset..offset + new_value.data.len()].copy_from_slice(&new_value.data);
+
+        let payload_len = u32::from_le_bytes([
+            page.data[HEADER_OFFSET_PAYLOAD_LEN],
+            page.data[HEADER_OFFSET_PAYLOAD_LEN + 1],
+            page.data[HEADER_OFFSET_PAYLOAD_LEN + 2],
+            page.data[HEADER_OFFSET_PAYLOAD_LEN + 3],
+        ]) as usize;
+        
+        let payload = &page.data[BTREE_PAGE_HEADER_SIZE..BTREE_PAGE_HEADER_SIZE + payload_len];
+        let checksum = Self::calculate_checksum(payload);
+        page.data[HEADER_OFFSET_CHECKSUM..HEADER_OFFSET_CHECKSUM + CHECKSUM_SIZE]
+            .copy_from_slice(&checksum.to_le_bytes());
+
+        self.raw_page = Some(page.clone());
+        
+        Ok(true)
+    }
+
     pub fn search(&self, key: &BTreeKey) -> SearchResult {
         match self.node_type {
             NodeType::Leaf => self.search_leaf(key),
@@ -671,6 +727,9 @@ impl BTreeNode {
             .iter()
             .position(|k| k > &new_key)
             .unwrap_or(self.keys.len());
+            
+        let is_append = pos == self.keys.len();
+        
         self.keys.insert(pos, new_key);
         self.values.insert(pos, new_value);
 
@@ -684,8 +743,12 @@ impl BTreeNode {
         let mut new_page = Page::new(new_page_id);
         let mut new_node = Self::new_leaf(new_page_id);
 
-        // Choose a split point that balances payload bytes across leaf pages.
-        let split_pos = self.best_leaf_split_pos();
+        let split_pos = if is_append {
+            self.keys.len() - 1 // Leave all existing elements in the left node
+        } else {
+            self.best_leaf_split_pos()
+        };
+        
         new_node.keys = self.keys.split_off(split_pos);
         new_node.values = self.values.split_off(split_pos);
         let split_key = new_node.keys[0].clone();
@@ -710,6 +773,9 @@ impl BTreeNode {
             .iter()
             .position(|k| k >= &new_key)
             .unwrap_or(self.keys.len());
+            
+        let is_append = pos == self.keys.len();
+        
         self.keys.insert(pos, new_key);
         self.children.insert(pos + 1, new_child);
 
@@ -723,8 +789,11 @@ impl BTreeNode {
         let mut new_page = Page::new(new_page_id);
         let mut new_node = Self::new_internal(new_page_id);
 
-        // Choose a split point that balances payload bytes while keeping key separators valid.
-        let split_pos = self.best_internal_split_pos();
+        let split_pos = if is_append {
+            self.keys.len() - 2
+        } else {
+            self.best_internal_split_pos()
+        };
         let split_key = self.keys[split_pos].clone();
 
         new_node.keys = self.keys.split_off(split_pos + 1);

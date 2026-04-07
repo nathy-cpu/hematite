@@ -129,11 +129,16 @@ impl BTreeIndex {
 
         match node.node_type {
             NodeType::Leaf => {
+                if node.try_update_leaf_in_place(&mut page, &key, &value)? {
+                    self.lock_storage()?.write_page(page)?;
+                    return Ok(None);
+                }
+
                 if let Some(existing_index) = node.keys.iter().position(|k| k == &key) {
                     node.keys.remove(existing_index);
                     node.values.remove(existing_index);
 
-                    if node.keys.len() < node::MAX_KEYS && node.can_insert_key_value(&key, &value) {
+                    if node.keys.len() < crate::btree::node::MAX_KEYS && node.can_insert_key_value(&key, &value) {
                         node.insert_leaf(key, value)?;
                         node.to_page(&mut page)?;
                         self.lock_storage()?.write_page(page)?;
