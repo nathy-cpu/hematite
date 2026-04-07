@@ -498,6 +498,7 @@ impl Pager {
         }
         self.transaction = None;
         self.release_write_lock()?;
+        self.state = PagerState::Open;
         Ok(())
     }
 
@@ -1441,5 +1442,16 @@ impl Drop for Pager {
             }
             PagerLockMode::None => {}
         }
+    }
+}
+
+#[cfg(test)]
+impl Pager {
+    pub fn inject_io_failure(&mut self) {
+        self.file_manager.inject_write_failure();
+    }
+
+    pub fn state(&self) -> PagerState {
+        self.state
     }
 }

@@ -38,6 +38,8 @@ pub struct FileManager {
     position: u64,
     next_page_id: u32,
     free_list: FreeList,
+    #[cfg(test)]
+    fail_next_write: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -60,25 +62,31 @@ impl FileManager {
             .create(true)
             .open(path)?;
 
-        let mut manager = Self {
+        let manager = Self {
             backend: FileBackend::Disk(file),
             position: 0,
             next_page_id: 0,
             free_list: FreeList::new(),
+            #[cfg(test)]
+            fail_next_write: false,
         };
 
+        let mut manager = manager;
         manager.initialize()?;
         Ok(manager)
     }
 
     pub fn new_in_memory() -> Result<Self> {
-        let mut manager = Self {
+        let manager = Self {
             backend: FileBackend::Memory(Vec::new()),
             position: 0,
             next_page_id: 0,
             free_list: FreeList::new(),
+            #[cfg(test)]
+            fail_next_write: false,
         };
 
+        let mut manager = manager;
         manager.initialize()?;
         Ok(manager)
     }
@@ -311,6 +319,14 @@ impl FileManager {
     }
 
     fn write_all(&mut self, buf: &[u8]) -> Result<()> {
+        #[cfg(test)]
+        if self.fail_next_write {
+            self.fail_next_write = false;
+            return Err(crate::error::HematiteError::IoError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Injected IO error",
+            )));
+        }
         match &mut self.backend {
             FileBackend::Disk(file) => {
                 file.write_all(buf)?;
@@ -343,5 +359,12 @@ impl FileManager {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+impl FileManager {
+    pub fn inject_write_failure(&mut self) {
+        self.fail_next_write = true;
     }
 }
