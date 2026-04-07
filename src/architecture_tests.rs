@@ -32,7 +32,11 @@ fn top_level_module(path: &Path) -> Option<&'static str> {
 
 fn is_production_file(path: &Path) -> bool {
     let file_name = path.file_name().and_then(|name| name.to_str());
-    !matches!(file_name, Some("tests.rs"))
+    match file_name {
+        Some("tests.rs") => false,
+        Some(name) if name.ends_with("_test.rs") => false,
+        _ => true,
+    }
 }
 
 fn extract_crate_import_modules(contents: &str) -> BTreeSet<String> {
