@@ -51,7 +51,7 @@ impl BTreeManager {
 
     pub fn open_tree(&mut self, root_page_id: PageId) -> Result<BTreeIndex> {
         let page = self.lock_storage()?.read_page(root_page_id)?;
-        let _node = BTreeNode::from_page(page)?;
+        let _node = BTreeNode::from_page_decoded(page)?;
         Ok(BTreeIndex::from_shared_storage(
             self.storage.clone(),
             root_page_id,
@@ -65,7 +65,7 @@ impl BTreeManager {
 
     fn delete_tree_recursive(&mut self, page_id: PageId) -> Result<()> {
         let page = self.lock_storage()?.read_page(page_id)?;
-        let node = BTreeNode::from_page(page)?;
+        let node = BTreeNode::from_page_decoded(page)?;
 
         match node.node_type {
             NodeType::Leaf => {
@@ -117,7 +117,7 @@ impl BTreeManager {
         }
 
         let page = self.lock_storage()?.read_page(page_id)?;
-        let node = BTreeNode::from_page(page)?;
+        let node = BTreeNode::from_page_decoded(page)?;
 
         for i in 1..node.keys.len() {
             if node.keys[i - 1] >= node.keys[i] {
@@ -237,7 +237,7 @@ pub fn collect_tree_page_ids(
 ) -> Result<()> {
     out.push(page_id);
     let page = pager.read_page(page_id)?;
-    let node = BTreeNode::from_page(page)?;
+    let node = BTreeNode::from_page_decoded(page)?;
     if node.node_type == NodeType::Internal {
         for child_page_id in node.children {
             collect_tree_page_ids(pager, child_page_id, out)?;
@@ -277,7 +277,7 @@ fn collect_tree_space_stats_recursive(
     }
 
     let page = pager.read_page(page_id)?;
-    let node = BTreeNode::from_page(page)?;
+    let node = BTreeNode::from_page_decoded(page)?;
     stats.page_ids.push(page_id);
     stats.used_bytes += node.estimate_serialized_size();
 

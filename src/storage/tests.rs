@@ -1185,7 +1185,7 @@ mod mod_tests {
         let _ = storage.insert_into_table("docs", vec![Value::Text("x".repeat(PAGE_SIZE * 3))])?;
 
         let root_page = storage.read_page(root_page_id)?;
-        let root_node = BTreeNode::from_page(root_page)?;
+        let root_node = BTreeNode::from_page_decoded(root_page)?;
         let layout = StoredValueLayout::decode(root_node.values[0].as_bytes())?;
         assert_ne!(layout.overflow_first_page, crate::storage::INVALID_PAGE_ID);
 
@@ -1239,7 +1239,7 @@ mod mod_tests {
         let _ = storage.insert_into_table("users", vec![Value::Integer(2)])?;
 
         let mut page = storage.read_page(root_page_id)?;
-        let mut node = BTreeNode::from_page(page.clone())?;
+        let mut node = BTreeNode::from_page_decoded(page.clone())?;
         assert_eq!(node.node_type, NodeType::Leaf);
         assert!(node.keys.len() >= 2);
 
@@ -1290,7 +1290,7 @@ mod mod_tests {
             storage.insert_into_table("docs", vec![Value::Text("x".repeat(PAGE_SIZE * 3))])?;
 
         let root_page = storage.read_page(root_page_id)?;
-        let root_node = BTreeNode::from_page(root_page)?;
+        let root_node = BTreeNode::from_page_decoded(root_page)?;
         let layout = StoredValueLayout::decode(root_node.values[0].as_bytes())?;
         let overflow_ids = storage.with_pager(|pager| {
             collect_overflow_page_ids(pager, Some(layout.overflow_first_page))
@@ -1318,7 +1318,7 @@ mod mod_tests {
         let _ = storage.insert_into_table("docs", vec![Value::Text("x".repeat(PAGE_SIZE * 3))])?;
 
         let root_page = storage.read_page(root_page_id)?;
-        let root_node = BTreeNode::from_page(root_page)?;
+        let root_node = BTreeNode::from_page_decoded(root_page)?;
         let layout = StoredValueLayout::decode(root_node.values[0].as_bytes())?;
         let overflow_ids = storage.with_pager(|pager| {
             collect_overflow_page_ids(pager, Some(layout.overflow_first_page))
@@ -1351,7 +1351,7 @@ mod mod_tests {
         let _ = storage.insert_into_table("docs", vec![Value::Text("x".repeat(PAGE_SIZE * 3))])?;
 
         let root_page = storage.read_page(root_page_id)?;
-        let root_node = BTreeNode::from_page(root_page)?;
+        let root_node = BTreeNode::from_page_decoded(root_page)?;
         let layout = StoredValueLayout::decode(root_node.values[0].as_bytes())?;
         let overflow_ids = storage.with_pager(|pager| {
             collect_overflow_page_ids(pager, Some(layout.overflow_first_page))
@@ -1519,7 +1519,7 @@ mod mod_tests {
             .expect("table metadata should exist")
             .clone();
         let root_page = storage.read_page(metadata.root_page_id)?;
-        let root_node = BTreeNode::from_page(root_page)?;
+        let root_node = BTreeNode::from_page_decoded(root_page)?;
 
         assert_eq!(root_node.node_type, NodeType::Internal);
         assert_eq!(metadata.row_count, 220);
@@ -1551,7 +1551,7 @@ mod mod_tests {
 
         let root_page_id = storage.create_table("users")?;
         let root_page = storage.read_page(root_page_id)?;
-        let root_node = BTreeNode::from_page(root_page)?;
+        let root_node = BTreeNode::from_page_decoded(root_page)?;
 
         assert_eq!(root_node.page_id, root_page_id);
         assert_eq!(root_node.node_type, NodeType::Leaf);

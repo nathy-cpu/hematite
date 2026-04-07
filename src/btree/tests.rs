@@ -1209,7 +1209,7 @@ mod tree_tests {
         let mut page = Page::new(page_id);
         BTreeNode::to_page(&node, &mut page)?;
 
-        let deserialized_node = BTreeNode::from_page(page)?;
+        let deserialized_node = BTreeNode::from_page_decoded(page)?;
         assert_eq!(deserialized_node.node_type, node.node_type);
         assert_eq!(deserialized_node.keys.len(), node.keys.len());
         assert_eq!(deserialized_node.values.len(), node.values.len());
@@ -1236,7 +1236,7 @@ mod tree_tests {
         BTreeNode::to_page(&node, &mut page)?;
         page.data[4] = BTREE_PAGE_FORMAT_VERSION.saturating_add(1);
 
-        let err = BTreeNode::from_page(page).unwrap_err();
+        let err = BTreeNode::from_page_decoded(page).unwrap_err();
         assert!(err.to_string().contains("Unsupported B-tree version"));
 
         Ok(())
@@ -1254,7 +1254,7 @@ mod tree_tests {
 
         // Corrupt payload_len to exceed page boundary.
         page.data[14..18].copy_from_slice(&((PAGE_SIZE as u32) + 1).to_le_bytes());
-        let err = BTreeNode::from_page(page).unwrap_err();
+        let err = BTreeNode::from_page_decoded(page).unwrap_err();
         assert!(err.to_string().contains("Payload length"));
 
         // Keep a guard that the header offset contract is stable.

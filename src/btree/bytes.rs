@@ -369,7 +369,7 @@ impl ByteTree {
 
 fn free_tree_overflow(storage: &mut Pager, root_page_id: PageId) -> Result<()> {
     let page = storage.read_page(root_page_id)?;
-    let node = BTreeNode::from_page(page)?;
+    let node = BTreeNode::from_page_decoded(page)?;
 
     match node.node_type {
         NodeType::Leaf => {
@@ -395,7 +395,7 @@ fn validate_tree_overflow_pages(
     owned_overflow_pages: &mut HashSet<PageId>,
 ) -> Result<()> {
     let page = storage.read_page(root_page_id)?;
-    let node = BTreeNode::from_page(page)?;
+    let node = BTreeNode::from_page_decoded(page)?;
 
     match node.node_type {
         NodeType::Leaf => {
