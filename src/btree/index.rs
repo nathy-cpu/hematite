@@ -125,7 +125,7 @@ impl BTreeIndex {
         value: BTreeValue,
     ) -> Result<Option<(BTreeKey, PageId)>> {
         let mut page = self.lock_storage()?.read_page(page_id)?;
-        let mut node = BTreeNode::from_page_decoded(page.clone())?;
+        let mut node = BTreeNode::from_page(page.clone())?;
 
         match node.node_type {
             NodeType::Leaf => {
@@ -133,6 +133,8 @@ impl BTreeIndex {
                     self.lock_storage()?.write_page(page)?;
                     return Ok(None);
                 }
+
+                node.decode()?;
 
                 if let Some(existing_index) = node.keys.iter().position(|k| k == &key) {
                     node.keys.remove(existing_index);
@@ -166,6 +168,7 @@ impl BTreeIndex {
                 let split_result = self.insert_recursive(child_page_id, key, value)?;
 
                 if let Some((split_key, split_page_id)) = split_result {
+                    node.decode()?; // Mutation needed
                     if node.keys.len() < node::MAX_KEYS && node.can_insert_key_child(&split_key) {
                         node.insert_internal(split_key, split_page_id)?;
                         node.to_page(&mut page)?;
@@ -178,8 +181,6 @@ impl BTreeIndex {
                         Ok(Some((new_key, new_page_id)))
                     }
                 } else {
-                    node.to_page(&mut page)?;
-                    self.lock_storage()?.write_page(page)?;
                     Ok(None)
                 }
             }

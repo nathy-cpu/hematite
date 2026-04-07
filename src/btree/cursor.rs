@@ -207,8 +207,8 @@ impl BTreeCursor {
 
                     while left < right {
                         let mid = (left + right) / 2;
-                        let mid_key = node.get_key_procedural(mid)?;
-                        if &mid_key < key {
+                        let mid_key_bytes = node.get_key_view(mid)?;
+                        if mid_key_bytes < key.as_bytes() {
                             left = mid + 1;
                         } else {
                             right = mid;
@@ -231,8 +231,8 @@ impl BTreeCursor {
                     // Find the correct child to traverse
                     let mut child_index = 0;
                     for i in 0..node.key_count {
-                        let node_key = node.get_key_procedural(i)?;
-                        if &node_key < key {
+                        let node_key_bytes = node.get_key_view(i)?;
+                        if node_key_bytes < key.as_bytes() {
                             child_index = i + 1;
                         } else {
                             break;

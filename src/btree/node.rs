@@ -60,6 +60,7 @@ pub struct BTreeNode {
     pub payload_len: usize,
     pub raw_page: Option<Page>,
     pub is_decoded: bool,
+    pub cell_offsets: Vec<u16>,
 }
 
 impl BTreeNode {
@@ -74,6 +75,7 @@ impl BTreeNode {
             payload_len: 0,
             raw_page: None,
             is_decoded: true,
+            cell_offsets: Vec::new(),
         }
     }
 
@@ -88,6 +90,7 @@ impl BTreeNode {
             payload_len: 0,
             raw_page: None,
             is_decoded: true,
+            cell_offsets: Vec::new(),
         }
     }
 
@@ -295,6 +298,29 @@ impl BTreeNode {
         node.raw_page = Some(page);
         node.is_decoded = false;
 
+        // Build cell offsets table
+        let mut offset = BTREE_PAGE_HEADER_SIZE;
+        let p_data = &node.raw_page.as_ref().unwrap().data;
+        for _ in 0..key_count {
+            node.cell_offsets.push(offset as u16);
+            let key_len = u16::from_le_bytes([p_data[offset], p_data[offset + 1]]) as usize;
+            offset += 2 + key_len;
+        }
+        if node_type == NodeType::Internal {
+            // Child IDs follow keys
+            for _ in 0..key_count + 1 {
+                node.cell_offsets.push(offset as u16);
+                offset += 4;
+            }
+        } else {
+            // Values follow keys in leaf
+            for _ in 0..key_count {
+                node.cell_offsets.push(offset as u16);
+                let val_len = u16::from_le_bytes([p_data[offset], p_data[offset + 1]]) as usize;
+                offset += 2 + val_len;
+            }
+        }
+
         Ok(node)
     }
 
@@ -416,81 +442,60 @@ impl BTreeNode {
         Ok(())
     }
 
-    pub fn get_key_procedural(&self, target_index: usize) -> Result<BTreeKey> {
+    pub fn get_key_view(&self, target_index: usize) -> Result<&[u8]> {
         if target_index >= self.key_count {
             return Err(HematiteError::StorageError("Index out of bounds".to_string()));
         }
-        if !self.keys.is_empty() {
-            return Ok(self.keys[target_index].clone());
+        if self.is_decoded {
+            return Ok(&self.keys[target_index].data);
         }
 
         let page = self.raw_page.as_ref().unwrap();
-        let mut offset = BTREE_PAGE_HEADER_SIZE;
-        
-        for i in 0..=target_index {
-            let key_len = u16::from_le_bytes([page.data[offset], page.data[offset + 1]]) as usize;
-            offset += 2;
-            if i == target_index {
-                let key_data = page.data[offset..offset + key_len].to_vec();
-                return Ok(BTreeKey::new(key_data));
-            }
-            offset += key_len;
-        }
-        unreachable!()
+        let offset = self.cell_offsets[target_index] as usize;
+        let key_len = u16::from_le_bytes([page.data[offset], page.data[offset + 1]]) as usize;
+        Ok(&page.data[offset + 2..offset + 2 + key_len])
+    }
+
+    pub fn get_key_procedural(&self, target_index: usize) -> Result<BTreeKey> {
+        self.get_key_view(target_index).map(|v| BTreeKey::new(v.to_vec()))
     }
 
     pub fn get_child_procedural(&self, target_index: usize) -> Result<PageId> {
         if target_index > self.key_count || self.node_type != NodeType::Internal {
             return Err(HematiteError::StorageError("Index out of bounds".to_string()));
         }
-        if !self.children.is_empty() {
+        if self.is_decoded {
             return Ok(self.children[target_index]);
         }
 
         let page = self.raw_page.as_ref().unwrap();
-        let mut offset = BTREE_PAGE_HEADER_SIZE;
-        
-        for _ in 0..self.key_count {
-            let key_len = u16::from_le_bytes([page.data[offset], page.data[offset + 1]]) as usize;
-            offset += 2 + key_len;
-        }
-        
-        offset += target_index * 4;
-        let child_id = u32::from_le_bytes([
+        // Child offsets start after keys (at index key_count)
+        let offset = self.cell_offsets[self.key_count + target_index] as usize;
+        Ok(u32::from_le_bytes([
             page.data[offset],
             page.data[offset + 1],
             page.data[offset + 2],
             page.data[offset + 3],
-        ]);
-        Ok(child_id)
+        ]))
     }
 
-    pub fn get_value_procedural(&self, target_index: usize) -> Result<BTreeValue> {
+    pub fn get_value_view(&self, target_index: usize) -> Result<&[u8]> {
         if target_index >= self.key_count || self.node_type != NodeType::Leaf {
             return Err(HematiteError::StorageError("Index out of bounds".to_string()));
         }
-        if !self.values.is_empty() {
-            return Ok(self.values[target_index].clone());
+        if self.is_decoded {
+            return Ok(&self.values[target_index].data);
         }
 
         let page = self.raw_page.as_ref().unwrap();
-        let mut offset = BTREE_PAGE_HEADER_SIZE;
-        
-        for _ in 0..self.key_count {
-            let key_len = u16::from_le_bytes([page.data[offset], page.data[offset + 1]]) as usize;
-            offset += 2 + key_len;
-        }
-        
-        for i in 0..=target_index {
-            let val_len = u16::from_le_bytes([page.data[offset], page.data[offset + 1]]) as usize;
-            offset += 2;
-            if i == target_index {
-                let val_data = page.data[offset..offset + val_len].to_vec();
-                return Ok(BTreeValue::new(val_data));
-            }
-            offset += val_len;
-        }
-        unreachable!()
+        // Value offsets start after keys (at index key_count)
+        let offset = self.cell_offsets[self.key_count + target_index] as usize;
+        let val_len = u16::from_le_bytes([page.data[offset], page.data[offset + 1]]) as usize;
+        Ok(&page.data[offset + 2..offset + 2 + val_len])
+    }
+
+    pub fn get_value_procedural(&self, target_index: usize) -> Result<BTreeValue> {
+        self.get_value_view(target_index).map(|v| BTreeValue::new(v.to_vec()))
     }
 
     pub fn to_page(&self, page: &mut Page) -> Result<()> {
@@ -578,47 +583,53 @@ impl BTreeNode {
             return Ok(false);
         }
 
-        let existing_index = match self.keys.iter().position(|k| k == key) {
+        // Find key index lazily
+        let mut existing_index = None;
+        if self.is_decoded {
+            existing_index = self.keys.iter().position(|k| k == key);
+        } else {
+            for i in 0..self.key_count {
+                if self.get_key_view(i)? == key.as_bytes() {
+                    existing_index = Some(i);
+                    break;
+                }
+            }
+        }
+
+        let index = match existing_index {
             Some(i) => i,
             None => return Ok(false),
         };
 
-        let old_value_len = self.values[existing_index].data.len();
-        if old_value_len != new_value.data.len() {
+        // Check value length
+        let current_val_len;
+        if self.is_decoded {
+            current_val_len = self.values[index].data.len();
+        } else {
+            let page_data = &self.raw_page.as_ref().unwrap().data;
+            let offset = self.cell_offsets[self.key_count + index] as usize;
+            current_val_len = u16::from_le_bytes([page_data[offset], page_data[offset + 1]]) as usize;
+        }
+
+        if current_val_len != new_value.data.len() {
             return Ok(false);
         }
 
-        // Needs to have a decoded page to do direct manipulation
-        if self.raw_page.is_none() {
-            self.to_page(page)?;
-            self.raw_page = Some(page.clone());
-        }
+        // Perform in-place update on raw page
+        let offset = self.cell_offsets[self.key_count + index] as usize;
+        page.data[offset + 2..offset + 2 + current_val_len].copy_from_slice(&new_value.data);
 
-        self.values[existing_index] = new_value.clone();
-
-        let mut offset = BTREE_PAGE_HEADER_SIZE;
-        for k in &self.keys {
-            offset += 2 + k.data.len();
-        }
-        for i in 0..existing_index {
-            offset += 2 + self.values[i].data.len();
-        }
-
-        offset += 2; // skip value len
-        page.data[offset..offset + new_value.data.len()].copy_from_slice(&new_value.data);
-
-        let payload_len = u32::from_le_bytes([
-            page.data[HEADER_OFFSET_PAYLOAD_LEN],
-            page.data[HEADER_OFFSET_PAYLOAD_LEN + 1],
-            page.data[HEADER_OFFSET_PAYLOAD_LEN + 2],
-            page.data[HEADER_OFFSET_PAYLOAD_LEN + 3],
-        ]) as usize;
-        
+        // Update checksum
+        let payload_len = self.payload_len;
         let payload = &page.data[BTREE_PAGE_HEADER_SIZE..BTREE_PAGE_HEADER_SIZE + payload_len];
         let checksum = Self::calculate_checksum(payload);
         page.data[HEADER_OFFSET_CHECKSUM..HEADER_OFFSET_CHECKSUM + CHECKSUM_SIZE]
             .copy_from_slice(&checksum.to_le_bytes());
 
+        // Update self if decoded
+        if self.is_decoded {
+            self.values[index] = new_value.clone();
+        }
         self.raw_page = Some(page.clone());
         
         Ok(true)
@@ -632,47 +643,67 @@ impl BTreeNode {
     }
 
     fn search_leaf(&self, key: &BTreeKey) -> SearchResult {
-        for (i, k) in self.keys.iter().enumerate() {
-            match key.cmp(k) {
+        let mut left = 0;
+        let mut right = self.key_count;
+
+        while left < right {
+            let mid = (left + right) / 2;
+            let mid_key_bytes = self.get_key_view(mid).unwrap();
+            match key.as_bytes().cmp(mid_key_bytes) {
                 std::cmp::Ordering::Equal => {
-                    return SearchResult::Found(self.values[i].clone());
+                    return SearchResult::Found(self.get_value_procedural(mid).unwrap());
                 }
                 std::cmp::Ordering::Less => {
-                    break;
+                    right = mid;
                 }
-                std::cmp::Ordering::Greater => continue,
+                std::cmp::Ordering::Greater => {
+                    left = mid + 1;
+                }
             }
         }
         SearchResult::NotFound(INVALID_PAGE_ID)
     }
 
     fn search_internal(&self, key: &BTreeKey) -> SearchResult {
-        for (i, k) in self.keys.iter().enumerate() {
-            match key.cmp(k) {
+        let mut left = 0;
+        let mut right = self.key_count;
+
+        while left < right {
+            let mid = (left + right) / 2;
+            let mid_key_bytes = self.get_key_view(mid).unwrap();
+            match key.as_bytes().cmp(mid_key_bytes) {
                 std::cmp::Ordering::Equal => {
-                    // In B+ tree, when key equals separator, continue to right child
-                    // (assuming separators are minimum keys of right subtrees)
-                    return SearchResult::NotFound(self.children[i + 1]);
+                    return SearchResult::NotFound(self.get_child_procedural(mid + 1).unwrap());
                 }
                 std::cmp::Ordering::Less => {
-                    return SearchResult::NotFound(self.children[i]);
+                    right = mid;
                 }
-                std::cmp::Ordering::Greater => continue,
+                std::cmp::Ordering::Greater => {
+                    left = mid + 1;
+                }
             }
         }
-        SearchResult::NotFound(self.children[self.keys.len()])
+        SearchResult::NotFound(self.get_child_procedural(left).unwrap())
     }
 
     pub fn find_child(&self, key: &BTreeKey) -> PageId {
-        for (i, k) in self.keys.iter().enumerate() {
-            if key < k {
-                return self.children[i];
+        let mut left = 0;
+        let mut right = self.key_count;
+
+        while left < right {
+            let mid = (left + right) / 2;
+            let mid_key_bytes = self.get_key_view(mid).unwrap();
+            if key.as_bytes() < mid_key_bytes {
+                right = mid;
+            } else {
+                left = mid + 1;
             }
         }
-        self.children[self.keys.len()]
+        self.get_child_procedural(left).unwrap()
     }
 
     pub fn insert_leaf(&mut self, key: BTreeKey, value: BTreeValue) -> Result<()> {
+        self.decode()?;
         Self::validate_key_size(&key)?;
         Self::validate_value_size(&value)?;
 
@@ -698,6 +729,7 @@ impl BTreeNode {
     }
 
     pub fn insert_internal(&mut self, key: BTreeKey, child_page_id: PageId) -> Result<()> {
+        self.decode()?;
         Self::validate_key_size(&key)?;
 
         if !self.can_insert_key_child(&key) {
@@ -722,6 +754,7 @@ impl BTreeNode {
         new_key: BTreeKey,
         new_value: BTreeValue,
     ) -> Result<(BTreeKey, PageId)> {
+        self.decode()?;
         let pos = self
             .keys
             .iter()
@@ -768,6 +801,7 @@ impl BTreeNode {
         new_key: BTreeKey,
         new_child: PageId,
     ) -> Result<(BTreeKey, PageId)> {
+        self.decode()?;
         let pos = self
             .keys
             .iter()
@@ -941,6 +975,8 @@ impl BTreeNode {
     }
 
     pub fn merge_leaf(&mut self, other: &mut BTreeNode, storage: &mut Pager) -> Result<()> {
+        self.decode()?;
+        other.decode()?;
         if self.node_type != NodeType::Leaf || other.node_type != NodeType::Leaf {
             return Err(HematiteError::StorageError(
                 "Can only merge leaf nodes".to_string(),
@@ -967,6 +1003,8 @@ impl BTreeNode {
         separator_key: BTreeKey,
         storage: &mut Pager,
     ) -> Result<()> {
+        self.decode()?;
+        other.decode()?;
         if self.node_type != NodeType::Internal || other.node_type != NodeType::Internal {
             return Err(HematiteError::StorageError(
                 "Can only merge internal nodes".to_string(),
@@ -990,8 +1028,8 @@ impl BTreeNode {
 
     pub fn is_underflow(&self) -> bool {
         match self.node_type {
-            NodeType::Leaf => self.keys.len() < (MAX_KEYS / 2),
-            NodeType::Internal => self.keys.len() < ((MAX_KEYS - 1) / 2),
+            NodeType::Leaf => self.key_count < (MAX_KEYS / 2),
+            NodeType::Internal => self.key_count < ((MAX_KEYS - 1) / 2),
         }
     }
 }
