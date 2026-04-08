@@ -77,6 +77,8 @@
 
 #[path = "pager/cache.rs"]
 mod cache;
+#[path = "pager/locking.rs"]
+mod locking;
 #[path = "pager/state.rs"]
 mod state;
 
@@ -95,7 +97,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use crate::storage::pager::locking::checksum_persist_lock;
 
 pub use self::state::{JournalMode, PagerState};
 
@@ -128,13 +130,6 @@ impl PagerSnapshot {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-struct LockRegistryEntry {
-    readers: usize,
-    writer: bool,
-    wal_reader_sequences: HashMap<u64, usize>,
-}
-
 fn compact_transaction_free_pages(transaction: &mut PagerTransaction) {
     transaction.wal_free_pages.sort_unstable();
     transaction.wal_free_pages.dedup();
@@ -145,16 +140,6 @@ fn compact_transaction_free_pages(transaction: &mut PagerTransaction) {
         transaction.wal_free_pages.pop();
         transaction.wal_next_page_id = transaction.wal_next_page_id.saturating_sub(1);
     }
-}
-
-fn lock_registry() -> &'static Mutex<HashMap<PathBuf, LockRegistryEntry>> {
-    static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, LockRegistryEntry>>> = OnceLock::new();
-    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn checksum_persist_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 #[derive(Debug)]
@@ -175,24 +160,6 @@ pub struct Pager {
 }
 
 impl Pager {
-    fn lock_registry_map(
-        &self,
-    ) -> Result<MutexGuard<'static, HashMap<PathBuf, LockRegistryEntry>>> {
-        lock_registry().lock().map_err(|_| {
-            crate::error::HematiteError::InternalError(
-                "Pager lock registry mutex is poisoned".to_string(),
-            )
-        })
-    }
-
-    fn database_identity_path(&self) -> Result<&PathBuf> {
-        self.database_identity.as_ref().ok_or_else(|| {
-            crate::error::HematiteError::InternalError(
-                "Pager database identity is not available".to_string(),
-            )
-        })
-    }
-
     pub const CHECKSUM_METADATA_VERSION: u32 = 1;
 
     pub fn new<P: AsRef<Path>>(path: P, cache_capacity: usize) -> Result<Self> {
@@ -765,135 +732,6 @@ impl Pager {
             Some(parent) => parent.join(file_name),
             None => PathBuf::from(file_name),
         }
-    }
-
-    fn acquire_shared_lock(&mut self) -> Result<()> {
-        if self.database_identity.is_none() {
-            return Ok(());
-        }
-
-        match self.lock_mode {
-            PagerLockMode::Write if self.journal_mode == JournalMode::Wal => return Ok(()),
-            PagerLockMode::Write => return Ok(()),
-            PagerLockMode::Shared { depth } => {
-                self.lock_mode = PagerLockMode::Shared { depth: depth + 1 };
-                return Ok(());
-            }
-            PagerLockMode::None => {}
-        }
-
-        let path = self.database_identity_path()?.clone();
-        let mut registry = self.lock_registry_map()?;
-        let entry = registry.entry(path).or_default();
-        if entry.writer && self.journal_mode == JournalMode::Rollback {
-            return Err(crate::error::HematiteError::StorageError(
-                "database is locked for writing".to_string(),
-            ));
-        }
-        entry.readers += 1;
-        self.lock_mode = PagerLockMode::Shared { depth: 1 };
-        Ok(())
-    }
-
-    fn release_shared_lock(&mut self) -> Result<()> {
-        let Some(path) = self.database_identity.as_ref() else {
-            return Ok(());
-        };
-
-        match self.lock_mode {
-            PagerLockMode::Write | PagerLockMode::None => return Ok(()),
-            PagerLockMode::Shared { depth } if depth > 1 => {
-                self.lock_mode = PagerLockMode::Shared { depth: depth - 1 };
-                return Ok(());
-            }
-            PagerLockMode::Shared { .. } => {}
-        }
-
-        let mut registry = self.lock_registry_map()?;
-        if let Some(entry) = registry.get_mut(path) {
-            entry.readers = entry.readers.saturating_sub(1);
-            if entry.readers == 0 && !entry.writer {
-                registry.remove(path);
-            }
-        }
-        self.lock_mode = PagerLockMode::None;
-        Ok(())
-    }
-
-    fn register_wal_reader_sequence(&self, sequence: u64) -> Result<()> {
-        let Some(path) = self.database_identity.as_ref() else {
-            return Ok(());
-        };
-        let mut registry = self.lock_registry_map()?;
-        let entry = registry.entry(path.clone()).or_default();
-        *entry.wal_reader_sequences.entry(sequence).or_insert(0) += 1;
-        Ok(())
-    }
-
-    fn unregister_wal_reader_sequence(&self, sequence: u64) -> Result<()> {
-        let Some(path) = self.database_identity.as_ref() else {
-            return Ok(());
-        };
-        let mut registry = self.lock_registry_map()?;
-        if let Some(entry) = registry.get_mut(path) {
-            if let Some(count) = entry.wal_reader_sequences.get_mut(&sequence) {
-                *count = count.saturating_sub(1);
-                if *count == 0 {
-                    entry.wal_reader_sequences.remove(&sequence);
-                }
-            }
-            if entry.readers == 0 && !entry.writer && entry.wal_reader_sequences.is_empty() {
-                registry.remove(path);
-            }
-        }
-        Ok(())
-    }
-
-    fn acquire_write_lock(&mut self) -> Result<()> {
-        if self.database_identity.is_none() {
-            self.lock_mode = PagerLockMode::Write;
-            return Ok(());
-        }
-        if self.lock_mode == PagerLockMode::Write {
-            return Ok(());
-        }
-        if matches!(self.lock_mode, PagerLockMode::Shared { .. }) {
-            return Err(crate::error::HematiteError::StorageError(
-                "cannot upgrade a shared database lock to a write lock".to_string(),
-            ));
-        }
-
-        let path = self.database_identity_path()?.clone();
-        let mut registry = self.lock_registry_map()?;
-        let entry = registry.entry(path).or_default();
-        if entry.writer || (self.journal_mode == JournalMode::Rollback && entry.readers > 0) {
-            return Err(crate::error::HematiteError::StorageError(
-                "database is locked".to_string(),
-            ));
-        }
-        entry.writer = true;
-        self.lock_mode = PagerLockMode::Write;
-        Ok(())
-    }
-
-    fn release_write_lock(&mut self) -> Result<()> {
-        let Some(path) = self.database_identity.as_ref() else {
-            self.lock_mode = PagerLockMode::None;
-            return Ok(());
-        };
-        if self.lock_mode != PagerLockMode::Write {
-            return Ok(());
-        }
-
-        let mut registry = self.lock_registry_map()?;
-        if let Some(entry) = registry.get_mut(path) {
-            entry.writer = false;
-            if entry.readers == 0 {
-                registry.remove(path);
-            }
-        }
-        self.lock_mode = PagerLockMode::None;
-        Ok(())
     }
 
     fn journal_path(db_path: &Path) -> PathBuf {
