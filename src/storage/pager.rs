@@ -75,14 +75,20 @@
 //! - checkpoints cannot discard page images that are still needed by an active reader snapshot;
 //! - higher layers never see partial page writes or raw filesystem ordering concerns.
 
+#[path = "pager/cache.rs"]
+mod cache;
+#[path = "pager/state.rs"]
+mod state;
+
 use crate::error::Result;
 use crate::storage::journal::{JournalRecord, JournalState, RollbackJournal};
 use crate::storage::wal::{VisibleWalState, WalFrame, WalRecord};
 use crate::storage::{
-    buffer_pool::BufferPool,
     file_manager::{FileManager, FileManagerSnapshot},
     Page, PageId, PagerIntegrityReport, DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID,
 };
+use self::cache::PageCache;
+use self::state::PagerLockMode;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -91,31 +97,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JournalMode {
-    Rollback,
-    Wal,
-}
-
-impl JournalMode {
-    fn parse(value: &str) -> Result<Self> {
-        match value {
-            "rollback" => Ok(Self::Rollback),
-            "wal" => Ok(Self::Wal),
-            _ => Err(crate::error::HematiteError::StorageError(format!(
-                "Unsupported pager journal mode '{}'",
-                value
-            ))),
-        }
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Rollback => "rollback",
-            Self::Wal => "wal",
-        }
-    }
-}
+pub use self::state::{JournalMode, PagerState};
 
 #[derive(Debug, Clone)]
 struct PagerTransaction {
@@ -131,35 +113,19 @@ struct PagerTransaction {
 #[derive(Debug, Clone)]
 pub(crate) struct PagerSnapshot {
     file_manager: FileManagerSnapshot,
-    buffer_pool: BufferPool,
-    dirty_pages: HashSet<PageId>,
+    cache: PageCache,
     page_checksums: HashMap<PageId, u32>,
     transaction: Option<PagerTransaction>,
 }
 
 impl PagerSnapshot {
     pub(crate) fn into_transaction_baseline(mut self) -> Self {
-        self.dirty_pages.clear();
+        for page_id in self.cache.dirty_page_ids() {
+            self.cache.clear_dirty(page_id);
+        }
         self.transaction = None;
         self
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PagerState {
-    Open,
-    Reader,
-    WriterLocked,
-    WriterCacheMod,
-    WriterDbMod,
-    Error,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PagerLockMode {
-    None,
-    Shared { depth: usize },
-    Write,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -194,8 +160,7 @@ fn checksum_persist_lock() -> &'static Mutex<()> {
 #[derive(Debug)]
 pub struct Pager {
     file_manager: FileManager,
-    buffer_pool: BufferPool,
-    dirty_pages: HashSet<PageId>,
+    cache: PageCache,
     page_checksums: HashMap<PageId, u32>,
     journal_mode: JournalMode,
     checksum_store_path: Option<PathBuf>,
@@ -207,7 +172,6 @@ pub struct Pager {
     latest_wal_state: Option<VisibleWalState>,
     transaction: Option<PagerTransaction>,
     state: PagerState,
-    buffer_pool_capacity: usize,
 }
 
 impl Pager {
@@ -241,8 +205,7 @@ impl Pager {
             .or_else(|| Some(path.as_ref().to_path_buf()));
         let mut pager = Self {
             file_manager,
-            buffer_pool: BufferPool::new(cache_capacity),
-            dirty_pages: HashSet::new(),
+            cache: PageCache::new(cache_capacity),
             page_checksums: HashMap::new(),
             journal_mode: JournalMode::Rollback,
             checksum_store_path,
@@ -254,7 +217,6 @@ impl Pager {
             latest_wal_state: None,
             transaction: None,
             state: PagerState::Open,
-            buffer_pool_capacity: cache_capacity,
         };
         pager.recover_if_needed()?;
         pager.load_persisted_state()?;
@@ -266,8 +228,7 @@ impl Pager {
         let file_manager = FileManager::new_in_memory()?;
         Ok(Self {
             file_manager,
-            buffer_pool: BufferPool::new(cache_capacity),
-            dirty_pages: HashSet::new(),
+            cache: PageCache::new(cache_capacity),
             page_checksums: HashMap::new(),
             journal_mode: JournalMode::Rollback,
             checksum_store_path: None,
@@ -279,7 +240,6 @@ impl Pager {
             latest_wal_state: None,
             transaction: None,
             state: PagerState::Open,
-            buffer_pool_capacity: cache_capacity,
         })
     }
 
@@ -294,7 +254,7 @@ impl Pager {
 
     pub fn read_page(&mut self, page_id: PageId) -> Result<Page> {
         self.check_error_state()?;
-        if let Some(page) = self.buffer_pool.get(page_id) {
+        if let Some(page) = self.cache.get(page_id) {
             return Ok(page.clone());
         }
 
@@ -304,7 +264,7 @@ impl Pager {
                     && page_id < transaction.wal_next_page_id
                 {
                     let page = Page::new(page_id);
-                    self.buffer_pool.put(page.clone());
+                    self.cache.put(page.clone());
                     return Ok(page);
                 }
             }
@@ -326,7 +286,7 @@ impl Pager {
                         )));
                     }
                 }
-                self.buffer_pool.put(page.clone());
+                self.cache.put(page.clone());
                 return Ok(page);
             }
             let visible_page_regions =
@@ -334,7 +294,7 @@ impl Pager {
             let visible_next_page_id = (visible_page_regions as u32).max(2);
             if page_id >= self.file_manager.next_page_id() && page_id < visible_next_page_id {
                 let page = Page::new(page_id);
-                self.buffer_pool.put(page.clone());
+                self.cache.put(page.clone());
                 return Ok(page);
             }
         }
@@ -355,7 +315,7 @@ impl Pager {
                 )));
             }
         }
-        self.buffer_pool.put(page.clone());
+        self.cache.put(page.clone());
         Ok(page)
     }
 
@@ -367,8 +327,8 @@ impl Pager {
             self.page_checksums
                 .insert(page_id, Self::calculate_page_checksum(&page));
         }
-        self.buffer_pool.put(page);
-        self.dirty_pages.insert(page_id);
+        self.cache.put(page);
+        self.cache.mark_dirty(page_id);
         Ok(())
     }
 
@@ -390,8 +350,7 @@ impl Pager {
     pub fn deallocate_page(&mut self, page_id: PageId) -> Result<()> {
         self.check_error_state()?;
         self.snapshot_original_page(page_id)?;
-        self.buffer_pool.remove(page_id);
-        self.dirty_pages.remove(&page_id);
+        self.cache.remove(page_id);
         self.page_checksums.remove(&page_id);
         if self.journal_mode == JournalMode::Wal {
             if let Some(transaction) = &mut self.transaction {
@@ -416,7 +375,7 @@ impl Pager {
             ));
         }
 
-        let dirty_ids = self.dirty_pages.iter().copied().collect::<Vec<_>>();
+        let dirty_ids = self.cache.dirty_page_ids();
         let mut metadata_page_dirty = false;
 
         for page_id in dirty_ids.iter().copied() {
@@ -425,24 +384,24 @@ impl Pager {
                 continue;
             }
 
-            if let Some(page) = self.buffer_pool.get(page_id) {
+            if let Some(page) = self.cache.get(page_id) {
                 if let Err(e) = self.file_manager.write_page(page) {
                     self.state = PagerState::Error;
                     return Err(e);
                 }
             }
-            self.dirty_pages.remove(&page_id);
+            self.cache.clear_dirty(page_id);
         }
 
         // Metadata is written last so it cannot describe page state that has not reached disk.
         if metadata_page_dirty {
-            if let Some(page) = self.buffer_pool.get(STORAGE_METADATA_PAGE_ID) {
+            if let Some(page) = self.cache.get(STORAGE_METADATA_PAGE_ID) {
                 if let Err(e) = self.file_manager.write_page(page) {
                     self.state = PagerState::Error;
                     return Err(e);
                 }
             }
-            self.dirty_pages.remove(&STORAGE_METADATA_PAGE_ID);
+            self.cache.clear_dirty(STORAGE_METADATA_PAGE_ID);
         }
         if let Err(e) = self.file_manager.flush() {
             self.state = PagerState::Error;
@@ -534,8 +493,7 @@ impl Pager {
     pub(crate) fn snapshot(&self) -> Result<PagerSnapshot> {
         Ok(PagerSnapshot {
             file_manager: self.file_manager.snapshot()?,
-            buffer_pool: self.buffer_pool.clone(),
-            dirty_pages: self.dirty_pages.clone(),
+            cache: self.cache.clone(),
             page_checksums: self.page_checksums.clone(),
             transaction: self.transaction.clone(),
         })
@@ -543,8 +501,7 @@ impl Pager {
 
     pub(crate) fn restore_snapshot(&mut self, snapshot: PagerSnapshot) -> Result<()> {
         self.file_manager.restore_snapshot(snapshot.file_manager)?;
-        self.buffer_pool = snapshot.buffer_pool;
-        self.dirty_pages = snapshot.dirty_pages;
+        self.cache = snapshot.cache;
         self.page_checksums = snapshot.page_checksums;
         self.transaction = snapshot.transaction;
         Ok(())
@@ -743,8 +700,8 @@ impl Pager {
                 )));
             }
 
-            let page = if self.dirty_pages.contains(&page_id) {
-                self.buffer_pool.get(page_id).cloned().ok_or_else(|| {
+            let page = if self.cache.is_dirty(page_id) {
+                self.cache.get(page_id).cloned().ok_or_else(|| {
                     crate::error::HematiteError::StorageError(format!(
                         "Dirty page {} missing from buffer pool",
                         page_id
@@ -788,7 +745,7 @@ impl Pager {
 
     #[cfg(test)]
     pub(crate) fn dirty_page_count(&self) -> usize {
-        self.dirty_pages.len()
+        self.cache.dirty_count()
     }
 
     #[cfg(test)]
@@ -1126,11 +1083,11 @@ impl Pager {
     }
 
     fn refresh_persisted_view(&mut self) -> Result<()> {
-        if self.transaction.is_some() || !self.dirty_pages.is_empty() {
+        if self.transaction.is_some() || self.cache.dirty_count() != 0 {
             return Ok(());
         }
 
-        self.buffer_pool = BufferPool::new(self.buffer_pool_capacity);
+        self.cache.reset();
         self.load_persisted_state()?;
         self.load_latest_wal_state()
     }
@@ -1328,8 +1285,7 @@ impl Pager {
     }
 
     fn restore_from_journal(&mut self, journal: &RollbackJournal) -> Result<()> {
-        self.buffer_pool = BufferPool::new(self.buffer_pool_capacity);
-        self.dirty_pages.clear();
+        self.cache.reset();
         self.file_manager
             .restore_file_len(journal.original_file_len)?;
         self.file_manager
@@ -1349,8 +1305,7 @@ impl Pager {
         let transaction = self.transaction.clone().ok_or_else(|| {
             crate::error::HematiteError::StorageError("Pager transaction is not active".to_string())
         })?;
-        self.buffer_pool = BufferPool::new(self.buffer_pool_capacity);
-        self.dirty_pages.clear();
+        self.cache.reset();
         self.page_checksums = transaction.original_checksums;
         self.load_latest_wal_state()
     }
@@ -1365,12 +1320,12 @@ impl Pager {
             .map(|state| state.visible_sequence + 1)
             .unwrap_or(1);
 
-        let mut page_ids = self.dirty_pages.iter().copied().collect::<Vec<_>>();
+        let mut page_ids = self.cache.dirty_page_ids();
         page_ids.sort_unstable();
 
         let mut frames = Vec::with_capacity(page_ids.len());
         for page_id in page_ids {
-            let page = self.buffer_pool.get(page_id).cloned().ok_or_else(|| {
+            let page = self.cache.get(page_id).cloned().ok_or_else(|| {
                 crate::error::HematiteError::StorageError(format!(
                     "Dirty page {} missing from buffer pool",
                     page_id
@@ -1398,7 +1353,9 @@ impl Pager {
         };
 
         self.append_wal_record(record)?;
-        self.dirty_pages.clear();
+        for page_id in self.cache.dirty_page_ids() {
+            self.cache.clear_dirty(page_id);
+        }
         self.persist_checksums()
     }
 
