@@ -251,6 +251,7 @@ mod wal_tests {
 }
 
 mod pager_tests {
+    use crate::storage::journal::{JournalRecord, JournalState, RollbackJournal};
     use crate::storage::pager::Pager;
     use crate::storage::wal::{WalFrame, WalRecord};
     use crate::storage::{JournalMode, Page};
@@ -355,6 +356,174 @@ mod pager_tests {
         let mut reopened = Pager::new(test_db.path(), 8)?;
         let page = reopened.read_page(page_id)?;
         assert_eq!(page.data[0], 10);
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_rollback_journal_is_created_on_begin_transaction() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_rollback_journal_created_on_begin");
+        let journal_path = std::path::PathBuf::from(format!("{}.journal", test_db.path()));
+
+        let mut pager = Pager::new(test_db.path(), 8)?;
+        let page_id = pager.allocate_page()?;
+        let mut page = Page::new(page_id);
+        page.data[0] = 33;
+        pager.write_page(page)?;
+        pager.flush()?;
+
+        pager.begin_transaction()?;
+        assert!(journal_path.exists());
+
+        let journal = RollbackJournal::decode(&fs::read(&journal_path)?)?;
+        assert_eq!(journal.state, JournalState::Active);
+        assert_eq!(journal.page_records.len(), 0);
+        assert!(journal.original_file_len >= 64 + 3 * crate::storage::PAGE_SIZE as u64);
+
+        pager.rollback_transaction()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_rollback_journal_records_original_pages_once() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_rollback_journal_records_original_pages_once");
+        let journal_path = std::path::PathBuf::from(format!("{}.journal", test_db.path()));
+
+        let mut pager = Pager::new(test_db.path(), 8)?;
+        let first_page_id = pager.allocate_page()?;
+        let second_page_id = pager.allocate_page()?;
+
+        let mut first_page = Page::new(first_page_id);
+        first_page.data[0] = 11;
+        pager.write_page(first_page)?;
+
+        let mut second_page = Page::new(second_page_id);
+        second_page.data[0] = 22;
+        pager.write_page(second_page)?;
+        pager.flush()?;
+
+        pager.begin_transaction()?;
+
+        let mut updated_first = pager.read_page(first_page_id)?;
+        updated_first.data[0] = 99;
+        pager.write_page(updated_first)?;
+
+        let mut updated_first_again = pager.read_page(first_page_id)?;
+        updated_first_again.data[1] = 88;
+        pager.write_page(updated_first_again)?;
+
+        let mut updated_second = pager.read_page(second_page_id)?;
+        updated_second.data[0] = 77;
+        pager.write_page(updated_second)?;
+
+        let journal = RollbackJournal::decode(&fs::read(&journal_path)?)?;
+        assert_eq!(journal.state, JournalState::Active);
+        assert_eq!(journal.page_records.len(), 2);
+
+        let first_record = journal
+            .page_records
+            .iter()
+            .find(|record| record.page_id == first_page_id)
+            .expect("first page should be journaled");
+        let second_record = journal
+            .page_records
+            .iter()
+            .find(|record| record.page_id == second_page_id)
+            .expect("second page should be journaled");
+
+        assert_eq!(first_record.data[0], 11);
+        assert_eq!(second_record.data[0], 22);
+
+        pager.rollback_transaction()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_recovery_rolls_back_multiple_pages_from_active_journal(
+    ) -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_recovery_rolls_back_multiple_pages");
+        let (first_page_id, second_page_id) = {
+            let mut pager = Pager::new(test_db.path(), 8)?;
+            let first_page_id = pager.allocate_page()?;
+            let second_page_id = pager.allocate_page()?;
+
+            let mut first_page = Page::new(first_page_id);
+            first_page.data[0] = 10;
+            pager.write_page(first_page)?;
+
+            let mut second_page = Page::new(second_page_id);
+            second_page.data[0] = 20;
+            pager.write_page(second_page)?;
+            pager.flush()?;
+
+            pager.begin_transaction()?;
+            let mut updated_first = pager.read_page(first_page_id)?;
+            updated_first.data[0] = 50;
+            pager.write_page(updated_first)?;
+
+            let mut updated_second = pager.read_page(second_page_id)?;
+            updated_second.data[0] = 60;
+            pager.write_page(updated_second)?;
+
+            (first_page_id, second_page_id)
+        };
+
+        let mut reopened = Pager::new(test_db.path(), 8)?;
+        assert_eq!(reopened.read_page(first_page_id)?.data[0], 10);
+        assert_eq!(reopened.read_page(second_page_id)?.data[0], 20);
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_open_discards_committed_journal_without_rollback() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_open_discards_committed_journal");
+        let journal_path = std::path::PathBuf::from(format!("{}.journal", test_db.path()));
+
+        let (page_id, file_len, free_pages, checksums) = {
+            let mut pager = Pager::new(test_db.path(), 8)?;
+            let page_id = pager.allocate_page()?;
+            let mut page = Page::new(page_id);
+            page.data[0] = 55;
+            pager.write_page(page)?;
+            pager.flush()?;
+            (
+                page_id,
+                pager.file_len()?,
+                pager.free_pages().to_vec(),
+                pager.checksum_entries(),
+            )
+        };
+
+        let journal = RollbackJournal {
+            state: JournalState::Committed,
+            original_file_len: file_len,
+            original_free_pages: free_pages,
+            original_checksums: checksums,
+            page_records: vec![JournalRecord {
+                page_id,
+                data: vec![1u8; crate::storage::PAGE_SIZE],
+            }],
+        };
+        fs::write(&journal_path, journal.encode()?)?;
+
+        let mut reopened = Pager::new(test_db.path(), 8)?;
+        assert_eq!(reopened.read_page(page_id)?.data[0], 55);
+        assert!(!journal_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_open_rejects_truncated_rollback_journal() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_open_rejects_truncated_journal");
+        let journal_path = std::path::PathBuf::from(format!("{}.journal", test_db.path()));
+
+        let mut pager = Pager::new(test_db.path(), 8)?;
+        pager.flush()?;
+        drop(pager);
+
+        fs::write(&journal_path, b"HTRJ\x01\x00")?;
+
+        let err = Pager::new(test_db.path(), 8).unwrap_err();
+        assert!(err.to_string().contains("truncated"));
         Ok(())
     }
 
