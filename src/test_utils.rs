@@ -1,7 +1,10 @@
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+static TEST_DB_UNIQUIFIER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
 pub struct TestDbFile {
@@ -14,7 +17,8 @@ impl TestDbFile {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let path = PathBuf::from(format!("{}_{}.db", prefix, nanos));
+        let uniquifier = TEST_DB_UNIQUIFIER.fetch_add(1, Ordering::Relaxed);
+        let path = PathBuf::from(format!("{}_{}_{}.db", prefix, nanos, uniquifier));
         Self::cleanup_paths_for(&path);
         Self { path }
     }

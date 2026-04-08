@@ -1872,7 +1872,10 @@ impl Connection {
             ));
         }
         let mut catalog_guard = self.lock_catalog()?;
-        catalog_guard.flush()
+        if catalog_guard.has_pending_changes()? {
+            catalog_guard.flush()?;
+        }
+        Ok(())
     }
 
     pub fn journal_mode(&self) -> Result<JournalMode> {

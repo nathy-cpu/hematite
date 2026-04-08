@@ -479,6 +479,10 @@ impl Catalog {
         self.engine.flush()
     }
 
+    pub(crate) fn has_pending_changes(&self) -> Result<bool> {
+        Ok(self.schema_dirty || self.engine.has_pending_changes()?)
+    }
+
     pub fn journal_mode(&self) -> Result<JournalMode> {
         self.engine.journal_mode()
     }

@@ -3306,6 +3306,31 @@ mod connection_tests {
     }
 
     #[test]
+    fn test_close_of_stale_rollback_connection_does_not_rewrite_checksums() -> Result<()> {
+        let db = TestDbFile::new("_test_close_of_stale_rollback_connection_does_not_rewrite_checksums");
+        let mut setup = Connection::new(db.path())?;
+        setup.execute("CREATE TABLE items (id INT PRIMARY KEY, note TEXT NOT NULL);")?;
+        setup.execute("INSERT INTO items (id, note) VALUES (1, 'before');")?;
+        setup.close()?;
+
+        let mut stale_reader = Connection::new(db.path())?;
+        let before = count_rows(&mut stale_reader, "items")?;
+        assert_eq!(before, 1);
+
+        let mut writer = Connection::new(db.path())?;
+        writer.execute("INSERT INTO items (id, note) VALUES (2, 'after');")?;
+        writer.close()?;
+
+        stale_reader.close()?;
+
+        let mut verify = Connection::new(db.path())?;
+        let total = count_rows(&mut verify, "items")?;
+        assert_eq!(total, 2);
+        verify.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_connection_can_switch_from_wal_back_to_rollback() -> Result<()> {
         let db = TestDbFile::new("_test_connection_can_switch_from_wal_back_to_rollback");
         let mut conn = Connection::new(db.path())?;

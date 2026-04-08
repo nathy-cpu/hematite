@@ -244,6 +244,10 @@ impl CatalogEngine {
         self.tree_store().flush()
     }
 
+    pub(crate) fn has_pending_changes(&self) -> Result<bool> {
+        self.tree_store().has_pending_changes()
+    }
+
     pub fn journal_mode(&self) -> Result<JournalMode> {
         Ok(match self.tree_store().journal_mode()? {
             BTreeJournalMode::Rollback => JournalMode::Rollback,

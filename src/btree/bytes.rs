@@ -147,6 +147,10 @@ impl ByteTreeStore {
         Ok(self.lock_storage()?.transaction_active())
     }
 
+    pub(crate) fn has_pending_changes(&self) -> Result<bool> {
+        Ok(self.lock_storage()?.has_pending_changes())
+    }
+
     pub(crate) fn snapshot(&self) -> Result<ByteTreeStoreSnapshot> {
         Ok(ByteTreeStoreSnapshot {
             pager: self.lock_storage()?.snapshot()?,
