@@ -315,14 +315,6 @@ impl Pager {
             .as_ref()
             .or(self.latest_wal_state.as_ref())
         {
-            let visible_page_regions =
-                state.file_len.saturating_sub(64) / crate::storage::PAGE_SIZE as u64;
-            let visible_next_page_id = (visible_page_regions as u32).max(2);
-            if page_id >= self.file_manager.next_page_id() && page_id < visible_next_page_id {
-                let page = Page::new(page_id);
-                self.buffer_pool.put(page.clone());
-                return Ok(page);
-            }
             if let Some(data) = state.page_overrides.get(&page_id) {
                 let page = Page::from_bytes(page_id, data.clone())?;
                 if let Some(expected_checksum) = state.page_checksums.get(&page_id) {
@@ -334,6 +326,14 @@ impl Pager {
                         )));
                     }
                 }
+                self.buffer_pool.put(page.clone());
+                return Ok(page);
+            }
+            let visible_page_regions =
+                state.file_len.saturating_sub(64) / crate::storage::PAGE_SIZE as u64;
+            let visible_next_page_id = (visible_page_regions as u32).max(2);
+            if page_id >= self.file_manager.next_page_id() && page_id < visible_next_page_id {
+                let page = Page::new(page_id);
                 self.buffer_pool.put(page.clone());
                 return Ok(page);
             }
