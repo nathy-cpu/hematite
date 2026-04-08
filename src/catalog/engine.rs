@@ -82,6 +82,13 @@ pub struct CatalogEngineSnapshot {
     tree_store: ByteTreeStoreSnapshot,
 }
 
+impl CatalogEngineSnapshot {
+    pub(crate) fn into_transaction_baseline(mut self) -> Self {
+        self.tree_store = self.tree_store.into_transaction_baseline();
+        self
+    }
+}
+
 #[derive(Debug)]
 pub struct CatalogEngine {
     pub(crate) tree_store: ByteTreeStore,
@@ -271,6 +278,11 @@ impl CatalogEngine {
 
     pub fn transaction_active(&self) -> Result<bool> {
         self.tree_store().transaction_active()
+    }
+
+    pub(crate) fn refresh_runtime_metadata(&mut self) -> Result<()> {
+        self.table_metadata.clear();
+        engine_metadata::load_table_metadata(self)
     }
 
     pub(crate) fn begin_read(&mut self) -> Result<()> {

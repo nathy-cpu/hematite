@@ -2,9 +2,57 @@
 
 mod connection_tests {
     use crate::catalog::{DataType, DateTimeValue, JournalMode, TimeValue, TimeWithTimeZoneValue};
-    use crate::error::Result;
+    use crate::error::{HematiteError, Result};
     use crate::sql::connection::*;
     use crate::test_utils::TestDbFile;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+    use std::time::Duration;
+
+    fn is_locked_error(err: &HematiteError) -> bool {
+        err.to_string().contains("locked")
+    }
+
+    fn count_rows(conn: &mut Connection, table: &str) -> Result<i64> {
+        let result = conn.execute(&format!("SELECT COUNT(*) FROM {table};"))?;
+        let value = result
+            .rows
+            .first()
+            .and_then(|row| row.first())
+            .ok_or_else(|| HematiteError::InternalError("COUNT(*) returned no rows".to_string()))?;
+        match value {
+            crate::catalog::Value::Integer(value) => Ok(i64::from(*value)),
+            crate::catalog::Value::BigInt(value) => Ok(*value),
+            other => Err(HematiteError::InternalError(format!(
+                "COUNT(*) returned unexpected value type: {:?}",
+                other
+            ))),
+        }
+    }
+
+    fn execute_with_lock_retries(
+        conn: &mut Connection,
+        sql: &str,
+        max_attempts: usize,
+    ) -> Result<()> {
+        for _ in 0..max_attempts {
+            match conn.execute(sql) {
+                Ok(_) => return Ok(()),
+                Err(err) if is_locked_error(&err) => thread::sleep(Duration::from_millis(1)),
+                Err(err) => return Err(err),
+            }
+        }
+
+        Err(HematiteError::StorageError(format!(
+            "statement remained locked after {max_attempts} attempts: {sql}"
+        )))
+    }
+
+    fn open_connection(path: &PathBuf) -> Result<Connection> {
+        Connection::new(path.to_string_lossy().as_ref())
+    }
 
     #[test]
     fn test_connection_execute() -> Result<()> {
@@ -3037,6 +3085,223 @@ mod connection_tests {
 
         conn1.close()?;
         conn2.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_threaded_wal_multi_connection_reads_and_writes() -> Result<()> {
+        let db = TestDbFile::new("_test_threaded_wal_multi_connection_reads_and_writes");
+        let db_path = db.as_path().to_path_buf();
+        let mut setup = Connection::new(db.path())?;
+        setup.set_journal_mode(JournalMode::Wal)?;
+        setup.execute(
+            "CREATE TABLE items (id INT PRIMARY KEY, worker INT NOT NULL, note TEXT NOT NULL);",
+        )?;
+        setup.close()?;
+
+        const WRITERS: usize = 3;
+        const READERS: usize = 6;
+        // Keep this workload small enough to exercise multi-connection WAL visibility without
+        // depending on larger tree-growth behavior, which is covered elsewhere.
+        const INSERTS_PER_WRITER: usize = 5;
+
+        let barrier = Arc::new(Barrier::new(WRITERS + READERS + 1));
+        let writers_done = Arc::new(AtomicBool::new(false));
+
+        let mut writer_handles = Vec::new();
+        for worker_id in 0..WRITERS {
+            let barrier = Arc::clone(&barrier);
+            let db_path = db_path.clone();
+            writer_handles.push(thread::spawn(move || -> Result<()> {
+                let mut conn = open_connection(&db_path)?;
+                assert_eq!(conn.journal_mode()?, JournalMode::Wal);
+                barrier.wait();
+
+                for offset in 0..INSERTS_PER_WRITER {
+                    let id = (worker_id as i32) * 10_000 + offset as i32;
+                    let sql = format!(
+                        "INSERT INTO items (id, worker, note) VALUES ({id}, {}, 'worker_{}_{}');",
+                        worker_id, worker_id, offset
+                    );
+                    execute_with_lock_retries(&mut conn, &sql, 500)?;
+                    if offset % 5 == 0 {
+                        let _ = count_rows(&mut conn, "items")?;
+                    }
+                }
+
+                conn.close()?;
+                Ok(())
+            }));
+        }
+
+        let mut reader_handles = Vec::new();
+        for _ in 0..READERS {
+            let barrier = Arc::clone(&barrier);
+            let writers_done = Arc::clone(&writers_done);
+            let db_path = db_path.clone();
+            reader_handles.push(thread::spawn(move || -> Result<()> {
+                let mut conn = open_connection(&db_path)?;
+                assert_eq!(conn.journal_mode()?, JournalMode::Wal);
+                barrier.wait();
+
+                let mut last_seen = 0i64;
+                let mut iterations = 0usize;
+                while !writers_done.load(Ordering::SeqCst) || iterations < 25 {
+                    let current = count_rows(&mut conn, "items")?;
+                    assert!(
+                        current >= last_seen,
+                        "WAL reader count regressed from {} to {}",
+                        last_seen,
+                        current
+                    );
+                    last_seen = current;
+                    let _ = conn.execute("SELECT id, worker FROM items ORDER BY id LIMIT 5;")?;
+                    iterations += 1;
+                    thread::sleep(Duration::from_millis(1));
+                }
+
+                conn.close()?;
+                Ok(())
+            }));
+        }
+
+        barrier.wait();
+
+        for handle in writer_handles {
+            handle.join().unwrap()?;
+        }
+        writers_done.store(true, Ordering::SeqCst);
+
+        for handle in reader_handles {
+            handle.join().unwrap()?;
+        }
+
+        let mut verify = Connection::new(db.path())?;
+        let total = count_rows(&mut verify, "items")?;
+        assert_eq!(total, (WRITERS * INSERTS_PER_WRITER) as i64);
+        let ordered = verify.execute("SELECT id FROM items ORDER BY id;")?;
+        assert_eq!(ordered.rows.len(), WRITERS * INSERTS_PER_WRITER);
+        verify.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_threaded_multi_connection_close_does_not_race_checksum_persistence() -> Result<()> {
+        let db = TestDbFile::new(
+            "_test_threaded_multi_connection_close_does_not_race_checksum_persistence",
+        );
+        let db_path = db.as_path().to_path_buf();
+        let mut setup = Connection::new(db.path())?;
+        setup.set_journal_mode(JournalMode::Wal)?;
+        setup.execute("CREATE TABLE items (id INT PRIMARY KEY, note TEXT NOT NULL);")?;
+        setup.execute("INSERT INTO items (id, note) VALUES (1, 'seed');")?;
+        setup.close()?;
+
+        const WORKERS: usize = 8;
+        const ROUNDS: usize = 10;
+
+        for _ in 0..ROUNDS {
+            let barrier = Arc::new(Barrier::new(WORKERS));
+            let mut handles = Vec::new();
+            for _ in 0..WORKERS {
+                let barrier = Arc::clone(&barrier);
+                let db_path = db_path.clone();
+                handles.push(thread::spawn(move || -> Result<()> {
+                    let mut conn = open_connection(&db_path)?;
+                    assert_eq!(conn.journal_mode()?, JournalMode::Wal);
+                    let _ = conn.execute("SELECT COUNT(*) FROM items;")?;
+                    barrier.wait();
+                    conn.close()
+                }));
+            }
+
+            for handle in handles {
+                handle.join().unwrap()?;
+            }
+        }
+
+        let mut verify = Connection::new(db.path())?;
+        let total = count_rows(&mut verify, "items")?;
+        assert_eq!(total, 1);
+        verify.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_threaded_rollback_multi_connection_reads_and_writes() -> Result<()> {
+        let db = TestDbFile::new("_test_threaded_rollback_multi_connection_reads_and_writes");
+        let db_path = db.as_path().to_path_buf();
+        let mut setup = Connection::new(db.path())?;
+        setup.execute(
+            "CREATE TABLE items (id INT PRIMARY KEY, worker INT NOT NULL, note TEXT NOT NULL);",
+        )?;
+        setup.close()?;
+
+        const WRITERS: usize = 3;
+        const INSERTS_PER_WRITER: usize = 12;
+
+        let barrier = Arc::new(Barrier::new(WRITERS + 2));
+        let writers_done = Arc::new(AtomicBool::new(false));
+
+        let mut writer_handles = Vec::new();
+        for worker_id in 0..WRITERS {
+            let barrier = Arc::clone(&barrier);
+            let db_path = db_path.clone();
+            writer_handles.push(thread::spawn(move || -> Result<()> {
+                let mut conn = open_connection(&db_path)?;
+                barrier.wait();
+
+                for offset in 0..INSERTS_PER_WRITER {
+                    let id = (worker_id as i32) * 10_000 + offset as i32;
+                    let sql = format!(
+                        "INSERT INTO items (id, worker, note) VALUES ({id}, {}, 'rollback_{}_{}');",
+                        worker_id, worker_id, offset
+                    );
+                    execute_with_lock_retries(&mut conn, &sql, 500)?;
+                }
+
+                conn.close()?;
+                Ok(())
+            }));
+        }
+
+        let reader_barrier = Arc::clone(&barrier);
+        let reader_done = Arc::clone(&writers_done);
+        let reader_path = db_path.clone();
+        let reader_handle = thread::spawn(move || -> Result<()> {
+            let mut conn = open_connection(&reader_path)?;
+            reader_barrier.wait();
+
+            let mut saw_locked = false;
+            let mut saw_success = false;
+            let mut iterations = 0usize;
+            while !reader_done.load(Ordering::SeqCst) || iterations < 25 {
+                match count_rows(&mut conn, "items") {
+                    Ok(_) => saw_success = true,
+                    Err(err) if is_locked_error(&err) => saw_locked = true,
+                    Err(err) => return Err(err),
+                }
+                iterations += 1;
+                thread::sleep(Duration::from_millis(1));
+            }
+
+            assert!(saw_locked || saw_success);
+            conn.close()?;
+            Ok(())
+        });
+
+        barrier.wait();
+
+        for handle in writer_handles {
+            handle.join().unwrap()?;
+        }
+        writers_done.store(true, Ordering::SeqCst);
+        reader_handle.join().unwrap()?;
+
+        let mut verify = Connection::new(db.path())?;
+        let total = count_rows(&mut verify, "items")?;
+        assert_eq!(total, (WRITERS * INSERTS_PER_WRITER) as i64);
+        verify.close()?;
         Ok(())
     }
 

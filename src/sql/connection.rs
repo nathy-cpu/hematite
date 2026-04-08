@@ -65,8 +65,18 @@ impl ImplicitMutation {
         }
 
         let mut catalog_guard = connection.lock_catalog()?;
-        let snapshot = catalog_guard.snapshot()?;
         catalog_guard.begin_transaction()?;
+        if let Err(err) = catalog_guard.refresh_from_storage() {
+            let _ = catalog_guard.rollback_transaction();
+            return Err(err);
+        }
+        let snapshot = match catalog_guard.transaction_entry_snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                let _ = catalog_guard.rollback_transaction();
+                return Err(err);
+            }
+        };
         Ok(Self {
             snapshot: Some(snapshot),
         })
@@ -439,6 +449,15 @@ impl Connection {
         self.catalog.lock().map_err(|_| {
             HematiteError::InternalError("SQL connection catalog mutex is poisoned".to_string())
         })
+    }
+
+    fn refresh_catalog_view_if_needed(&mut self) -> Result<()> {
+        if self.transaction.is_some() {
+            return Ok(());
+        }
+
+        let mut catalog_guard = self.lock_catalog()?;
+        catalog_guard.refresh_from_storage()
     }
 
     pub fn new(database_path: &str) -> Result<Self> {
@@ -1292,6 +1311,8 @@ impl Connection {
             _ => {}
         }
 
+        self.refresh_catalog_view_if_needed()?;
+
         if statement.is_read_only() {
             return self.execute_read_statement(statement);
         }
@@ -1918,8 +1939,18 @@ impl Connection {
         }
 
         let mut catalog_guard = self.lock_catalog()?;
-        let snapshot = catalog_guard.snapshot()?;
         catalog_guard.begin_transaction()?;
+        if let Err(err) = catalog_guard.refresh_from_storage() {
+            let _ = catalog_guard.rollback_transaction();
+            return Err(err);
+        }
+        let snapshot = match catalog_guard.transaction_entry_snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                let _ = catalog_guard.rollback_transaction();
+                return Err(err);
+            }
+        };
         drop(catalog_guard);
         self.transaction = Some(ConnectionTransaction {
             snapshot,

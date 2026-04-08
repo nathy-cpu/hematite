@@ -137,6 +137,14 @@ pub(crate) struct PagerSnapshot {
     transaction: Option<PagerTransaction>,
 }
 
+impl PagerSnapshot {
+    pub(crate) fn into_transaction_baseline(mut self) -> Self {
+        self.dirty_pages.clear();
+        self.transaction = None;
+        self
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PagerState {
     Open,
@@ -176,6 +184,11 @@ fn compact_transaction_free_pages(transaction: &mut PagerTransaction) {
 fn lock_registry() -> &'static Mutex<HashMap<PathBuf, LockRegistryEntry>> {
     static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, LockRegistryEntry>>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn checksum_persist_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 #[derive(Debug)]
@@ -302,6 +315,14 @@ impl Pager {
             .as_ref()
             .or(self.latest_wal_state.as_ref())
         {
+            let visible_page_regions =
+                state.file_len.saturating_sub(64) / crate::storage::PAGE_SIZE as u64;
+            let visible_next_page_id = (visible_page_regions as u32).max(2);
+            if page_id >= self.file_manager.next_page_id() && page_id < visible_next_page_id {
+                let page = Page::new(page_id);
+                self.buffer_pool.put(page.clone());
+                return Ok(page);
+            }
             if let Some(data) = state.page_overrides.get(&page_id) {
                 let page = Page::from_bytes(page_id, data.clone())?;
                 if let Some(expected_checksum) = state.page_checksums.get(&page_id) {
@@ -533,15 +554,17 @@ impl Pager {
         self.check_error_state()?;
         let previous_lock_mode = self.lock_mode;
         self.acquire_shared_lock()?;
-        if let Err(err) = self.refresh_persisted_view() {
-            let _ = self.release_shared_lock();
-            return Err(err);
+        if matches!(previous_lock_mode, PagerLockMode::Shared { .. }) {
+            return Ok(());
+        }
+        if !matches!(previous_lock_mode, PagerLockMode::Write) {
+            if let Err(err) = self.refresh_persisted_view() {
+                let _ = self.release_shared_lock();
+                return Err(err);
+            }
         }
         if self.journal_mode == JournalMode::Wal {
             if matches!(previous_lock_mode, PagerLockMode::Write) {
-                return Ok(());
-            }
-            if matches!(previous_lock_mode, PagerLockMode::Shared { .. }) {
                 return Ok(());
             }
             let snapshot = self.snapshot_wal_visible_state()?;
@@ -1145,6 +1168,11 @@ impl Pager {
         let Some(path) = &self.checksum_store_path else {
             return Ok(());
         };
+        let _persist_guard = checksum_persist_lock().lock().map_err(|_| {
+            crate::error::HematiteError::InternalError(
+                "Pager checksum persistence mutex is poisoned".to_string(),
+            )
+        })?;
 
         let mut entries = self
             .page_checksums
@@ -1166,7 +1194,17 @@ impl Pager {
             lines.push(format!("checksum|{}|{}", page_id, checksum));
         }
 
-        fs::write(path, lines.join("\n"))?;
+        let contents = lines.join("\n");
+        let mut temp_path = path.clone();
+        let mut temp_name = temp_path
+            .file_name()
+            .map(OsString::from)
+            .unwrap_or_else(|| OsString::from("hematite.checksum"));
+        temp_name.push(".tmp");
+        temp_path.set_file_name(temp_name);
+
+        fs::write(&temp_path, contents)?;
+        fs::rename(&temp_path, path)?;
         Ok(())
     }
 

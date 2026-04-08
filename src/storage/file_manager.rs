@@ -125,7 +125,12 @@ impl FileManager {
 
         let mut data = vec![0u8; PAGE_SIZE];
         self.seek(SeekFrom::Start(offset))?;
-        self.read_exact(&mut data)?;
+        self.read_exact(&mut data).map_err(|err| {
+            crate::error::HematiteError::StorageError(format!(
+                "Failed to read page {} at offset {}: {}",
+                page_id, offset, err
+            ))
+        })?;
 
         Page::from_bytes(page_id, data)
     }

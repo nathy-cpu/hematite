@@ -407,6 +407,15 @@ impl Catalog {
         })
     }
 
+    pub(crate) fn transaction_entry_snapshot(&self) -> Result<CatalogSnapshot> {
+        Ok(CatalogSnapshot {
+            schema: self.schema.clone(),
+            schema_root: self.schema_root,
+            schema_dirty: self.schema_dirty,
+            engine: self.engine.snapshot()?.into_transaction_baseline(),
+        })
+    }
+
     pub(crate) fn restore_snapshot(&mut self, snapshot: CatalogSnapshot) -> Result<()> {
         self.schema = snapshot.schema;
         self.schema_root = snapshot.schema_root;
@@ -416,6 +425,40 @@ impl Catalog {
 
     pub(crate) fn begin_transaction(&mut self) -> Result<()> {
         self.engine.begin_transaction()
+    }
+
+    pub(crate) fn refresh_from_storage(&mut self) -> Result<()> {
+        if self.schema_dirty {
+            return Ok(());
+        }
+
+        let transaction_active = self.engine.transaction_active()?;
+        if !transaction_active {
+            self.engine.begin_read()?;
+        }
+
+        let refresh = (|| -> Result<()> {
+            let Some(header) = self.engine.read_database_header()? else {
+                return Ok(());
+            };
+
+            self.engine.refresh_runtime_metadata()?;
+            self.schema = self.engine.load_schema(header.schema_root_page)?;
+            self.schema_root = header.schema_root_page;
+            self.schema_dirty = false;
+            Ok(())
+        })();
+
+        if transaction_active {
+            return refresh;
+        }
+
+        let release = self.engine.end_read();
+        match (refresh, release) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(err), _) => Err(err),
+            (Ok(()), Err(err)) => Err(err),
+        }
     }
 
     pub(crate) fn commit_transaction(&mut self) -> Result<()> {

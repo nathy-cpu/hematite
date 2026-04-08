@@ -15,9 +15,7 @@ impl TestDbFile {
             .unwrap_or_default()
             .as_nanos();
         let path = PathBuf::from(format!("{}_{}.db", prefix, nanos));
-        let _ = fs::remove_file(&path);
-        let _ = fs::remove_file(Self::pager_checksum_path_for(&path));
-        let _ = fs::remove_file(Self::wal_path_for(&path));
+        Self::cleanup_paths_for(&path);
         Self { path }
     }
 
@@ -33,6 +31,10 @@ impl TestDbFile {
         Self::pager_checksum_path_for(&self.path)
     }
 
+    fn pager_checksum_temp_path(&self) -> PathBuf {
+        Self::pager_checksum_temp_path_for(&self.path)
+    }
+
     fn pager_checksum_path_for(path: &Path) -> PathBuf {
         let mut file_name = path
             .file_name()
@@ -43,6 +45,17 @@ impl TestDbFile {
             Some(parent) => parent.join(file_name),
             None => PathBuf::from(file_name),
         }
+    }
+
+    fn pager_checksum_temp_path_for(path: &Path) -> PathBuf {
+        let mut temp_path = Self::pager_checksum_path_for(path);
+        let mut file_name = temp_path
+            .file_name()
+            .map(OsString::from)
+            .unwrap_or_else(|| OsString::from("hematite.db.pager_checksums"));
+        file_name.push(".tmp");
+        temp_path.set_file_name(file_name);
+        temp_path
     }
 
     fn wal_path(&self) -> PathBuf {
@@ -60,13 +73,39 @@ impl TestDbFile {
             None => PathBuf::from(file_name),
         }
     }
+
+    fn journal_path(&self) -> PathBuf {
+        Self::journal_path_for(&self.path)
+    }
+
+    fn journal_path_for(path: &Path) -> PathBuf {
+        let mut file_name = path
+            .file_name()
+            .map(OsString::from)
+            .unwrap_or_else(|| OsString::from("hematite.db"));
+        file_name.push(".journal");
+        match path.parent() {
+            Some(parent) => parent.join(file_name),
+            None => PathBuf::from(file_name),
+        }
+    }
+
+    fn cleanup_paths_for(path: &Path) {
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(Self::pager_checksum_path_for(path));
+        let _ = fs::remove_file(Self::pager_checksum_temp_path_for(path));
+        let _ = fs::remove_file(Self::wal_path_for(path));
+        let _ = fs::remove_file(Self::journal_path_for(path));
+    }
 }
 
 impl Drop for TestDbFile {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
         let _ = fs::remove_file(self.pager_checksum_path());
+        let _ = fs::remove_file(self.pager_checksum_temp_path());
         let _ = fs::remove_file(self.wal_path());
+        let _ = fs::remove_file(self.journal_path());
     }
 }
 
