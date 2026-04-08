@@ -1,4 +1,4 @@
-use super::{JournalMode, Pager, PagerLockMode};
+use super::{JournalMode, Pager, PagerLockMode, PagerState};
 use crate::error::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -40,6 +40,12 @@ impl Pager {
     pub(super) fn leave_writer_scope(&mut self) -> Result<PagerLockMode> {
         self.release_write_lock()?;
         Ok(self.lock_mode)
+    }
+
+    pub(super) fn exit_writer_scope_to_open(&mut self) -> Result<()> {
+        let resulting_lock_mode = self.leave_writer_scope()?;
+        debug_assert!(matches!(resulting_lock_mode, PagerLockMode::None));
+        self.transition_state(PagerState::Open)
     }
 
     pub(super) fn lock_registry_map(

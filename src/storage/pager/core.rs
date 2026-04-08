@@ -13,7 +13,7 @@ impl Pager {
 
         self.enter_writer_scope()?;
         if let Err(err) = self.refresh_persisted_view() {
-            let _ = self.leave_writer_scope();
+            let _ = self.exit_writer_scope_to_open();
             return Err(err);
         }
 
@@ -53,9 +53,7 @@ impl Pager {
         }
         self.remove_journal_file()?;
         self.transaction = None;
-        let resulting_lock_mode = self.leave_writer_scope()?;
-        debug_assert!(matches!(resulting_lock_mode, super::PagerLockMode::None));
-        self.transition_state(PagerState::Open)?;
+        self.exit_writer_scope_to_open()?;
         Ok(())
     }
 
@@ -72,9 +70,7 @@ impl Pager {
             self.rollback_rollback_transaction()?;
         }
         self.transaction = None;
-        let resulting_lock_mode = self.leave_writer_scope()?;
-        debug_assert!(matches!(resulting_lock_mode, super::PagerLockMode::None));
-        self.transition_state(PagerState::Open)?;
+        self.exit_writer_scope_to_open()?;
         Ok(())
     }
 }
