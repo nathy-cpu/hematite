@@ -78,7 +78,7 @@ impl Pager {
             }
 
             let page = if self.cache.is_dirty(page_id) {
-                self.cache.get(page_id).cloned().ok_or_else(|| {
+                self.cache.peek(page_id).cloned().ok_or_else(|| {
                     crate::error::HematiteError::StorageError(format!(
                         "Dirty page {} missing from buffer pool",
                         page_id

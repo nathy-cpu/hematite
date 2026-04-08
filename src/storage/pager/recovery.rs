@@ -315,6 +315,7 @@ impl Pager {
             data: page.data,
         });
         transaction.journaled_pages.insert(page_id);
+        self.cache.mark_journaled(page_id);
         self.persist_journal(JournalState::Active)
     }
 
@@ -448,7 +449,7 @@ impl Pager {
 
         let mut frames = Vec::with_capacity(page_ids.len());
         for page_id in page_ids {
-            let page = self.cache.get(page_id).cloned().ok_or_else(|| {
+            let page = self.cache.peek(page_id).cloned().ok_or_else(|| {
                 crate::error::HematiteError::StorageError(format!(
                     "Dirty page {} missing from buffer pool",
                     page_id

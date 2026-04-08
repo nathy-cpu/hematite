@@ -104,7 +104,7 @@ impl Pager {
                 continue;
             }
 
-            if let Some(page) = self.cache.get(page_id) {
+            if let Some(page) = self.cache.peek(page_id) {
                 if let Err(e) = self.file_manager.write_page(page) {
                     self.enter_error_state();
                     return Err(e);
@@ -115,7 +115,7 @@ impl Pager {
 
         // Metadata is written last so it cannot describe page state that has not reached disk.
         if metadata_page_dirty {
-            if let Some(page) = self.cache.get(STORAGE_METADATA_PAGE_ID) {
+            if let Some(page) = self.cache.peek(STORAGE_METADATA_PAGE_ID) {
                 if let Err(e) = self.file_manager.write_page(page) {
                     self.enter_error_state();
                     return Err(e);
