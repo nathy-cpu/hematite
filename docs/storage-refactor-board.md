@@ -26,8 +26,8 @@ Use it alongside [storage-refactor-plan.md](./storage-refactor-plan.md):
 | `M5` Recovery/WAL/Rollback Separation | Separate rollback, WAL, and recovery internals into distinct modules | `Done` | `journal.rs`, `wal.rs`, and `recovery.rs` now own those concerns structurally | Start changing behavior inside those modules rather than re-extracting more code |
 | `M6` Integrity And Checksum Separation | Isolate integrity verification and checksum helpers | `Done` | `integrity.rs` owns validation and checksum calculation | Add more corruption-path tests when rollback journaling is rewritten |
 | `M7` Page IO And Space Separation | Isolate page IO, flush, allocation, and free-page helpers | `Done` | `page_io.rs` and `space.rs` now own those pager responsibilities | Keep them stable while rewriting rollback behavior behind them |
-| `M8` Test Harness Strengthening | Improve regression coverage for pager states, WAL, rollback, and concurrency | `In Progress` | Pager fault tests and threaded connection tests are stronger than before | Add more failure-path and journaling-order tests |
-| `M9` Page Cache Redesign | Replace the current cache shape with a more SQLite-like pager-owned page cache | `In Progress` | Cache is pager-owned and modularized, but it is not yet a full pinned-page-header design | Decide the smallest first cache-behavior change worth landing after rollback work begins |
+| `M8` Test Harness Strengthening | Improve regression coverage for pager states, WAL, rollback, and concurrency | `Done` | Pager fault tests, threaded rollback/WAL tests, rollback-journal characterization tests, committed-journal reopen tests, and truncated-journal rejection tests are in place | Extend only when a new behavior rewrite needs more coverage |
+| `M9` Page Cache Redesign | Replace the current cache shape with a more SQLite-like pager-owned page cache | `Done` | The cache now stores page-local metadata inside cache entries, supports non-recency `peek`, and tracks deterministic dirty ordering for pager internals | Revisit only if rollback or WAL work exposes a real cache limitation |
 | `M10` Rollback Core Rewrite | Replace snapshot-shaped rollback behavior with explicit page-journal behavior | `Not Started` | Rollback logic is extracted, but behavior is still mostly the old model | Start by documenting current rollback begin/commit/rollback sequencing in tests |
 | `M11` Savepoint/Subjournal Rewrite | Rebuild savepoint internals on top of the new rollback core | `Not Started` | Current snapshot compatibility is still compatibility-shaped | Wait until the rollback core exists |
 | `M12` Locking Model Rewrite | Replace the current in-process registry as the true correctness backbone | `Not Started` | Current lock handling is cleaner, but still fundamentally registry-based | Defer until rollback behavior is clearer |
@@ -47,6 +47,8 @@ These are the milestones we can honestly treat as completed:
 - `M5` Recovery/WAL/Rollback Separation
 - `M6` Integrity And Checksum Separation
 - `M7` Page IO And Space Separation
+- `M8` Test Harness Strengthening
+- `M9` Page Cache Redesign
 
 ## Validation Checkpoint
 
@@ -86,13 +88,6 @@ More specifically:
 - `M4` to `M7` are structurally complete and well validated
 - the remaining real behavior risk still begins at rollback-core work and beyond
 
-## What Is Partially Finished
-
-These areas have meaningful groundwork, but not the final behavior we want:
-
-- `M8` Test Harness Strengthening
-- `M9` Page Cache Redesign
-
 ## What Still Carries The Real Rewrite Risk
 
 These are the milestones that will actually determine whether the rewrite succeeds:
@@ -105,17 +100,13 @@ These are the milestones that will actually determine whether the rewrite succee
 
 ## Recommended Execution Order From Here
 
-1. Finish `M8` enough to characterize current rollback behavior with tighter tests.
-2. Start `M10` with the smallest page-journal-shaped rollback slice possible.
-3. Only revisit `M9` in a bigger way if rollback work shows the cache shape is now the limiting factor.
-4. Keep `M13` blocked behind real rollback-core progress.
-5. Treat `M12` and `M14` as parallel reliability tracks once `M10` has genuine momentum.
+1. Start `M10` with the smallest page-journal-shaped rollback slice possible.
+2. Keep `M13` blocked behind real rollback-core progress.
+3. Treat `M12` and `M14` as parallel reliability tracks once `M10` has genuine momentum.
+4. Revisit cache internals only if rollback or WAL work exposes a specific need.
 
 ## Immediate Next Actions
 
-- Add rollback characterization tests for:
-  - first dirty page journaling behavior
-  - rollback restoration after multiple page writes
-  - commit ordering around journal persistence and page flush
 - Identify the first current rollback path that still depends on broad transaction snapshots.
 - Introduce the first rollback-core helper that records original page images explicitly and keeps the current public pager behavior unchanged.
+- Add the first rollback behavior change behind the new characterization tests instead of doing more structural extraction work.

@@ -260,25 +260,47 @@ The rewrite effort has already added meaningful regressions around:
 
 This is especially valuable because it gives us confidence to change internals without guessing.
 
+#### 6. The characterization test phase is now strong enough for rollback work
+
+The current test surface now covers the most important pre-rewrite pager behaviors:
+
+- pager reader and writer state progression
+- rollback journal creation on transaction begin
+- original page capture only once per page in rollback mode
+- active-journal recovery across multiple modified pages
+- committed-journal reopen behavior
+- truncated rollback-journal rejection on open
+- WAL snapshot visibility and checkpoint behavior
+- threaded rollback and WAL multi-connection regressions
+
+That does not eliminate the need for deeper future fault-injection work, but it means the test-characterization phase is no longer the main blocker.
+
+#### 7. The page cache milestone is complete for the current phase
+
+The cache has moved beyond simple modularization. It now has:
+
+- page-local metadata stored with each cached page entry
+- deterministic dirty-page ordering
+- a non-recency `peek` path for internal pager operations
+- richer internal state for pinning, journaling, sync tracking, and write suppression
+
+This is not a full SQLite `PCache` clone, but it is enough to treat the current cache-design milestone as complete for this phase of the rewrite.
+
 ### What Is Only Partially Done
 
-#### 1. The page cache is only partially SQLite-like
-
-The cache has moved under pager ownership, which is good, but it is not yet a fully SQLite-like page cache with explicit pinned page headers, journaling flags, and spill policy. It is better factored, but not yet fully redesigned.
-
-#### 2. Locking is cleaner, but still not fundamentally rewritten
+#### 1. Locking is cleaner, but still not fundamentally rewritten
 
 The current lock layer is still based on the existing in-process registry model. The state and scope APIs are cleaner now, but the underlying coordination model is not yet the stronger pager-owned locking design the original plan called for.
 
-#### 3. Snapshot/savepoint compatibility is still compatibility-shaped
+#### 2. Snapshot/savepoint compatibility is still compatibility-shaped
 
 The snapshot logic has been extracted, which is useful, but it has not yet been reimplemented as a thin savepoint-based compatibility layer over a rebuilt rollback core.
 
-#### 4. Rollback mode still largely reflects the older behavior model
+#### 3. Rollback mode still largely reflects the older behavior model
 
 Rollback handling is now isolated in its own module, but it has not yet been rebuilt around the intended page-journal-first sequencing. This is the biggest gap between "well-factored current implementation" and "new pager design."
 
-#### 5. WAL has been extracted, but not rewritten
+#### 4. WAL has been extracted, but not rewritten
 
 The WAL path is better separated than before, but it still rides on the current pager behavior rather than a freshly rebuilt core. This is expected, because WAL was intentionally planned after rollback.
 
@@ -288,7 +310,6 @@ These goals from the original plan are still substantially ahead of us:
 
 - a true rollback-journal rewrite that replaces broad snapshot-shaped behavior with page-granular journaling semantics
 - a pager-owned savepoint/subjournal model
-- a fully redesigned page cache with richer page-header flags and pin semantics
 - a replacement for the current in-process lock registry as the correctness backbone
 - a ground-up WAL rewrite on top of the rebuilt pager core
 - the deeper SQLite-style failure-injection and hot-journal recovery matrix described in the original plan
