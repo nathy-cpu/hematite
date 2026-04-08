@@ -33,6 +33,7 @@ pub enum PagerState {
     WriterLocked,
     WriterCacheMod,
     WriterDbMod,
+    WriterFinished,
     Error,
 }
 

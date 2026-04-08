@@ -296,6 +296,9 @@ impl Pager {
         }
         self.cache.put(page);
         self.cache.mark_dirty(page_id);
+        if self.transaction.is_some() {
+            self.state = PagerState::WriterCacheMod;
+        }
         Ok(())
     }
 
@@ -378,6 +381,11 @@ impl Pager {
             self.state = PagerState::Error;
             return Err(e);
         }
+        if self.transaction.is_some() {
+            self.state = PagerState::WriterDbMod;
+        } else if !matches!(self.lock_mode, PagerLockMode::Shared { .. }) {
+            self.state = PagerState::Open;
+        }
         Ok(())
     }
 
@@ -405,6 +413,7 @@ impl Pager {
             page_records: Vec::new(),
         };
         self.transaction = Some(transaction);
+        self.state = PagerState::WriterLocked;
         if self.journal_mode == JournalMode::Rollback {
             self.persist_journal(JournalState::Active)?;
         }
@@ -424,13 +433,16 @@ impl Pager {
             if self.can_checkpoint_wal()? {
                 self.checkpoint_wal_unlocked()?;
             }
+            self.state = PagerState::WriterFinished;
         } else {
             self.flush()?;
             self.persist_journal(JournalState::Committed)?;
+            self.state = PagerState::WriterFinished;
         }
         self.remove_journal_file()?;
         self.transaction = None;
         self.release_write_lock()?;
+        self.state = PagerState::Open;
         Ok(())
     }
 
@@ -495,6 +507,9 @@ impl Pager {
             self.register_wal_reader_sequence(snapshot.visible_sequence)?;
             self.wal_read_snapshot = Some(snapshot);
         }
+        if !matches!(self.lock_mode, PagerLockMode::Write) {
+            self.state = PagerState::Reader;
+        }
         Ok(())
     }
 
@@ -505,7 +520,11 @@ impl Pager {
             }
         }
         self.wal_read_snapshot = None;
-        self.release_shared_lock()
+        self.release_shared_lock()?;
+        if matches!(self.lock_mode, PagerLockMode::None) {
+            self.state = PagerState::Open;
+        }
+        Ok(())
     }
 
     pub fn free_pages(&self) -> &[PageId] {

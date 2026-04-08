@@ -77,3 +77,47 @@ fn test_pager_recovery_from_error_state_via_rollback() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn test_pager_state_tracks_reader_scope() -> Result<()> {
+    let test_db = TestDbFile::new("pager_state_reader_scope");
+    let mut pager = Pager::new(&test_db, 10)?;
+
+    assert_eq!(pager.state(), PagerState::Open);
+    pager.begin_read()?;
+    assert_eq!(pager.state(), PagerState::Reader);
+    pager.end_read()?;
+    assert_eq!(pager.state(), PagerState::Open);
+
+    Ok(())
+}
+
+#[test]
+fn test_pager_state_tracks_writer_progression() -> Result<()> {
+    let test_db = TestDbFile::new("pager_state_writer_progression");
+    let mut pager = Pager::new(&test_db, 10)?;
+
+    let page_id = pager.allocate_page()?;
+    let mut initial = Page::new(page_id);
+    initial.data[0] = 1;
+    pager.write_page(initial)?;
+    pager.flush()?;
+    assert_eq!(pager.state(), PagerState::Open);
+
+    pager.begin_transaction()?;
+    assert_eq!(pager.state(), PagerState::WriterLocked);
+
+    let mut updated = pager.read_page(page_id)?;
+    updated.data[0] = 2;
+    pager.write_page(updated)?;
+    assert_eq!(pager.state(), PagerState::WriterCacheMod);
+
+    pager.flush()?;
+    assert_eq!(pager.state(), PagerState::WriterDbMod);
+
+    pager.rollback_transaction()?;
+    assert_eq!(pager.state(), PagerState::Open);
+    assert_eq!(pager.read_page(page_id)?.data[0], 1);
+
+    Ok(())
+}
