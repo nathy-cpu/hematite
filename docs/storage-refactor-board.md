@@ -48,6 +48,44 @@ These are the milestones we can honestly treat as completed:
 - `M6` Integrity And Checksum Separation
 - `M7` Page IO And Space Separation
 
+## Validation Checkpoint
+
+This checkpoint was taken after the lock/state coordination refactors and before starting the next major rewrite steps.
+
+### Result
+
+`M0` through `M7` remain valid and do not need to be downgraded.
+
+That means we can move forward to the next milestones without reopening the completed scaffold work first.
+
+### Evidence Used
+
+Structural evidence:
+
+- the pager facade still exists in `src/storage/pager.rs`
+- the internal module split is present under `src/storage/pager/`
+- state validation is present in `src/storage/pager/state.rs`
+- lock coordination helpers are present in `src/storage/pager/locking.rs`
+- rollback, WAL, recovery, savepoint, page IO, space, and integrity concerns are split into dedicated modules
+
+Behavioral evidence:
+
+- `cargo test pager_fault -- --nocapture --test-threads=1`
+- `cargo test storage::tests::pager_tests:: -- --nocapture`
+- `cargo test sql::tests::connection_tests::test_threaded_rollback_multi_connection_reads_and_writes -- --nocapture`
+
+### Important Interpretation
+
+This checkpoint confirms that the scaffolding milestones are complete enough to build on.
+
+It does **not** mean that rollback mode or WAL have been behaviorally rewritten yet.
+
+More specifically:
+
+- `M0` to `M3` are both structurally and behaviorally convincing
+- `M4` to `M7` are structurally complete and well validated
+- the remaining real behavior risk still begins at rollback-core work and beyond
+
 ## What Is Partially Finished
 
 These areas have meaningful groundwork, but not the final behavior we want:
