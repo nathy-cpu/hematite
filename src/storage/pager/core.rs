@@ -27,7 +27,7 @@ impl Pager {
             page_records: Vec::new(),
         };
         self.transaction = Some(transaction);
-        self.state = PagerState::WriterLocked;
+        self.transition_state(PagerState::WriterLocked)?;
         if self.journal_mode == JournalMode::Rollback {
             self.begin_rollback_transaction()?;
         }
@@ -47,14 +47,14 @@ impl Pager {
             if self.can_checkpoint_wal()? {
                 self.checkpoint_wal_unlocked()?;
             }
-            self.state = PagerState::WriterFinished;
+            self.transition_state(PagerState::WriterFinished)?;
         } else {
             self.commit_rollback_transaction()?;
         }
         self.remove_journal_file()?;
         self.transaction = None;
         self.release_write_lock()?;
-        self.state = PagerState::Open;
+        self.transition_state(PagerState::Open)?;
         Ok(())
     }
 
@@ -72,7 +72,7 @@ impl Pager {
         }
         self.transaction = None;
         self.release_write_lock()?;
-        self.state = PagerState::Open;
+        self.transition_state(PagerState::Open)?;
         Ok(())
     }
 }

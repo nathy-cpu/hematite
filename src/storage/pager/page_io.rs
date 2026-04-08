@@ -82,7 +82,7 @@ impl Pager {
         self.cache.put(page);
         self.cache.mark_dirty(page_id);
         if self.transaction.is_some() {
-            self.state = PagerState::WriterCacheMod;
+            self.transition_state(PagerState::WriterCacheMod)?;
         }
         Ok(())
     }
@@ -106,7 +106,7 @@ impl Pager {
 
             if let Some(page) = self.cache.get(page_id) {
                 if let Err(e) = self.file_manager.write_page(page) {
-                    self.state = PagerState::Error;
+                    self.enter_error_state();
                     return Err(e);
                 }
             }
@@ -117,24 +117,24 @@ impl Pager {
         if metadata_page_dirty {
             if let Some(page) = self.cache.get(STORAGE_METADATA_PAGE_ID) {
                 if let Err(e) = self.file_manager.write_page(page) {
-                    self.state = PagerState::Error;
+                    self.enter_error_state();
                     return Err(e);
                 }
             }
             self.cache.clear_dirty(STORAGE_METADATA_PAGE_ID);
         }
         if let Err(e) = self.file_manager.flush() {
-            self.state = PagerState::Error;
+            self.enter_error_state();
             return Err(e);
         }
         if let Err(e) = self.persist_checksums() {
-            self.state = PagerState::Error;
+            self.enter_error_state();
             return Err(e);
         }
         if self.transaction.is_some() {
-            self.state = PagerState::WriterDbMod;
+            self.transition_state(PagerState::WriterDbMod)?;
         } else if !matches!(self.lock_mode, PagerLockMode::Shared { .. }) {
-            self.state = PagerState::Open;
+            self.transition_state(PagerState::Open)?;
         }
         Ok(())
     }

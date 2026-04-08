@@ -41,10 +41,6 @@ impl Pager {
     }
 
     pub(super) fn acquire_shared_lock(&mut self) -> Result<()> {
-        if self.database_identity.is_none() {
-            return Ok(());
-        }
-
         match self.lock_mode {
             PagerLockMode::Write if self.journal_mode == JournalMode::Wal => return Ok(()),
             PagerLockMode::Write => return Ok(()),
@@ -53,6 +49,11 @@ impl Pager {
                 return Ok(());
             }
             PagerLockMode::None => {}
+        }
+
+        if self.database_identity.is_none() {
+            self.lock_mode = PagerLockMode::Shared { depth: 1 };
+            return Ok(());
         }
 
         let path = self.database_identity_path()?.clone();
@@ -69,10 +70,6 @@ impl Pager {
     }
 
     pub(super) fn release_shared_lock(&mut self) -> Result<()> {
-        let Some(path) = self.database_identity.as_ref() else {
-            return Ok(());
-        };
-
         match self.lock_mode {
             PagerLockMode::Write | PagerLockMode::None => return Ok(()),
             PagerLockMode::Shared { depth } if depth > 1 => {
@@ -81,6 +78,11 @@ impl Pager {
             }
             PagerLockMode::Shared { .. } => {}
         }
+
+        let Some(path) = self.database_identity.as_ref() else {
+            self.lock_mode = PagerLockMode::None;
+            return Ok(());
+        };
 
         let mut registry = self.lock_registry_map()?;
         if let Some(entry) = registry.get_mut(path) {

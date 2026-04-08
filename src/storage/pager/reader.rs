@@ -24,7 +24,7 @@ impl Pager {
             self.wal_read_snapshot = Some(snapshot);
         }
         if !matches!(self.lock_mode, PagerLockMode::Write) {
-            self.state = PagerState::Reader;
+            self.transition_state(PagerState::Reader)?;
         }
         Ok(())
     }
@@ -38,7 +38,7 @@ impl Pager {
         self.wal_read_snapshot = None;
         self.release_shared_lock()?;
         if matches!(self.lock_mode, PagerLockMode::None) {
-            self.state = PagerState::Open;
+            self.transition_state(PagerState::Open)?;
         }
         Ok(())
     }

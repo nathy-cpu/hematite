@@ -121,3 +121,50 @@ fn test_pager_state_tracks_writer_progression() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn test_pager_reader_scope_cannot_upgrade_to_writer_transaction() -> Result<()> {
+    let test_db = TestDbFile::new("pager_state_reader_cannot_upgrade");
+    let mut pager = Pager::new(&test_db, 10)?;
+
+    pager.begin_read()?;
+    assert_eq!(pager.state(), PagerState::Reader);
+
+    let err = pager.begin_transaction().unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("cannot upgrade a shared database lock to a write lock")
+    );
+    assert_eq!(pager.state(), PagerState::Reader);
+
+    pager.end_read()?;
+    assert_eq!(pager.state(), PagerState::Open);
+
+    Ok(())
+}
+
+#[test]
+fn test_pager_begin_read_during_write_transaction_keeps_writer_state() -> Result<()> {
+    let test_db = TestDbFile::new("pager_state_reader_inside_writer");
+    let mut pager = Pager::new(&test_db, 10)?;
+
+    pager.begin_transaction()?;
+    assert_eq!(pager.state(), PagerState::WriterLocked);
+
+    pager.begin_read()?;
+    assert_eq!(pager.state(), PagerState::WriterLocked);
+
+    let page_id = pager.allocate_page()?;
+    let mut page = Page::new(page_id);
+    page.data[0] = 7;
+    pager.write_page(page)?;
+    assert_eq!(pager.state(), PagerState::WriterCacheMod);
+
+    pager.end_read()?;
+    assert_eq!(pager.state(), PagerState::WriterCacheMod);
+
+    pager.rollback_transaction()?;
+    assert_eq!(pager.state(), PagerState::Open);
+
+    Ok(())
+}
