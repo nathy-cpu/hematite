@@ -7,6 +7,8 @@ This document records two things:
 
 The goal of the rewrite is to improve correctness, concurrency behavior, and long-term performance without forcing upper layers such as the B-tree, catalog, and SQL interface to change their public contract.
 
+For the short status view, see [storage-refactor-board.md](./storage-refactor-board.md).
+
 ## Original Plan
 
 ### Rewrite Goal
