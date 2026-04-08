@@ -7,9 +7,14 @@ mod connection_tests {
     use crate::test_utils::TestDbFile;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Barrier};
+    use std::sync::{Arc, Barrier, Mutex, OnceLock};
     use std::thread;
     use std::time::Duration;
+
+    fn threaded_db_test_guard() -> &'static Mutex<()> {
+        static THREADED_DB_TEST_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+        THREADED_DB_TEST_GUARD.get_or_init(|| Mutex::new(()))
+    }
 
     fn is_locked_error(err: &HematiteError) -> bool {
         err.to_string().contains("locked")
@@ -3090,6 +3095,7 @@ mod connection_tests {
 
     #[test]
     fn test_threaded_wal_multi_connection_reads_and_writes() -> Result<()> {
+        let _guard = threaded_db_test_guard().lock().unwrap();
         let db = TestDbFile::new("_test_threaded_wal_multi_connection_reads_and_writes");
         let db_path = db.as_path().to_path_buf();
         let mut setup = Connection::new(db.path())?;
@@ -3187,6 +3193,7 @@ mod connection_tests {
 
     #[test]
     fn test_threaded_multi_connection_close_does_not_race_checksum_persistence() -> Result<()> {
+        let _guard = threaded_db_test_guard().lock().unwrap();
         let db = TestDbFile::new(
             "_test_threaded_multi_connection_close_does_not_race_checksum_persistence",
         );
@@ -3229,6 +3236,7 @@ mod connection_tests {
 
     #[test]
     fn test_threaded_rollback_multi_connection_reads_and_writes() -> Result<()> {
+        let _guard = threaded_db_test_guard().lock().unwrap();
         let db = TestDbFile::new("_test_threaded_rollback_multi_connection_reads_and_writes");
         let db_path = db.as_path().to_path_buf();
         let mut setup = Connection::new(db.path())?;
