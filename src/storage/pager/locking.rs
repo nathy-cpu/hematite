@@ -22,6 +22,26 @@ pub(crate) fn checksum_persist_lock() -> &'static Mutex<()> {
 }
 
 impl Pager {
+    pub(super) fn enter_reader_scope(&mut self) -> Result<PagerLockMode> {
+        let previous_lock_mode = self.lock_mode;
+        self.acquire_shared_lock()?;
+        Ok(previous_lock_mode)
+    }
+
+    pub(super) fn leave_reader_scope(&mut self) -> Result<PagerLockMode> {
+        self.release_shared_lock()?;
+        Ok(self.lock_mode)
+    }
+
+    pub(super) fn enter_writer_scope(&mut self) -> Result<()> {
+        self.acquire_write_lock()
+    }
+
+    pub(super) fn leave_writer_scope(&mut self) -> Result<PagerLockMode> {
+        self.release_write_lock()?;
+        Ok(self.lock_mode)
+    }
+
     pub(super) fn lock_registry_map(
         &self,
     ) -> Result<MutexGuard<'static, HashMap<PathBuf, LockRegistryEntry>>> {

@@ -4,14 +4,13 @@ use crate::error::Result;
 impl Pager {
     pub fn begin_read(&mut self) -> Result<()> {
         self.check_error_state()?;
-        let previous_lock_mode = self.lock_mode;
-        self.acquire_shared_lock()?;
+        let previous_lock_mode = self.enter_reader_scope()?;
         if matches!(previous_lock_mode, PagerLockMode::Shared { .. }) {
             return Ok(());
         }
         if !matches!(previous_lock_mode, PagerLockMode::Write) {
             if let Err(err) = self.refresh_persisted_view() {
-                let _ = self.release_shared_lock();
+                let _ = self.leave_reader_scope();
                 return Err(err);
             }
         }
@@ -36,8 +35,8 @@ impl Pager {
             }
         }
         self.wal_read_snapshot = None;
-        self.release_shared_lock()?;
-        if matches!(self.lock_mode, PagerLockMode::None) {
+        let resulting_lock_mode = self.leave_reader_scope()?;
+        if matches!(resulting_lock_mode, PagerLockMode::None) {
             self.transition_state(PagerState::Open)?;
         }
         Ok(())
