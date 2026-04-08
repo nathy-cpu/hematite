@@ -77,6 +77,8 @@
 
 #[path = "pager/cache.rs"]
 mod cache;
+#[path = "pager/journal.rs"]
+mod journal;
 #[path = "pager/locking.rs"]
 mod locking;
 #[path = "pager/recovery.rs"]
@@ -85,7 +87,7 @@ mod recovery;
 mod state;
 
 use crate::error::Result;
-use crate::storage::journal::{JournalRecord, JournalState};
+use crate::storage::journal::JournalRecord;
 use crate::storage::wal::VisibleWalState;
 use crate::storage::{
     file_manager::{FileManager, FileManagerSnapshot},
@@ -414,7 +416,7 @@ impl Pager {
         self.transaction = Some(transaction);
         self.state = PagerState::WriterLocked;
         if self.journal_mode == JournalMode::Rollback {
-            self.persist_journal(JournalState::Active)?;
+            self.begin_rollback_transaction()?;
         }
         Ok(())
     }
@@ -434,9 +436,7 @@ impl Pager {
             }
             self.state = PagerState::WriterFinished;
         } else {
-            self.flush()?;
-            self.persist_journal(JournalState::Committed)?;
-            self.state = PagerState::WriterFinished;
+            self.commit_rollback_transaction()?;
         }
         self.remove_journal_file()?;
         self.transaction = None;
@@ -455,8 +455,7 @@ impl Pager {
         if self.journal_mode == JournalMode::Wal {
             self.rollback_wal_transaction()?;
         } else {
-            self.rollback_from_active_transaction()?;
-            self.remove_journal_file()?;
+            self.rollback_rollback_transaction()?;
         }
         self.transaction = None;
         self.release_write_lock()?;
