@@ -93,6 +93,8 @@ mod page_io;
 mod integrity;
 #[path = "pager/space.rs"]
 mod space;
+#[path = "pager/test_support.rs"]
+mod test_support;
 #[path = "pager/savepoint.rs"]
 mod savepoint;
 #[path = "pager/state.rs"]
@@ -229,18 +231,6 @@ impl Pager {
         self.journal_mode
     }
 
-    #[cfg(test)]
-    pub(crate) fn dirty_page_count(&self) -> usize {
-        self.cache.dirty_count()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn wal_snapshot_sequence(&self) -> Option<u64> {
-        self.wal_read_snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.visible_sequence)
-    }
-
 }
 
 impl Drop for Pager {
@@ -254,16 +244,5 @@ impl Drop for Pager {
             }
             PagerLockMode::None => {}
         }
-    }
-}
-
-#[cfg(test)]
-impl Pager {
-    pub fn inject_io_failure(&mut self) {
-        self.file_manager.inject_write_failure();
-    }
-
-    pub fn state(&self) -> PagerState {
-        self.state
     }
 }
