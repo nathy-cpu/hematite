@@ -62,11 +62,12 @@ impl BTreeIndex {
     }
 
     pub fn search(&mut self, key: &BTreeKey) -> Result<Option<BTreeValue>> {
+        let mut storage = self.lock_storage()?;
         let mut current_page_id = self.root_page_id;
 
         loop {
-            let page = self.lock_storage()?.read_page(current_page_id)?;
-            let node = BTreeNode::from_page_decoded(page)?;
+            let page = storage.read_page(current_page_id)?;
+            let node = BTreeNode::from_page(page)?;
 
             match node.search(key) {
                 SearchResult::Found(value) => return Ok(Some(value)),
@@ -80,10 +81,37 @@ impl BTreeIndex {
 
     pub fn search_typed<C: KeyValueCodec>(&mut self, key: &C::Key) -> Result<Option<C::Value>> {
         let encoded_key = C::encode_key(key)?;
-        let raw = self.search(&BTreeKey::new(encoded_key))?;
-        match raw {
-            Some(value) => Ok(Some(C::decode_value(value.as_bytes())?)),
-            None => Ok(None),
+        let key = BTreeKey::new(encoded_key);
+        let mut storage = self.lock_storage()?;
+        let mut current_page_id = self.root_page_id;
+
+        loop {
+            let page = storage.read_page(current_page_id)?;
+            let node = BTreeNode::from_page(page)?;
+
+            match node.node_type {
+                NodeType::Leaf => {
+                    let mut left = 0usize;
+                    let mut right = node.key_count;
+
+                    while left < right {
+                        let mid = (left + right) / 2;
+                        let mid_key_bytes = node.get_key_view(mid)?;
+                        match key.as_bytes().cmp(mid_key_bytes) {
+                            std::cmp::Ordering::Equal => {
+                                return Ok(Some(C::decode_value(node.get_value_view(mid)?)?));
+                            }
+                            std::cmp::Ordering::Less => right = mid,
+                            std::cmp::Ordering::Greater => left = mid + 1,
+                        }
+                    }
+
+                    return Ok(None);
+                }
+                NodeType::Internal => {
+                    current_page_id = node.find_child(&key);
+                }
+            }
         }
     }
 

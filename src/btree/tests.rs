@@ -1226,6 +1226,104 @@ mod tree_tests {
     }
 
     #[test]
+    fn test_btree_lazy_page_views_do_not_force_decode() -> Result<()> {
+        let page_id = 1;
+        let mut node = BTreeNode::new_leaf(page_id);
+        node.keys.push(BTreeKey::new(vec![1, 2, 3]));
+        node.keys.push(BTreeKey::new(vec![4, 5, 6]));
+        node.values.push(BTreeValue::new(vec![7, 8, 9]));
+        node.values.push(BTreeValue::new(vec![10, 11, 12]));
+
+        let mut page = Page::new(page_id);
+        BTreeNode::to_page(&node, &mut page)?;
+
+        let lazy = BTreeNode::from_page(page)?;
+        assert!(!lazy.is_decoded);
+        assert_eq!(lazy.key_count, 2);
+        assert!(lazy.keys.is_empty());
+        assert!(lazy.values.is_empty());
+
+        assert_eq!(lazy.get_key_view(0)?, &[1, 2, 3]);
+        assert_eq!(lazy.get_value_view(1)?, &[10, 11, 12]);
+        assert!(!lazy.is_decoded);
+
+        match lazy.search(&BTreeKey::new(vec![4, 5, 6])) {
+            crate::btree::node::SearchResult::Found(value) => {
+                assert_eq!(value.data, vec![10, 11, 12]);
+            }
+            crate::btree::node::SearchResult::NotFound(_) => {
+                panic!("expected exact key to be found from lazy page view");
+            }
+        }
+        assert!(!lazy.is_decoded);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_btree_leaf_in_place_update_preserves_lazy_state() -> Result<()> {
+        let page_id = 1;
+        let key = BTreeKey::new(vec![1, 2, 3]);
+        let mut node = BTreeNode::new_leaf(page_id);
+        node.keys.push(key.clone());
+        node.values.push(BTreeValue::new(vec![7, 8, 9]));
+
+        let mut page = Page::new(page_id);
+        BTreeNode::to_page(&node, &mut page)?;
+
+        let mut lazy = BTreeNode::from_page(page.clone())?;
+        assert!(!lazy.is_decoded);
+
+        let replacement = BTreeValue::new(vec![4, 5, 6]);
+        assert!(lazy.try_update_leaf_in_place(&mut page, &key, &replacement)?);
+        assert!(!lazy.is_decoded);
+
+        let decoded = BTreeNode::from_page_decoded(page)?;
+        assert_eq!(decoded.values.len(), 1);
+        assert_eq!(decoded.values[0].data, replacement.data);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_btree_append_split_keeps_existing_keys_left() -> Result<()> {
+        let mut storage = Pager::new_in_memory(100)?;
+        let page_id = storage.allocate_page()?;
+
+        let mut node = BTreeNode::new_leaf(page_id);
+        for i in 0u32..3u32 {
+            node.keys.push(BTreeKey::new(i.to_be_bytes().to_vec()));
+            node.values
+                .push(BTreeValue::new(format!("v{i}").into_bytes()));
+        }
+
+        let mut page = Page::new(page_id);
+        node.to_page(&mut page)?;
+        storage.write_page(page)?;
+
+        let mut lazy = BTreeNode::from_page(storage.read_page(page_id)?)?;
+        let append_key = BTreeKey::new(99u32.to_be_bytes().to_vec());
+        let append_value = BTreeValue::new(b"v99".to_vec());
+        let (split_key, right_page_id) =
+            lazy.split_leaf(&mut storage, append_key.clone(), append_value.clone())?;
+
+        assert_eq!(split_key, append_key);
+
+        let left = BTreeNode::from_page_decoded(storage.read_page(page_id)?)?;
+        let right = BTreeNode::from_page_decoded(storage.read_page(right_page_id)?)?;
+
+        assert_eq!(left.keys.len(), 3);
+        assert_eq!(right.keys.len(), 1);
+        assert_eq!(left.keys[0].data, 0u32.to_be_bytes().to_vec());
+        assert_eq!(left.keys[1].data, 1u32.to_be_bytes().to_vec());
+        assert_eq!(left.keys[2].data, 2u32.to_be_bytes().to_vec());
+        assert_eq!(right.keys[0], append_key);
+        assert_eq!(right.values[0], append_value);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_btree_page_rejects_unsupported_version() -> Result<()> {
         let page_id = 1;
         let mut node = BTreeNode::new_leaf(page_id);

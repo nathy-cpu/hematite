@@ -529,6 +529,46 @@ mod pager_tests {
     }
 
     #[test]
+    fn test_pager_wal_refreshes_stale_writer_state_before_committing() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_wal_refreshes_stale_writer_state");
+        let wal_path = std::path::PathBuf::from(format!("{}.wal", test_db.path()));
+
+        let mut first_writer = Pager::new(test_db.path(), 8)?;
+        let mut second_writer = Pager::new(test_db.path(), 8)?;
+        first_writer.set_journal_mode(JournalMode::Wal)?;
+        second_writer.set_journal_mode(JournalMode::Wal)?;
+
+        let mut pinned_reader = Pager::new(test_db.path(), 8)?;
+        pinned_reader.begin_read()?;
+
+        first_writer.begin_transaction()?;
+        let page_id = first_writer.allocate_page()?;
+        let mut first_page = Page::new(page_id);
+        first_page.data[0] = 1;
+        first_writer.write_page(first_page)?;
+        first_writer.commit_transaction()?;
+
+        second_writer.begin_transaction()?;
+        let mut updated_page = second_writer.read_page(page_id)?;
+        assert_eq!(updated_page.data[0], 1);
+        updated_page.data[0] = 2;
+        second_writer.write_page(updated_page)?;
+        second_writer.commit_transaction()?;
+
+        let state = WalRecord::load_visible_state_from_path(&wal_path)?
+            .expect("WAL state should exist after committed transactions");
+        assert_eq!(state.visible_sequence, 2);
+
+        pinned_reader.end_read()?;
+
+        let mut reader = Pager::new(test_db.path(), 8)?;
+        reader.begin_read()?;
+        assert_eq!(reader.read_page(page_id)?.data[0], 2);
+        reader.end_read()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_pager_reads_committed_wal_page_images() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_pager_reads_committed_wal_page_images");
         let wal_path = std::path::PathBuf::from(format!("{}.wal", test_db.path()));

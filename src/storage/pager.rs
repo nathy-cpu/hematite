@@ -443,6 +443,10 @@ impl Pager {
         }
 
         self.acquire_write_lock()?;
+        if let Err(err) = self.refresh_persisted_view() {
+            let _ = self.release_write_lock();
+            return Err(err);
+        }
 
         let transaction = PagerTransaction {
             original_file_len: self.file_manager.file_len()?,

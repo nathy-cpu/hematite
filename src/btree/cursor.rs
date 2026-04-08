@@ -111,10 +111,14 @@ impl BTreeCursor {
         }
     }
 
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub fn save_position(&self) -> Option<BTreeKey> {
         self.cached_key.clone()
     }
 
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub fn restore_position(&mut self, saved_position: Option<BTreeKey>) -> Result<()> {
         if let Some(key) = saved_position {
             self.seek(&key)
@@ -182,76 +186,67 @@ impl BTreeCursor {
     }
 
     fn seek_to_key(&mut self, page_id: PageId, key: &BTreeKey) -> Result<()> {
-        self.stack.clear();
-        self.at_end = false;
-
         let mut current_page_id = page_id;
+        let mut frames = Vec::new();
+        let at_end = {
+            let mut storage = self.lock_storage()?;
+            loop {
+                let page = storage.read_page(current_page_id)?;
+                let node = BTreeNode::from_page(page)?;
 
-        loop {
-            let page = self.lock_storage()?.read_page(current_page_id)?;
-            let node = BTreeNode::from_page(page)?;
+                match node.node_type {
+                    NodeType::Leaf => {
+                        let mut frame = CursorFrame {
+                            page_id: current_page_id,
+                            node,
+                            index: 0,
+                        };
 
-            match node.node_type {
-                NodeType::Leaf => {
-                    // Find the key in the leaf
-                    let frame = CursorFrame {
-                        page_id: current_page_id,
-                        node: node.clone(),
-                        index: 0,
-                    };
-                    self.stack.push(frame);
+                        let mut left = 0;
+                        let mut right = frame.node.key_count;
 
-                    // Binary search for the key
-                    let mut left = 0;
-                    let mut right = node.key_count;
-
-                    while left < right {
-                        let mid = (left + right) / 2;
-                        let mid_key_bytes = node.get_key_view(mid)?;
-                        if mid_key_bytes < key.as_bytes() {
-                            left = mid + 1;
-                        } else {
-                            right = mid;
+                        while left < right {
+                            let mid = (left + right) / 2;
+                            let mid_key_bytes = frame.node.get_key_view(mid)?;
+                            if mid_key_bytes < key.as_bytes() {
+                                left = mid + 1;
+                            } else {
+                                right = mid;
+                            }
                         }
-                    }
 
-                    let frame = self.stack.last_mut().ok_or_else(|| {
-                        HematiteError::InternalError(
-                            "B-tree cursor lost its leaf frame during seek".to_string(),
-                        )
-                    })?;
-                    frame.index = left;
-                    if left >= node.key_count {
-                        self.at_end = true;
+                        frame.index = left;
+                        let reached_end = left >= frame.node.key_count;
+                        frames.push(frame);
+                        break reached_end;
                     }
-                    self.sync_cache();
-                    return Ok(());
-                }
-                NodeType::Internal => {
-                    // Find the correct child to traverse
-                    let mut child_index = 0;
-                    for i in 0..node.key_count {
-                        let node_key_bytes = node.get_key_view(i)?;
-                        if node_key_bytes < key.as_bytes() {
-                            child_index = i + 1;
-                        } else {
-                            break;
+                    NodeType::Internal => {
+                        let mut child_index = 0;
+                        for i in 0..node.key_count {
+                            let node_key_bytes = node.get_key_view(i)?;
+                            if node_key_bytes < key.as_bytes() {
+                                child_index = i + 1;
+                            } else {
+                                break;
+                            }
                         }
+
+                        let next_child = node.get_child_procedural(child_index)?;
+                        frames.push(CursorFrame {
+                            page_id: current_page_id,
+                            node,
+                            index: child_index,
+                        });
+                        current_page_id = next_child;
                     }
-
-                    let next_child = node.get_child_procedural(child_index)?;
-
-                    let frame = CursorFrame {
-                        page_id: current_page_id,
-                        node: node.clone(),
-                        index: child_index,
-                    };
-                    self.stack.push(frame);
-
-                    current_page_id = next_child;
                 }
             }
-        }
+        };
+
+        self.stack = frames;
+        self.at_end = at_end;
+        self.sync_cache();
+        Ok(())
     }
 
     pub fn next(&mut self) -> Result<()> {
@@ -375,43 +370,50 @@ impl BTreeCursor {
 
     fn traverse_to_leftmost_leaf(&mut self, page_id: PageId) -> Result<()> {
         let mut current_page_id = page_id;
+        let mut frames = Vec::new();
+        let mut storage = self.lock_storage()?;
 
         loop {
-            let page = self.lock_storage()?.read_page(current_page_id)?;
+            let page = storage.read_page(current_page_id)?;
             let node = BTreeNode::from_page(page)?;
-
-            let frame = CursorFrame {
-                page_id: current_page_id,
-                node: node.clone(),
-                index: 0,
-            };
-
-            self.stack.push(frame);
-
-            match node.node_type {
-                NodeType::Leaf => {
-                    break;
-                }
+            let next_child = match node.node_type {
+                NodeType::Leaf => None,
                 NodeType::Internal => {
                     if node.key_count == 0 && node.get_child_procedural(0).is_err() {
                         return Err(HematiteError::CorruptedData(
                             "Internal node has no children".to_string(),
                         ));
                     }
-                    current_page_id = node.get_child_procedural(0)?;
+                    Some(node.get_child_procedural(0)?)
                 }
+            };
+
+            frames.push(CursorFrame {
+                page_id: current_page_id,
+                node,
+                index: 0,
+            });
+
+            if let Some(next_child) = next_child {
+                current_page_id = next_child;
+            } else {
+                break;
             }
         }
 
+        drop(storage);
+        self.stack.extend(frames);
         Ok(())
     }
 
     #[cfg(test)]
     fn traverse_to_rightmost_leaf(&mut self, page_id: PageId) -> Result<()> {
         let mut current_page_id = page_id;
+        let mut frames = Vec::new();
+        let mut storage = self.lock_storage()?;
 
         loop {
-            let page = self.lock_storage()?.read_page(current_page_id)?;
+            let page = storage.read_page(current_page_id)?;
             let node = BTreeNode::from_page(page)?;
 
             let index = if node.node_type == NodeType::Leaf {
@@ -419,28 +421,33 @@ impl BTreeCursor {
             } else {
                 node.key_count // Last child index is key_count
             };
-
-            let frame = CursorFrame {
-                page_id: current_page_id,
-                node: node.clone(),
-                index,
-            };
-
-            self.stack.push(frame);
-
-            match node.node_type {
-                NodeType::Leaf => break,
+            let next_child = match node.node_type {
+                NodeType::Leaf => None,
                 NodeType::Internal => {
                     if node.key_count == 0 && node.get_child_procedural(0).is_err() {
                         return Err(HematiteError::CorruptedData(
                             "Internal node has no children".to_string(),
                         ));
                     }
-                    current_page_id = node.get_child_procedural(node.key_count)?;
+                    Some(node.get_child_procedural(node.key_count)?)
                 }
+            };
+
+            frames.push(CursorFrame {
+                page_id: current_page_id,
+                node,
+                index,
+            });
+
+            if let Some(next_child) = next_child {
+                current_page_id = next_child;
+            } else {
+                break;
             }
         }
 
+        drop(storage);
+        self.stack.extend(frames);
         Ok(())
     }
 }
