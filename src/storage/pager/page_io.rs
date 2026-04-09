@@ -104,6 +104,37 @@ impl Pager {
         if self.transaction.is_some() {
             self.transition_state(PagerState::WriterCacheMod)?;
         }
+
+        // Spill already-journaled dirty pages to disk when the cache is over
+        // capacity and no clean pages remain for eviction.
+        if self.cache.needs_spill() {
+            self.spill_pages()?;
+        }
+
+        Ok(())
+    }
+
+    /// Write already-journaled dirty pages through to the database file to
+    /// reclaim cache space.  Only pages whose original images have already been
+    /// captured in the rollback journal are eligible — so crash-recovery
+    /// invariants are preserved.
+    fn spill_pages(&mut self) -> Result<()> {
+        let candidates = self.cache.spillable_candidates();
+        for page_id in candidates {
+            // Skip metadata page — it must be written last during flush.
+            if page_id == STORAGE_METADATA_PAGE_ID {
+                continue;
+            }
+            if let Some(page) = self.cache.peek(page_id) {
+                if let Err(e) = self.file_manager.write_page(page) {
+                    self.enter_error_state();
+                    return Err(e);
+                }
+            }
+            self.cache.clear_dirty(page_id);
+            // After clearing dirty, the page becomes a clean cache entry that
+            // regular LRU eviction can reclaim.
+        }
         Ok(())
     }
 

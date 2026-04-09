@@ -9,7 +9,10 @@
 //! This keeps the existing `BTreeNode` API that the rest of the tree code uses, but removes the
 //! old contiguous key/value section format.
 
-use crate::btree::page_format::BTreePageHeaderV3;
+use crate::btree::page_format::{
+    self, insert_cell as pf_insert_cell, remove_cell as pf_remove_cell,
+    total_free_space as pf_total_free_space, BTreePageHeaderV3,
+};
 use crate::btree::{BTreeKey, BTreeValue, NodeType, BTREE_ORDER};
 use crate::error::{HematiteError, Result};
 use crate::storage::format::{PageKind, DATABASE_HEADER_SIZE};
@@ -477,6 +480,86 @@ impl BTreeNode {
             self.values[index] = new_value.clone();
         }
         self.raw_page = Some(Arc::new(page.clone()));
+        Ok(true)
+    }
+
+    /// Try to insert a key-value pair directly into the page bytes without a
+    /// full decode + rebuild cycle.  Returns `true` if successful, `false` if
+    /// there isn't enough space on the page (caller should fall back to split).
+    pub fn try_insert_leaf_in_place(
+        &mut self,
+        page: &mut Page,
+        key: &BTreeKey,
+        value: &BTreeValue,
+    ) -> Result<bool> {
+        if self.node_type != NodeType::Leaf {
+            return Ok(false);
+        }
+        Self::validate_key_size(key)?;
+        Self::validate_value_size(value)?;
+
+        // Check for duplicate key — updates must go through the normal path.
+        if self.exact_key_index(key).is_some() {
+            return Ok(false);
+        }
+
+        let is_p1 = is_page_one(page.id);
+        let cell_bytes = encode_leaf_cell(key, value);
+        let needed = cell_bytes.len() + 2; // +2 for cell pointer
+
+        // Check total free space on the page.
+        let free = pf_total_free_space(page, is_p1)?;
+        if free < needed {
+            return Ok(false);
+        }
+
+        // Find insertion position via binary search on the lazy node.
+        let pos = self.lower_bound_index(key);
+
+        // Use the page_format insert_cell to do the work.
+        pf_insert_cell(page, is_p1, pos, &cell_bytes)?;
+
+        // Invalidate the lazy node state so the next read re-parses.
+        self.raw_page = Some(Arc::new(page.clone()));
+        self.is_decoded = false;
+        let header = BTreePageHeaderV3::parse(page, is_p1)?;
+        self.key_count = header.cell_count as usize;
+        self.cell_offsets = (0..header.cell_count as usize)
+            .map(|i| cell_pointer_from_header(page, &header, i))
+            .collect::<Result<Vec<_>>>()?;
+        self.payload_len = PAGE_SIZE.saturating_sub(header.cell_content_start as usize);
+        self.keys.clear();
+        self.values.clear();
+        self.children.clear();
+        Ok(true)
+    }
+
+    /// Try to remove a cell at `index` directly on the page bytes without
+    /// a full decode + rebuild.  Returns `true` if successful.
+    pub fn try_remove_cell_in_place(
+        &mut self,
+        page: &mut Page,
+        index: usize,
+    ) -> Result<bool> {
+        if index >= self.key_count {
+            return Ok(false);
+        }
+        let is_p1 = is_page_one(page.id);
+
+        pf_remove_cell(page, is_p1, index)?;
+
+        // Refresh lazy state from the updated page.
+        self.raw_page = Some(Arc::new(page.clone()));
+        self.is_decoded = false;
+        let header = BTreePageHeaderV3::parse(page, is_p1)?;
+        self.key_count = header.cell_count as usize;
+        self.cell_offsets = (0..header.cell_count as usize)
+            .map(|i| cell_pointer_from_header(page, &header, i))
+            .collect::<Result<Vec<_>>>()?;
+        self.payload_len = PAGE_SIZE.saturating_sub(header.cell_content_start as usize);
+        self.keys.clear();
+        self.values.clear();
+        self.children.clear();
         Ok(true)
     }
 

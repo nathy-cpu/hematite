@@ -1,15 +1,18 @@
 use super::{JournalMode, Pager};
 use crate::error::Result;
 use crate::storage::journal::{JournalRecord, JournalState, RollbackJournal};
+use crate::storage::journal_v3::{V3JournalHeader, V3JournalRecord, V3JournalState};
 use crate::storage::pager_metadata::PersistedPagerState;
 use crate::storage::wal::{
     append_committed_frames_to_path, load_visible_state_from_path_with_base, VisibleWalState,
     WalFrame,
 };
-use crate::storage::{metadata_page, Page, PageId, STORAGE_METADATA_PAGE_ID, PAGE_SIZE};
+use crate::storage::{
+    metadata_page, next_page_id_for_file_len, Page, PageId, STORAGE_METADATA_PAGE_ID, PAGE_SIZE,
+};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 impl Pager {
@@ -215,7 +218,10 @@ impl Pager {
         Ok(())
     }
 
-    pub(super) fn persist_journal(&self, state: JournalState) -> Result<()> {
+
+    /// Write the journal header and metadata section once at transaction begin.
+    /// Keeps the file handle open for incremental record appending.
+    pub(super) fn initialize_rollback_journal(&mut self) -> Result<()> {
         let Some(transaction) = self.active_rollback_transaction() else {
             return Ok(());
         };
@@ -223,54 +229,139 @@ impl Pager {
             return Ok(());
         };
 
-        let journal = RollbackJournal {
-            state,
-            original_file_len: transaction.original_file_len,
-            original_free_pages: transaction.original_free_pages.clone(),
-            original_checksums: transaction
-                .original_checksums
-                .iter()
-                .map(|(page_id, checksum)| (*page_id, *checksum))
-                .collect(),
-            page_records: transaction.page_records.clone(),
+        let original_free_pages = transaction.original_free_pages.clone();
+        let original_checksums: Vec<(PageId, u32)> = transaction
+            .original_checksums
+            .iter()
+            .map(|(page_id, checksum)| (*page_id, *checksum))
+            .collect();
+        let original_file_len = transaction.original_file_len;
+
+        let header = V3JournalHeader {
+            state: V3JournalState::Active,
+            original_database_page_count: next_page_id_for_file_len(original_file_len),
+            free_page_count: original_free_pages.len() as u32,
+            checksum_count: original_checksums.len() as u32,
+            record_count: 0,
+            ..V3JournalHeader::default()
         };
-        let bytes = journal.encode()?;
+
+        let mut bytes = Vec::with_capacity(
+            36 + original_free_pages.len() * 4 + original_checksums.len() * 8,
+        );
+        bytes.extend_from_slice(&header.encode());
+        for page_id in &original_free_pages {
+            bytes.extend_from_slice(&page_id.to_be_bytes());
+        }
+        for (page_id, checksum) in &original_checksums {
+            bytes.extend_from_slice(&page_id.to_be_bytes());
+            bytes.extend_from_slice(&checksum.to_be_bytes());
+        }
+
+        let header_len = bytes.len() as u64;
+
         let mut file = OpenOptions::new()
             .create(true)
             .write(true)
+            .read(true)
             .truncate(true)
             .open(path)?;
         file.write_all(&bytes)?;
         file.sync_all()?;
+
+        self.journal_file = Some(file);
+        self.journal_record_count = 0;
+        self.journal_header_len = header_len;
+
         Ok(())
     }
 
-    pub(super) fn initialize_rollback_journal(&self) -> Result<()> {
-        self.persist_journal(JournalState::Active)
+    /// Append a single page record to the already-open journal file.
+    pub(super) fn append_rollback_journal_record(&mut self, record: &JournalRecord) -> Result<()> {
+        let Some(file) = &mut self.journal_file else {
+            return Ok(());
+        };
+
+        let v3_record = V3JournalRecord {
+            page_number: record.page_id,
+            page_bytes: record.data.clone(),
+        };
+        let checksum_seed = V3JournalHeader::default().checksum_seed;
+        let encoded = v3_record.encode(checksum_seed)?;
+        file.write_all(&encoded)?;
+        self.journal_record_count += 1;
+
+        // Update record_count in the header (offset 32) so the journal is
+        // always self-consistent — a crash at any point leaves a decodable file.
+        file.seek(SeekFrom::Start(32))?;
+        file.write_all(&self.journal_record_count.to_be_bytes())?;
+
+        file.sync_all()?;
+
+        // Seek back to end for the next append.
+        file.seek(SeekFrom::End(0))?;
+
+        Ok(())
     }
 
-    pub(super) fn append_rollback_journal_record(&self, record: &JournalRecord) -> Result<()> {
-        let _ = record;
-        self.persist_journal(JournalState::Active)
+    /// Atomically mark the journal as committed by updating just the state byte
+    /// and record count in the header — no full rewrite.
+    pub(super) fn mark_rollback_journal_committed(&mut self) -> Result<()> {
+        let Some(file) = &mut self.journal_file else {
+            return Ok(());
+        };
+
+        // State byte is at offset 8 in the V3 header.
+        file.seek(SeekFrom::Start(8))?;
+        file.write_all(&[V3JournalState::Committed as u8])?;
+
+        // Record count is at offset 32 in the V3 header.
+        file.seek(SeekFrom::Start(32))?;
+        file.write_all(&self.journal_record_count.to_be_bytes())?;
+
+        file.sync_all()?;
+        Ok(())
     }
 
-    pub(super) fn mark_rollback_journal_committed(&self) -> Result<()> {
-        self.persist_journal(JournalState::Committed)
-    }
-
-    pub(super) fn sync_rollback_journal_from_transaction(&self) -> Result<()> {
+    /// After a savepoint restore, truncate the journal to match the reduced
+    /// page-record set and update the header's record count.
+    pub(super) fn sync_rollback_journal_from_transaction(&mut self) -> Result<()> {
         if self.journal_mode != JournalMode::Rollback {
             return Ok(());
         }
 
         if self.active_rollback_transaction().is_some() {
-            self.persist_journal(JournalState::Active)
+            let new_record_count = self
+                .active_rollback_transaction()
+                .map(|t| t.page_records.len() as u32)
+                .unwrap_or(0);
+
+            if let Some(file) = &mut self.journal_file {
+                let record_size = (8 + PAGE_SIZE) as u64;
+                let new_file_len =
+                    self.journal_header_len + new_record_count as u64 * record_size;
+                file.set_len(new_file_len)?;
+
+                // Update record_count at offset 32.
+                file.seek(SeekFrom::Start(32))?;
+                file.write_all(&new_record_count.to_be_bytes())?;
+                file.sync_all()?;
+
+                self.journal_record_count = new_record_count;
+            }
+            Ok(())
         } else {
             self.remove_journal_file()
         }
     }
 
-    pub(super) fn remove_journal_file(&self) -> Result<()> {
+    /// Close the journal file handle and remove the file from disk.
+    pub(super) fn remove_journal_file(&mut self) -> Result<()> {
+        // Close the handle first so the file can be removed cleanly.
+        self.journal_file = None;
+        self.journal_record_count = 0;
+        self.journal_header_len = 0;
+
         let Some(path) = &self.journal_path else {
             return Ok(());
         };

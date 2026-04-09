@@ -151,6 +151,86 @@ pub(crate) fn set_rightmost_child(page: &mut Page, is_page_one: bool, child: u32
     Ok(())
 }
 
+/// Minimum freeblock size: 4 bytes (2 for next pointer + 2 for size).
+const MIN_FREEBLOCK_SIZE: usize = 4;
+
+/// Calculate total usable free space on a page: gap + freeblock chain + fragments.
+pub(crate) fn total_free_space(page: &Page, is_page_one: bool) -> Result<usize> {
+    let header = BTreePageHeaderV3::parse(page, is_page_one)?;
+    let gap = header.writable_gap_size();
+    let fragments = header.fragmented_free_bytes as usize;
+
+    let mut freeblock_space = 0usize;
+    let mut fb_offset = header.first_freeblock as usize;
+    let mut visited = 0u16;
+    while fb_offset != 0 {
+        if fb_offset + MIN_FREEBLOCK_SIZE > PAGE_SIZE {
+            return Err(HematiteError::CorruptedData(
+                "Freeblock pointer exceeds page bounds".to_string(),
+            ));
+        }
+        let fb_size = read_u16_be(&page.data, fb_offset + 2) as usize;
+        freeblock_space += fb_size;
+        fb_offset = read_u16_be(&page.data, fb_offset) as usize;
+        visited += 1;
+        if visited > PAGE_SIZE as u16 / MIN_FREEBLOCK_SIZE as u16 {
+            return Err(HematiteError::CorruptedData(
+                "Freeblock chain cycle detected".to_string(),
+            ));
+        }
+    }
+
+    Ok(gap + freeblock_space + fragments)
+}
+
+/// Try to allocate `needed` bytes from the freeblock chain.
+/// Returns the offset of the allocated space, or `None` if no suitable freeblock exists.
+fn allocate_from_freeblocks(
+    data: &mut [u8],
+    header_offset: usize,
+    needed: usize,
+) -> Option<usize> {
+    // Walk the freeblock chain looking for a block >= needed.
+    let mut prev_ptr_offset = header_offset + OFFSET_FIRST_FREEBLOCK;
+    let mut fb_offset = read_u16_be(data, prev_ptr_offset) as usize;
+
+    while fb_offset != 0 {
+        if fb_offset + MIN_FREEBLOCK_SIZE > data.len() {
+            return None;
+        }
+        let fb_size = read_u16_be(data, fb_offset + 2) as usize;
+        let next_fb = read_u16_be(data, fb_offset) as usize;
+
+        if fb_size >= needed {
+            let remainder = fb_size - needed;
+            if remainder >= MIN_FREEBLOCK_SIZE {
+                // Shrink: keep the tail as a smaller freeblock.
+                let new_fb_offset = fb_offset + needed;
+                write_u16_be(data, new_fb_offset, next_fb as u16);
+                write_u16_be(data, new_fb_offset + 2, remainder as u16);
+                write_u16_be(data, prev_ptr_offset, new_fb_offset as u16);
+            } else {
+                // Use the whole freeblock; add remainder to fragment count.
+                write_u16_be(data, prev_ptr_offset, next_fb as u16);
+                if remainder > 0 {
+                    let frag_byte = header_offset + OFFSET_FRAGMENTED_FREE_BYTES;
+                    let old_frags = data[frag_byte] as usize;
+                    let new_frags = (old_frags + remainder).min(255);
+                    data[frag_byte] = new_frags as u8;
+                }
+            }
+            return Some(fb_offset);
+        }
+
+        prev_ptr_offset = fb_offset; // next-pointer field is at the start of freeblock
+        fb_offset = next_fb;
+    }
+
+    None
+}
+
+/// Insert a cell onto a page, reusing freeblock space when possible.
+/// Falls back to the gap, defragmenting if needed.
 pub(crate) fn insert_cell(
     page: &mut Page,
     is_page_one: bool,
@@ -165,39 +245,74 @@ pub(crate) fn insert_cell(
         )));
     }
 
-    let required = cell_bytes.len() + 2;
-    if header.writable_gap_size() < required {
-        defragment_page(page, is_page_one)?;
-        header = BTreePageHeaderV3::parse(page, is_page_one)?;
-    }
-    if header.writable_gap_size() < required {
+    let cell_len = cell_bytes.len();
+    // We always need 2 bytes for the new cell pointer in the pointer array.
+    let pointer_space_needed = 2;
+
+    // Check total free space first (gap + freeblocks + fragments).
+    let total_free = total_free_space(page, is_page_one)?;
+    if total_free < cell_len + pointer_space_needed {
         return Err(HematiteError::StorageError(
-            "v3 b-tree page has insufficient contiguous space for new cell".to_string(),
+            "v3 b-tree page has insufficient total space for new cell".to_string(),
         ));
     }
 
-    let cell_start = header.cell_content_start as usize - cell_bytes.len();
-    page.data[cell_start..header.cell_content_start as usize].copy_from_slice(cell_bytes);
+    // Ensure the gap has room for the new pointer entry (2 bytes).
+    if header.writable_gap_size() < pointer_space_needed {
+        defragment_page(page, is_page_one)?;
+        header = BTreePageHeaderV3::parse(page, is_page_one)?;
+    }
 
+    // Try allocating from freeblocks first.
+    let cell_start = if let Some(offset) =
+        allocate_from_freeblocks(&mut page.data, header.header_offset, cell_len)
+    {
+        page.data[offset..offset + cell_len].copy_from_slice(cell_bytes);
+        offset
+    } else {
+        // Fall back to the gap. If the gap is too small for cell + pointer, defragment.
+        let required_in_gap = cell_len + pointer_space_needed;
+        if header.writable_gap_size() < required_in_gap {
+            defragment_page(page, is_page_one)?;
+            header = BTreePageHeaderV3::parse(page, is_page_one)?;
+        }
+        if header.writable_gap_size() < cell_len + pointer_space_needed {
+            return Err(HematiteError::StorageError(
+                "v3 b-tree page has insufficient contiguous space for new cell".to_string(),
+            ));
+        }
+        let start = header.cell_content_start as usize - cell_len;
+        page.data[start..header.cell_content_start as usize].copy_from_slice(cell_bytes);
+
+        // Update cell_content_start.
+        write_u16_be(
+            &mut page.data,
+            header.header_offset + OFFSET_CELL_CONTENT_START,
+            start as u16,
+        );
+        start
+    };
+
+    // Insert the cell pointer at sorted_index, shifting later pointers right.
     let pointer_start = header.pointer_area_start();
     let insertion_offset = pointer_start + sorted_index * 2;
     let pointer_end = pointer_start + header.cell_count as usize * 2;
-    page.data.copy_within(insertion_offset..pointer_end, insertion_offset + 2);
+    page.data
+        .copy_within(insertion_offset..pointer_end, insertion_offset + 2);
     write_u16_be(&mut page.data, insertion_offset, cell_start as u16);
 
+    // Update cell count.
     write_u16_be(
         &mut page.data,
         header.header_offset + OFFSET_CELL_COUNT,
         header.cell_count + 1,
     );
-    write_u16_be(
-        &mut page.data,
-        header.header_offset + OFFSET_CELL_CONTENT_START,
-        cell_start as u16,
-    );
+
     Ok(cell_start as u16)
 }
 
+/// Remove a cell at `index` and add the freed space to the freeblock chain
+/// instead of defragmenting the entire page.
 pub(crate) fn remove_cell(page: &mut Page, is_page_one: bool, index: usize) -> Result<()> {
     let header = BTreePageHeaderV3::parse(page, is_page_one)?;
     if index >= header.cell_count as usize {
@@ -207,60 +322,172 @@ pub(crate) fn remove_cell(page: &mut Page, is_page_one: bool, index: usize) -> R
         )));
     }
 
+    // Read the cell pointer to know where the cell body lives.
+    let cell_offset = read_u16_be(
+        &page.data,
+        header.pointer_area_start() + index * 2,
+    ) as usize;
+
+    // Determine the cell size by finding the next cell boundary.
+    let cell_size = compute_cell_size(page, &header, cell_offset)?;
+
+    // Remove the cell pointer by shifting later pointers left.
     let pointer_start = header.pointer_area_start();
     let removal_offset = pointer_start + index * 2;
     let pointer_end = pointer_start + header.cell_count as usize * 2;
     page.data
         .copy_within(removal_offset + 2..pointer_end, removal_offset);
+    // Zero out the vacated trailing pointer slot.
+    page.data[pointer_end - 2] = 0;
+    page.data[pointer_end - 1] = 0;
+
+    // Update cell count.
     write_u16_be(
         &mut page.data,
         header.header_offset + OFFSET_CELL_COUNT,
         header.cell_count - 1,
     );
-    page.data[pointer_end - 2] = 0;
-    page.data[pointer_end - 1] = 0;
-    defragment_page(page, is_page_one)
+
+    // Add the freed cell body to the freeblock chain.
+    if cell_size >= MIN_FREEBLOCK_SIZE {
+        add_to_freeblock_chain(&mut page.data, header.header_offset, cell_offset, cell_size);
+    } else if cell_size > 0 {
+        // Too small for a freeblock — add to fragment count.
+        let frag_byte = header.header_offset + OFFSET_FRAGMENTED_FREE_BYTES;
+        let old_frags = page.data[frag_byte] as usize;
+        let new_frags = (old_frags + cell_size).min(255);
+        page.data[frag_byte] = new_frags as u8;
+    }
+
+    // If the freed cell was at cell_content_start, advance it.
+    if cell_offset == header.cell_content_start as usize {
+        let new_start = cell_offset + cell_size;
+        write_u16_be(
+            &mut page.data,
+            header.header_offset + OFFSET_CELL_CONTENT_START,
+            new_start as u16,
+        );
+    }
+
+    // Trigger defragmentation only if fragmentation is excessive (>60 bytes).
+    let updated_header = BTreePageHeaderV3::parse(page, is_page_one)?;
+    if updated_header.fragmented_free_bytes > 60 {
+        defragment_page(page, is_page_one)?;
+    }
+
+    Ok(())
 }
 
+/// Add a freed region to the freeblock chain, maintaining sorted order by offset.
+fn add_to_freeblock_chain(data: &mut [u8], header_offset: usize, offset: usize, size: usize) {
+    let first_fb_ptr = header_offset + OFFSET_FIRST_FREEBLOCK;
+    let mut prev_ptr_offset = first_fb_ptr;
+    let mut fb_offset = read_u16_be(data, prev_ptr_offset) as usize;
+
+    // Walk until we find the right insertion point (sorted by offset).
+    while fb_offset != 0 && fb_offset < offset {
+        prev_ptr_offset = fb_offset; // next-pointer is at the start
+        fb_offset = read_u16_be(data, fb_offset) as usize;
+    }
+
+    // Insert new freeblock: point to current successor.
+    write_u16_be(data, offset, fb_offset as u16);
+    write_u16_be(data, offset + 2, size as u16);
+
+    // Link predecessor to new freeblock.
+    write_u16_be(data, prev_ptr_offset, offset as u16);
+}
+
+/// Compute the size of a cell body at `cell_offset` by finding the boundary
+/// of the next closest cell or the end of the page.
+fn compute_cell_size(page: &Page, header: &BTreePageHeaderV3, cell_offset: usize) -> Result<usize> {
+    // Collect all cell start offsets and sort them.
+    let pointer_start = header.pointer_area_start();
+    let cell_count = header.cell_count as usize;
+    let mut starts: Vec<usize> = (0..cell_count)
+        .map(|i| read_u16_be(&page.data, pointer_start + i * 2) as usize)
+        .collect();
+    starts.sort_unstable();
+
+    // Find our cell in the sorted list.
+    if let Some(pos) = starts.iter().position(|&s| s == cell_offset) {
+        let end = if pos + 1 < starts.len() {
+            starts[pos + 1]
+        } else {
+            PAGE_SIZE
+        };
+        Ok(end - cell_offset)
+    } else {
+        Err(HematiteError::CorruptedData(
+            "Cell offset not found in pointer array".to_string(),
+        ))
+    }
+}
+
+/// Defragment a page by repacking all cells tightly from the end of the page.
+/// Clears the freeblock chain and fragment count.
 pub(crate) fn defragment_page(page: &mut Page, is_page_one: bool) -> Result<()> {
     let header = BTreePageHeaderV3::parse(page, is_page_one)?;
-    let mut cells = Vec::with_capacity(header.cell_count as usize);
-    for index in 0..header.cell_count as usize {
-        let start = cell_pointer(page, is_page_one, index)? as usize;
-        let end = if index == 0 {
-            PAGE_SIZE
+    let cell_count = header.cell_count as usize;
+    let pointer_start = header.pointer_area_start();
+
+    // Collect (pointer_index, cell_offset) pairs, then sort by offset
+    // so we can determine cell sizes from adjacent offsets.
+    let mut indexed_offsets: Vec<(usize, usize)> = (0..cell_count)
+        .map(|i| {
+            let offset = read_u16_be(&page.data, pointer_start + i * 2) as usize;
+            (i, offset)
+        })
+        .collect();
+    indexed_offsets.sort_by_key(|&(_, offset)| offset);
+
+    // Extract cell bodies.
+    let mut cells: Vec<(usize, Vec<u8>)> = Vec::with_capacity(cell_count);
+    for (idx_in_sorted, &(ptr_index, start)) in indexed_offsets.iter().enumerate() {
+        let end = if idx_in_sorted + 1 < indexed_offsets.len() {
+            indexed_offsets[idx_in_sorted + 1].1
         } else {
-            cell_pointer(page, is_page_one, index - 1)? as usize
+            PAGE_SIZE
         };
         if start >= end || end > PAGE_SIZE {
             return Err(HematiteError::CorruptedData(
-                "v3 b-tree cell pointer ordering is invalid".to_string(),
+                "v3 b-tree cell pointer ordering is invalid during defragment".to_string(),
             ));
         }
-        cells.push(page.data[start..end].to_vec());
+        cells.push((ptr_index, page.data[start..end].to_vec()));
     }
 
-    let clear_from = header.pointer_area_start();
-    page.data[clear_from..PAGE_SIZE].fill(0);
+    // Clear the cell content area.
+    let pointer_area_end = pointer_start + cell_count * 2;
+    page.data[pointer_area_end..PAGE_SIZE].fill(0);
 
+    // Repack cells from the end.
     let mut content_start = PAGE_SIZE;
-    for (index, cell) in cells.iter().enumerate().rev() {
-        content_start -= cell.len();
-        page.data[content_start..content_start + cell.len()].copy_from_slice(cell);
+    // Process in reverse offset order so the largest offset is written first.
+    for (ptr_index, cell_data) in cells.iter().rev() {
+        content_start -= cell_data.len();
+        page.data[content_start..content_start + cell_data.len()].copy_from_slice(cell_data);
         write_u16_be(
             &mut page.data,
-            header.pointer_area_start() + index * 2,
+            pointer_start + ptr_index * 2,
             content_start as u16,
         );
     }
 
+    // Update header: new content start, clear freeblocks and fragments.
     write_u16_be(
         &mut page.data,
         header.header_offset + OFFSET_CELL_CONTENT_START,
         content_start as u16,
     );
+    write_u16_be(
+        &mut page.data,
+        header.header_offset + OFFSET_FIRST_FREEBLOCK,
+        0,
+    );
     page.data[header.header_offset + OFFSET_FRAGMENTED_FREE_BYTES] = 0;
-    Ok(())
+    Ok(()
+    )
 }
 
 fn header_offset(is_page_one: bool) -> usize {

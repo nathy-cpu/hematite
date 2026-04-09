@@ -185,6 +185,12 @@ pub struct Pager {
     latest_wal_state: Option<VisibleWalState>,
     transaction: Option<PagerTransaction>,
     state: PagerState,
+    /// Open handle to the rollback journal file for incremental appending.
+    journal_file: Option<File>,
+    /// Number of page records appended to the current journal file.
+    journal_record_count: u32,
+    /// Byte offset in the journal file where page records begin (after header + metadata).
+    journal_header_len: u64,
 }
 
 impl Pager {
@@ -213,6 +219,9 @@ impl Pager {
             latest_wal_state: None,
             transaction: None,
             state: PagerState::Open,
+            journal_file: None,
+            journal_record_count: 0,
+            journal_header_len: 0,
         };
         pager.recover_if_needed()?;
         pager.load_persisted_state()?;
@@ -238,6 +247,9 @@ impl Pager {
             latest_wal_state: None,
             transaction: None,
             state: PagerState::Open,
+            journal_file: None,
+            journal_record_count: 0,
+            journal_header_len: 0,
         })
     }
 

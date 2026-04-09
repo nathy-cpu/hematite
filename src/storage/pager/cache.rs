@@ -242,6 +242,44 @@ impl PageCache {
         }
     }
 
+    /// Returns pages that are dirty but have already been journaled, are not pinned,
+    /// and do not require a journal sync — making them safe to spill (write through)
+    /// to the database file to reclaim cache space.
+    pub(crate) fn spillable_candidates(&self) -> Vec<PageId> {
+        self.lru_order
+            .iter()
+            .rev()
+            .copied()
+            .filter(|page_id| {
+                self.entries
+                    .get(page_id)
+                    .map(|entry| {
+                        entry.meta.dirty
+                            && entry.meta.journaled
+                            && !entry.meta.need_sync
+                            && !entry.meta.dont_write
+                            && Self::entry_pin_count(entry) == 0
+                    })
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
+
+    /// Returns true if the cache is over capacity and has no clean pages to evict.
+    pub(crate) fn needs_spill(&self) -> bool {
+        if self.entries.len() < self.capacity {
+            return false;
+        }
+        // Check if there are any clean, unpinned pages we can evict first.
+        let has_clean_evictable = self.lru_order.iter().rev().any(|page_id| {
+            self.entries
+                .get(page_id)
+                .map(|entry| !entry.meta.dirty && Self::entry_pin_count(entry) == 0)
+                .unwrap_or(false)
+        });
+        !has_clean_evictable
+    }
+
     fn entry_pin_count(entry: &CachedPageEntry) -> usize {
         let shared_pin_count = Arc::strong_count(&entry.page).saturating_sub(1);
         entry.meta.manual_pin_count + shared_pin_count
