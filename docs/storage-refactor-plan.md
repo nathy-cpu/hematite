@@ -247,6 +247,12 @@ Once the new format works, choose one of two honest paths:
 
 We should not accidentally drift into a half-compatible state.
 
+Current decision:
+
+- ship explicit old-format retirement first
+- reject retired on-disk generations at open time with a clear error
+- defer any offline migrator to a later, explicit project if demand justifies it
+
 ## What We Can Reuse From The Current Refactor
 
 The current storage rewrite was not wasted. It gives us useful scaffolding:

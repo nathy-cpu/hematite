@@ -44,7 +44,7 @@ overhaul:
 | `F7` Sidecar Metadata Removal | Remove `.pager_checksums` and other sidecar-driven durable metadata from the hot path | `Done` | Pager checksum/freelist metadata now lives in reserved page `1` through a shared metadata-page codec, legacy sidecars are migrated on open, test temp cleanup no longer depends on `.pager_checksums`, and WAL commits no longer rewrite main-file metadata on every append | Carry the main-file metadata split forward into the WAL frame rewrite so frame/checkpoint metadata stays single-sourced |
 | `F8` WAL Frame Rewrite | Replace the current visible-state WAL with a frame-oriented WAL closer to SQLite's approach | `Done` | The live WAL runtime now appends `v3` page frames with explicit commit sequences and metadata-page commit markers, reopen/checkpoint visibility is reconstructed from committed frame groups instead of full visible-state records, and WAL fault/threaded tests pass on the frame path | Build the remaining cursor/read-path and migration decisions on top of the now-live frame log |
 | `F9` Cursor And Read-Path Rewrite | Rebuild B-tree navigation around the new slotted-page format | `Done` | Hot B-tree point-lookups and cursor descent use the pager's shared-page path, tree open/validation/page-id/stats walkers now inspect slotted pages through shared-page lazy nodes, overflow-chain validation/collection no longer clones pages on read-only integrity passes, and the full test suite passes on the completed read-path cutover | Move to the format migration decision and then re-benchmark the new storage shape |
-| `F10` Format Migration Decision | Choose and implement either offline migration or explicit old-format retirement | `Not Started` | No final migration story exists yet | Decide whether to ship a migrator or require fresh databases |
+| `F10` Format Migration Decision | Choose and implement either offline migration or explicit old-format retirement | `Done` | Hematite now explicitly retires older on-disk generations: catalog open rejects non-current header generations with a migration/retirement error, the docs/spec/plan all record that no offline migrator is shipped yet, and regression tests cover retired-version and unknown-magic database files | Move to the performance validation campaign on the now-settled storage generation |
 | `F11` Performance Validation Campaign | Re-benchmark only after the new format and lower storage model are real | `Not Started` | Current benchmarks still measure the old-format storage shape despite pager cleanup | Re-run point-read, append-write, mixed, and overflow-heavy workloads |
 
 ## What Is Actually Finished Right Now
@@ -61,6 +61,7 @@ Finished for the new overhaul:
 - `F7` Sidecar Metadata Removal
 - `F8` WAL Frame Rewrite
 - `F9` Cursor And Read-Path Rewrite
+- `F10` Format Migration Decision
 
 Finished as groundwork from the prior campaign:
 
@@ -70,7 +71,6 @@ Finished as groundwork from the prior campaign:
 
 Not finished:
 
-- `F10` Format Migration Decision
 - `F11` Performance Validation Campaign
 
 ## Important Interpretation
@@ -86,14 +86,13 @@ That is the core correction this new board is making.
 
 ## Recommended Execution Order From Here
 
-1. Write `F1` first, so implementation work is guided by a real format contract.
-2. Do not spend effort optimizing the old page format any further unless required for a bug fix.
-3. Treat `F3`, `F4`, `F6`, and `F8` as the actual performance-defining milestones.
-4. Revisit higher-layer optimization only after the new storage shape exists and is benchmarked.
+1. Finish `F11` with same-spec benchmarks against the now-live storage generation.
+2. Use flamegraphs from the new format/runtime before choosing any further optimization work.
+3. Keep higher-layer query/planner work out of scope until the new storage baseline is measured honestly.
+4. If benchmarks still disappoint, open a fresh post-`F11` board from measured hotspots rather than assumptions.
 
 ## Immediate Next Actions
 
-- write the new storage format specification
-- decide how closely Hematite should follow SQLite's page and WAL layouts versus only copying the principles
-- map the current `BTreeNode`, overflow, journal, and WAL formats to their replacement designs
-- add format-level tests before the first real implementation slice lands
+- rerun canonical point-read, append-write, mixed, and overflow-heavy benchmarks on the current runtime
+- capture fresh `perf` profiles and compare them against the pre-overhaul baseline
+- record whether the new storage generation delivered meaningful wins before scheduling another refactor wave

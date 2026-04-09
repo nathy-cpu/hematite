@@ -100,6 +100,15 @@ impl CatalogEngine {
     pub(crate) const INVALID_PAGE_ID: PageId = ByteTreeStore::INVALID_PAGE_ID;
     pub(crate) const STORAGE_METADATA_VERSION: u32 = 3;
 
+    fn unsupported_storage_format_error(detail: impl Into<String>) -> HematiteError {
+        HematiteError::StorageError(format!(
+            "Unsupported on-disk database format: {}. This build only opens databases created \
+with the current post-reset storage format. Create a new database file; an offline migrator is \
+not available yet.",
+            detail.into()
+        ))
+    }
+
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
         Self::from_tree_store(ByteTreeStore::open_path(path, 100)?)
     }
@@ -118,11 +127,42 @@ impl CatalogEngine {
     }
 
     pub fn read_database_header(&self) -> Result<Option<DatabaseHeader>> {
-        self.tree_store()
+        let Some(page) = self
+            .tree_store()
             .read_reserved_blob(ByteTreeStore::DB_HEADER_PAGE_ID)?
-            .filter(|page| !page.iter().all(|&byte| byte == 0))
-            .map(|page| DatabaseHeader::deserialize(&page))
-            .transpose()
+        else {
+            return Ok(None);
+        };
+
+        if page.iter().all(|&byte| byte == 0) {
+            return Ok(None);
+        }
+
+        if page.len() < 8 {
+            return Err(Self::unsupported_storage_format_error(
+                "reserved header page is too short",
+            ));
+        }
+
+        let magic = [page[0], page[1], page[2], page[3]];
+        if magic != DatabaseHeader::MAGIC {
+            let printable_magic = String::from_utf8_lossy(&magic);
+            return Err(Self::unsupported_storage_format_error(format!(
+                "header magic {:?} ({}) does not match the current Hematite header",
+                magic, printable_magic
+            )));
+        }
+
+        let version = u32::from_le_bytes([page[4], page[5], page[6], page[7]]);
+        if version != DatabaseHeader::CURRENT_VERSION {
+            return Err(Self::unsupported_storage_format_error(format!(
+                "header version {} is retired; expected version {}",
+                version,
+                DatabaseHeader::CURRENT_VERSION
+            )));
+        }
+
+        Ok(Some(DatabaseHeader::deserialize(&page)?))
     }
 
     pub fn initialize_database_header(&mut self, schema_root_page: u32) -> Result<DatabaseHeader> {

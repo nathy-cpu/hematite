@@ -358,10 +358,11 @@ live in ordinary storage structures rather than custom out-of-band pages and sid
 
 Databases created with the current Hematite format are not readable as v3 databases.
 
-The migration decision is deferred to `F10`, but the spec assumes:
+`F10` resolves this by choosing explicit old-format retirement for the current release line:
 
-- either a dedicated offline migrator will rewrite old files to v3
-- or Hematite will require creating a new database under v3
+- Hematite opens only databases created with the current post-reset storage generation
+- older on-disk generations are rejected at open time with an explicit migration/retirement error
+- no offline migrator is shipped yet
 
 No in-place compatibility layer should be built into the hot storage path.
 

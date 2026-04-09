@@ -228,6 +228,7 @@ expect from an embedded database that are not supported yet.
 ### Embedded App Workflow
 
 - **No migration framework**: DDL is supported, but there is no built-in migration/versioning workflow.
+- **No storage-file upgrader yet**: Older on-disk Hematite generations are currently rejected; creating a new database file is required.
 - **No backup / restore helpers**: There is not yet a high-level API for backups, dumps, or restore flows.
 - **No import/export tools**: CSV import/export and similar convenience tooling are not built in.
 - **No async API**: The crate is synchronous today.

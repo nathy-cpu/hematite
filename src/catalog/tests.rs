@@ -1347,12 +1347,17 @@ mod tests {
 mod catalog_new_tests {
     use crate::catalog::catalog::Catalog;
     use crate::catalog::column::Column;
+    use crate::catalog::header::DatabaseHeader;
     use crate::catalog::ids::{ColumnId, TableId};
     use crate::catalog::serialization::IndexKeyCodec;
     use crate::catalog::types::DataType;
     use crate::catalog::Value;
     use crate::error::Result;
+    use crate::storage::{file_len_for_next_page_id, FIRST_ALLOCATABLE_PAGE_ID};
     use crate::test_utils::TestDbFile;
+    use std::collections::hash_map::DefaultHasher;
+    use std::fs;
+    use std::hash::{Hash, Hasher};
 
     #[test]
     fn test_catalog_new_database() -> Result<()> {
@@ -1649,5 +1654,51 @@ mod catalog_new_tests {
         assert!(err
             .to_string()
             .contains("Index entry is missing rowid bytes"));
+    }
+
+    #[test]
+    fn test_catalog_open_rejects_retired_header_version_with_migration_message() -> Result<()> {
+        let test_db = TestDbFile::new("_test_catalog_rejects_retired_header_version");
+        let mut bytes = vec![0u8; file_len_for_next_page_id(FIRST_ALLOCATABLE_PAGE_ID) as usize];
+
+        let unsupported_version = DatabaseHeader::CURRENT_VERSION - 1;
+        bytes[0..4].copy_from_slice(&DatabaseHeader::MAGIC);
+        bytes[4..8].copy_from_slice(&unsupported_version.to_le_bytes());
+        bytes[8..12].copy_from_slice(&42u32.to_le_bytes());
+        bytes[12..16].copy_from_slice(&1u32.to_le_bytes());
+
+        let mut hasher = DefaultHasher::new();
+        DatabaseHeader::MAGIC.hash(&mut hasher);
+        unsupported_version.hash(&mut hasher);
+        42u32.hash(&mut hasher);
+        1u32.hash(&mut hasher);
+        let checksum = hasher.finish() as u32;
+        bytes[16..20].copy_from_slice(&checksum.to_le_bytes());
+
+        fs::write(test_db.as_path(), bytes)?;
+
+        let err = Catalog::open_or_create(test_db.path()).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("Unsupported on-disk database format"));
+        assert!(message.contains("retired"));
+        assert!(message.contains("offline migrator is not available yet"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_catalog_open_rejects_unknown_header_magic_with_migration_message() -> Result<()> {
+        let test_db = TestDbFile::new("_test_catalog_rejects_unknown_header_magic");
+        let mut bytes = vec![0u8; file_len_for_next_page_id(FIRST_ALLOCATABLE_PAGE_ID) as usize];
+        bytes[0..4].copy_from_slice(b"OLD!");
+        fs::write(test_db.as_path(), bytes)?;
+
+        let err = Catalog::open_or_create(test_db.path()).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("Unsupported on-disk database format"));
+        assert!(message.contains("Create a new database file"));
+        assert!(message.contains("offline migrator is not available yet"));
+
+        Ok(())
     }
 }
