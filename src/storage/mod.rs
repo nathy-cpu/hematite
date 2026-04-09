@@ -30,6 +30,7 @@
 //! - this is the storage half of the future generic fork point.
 
 pub(crate) mod file_manager;
+pub(crate) mod format;
 pub(crate) mod free_list;
 pub(crate) mod journal;
 pub(crate) mod overflow;
