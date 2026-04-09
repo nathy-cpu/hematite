@@ -145,12 +145,27 @@ impl FileManager {
         Page::from_bytes(page_id, data)
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn read_region(&mut self, offset: u64, len: usize) -> Result<Vec<u8>> {
+        let mut bytes = vec![0u8; len];
+        self.seek(SeekFrom::Start(offset))?;
+        self.read_exact(&mut bytes)?;
+        Ok(bytes)
+    }
+
     pub fn write_page(&mut self, page: &Page) -> Result<()> {
         let offset = 64 + (page.id as u64 * PAGE_SIZE as u64);
 
         self.seek(SeekFrom::Start(offset))?;
         self.write_all(&page.data)?;
 
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn write_region(&mut self, offset: u64, bytes: &[u8]) -> Result<()> {
+        self.seek(SeekFrom::Start(offset))?;
+        self.write_all(bytes)?;
         Ok(())
     }
 
@@ -209,6 +224,11 @@ impl FileManager {
         let page_regions = len.saturating_sub(64) / PAGE_SIZE as u64;
         self.next_page_id = (page_regions as u32).max(2);
         Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn truncate_to(&mut self, len: u64) -> Result<()> {
+        self.set_len(len)
     }
 
     pub(crate) fn next_page_id(&self) -> u32 {
@@ -388,5 +408,37 @@ impl FileManager {
 
     pub fn inject_write_failure_after(&mut self, writes_before_failure: usize) {
         self.fail_on_write_countdown = Some(writes_before_failure);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FileManager;
+
+    #[test]
+    fn raw_region_io_roundtrips_in_memory() {
+        let mut manager = FileManager::new_in_memory().unwrap();
+        manager.write_region(17, b"hematite").unwrap();
+
+        let bytes = manager.read_region(17, 8).unwrap();
+        assert_eq!(bytes, b"hematite");
+    }
+
+    #[test]
+    fn raw_region_write_grows_in_memory_backend() {
+        let mut manager = FileManager::new_in_memory().unwrap();
+        manager.write_region(128, b"db").unwrap();
+
+        assert!(manager.file_len().unwrap() >= 130);
+        assert_eq!(manager.read_region(128, 2).unwrap(), b"db");
+    }
+
+    #[test]
+    fn truncate_to_shrinks_in_memory_backend() {
+        let mut manager = FileManager::new_in_memory().unwrap();
+        manager.write_region(256, b"pager").unwrap();
+        manager.truncate_to(64).unwrap();
+
+        assert_eq!(manager.file_len().unwrap(), 64);
     }
 }
