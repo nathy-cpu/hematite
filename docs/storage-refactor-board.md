@@ -30,7 +30,7 @@ Use it alongside [storage-refactor-plan.md](./storage-refactor-plan.md):
 | `M9` Page Cache Redesign | Replace the current cache shape with a more SQLite-like pager-owned page cache | `Done` | The cache now stores page-local metadata inside cache entries, supports non-recency `peek`, and tracks deterministic dirty ordering for pager internals | Revisit only if rollback or WAL work exposes a real cache limitation |
 | `M10` Rollback Core Rewrite | Replace snapshot-shaped rollback behavior with explicit page-journal behavior | `Done` | Rollback and WAL transaction state are split; rollback journals are initialized at begin, page images are appended incrementally, commit marks the on-disk journal committed, rollback restores from the journal, and snapshot restore rewrites the active journal to stay compatible with savepoints | Keep future savepoint and WAL work building on this journal-first rollback core |
 | `M11` Savepoint/Subjournal Rewrite | Rebuild savepoint internals on top of the new rollback core | `Done` | Rollback transactions now own internal pager savepoints; rollback-mode snapshots create savepoint handles instead of cloning the full pager; writes feed per-savepoint page capture; savepoint restore rebuilds cache/journal state from pager-owned savepoint data | Keep future work focused on locking and WAL rather than re-expanding snapshot cloning |
-| `M12` Locking Model Rewrite | Replace the current in-process registry as the true correctness backbone | `Not Started` | Current lock handling is cleaner, but still fundamentally registry-based | Defer until rollback behavior is clearer |
+| `M12` Locking Model Rewrite | Replace the current in-process registry as the true correctness backbone | `Done` | File-backed rollback and WAL lock sidecars now coordinate readers, writers, and WAL reader snapshots through OS locks; external lock-file tests and threaded rollback/WAL tests pass in the full suite | Move on to rebuilding WAL semantics on top of the new lock backbone |
 | `M13` WAL Rewrite | Rebuild WAL on top of the new pager core instead of layering on current behavior | `Not Started` | WAL is separated structurally, not behaviorally rewritten | Keep WAL changes behind rollback progress |
 | `M14` Fault Injection Matrix | Add SQLite-style failure-path testing for journal, commit, checkpoint, and recovery edges | `Not Started` | We have pager fault tests, but not the broader failure matrix yet | Introduce one rollback journal failure test at a time once rollback rewrite begins |
 | `M15` Cleanup And Optional Format Migration | Remove obsolete compatibility machinery after the new core is complete | `Blocked` | Too early; depends on rollback and WAL rewrites landing first | Revisit only after `M10` through `M14` materially advance |
@@ -51,6 +51,7 @@ These are the milestones we can honestly treat as completed:
 - `M9` Page Cache Redesign
 - `M10` Rollback Core Rewrite
 - `M11` Savepoint/Subjournal Rewrite
+- `M12` Locking Model Rewrite
 
 ## Validation Checkpoint
 
@@ -88,25 +89,23 @@ More specifically:
 
 - `M0` to `M3` are both structurally and behaviorally convincing
 - `M4` to `M7` are structurally complete and well validated
-- the remaining real behavior risk now begins at savepoint, locking, WAL, and fault-injection work
+- the remaining real behavior risk now begins at WAL semantics and the deeper fault-injection matrix
 
 ## What Still Carries The Real Rewrite Risk
 
 These are the milestones that will actually determine whether the rewrite succeeds:
 
-- `M12` Locking Model Rewrite
 - `M13` WAL Rewrite
 - `M14` Fault Injection Matrix
 
 ## Recommended Execution Order From Here
 
-1. Start `M12` by replacing the in-process registry as the true correctness backbone for lock coordination.
-2. Keep `M13` building on the rollback and savepoint cores rather than reintroducing shared transaction behavior.
-3. Treat `M14` as the reliability track that should grow alongside lock and WAL work.
-4. Revisit cache internals only if locking or WAL work exposes a specific need.
+1. Start `M13` by rebuilding WAL around the new rollback/savepoint core and file-backed lock coordination.
+2. Treat `M14` as the reliability track that should grow alongside WAL work.
+3. Revisit cache internals only if WAL work exposes a specific need.
 
 ## Immediate Next Actions
 
-- Identify the first lock path that still depends on the in-process registry rather than pager-owned coordination.
-- Start preparing WAL state and reader registration to lean on the new rollback/savepoint core.
-- Add the first targeted lock or failure-path test that pushes beyond the current registry-backed model.
+- Start replacing visible-state-shaped WAL behavior with pager-core-owned reader/writer and checkpoint flows.
+- Add the first WAL-specific failure-path tests now that lock coordination is externalized.
+- Keep validating threaded multi-connection rollback and WAL behavior as the WAL internals change.

@@ -218,7 +218,7 @@ The pager already had state names, but recent work made those states enforceable
 
 This is directly relevant to reliability and aligns with the original plan.
 
-#### 3. Lock coordination is cleaner and more intentional
+#### 3. Lock coordination is now structurally rewritten
 
 Recent lock coordination work now includes:
 
@@ -229,9 +229,13 @@ Recent lock coordination work now includes:
   - `leave_writer_scope`
 - a shared writer teardown helper:
   - `exit_writer_scope_to_open`
+- file-backed rollback reader/writer coordination through OS-backed sidecar locks
+- file-backed WAL writer coordination through a dedicated write-lock sidecar
+- per-reader WAL snapshot registrations backed by individual lock files rather than process-local bookkeeping
+- external lock-file regressions that verify Hematite respects coordination outside the current process
 - better in-memory lock bookkeeping, so in-memory pagers respect the same reader-state expectations as file-backed ones
 
-This is not a full locking rewrite yet, but it is real progress toward one.
+This is the first point where the lock backbone is no longer fundamentally the old in-process registry design. The implementation is still simpler than SQLite's full lock ladder, but it is now a real pager-owned locking layer.
 
 #### 4. Rollback, WAL, recovery, snapshot, integrity, and page IO are separated internally
 
@@ -288,11 +292,7 @@ This is not a full SQLite `PCache` clone, but it is enough to treat the current 
 
 ### What Is Only Partially Done
 
-#### 1. Locking is cleaner, but still not fundamentally rewritten
-
-The current lock layer is still based on the existing in-process registry model. The state and scope APIs are cleaner now, but the underlying coordination model is not yet the stronger pager-owned locking design the original plan called for.
-
-#### 2. WAL has been extracted, but not rewritten
+#### 1. WAL has been extracted, but not rewritten
 
 The WAL path is better separated than before, but it still rides on the current pager behavior rather than a freshly rebuilt core. This is expected, because WAL was intentionally planned after rollback.
 
@@ -300,7 +300,6 @@ The WAL path is better separated than before, but it still rides on the current 
 
 These goals from the original plan are still substantially ahead of us:
 
-- a replacement for the current in-process lock registry as the correctness backbone
 - a ground-up WAL rewrite on top of the rebuilt pager core
 - the deeper SQLite-style failure-injection and hot-journal recovery matrix described in the original plan
 
@@ -310,7 +309,7 @@ The rewrite is no longer just a plan. We have completed the structural preparati
 
 - the pager is decomposed
 - state transitions are explicit
-- lock coordination is cleaner
+- lock coordination is now externally backed
 - test coverage is stronger
 
 The project is no longer only in the "prepare the ground" stage. The rollback engine itself has started to change shape.
@@ -320,22 +319,22 @@ That distinction matters:
 - We have reduced the risk of the real rewrite.
 - We have achieved the first major behavioral goal of the real rewrite in rollback mode.
 - We have moved savepoints onto pager-owned rollback savepoint machinery.
-- The remaining hard work now sits in locking, WAL, and the deeper reliability matrix.
+- The remaining hard work now sits in WAL and the deeper reliability matrix.
 
 ### Recommended Next Step
 
-The next highest-value step is to start the locking rewrite on top of the rollback and savepoint cores.
+The next highest-value step is to start the WAL rewrite on top of the rollback, savepoint, and new lock cores.
 
 That should start with a small, well-bounded slice:
 
-- identify where current lock correctness still depends on the in-process registry
-- move one lock lifecycle responsibility behind a pager-owned coordination primitive instead
-- keep the public pager API unchanged while tightening lock correctness internally
+- move WAL reader snapshot registration and writer-visible-state ownership fully behind pager-core protocols
+- keep `checkpoint_wal()` and journal-mode switching behavior the same at the public boundary
+- add failure-path tests for checkpoint, reopen, and stale-reader visibility as the WAL internals change
 
 In short:
 
 - the scaffolding work is in good shape
-- the lock/state groundwork is now credible
+- the lock/state groundwork is now real enough to build on
 - the rollback core now has a true journal-first shape
 - savepoint behavior now has a pager-owned core too
-- the next milestone should be locking behavior, not more facade extraction
+- the next milestone should be WAL behavior, not more facade extraction
