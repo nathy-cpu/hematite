@@ -27,6 +27,7 @@
 
 use crate::error::Result;
 use crate::storage::free_list::FreeList;
+use crate::storage::format::{detect_format_generation, FormatGeneration};
 use crate::storage::{Page, PageId, PAGE_SIZE, STORAGE_METADATA_PAGE_ID};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -143,6 +144,18 @@ impl FileManager {
         })?;
 
         Page::from_bytes(page_id, data)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn detect_format_generation(&mut self) -> Result<Option<FormatGeneration>> {
+        let len = self.len()? as usize;
+        if len == 0 {
+            return Ok(None);
+        }
+
+        let probe_len = len.min(PAGE_SIZE);
+        let bytes = self.read_region(0, probe_len)?;
+        Ok(detect_format_generation(&bytes))
     }
 
     #[allow(dead_code)]
@@ -414,6 +427,7 @@ impl FileManager {
 #[cfg(test)]
 mod tests {
     use super::FileManager;
+    use crate::storage::format::{bootstrap_database_page_one, DatabaseHeaderV3, FormatGeneration, PageKind};
 
     #[test]
     fn raw_region_io_roundtrips_in_memory() {
@@ -440,5 +454,19 @@ mod tests {
         manager.truncate_to(64).unwrap();
 
         assert_eq!(manager.file_len().unwrap(), 64);
+    }
+
+    #[test]
+    fn detect_format_generation_recognizes_v3_files() {
+        let mut manager = FileManager::new_in_memory().unwrap();
+        let page_one =
+            bootstrap_database_page_one(&DatabaseHeaderV3::default(), PageKind::LeafTable)
+                .unwrap();
+        manager.write_region(0, &page_one).unwrap();
+
+        assert_eq!(
+            manager.detect_format_generation().unwrap(),
+            Some(FormatGeneration::V3)
+        );
     }
 }
