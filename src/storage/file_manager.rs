@@ -27,7 +27,10 @@
 
 use crate::error::Result;
 use crate::storage::free_list::FreeList;
-use crate::storage::format::{detect_format_generation, FormatGeneration};
+use crate::storage::format::{
+    bootstrap_database_page_one, detect_format_generation, DatabaseHeaderV3, FormatGeneration,
+    PageKind,
+};
 use crate::storage::{Page, PageId, PAGE_SIZE, STORAGE_METADATA_PAGE_ID};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -156,6 +159,20 @@ impl FileManager {
         let probe_len = len.min(PAGE_SIZE);
         let bytes = self.read_region(0, probe_len)?;
         Ok(detect_format_generation(&bytes))
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn bootstrap_v3_database(
+        &mut self,
+        header: &DatabaseHeaderV3,
+        root_page_kind: PageKind,
+    ) -> Result<()> {
+        let page_one = bootstrap_database_page_one(header, root_page_kind)?;
+        self.truncate_to(PAGE_SIZE as u64)?;
+        self.write_region(0, &page_one)?;
+        self.next_page_id = 2;
+        self.free_list.replace(Vec::new());
+        Ok(())
     }
 
     #[allow(dead_code)]
@@ -427,7 +444,7 @@ impl FileManager {
 #[cfg(test)]
 mod tests {
     use super::FileManager;
-    use crate::storage::format::{bootstrap_database_page_one, DatabaseHeaderV3, FormatGeneration, PageKind};
+    use crate::storage::format::{DatabaseHeaderV3, FormatGeneration, PageKind};
 
     #[test]
     fn raw_region_io_roundtrips_in_memory() {
@@ -459,14 +476,26 @@ mod tests {
     #[test]
     fn detect_format_generation_recognizes_v3_files() {
         let mut manager = FileManager::new_in_memory().unwrap();
-        let page_one =
-            bootstrap_database_page_one(&DatabaseHeaderV3::default(), PageKind::LeafTable)
-                .unwrap();
-        manager.write_region(0, &page_one).unwrap();
+        manager
+            .bootstrap_v3_database(&DatabaseHeaderV3::default(), PageKind::LeafTable)
+            .unwrap();
 
         assert_eq!(
             manager.detect_format_generation().unwrap(),
             Some(FormatGeneration::V3)
         );
+    }
+
+    #[test]
+    fn bootstrap_v3_database_writes_page_one_image() {
+        let mut manager = FileManager::new_in_memory().unwrap();
+        manager
+            .bootstrap_v3_database(&DatabaseHeaderV3::default(), PageKind::LeafTable)
+            .unwrap();
+
+        let page_one = manager.read_region(0, 4096).unwrap();
+        assert_eq!(&page_one[..16], b"Hematite format3");
+        assert_eq!(page_one[100], PageKind::LeafTable as u8);
+        assert_eq!(manager.file_len().unwrap(), 4096);
     }
 }
