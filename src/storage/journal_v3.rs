@@ -94,11 +94,6 @@ impl V3JournalHeader {
 
 impl V3JournalRecord {
     pub(crate) fn encode(&self, checksum_seed: u32) -> Result<Vec<u8>> {
-        if self.page_number == 0 {
-            return Err(HematiteError::StorageError(
-                "v3 rollback journal page number must be 1-based".to_string(),
-            ));
-        }
         if self.page_bytes.len() != PAGE_SIZE {
             return Err(HematiteError::StorageError(format!(
                 "v3 rollback journal record for page {} has invalid image size {}",
@@ -123,12 +118,6 @@ impl V3JournalRecord {
         }
 
         let page_number = read_u32_be(bytes, 0);
-        if page_number == 0 {
-            return Err(HematiteError::StorageError(
-                "v3 rollback journal page number must be 1-based".to_string(),
-            ));
-        }
-
         let checksum = read_u32_be(bytes, 4);
         let page_bytes = bytes[8..8 + PAGE_SIZE].to_vec();
         let expected = record_checksum(page_number, checksum_seed, &page_bytes);
@@ -191,11 +180,6 @@ impl V3RollbackJournal {
 fn validate_record_set(records: &[V3JournalRecord]) -> Result<()> {
     let mut seen = BTreeSet::new();
     for record in records {
-        if record.page_number == 0 {
-            return Err(HematiteError::StorageError(
-                "v3 rollback journal page number must be 1-based".to_string(),
-            ));
-        }
         if !seen.insert(record.page_number) {
             return Err(HematiteError::StorageError(format!(
                 "v3 rollback journal contains duplicate page {}",

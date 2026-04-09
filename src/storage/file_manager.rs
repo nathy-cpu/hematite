@@ -8,13 +8,13 @@
 //!
 //! ```text
 //! file offset
-//!   = (page_id - 1) * PAGE_SIZE
+//!   = page_id * PAGE_SIZE
 //! ```
 //!
 //! Reserved logical pages:
-//! - page `1`: database header
-//! - page `2`: storage metadata
-//! - page `3+`: allocatable payload pages
+//! - page `0`: database header
+//! - page `1`: storage metadata
+//! - page `2+`: allocatable payload pages
 //!
 //! Allocation model:
 //! - reuse a page id from the freelist if one exists;
@@ -31,7 +31,7 @@ use crate::storage::format::{
     PageKind,
 };
 use crate::storage::{
-    file_len_for_next_page_id, next_page_id_for_file_len, Page, PageId, DB_HEADER_PAGE_ID,
+    file_len_for_next_page_id, next_page_id_for_file_len, Page, PageId,
     FIRST_ALLOCATABLE_PAGE_ID, PAGE_SIZE,
 };
 use std::fs::{File, OpenOptions};
@@ -329,13 +329,7 @@ impl FileManager {
     }
 
     fn page_offset(page_id: PageId) -> Result<u64> {
-        if page_id < DB_HEADER_PAGE_ID {
-            return Err(crate::error::HematiteError::StorageError(format!(
-                "Page ids are 1-based; page {} is invalid",
-                page_id
-            )));
-        }
-        Ok(page_id.saturating_sub(1) as u64 * PAGE_SIZE as u64)
+        Ok(page_id as u64 * PAGE_SIZE as u64)
     }
 
     fn len(&self) -> Result<u64> {

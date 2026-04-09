@@ -9,11 +9,12 @@
 //! ```text
 //! byte offset 0
 //! +-----------------+-------------+
-//! | logical page 1  | db header   |
+//! | logical page 0  | db header   |
 //! +-----------------+-------------+
-//! | logical page 2  | metadata    |
 //! +-----------------+-------------+
-//! | logical page 3+ | payload     |
+//! | logical page 1  | metadata    |
+//! +-----------------+-------------+
+//! | logical page 2+ | payload     |
 //! +-----------------+-------------+
 //! ```
 //!

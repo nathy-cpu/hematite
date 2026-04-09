@@ -13,8 +13,8 @@ use crate::error::Result;
 
 pub const PAGE_SIZE: usize = 4096;
 
-pub const DB_HEADER_PAGE_ID: u32 = 1;
-pub const STORAGE_METADATA_PAGE_ID: u32 = 2;
+pub const DB_HEADER_PAGE_ID: u32 = 0;
+pub const STORAGE_METADATA_PAGE_ID: u32 = 1;
 pub const FIRST_ALLOCATABLE_PAGE_ID: u32 = STORAGE_METADATA_PAGE_ID + 1;
 pub const INVALID_PAGE_ID: u32 = u32::MAX;
 
@@ -22,16 +22,15 @@ pub type PageId = u32;
 
 pub const fn next_page_id_for_file_len(file_len: u64) -> PageId {
     let page_count = (file_len / PAGE_SIZE as u64) as PageId;
-    let next_page_id = page_count.saturating_add(1);
-    if next_page_id < FIRST_ALLOCATABLE_PAGE_ID {
+    if page_count < FIRST_ALLOCATABLE_PAGE_ID {
         FIRST_ALLOCATABLE_PAGE_ID
     } else {
-        next_page_id
+        page_count
     }
 }
 
 pub const fn file_len_for_next_page_id(next_page_id: PageId) -> u64 {
-    next_page_id.saturating_sub(1) as u64 * PAGE_SIZE as u64
+    next_page_id as u64 * PAGE_SIZE as u64
 }
 
 #[derive(Debug, Clone)]

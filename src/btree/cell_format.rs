@@ -99,9 +99,9 @@ impl TableLeafCell {
 
 impl TableInteriorCell {
     pub(crate) fn encode(&self) -> Result<Vec<u8>> {
-        if self.left_child_page_id == 0 {
+        if self.left_child_page_id <= 1 {
             return Err(HematiteError::StorageError(
-                "table interior cell child pointer must be 1-based".to_string(),
+                "table interior cell child pointer cannot reference reserved pages".to_string(),
             ));
         }
 
@@ -119,9 +119,9 @@ impl TableInteriorCell {
         }
 
         let left_child_page_id = read_u32_be(bytes, 0);
-        if left_child_page_id == 0 {
+        if left_child_page_id <= 1 {
             return Err(HematiteError::StorageError(
-                "table interior cell child pointer must be 1-based".to_string(),
+                "table interior cell child pointer cannot reference reserved pages".to_string(),
             ));
         }
 

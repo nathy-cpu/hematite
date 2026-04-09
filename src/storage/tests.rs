@@ -385,7 +385,7 @@ mod pager_tests {
         let journal = RollbackJournal::decode(&fs::read(&journal_path)?)?;
         assert_eq!(journal.state, JournalState::Active);
         assert_eq!(journal.page_records.len(), 0);
-        assert!(journal.original_file_len >= crate::storage::file_len_for_next_page_id(4));
+        assert!(journal.original_file_len >= crate::storage::file_len_for_next_page_id(3));
 
         pager.rollback_transaction()?;
         Ok(())
@@ -1860,7 +1860,7 @@ mod mod_tests {
                 .read(true)
                 .write(true)
                 .open(test_db.path())?;
-            let offset = corrupted_page_id.saturating_sub(1) as u64 * PAGE_SIZE as u64;
+            let offset = corrupted_page_id as u64 * PAGE_SIZE as u64;
             file.seek(SeekFrom::Start(offset))?;
             file.write_all(&[9])?;
             file.flush()?;
@@ -1892,7 +1892,7 @@ mod mod_tests {
                 .read(true)
                 .write(true)
                 .open(test_db.path())?;
-            let offset = corrupted_page_id.saturating_sub(1) as u64 * PAGE_SIZE as u64;
+            let offset = corrupted_page_id as u64 * PAGE_SIZE as u64;
             file.seek(SeekFrom::Start(offset))?;
             file.write_all(&[9])?;
             file.flush()?;
@@ -2473,7 +2473,7 @@ mod randomized_pager_lifecycle_tests {
                 let page_id = storage.allocate_page()?;
                 let id = page_id;
 
-                assert!(id >= 3, "allocator returned reserved page {}", id);
+                assert!(id >= 2, "allocator returned reserved page {}", id);
                 assert!(
                     !live_pages.contains(&id),
                     "allocator returned an already-live page {}",

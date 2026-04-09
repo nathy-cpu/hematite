@@ -27,8 +27,8 @@
 
 use crate::error::{HematiteError, Result};
 use crate::storage::{
-    file_len_for_next_page_id, next_page_id_for_file_len, PageId, DB_HEADER_PAGE_ID,
-    FIRST_ALLOCATABLE_PAGE_ID, PAGE_SIZE,
+    file_len_for_next_page_id, next_page_id_for_file_len, PageId, FIRST_ALLOCATABLE_PAGE_ID,
+    PAGE_SIZE,
 };
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
@@ -75,12 +75,6 @@ impl VisibleWalState {
         let visible_next_page_id = visible_next_page_id(record.file_len);
         let free_page_set = record.free_pages.iter().copied().collect::<HashSet<_>>();
 
-        if free_page_set.iter().any(|page_id| *page_id < DB_HEADER_PAGE_ID) {
-            return Err(HematiteError::StorageError(
-                "WAL free-page set contains invalid 0 page id".to_string(),
-            ));
-        }
-
         let mut page_overrides = self.page_overrides.clone();
         page_overrides.retain(|page_id, _| {
             *page_id < visible_next_page_id && !free_page_set.contains(page_id)
@@ -93,11 +87,6 @@ impl VisibleWalState {
                     frame.page_id,
                     frame.data.len()
                 )));
-            }
-            if frame.page_id < DB_HEADER_PAGE_ID {
-                return Err(HematiteError::StorageError(
-                    "WAL frame page ids must be 1-based".to_string(),
-                ));
             }
             if frame.page_id >= visible_next_page_id {
                 return Err(HematiteError::StorageError(format!(
@@ -128,9 +117,7 @@ impl VisibleWalState {
     }
 
     pub fn contains_page(&self, page_id: PageId) -> bool {
-        page_id >= DB_HEADER_PAGE_ID
-            && page_id < self.visible_next_page_id()
-            && !self.is_page_free(page_id)
+        page_id < self.visible_next_page_id() && !self.is_page_free(page_id)
     }
 
     pub fn is_page_free(&self, page_id: PageId) -> bool {
@@ -303,11 +290,6 @@ impl WalRecord {
 
             let mut seen_frames = HashSet::new();
             for frame in &record.frames {
-                if frame.page_id < DB_HEADER_PAGE_ID {
-                    return Err(HematiteError::StorageError(
-                        "WAL frame page ids must be 1-based".to_string(),
-                    ));
-                }
                 if !seen_frames.insert(frame.page_id) {
                     return Err(HematiteError::StorageError(format!(
                         "WAL record {} contains duplicate frame for page {}",

@@ -91,11 +91,6 @@ impl V3WalHeader {
 
 impl V3WalFrame {
     pub(crate) fn encode(&self, header: &V3WalHeader) -> Result<Vec<u8>> {
-        if self.page_number == 0 {
-            return Err(HematiteError::StorageError(
-                "v3 WAL frame page number must be 1-based".to_string(),
-            ));
-        }
         if self.page_bytes.len() != PAGE_SIZE {
             return Err(HematiteError::StorageError(format!(
                 "v3 WAL frame for page {} has invalid image size {}",
@@ -220,11 +215,6 @@ impl V3WalFile {
 fn validate_frame_order(frames: &[V3WalFrame]) -> Result<()> {
     let mut previous_commit = 0u64;
     for frame in frames {
-        if frame.page_number == 0 {
-            return Err(HematiteError::StorageError(
-                "v3 WAL frame page number must be 1-based".to_string(),
-            ));
-        }
         if frame.commit_sequence < previous_commit {
             return Err(HematiteError::StorageError(
                 "v3 WAL frames are not ordered by commit sequence".to_string(),

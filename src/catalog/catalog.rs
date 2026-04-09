@@ -512,9 +512,9 @@ impl Catalog {
             )));
         }
 
-        if root_page == 0 {
+        if root_page <= 1 {
             return Err(crate::error::HematiteError::StorageError(
-                "Root page 0 is reserved for database header".to_string(),
+                "Root pages 0 and 1 are reserved".to_string(),
             ));
         }
 
@@ -550,9 +550,9 @@ impl Catalog {
         table_id: TableId,
         root_page_id: u32,
     ) -> Result<()> {
-        if root_page_id == 0 {
+        if root_page_id <= 1 {
             return Err(crate::error::HematiteError::StorageError(
-                "Root page 0 is reserved for database header".to_string(),
+                "Root pages 0 and 1 are reserved".to_string(),
             ));
         }
 
@@ -570,9 +570,9 @@ impl Catalog {
         table_root_page_id: u32,
         primary_key_root_page_id: u32,
     ) -> Result<()> {
-        if table_root_page_id == 0 || primary_key_root_page_id == 0 {
+        if table_root_page_id <= 1 || primary_key_root_page_id <= 1 {
             return Err(crate::error::HematiteError::StorageError(
-                "Root page 0 is reserved for database header".to_string(),
+                "Root pages 0 and 1 are reserved".to_string(),
             ));
         }
 

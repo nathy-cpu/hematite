@@ -865,7 +865,7 @@ fn page_header_offset(page_id: PageId) -> usize {
 }
 
 fn is_page_one(page_id: PageId) -> bool {
-    page_id == 1
+    page_id == 0
 }
 
 fn initialize_page_bytes(page: &mut Page, kind: PageKind) -> Result<()> {
@@ -910,9 +910,9 @@ fn encode_leaf_cell(key: &BTreeKey, value: &BTreeValue) -> Vec<u8> {
 }
 
 fn encode_internal_cell(left_child: PageId, key: &BTreeKey) -> Result<Vec<u8>> {
-    if left_child == 0 {
+    if left_child <= 1 {
         return Err(HematiteError::StorageError(
-            "Internal node child ids must be 1-based".to_string(),
+            "Internal node child ids cannot reference reserved pages".to_string(),
         ));
     }
     let mut bytes = Vec::with_capacity(6 + key.data.len());
@@ -985,9 +985,9 @@ fn parse_leaf_cell(cell: &[u8]) -> Result<(BTreeKey, BTreeValue)> {
 fn parse_internal_cell(cell: &[u8]) -> Result<(PageId, BTreeKey)> {
     let key_range = internal_cell_key_range(cell)?;
     let child = u32::from_be_bytes([cell[0], cell[1], cell[2], cell[3]]);
-    if child == 0 {
+    if child <= 1 {
         return Err(HematiteError::CorruptedData(
-            "Internal cell child pointer must be 1-based".to_string(),
+            "Internal cell child pointer cannot reference reserved pages".to_string(),
         ));
     }
     Ok((child, BTreeKey::new(cell[key_range.0..key_range.1].to_vec())))
