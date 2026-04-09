@@ -292,15 +292,7 @@ This is not a full SQLite `PCache` clone, but it is enough to treat the current 
 
 The current lock layer is still based on the existing in-process registry model. The state and scope APIs are cleaner now, but the underlying coordination model is not yet the stronger pager-owned locking design the original plan called for.
 
-#### 2. Snapshot/savepoint compatibility is still compatibility-shaped
-
-The snapshot logic has been extracted, which is useful, but it has not yet been reimplemented as a thin savepoint-based compatibility layer over a rebuilt rollback core.
-
-#### 3. Savepoint compatibility is still layered on rollback snapshots
-
-Rollback itself is now journal-first, but savepoint compatibility is still implemented by broad snapshot/restore behavior above that core. That is useful for correctness, but it is not yet the pager-owned savepoint/subjournal design the rewrite is aiming for.
-
-#### 4. WAL has been extracted, but not rewritten
+#### 2. WAL has been extracted, but not rewritten
 
 The WAL path is better separated than before, but it still rides on the current pager behavior rather than a freshly rebuilt core. This is expected, because WAL was intentionally planned after rollback.
 
@@ -308,7 +300,6 @@ The WAL path is better separated than before, but it still rides on the current 
 
 These goals from the original plan are still substantially ahead of us:
 
-- a pager-owned savepoint/subjournal model
 - a replacement for the current in-process lock registry as the correctness backbone
 - a ground-up WAL rewrite on top of the rebuilt pager core
 - the deeper SQLite-style failure-injection and hot-journal recovery matrix described in the original plan
@@ -328,21 +319,23 @@ That distinction matters:
 
 - We have reduced the risk of the real rewrite.
 - We have achieved the first major behavioral goal of the real rewrite in rollback mode.
-- The remaining hard work now sits in savepoints, locking, WAL, and the deeper reliability matrix.
+- We have moved savepoints onto pager-owned rollback savepoint machinery.
+- The remaining hard work now sits in locking, WAL, and the deeper reliability matrix.
 
 ### Recommended Next Step
 
-The next highest-value step is to start the savepoint/subjournal rewrite on top of the new rollback core.
+The next highest-value step is to start the locking rewrite on top of the rollback and savepoint cores.
 
 That should start with a small, well-bounded slice:
 
-- identify where current savepoint restore still depends on broad pager snapshots
-- introduce pager-owned rollback/savepoint state that can survive restore without reconstructing as much pager state
-- keep the public snapshot compatibility API intact while progressively shrinking what it has to clone
+- identify where current lock correctness still depends on the in-process registry
+- move one lock lifecycle responsibility behind a pager-owned coordination primitive instead
+- keep the public pager API unchanged while tightening lock correctness internally
 
 In short:
 
 - the scaffolding work is in good shape
 - the lock/state groundwork is now credible
 - the rollback core now has a true journal-first shape
-- the next milestone should be savepoint/subjournal behavior, not more facade extraction
+- savepoint behavior now has a pager-owned core too
+- the next milestone should be locking behavior, not more facade extraction
