@@ -4,7 +4,6 @@ use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
 
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
@@ -14,11 +13,6 @@ pub(crate) struct WalReaderRegistration {
     pub(super) path: PathBuf,
     pub(super) sequence: u64,
     pub(super) file: File,
-}
-
-pub(crate) fn checksum_persist_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 fn next_wal_reader_registration_id() -> u64 {

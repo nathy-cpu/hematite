@@ -1,9 +1,10 @@
 use super::{JournalMode, Pager};
 use crate::error::Result;
 use crate::storage::journal::{JournalRecord, JournalState, RollbackJournal};
-use crate::storage::pager::locking::checksum_persist_lock;
 use crate::storage::wal::{VisibleWalState, WalFrame, WalRecord};
-use crate::storage::{file_len_for_next_page_id, Page, PageId, PAGE_SIZE};
+use crate::storage::{
+    file_len_for_next_page_id, metadata_page, Page, PageId, STORAGE_METADATA_PAGE_ID, PAGE_SIZE,
+};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -11,7 +12,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 impl Pager {
-    pub(super) fn checksum_store_path(db_path: &Path) -> PathBuf {
+    fn legacy_checksum_store_path(db_path: &Path) -> PathBuf {
         let mut file_name = db_path
             .file_name()
             .map(OsString::from)
@@ -48,16 +49,42 @@ impl Pager {
     }
 
     pub(super) fn load_persisted_state(&mut self) -> Result<()> {
-        let Some(path) = &self.checksum_store_path else {
-            return Ok(());
-        };
+        let page = self.file_manager.read_page(STORAGE_METADATA_PAGE_ID)?;
+        if let Some(bytes) = metadata_page::read_pager_metadata(&page.data)? {
+            let contents = String::from_utf8(bytes).map_err(|_| {
+                crate::error::HematiteError::StorageError(
+                    "Invalid pager metadata encoding".to_string(),
+                )
+            })?;
+            return self.apply_persisted_state(&contents);
+        }
 
-        let contents = match fs::read_to_string(path) {
-            Ok(contents) => contents,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(err) => return Err(err.into()),
-        };
+        if let Some(db_path) = &self.database_identity {
+            let sidecar_path = Self::legacy_checksum_store_path(db_path);
+            let contents = match fs::read_to_string(&sidecar_path) {
+                Ok(contents) => Some(contents),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+                Err(err) => return Err(err.into()),
+            };
+            if let Some(contents) = contents {
+                self.apply_persisted_state(&contents)?;
+                self.persist_checksums()?;
+                match fs::remove_file(&sidecar_path) {
+                    Ok(()) => {}
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(err) => return Err(err.into()),
+                }
+                return Ok(());
+            }
+        }
 
+        self.journal_mode = JournalMode::Rollback;
+        self.file_manager.set_free_pages(Vec::new());
+        self.page_checksums.clear();
+        Ok(())
+    }
+
+    fn apply_persisted_state(&mut self, contents: &str) -> Result<()> {
         let mut lines = contents.lines();
         let version = lines
             .next()
@@ -248,16 +275,7 @@ impl Pager {
         Ok(())
     }
 
-    pub(super) fn persist_checksums(&self) -> Result<()> {
-        let Some(path) = &self.checksum_store_path else {
-            return Ok(());
-        };
-        let _persist_guard = checksum_persist_lock().lock().map_err(|_| {
-            crate::error::HematiteError::InternalError(
-                "Pager checksum persistence mutex is poisoned".to_string(),
-            )
-        })?;
-
+    pub(super) fn persist_checksums(&mut self) -> Result<()> {
         let mut entries = self
             .page_checksums
             .iter()
@@ -279,16 +297,17 @@ impl Pager {
         }
 
         let contents = lines.join("\n");
-        let mut temp_path = path.clone();
-        let mut temp_name = temp_path
-            .file_name()
-            .map(OsString::from)
-            .unwrap_or_else(|| OsString::from("hematite.checksum"));
-        temp_name.push(".tmp");
-        temp_path.set_file_name(temp_name);
-
-        fs::write(&temp_path, contents)?;
-        fs::rename(&temp_path, path)?;
+        let existing_page = self
+            .cache
+            .peek(STORAGE_METADATA_PAGE_ID)
+            .cloned()
+            .unwrap_or(self.file_manager.read_page(STORAGE_METADATA_PAGE_ID)?);
+        let encoded = metadata_page::write_pager_metadata(&existing_page.data, contents.as_bytes())?;
+        let page = Page::from_bytes(STORAGE_METADATA_PAGE_ID, encoded)?;
+        self.file_manager.write_page(&page)?;
+        self.file_manager.flush()?;
+        self.cache.put(page);
+        self.cache.clear_dirty(STORAGE_METADATA_PAGE_ID);
         Ok(())
     }
 
@@ -547,7 +566,7 @@ impl Pager {
             self.cache.clear_dirty(page_id);
         }
         self.cache.reset();
-        self.persist_checksums()
+        Ok(())
     }
 
     pub(super) fn append_wal_record(&mut self, record: WalRecord) -> Result<()> {

@@ -194,12 +194,13 @@ mod pager_tests {
     use crate::storage::journal::{JournalRecord, JournalState, RollbackJournal};
     use crate::storage::pager::Pager;
     use crate::storage::wal::{WalFrame, WalRecord};
-    use crate::storage::{JournalMode, Page};
+    use crate::storage::{metadata_page, JournalMode, Page, PAGE_SIZE, STORAGE_METADATA_PAGE_ID};
     use crate::test_utils::TestDbFile;
     use std::ffi::OsString;
     use std::fs;
     #[cfg(unix)]
     use std::fs::OpenOptions;
+    use std::io::{Seek, SeekFrom, Write};
     #[cfg(unix)]
     use std::os::fd::AsRawFd;
     use std::path::{Path, PathBuf};
@@ -809,14 +810,59 @@ mod pager_tests {
         pager.flush()?;
         drop(pager);
 
-        let checksum_path = std::path::PathBuf::from(format!("{}.pager_checksums", test_db.path()));
-        std::fs::write(
-            &checksum_path,
-            "version=1\njournal_mode=bogus\nfree_count=0\nchecksum_count=0",
+        let invalid = metadata_page::write_pager_metadata(
+            &vec![0; PAGE_SIZE],
+            b"version=1\njournal_mode=bogus\nfree_count=0\nchecksum_count=0",
         )?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(test_db.path())?;
+        file.seek(SeekFrom::Start(
+            STORAGE_METADATA_PAGE_ID as u64 * PAGE_SIZE as u64,
+        ))?;
+        file.write_all(&invalid)?;
+        file.sync_all()?;
 
         let err = Pager::new(test_db.path(), 8).unwrap_err();
         assert!(err.to_string().contains("Unsupported pager journal mode"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_legacy_sidecar_metadata_is_migrated_to_reserved_page(
+    ) -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_legacy_sidecar_metadata_migrates");
+        let mut pager = Pager::new(test_db.path(), 8)?;
+        let page_id = pager.allocate_page()?;
+        let mut page = Page::new(page_id);
+        page.data[0] = 42;
+        let checksum = checksum_for_test(&page.data);
+        pager.write_page(page)?;
+        pager.flush()?;
+        drop(pager);
+
+        let mut db_file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(test_db.path())?;
+        db_file.seek(SeekFrom::Start(
+            STORAGE_METADATA_PAGE_ID as u64 * PAGE_SIZE as u64,
+        ))?;
+        db_file.write_all(&vec![0; PAGE_SIZE])?;
+        db_file.sync_all()?;
+
+        let checksum_path = std::path::PathBuf::from(format!("{}.pager_checksums", test_db.path()));
+        std::fs::write(
+            &checksum_path,
+            format!(
+                "version=1\njournal_mode=wal\nfree_count=0\nchecksum_count=1\nchecksum|{}|{}",
+                page_id, checksum
+            ),
+        )?;
+
+        let mut reopened = Pager::new(test_db.path(), 8)?;
+        assert_eq!(reopened.journal_mode(), JournalMode::Wal);
+        assert_eq!(reopened.read_page(page_id)?.data[0], 42);
+        assert!(!checksum_path.exists());
         Ok(())
     }
 
@@ -1015,7 +1061,7 @@ mod pager_tests {
             page_id
         };
 
-        assert!(!wal_path.exists());
+        assert!(wal_path.exists());
 
         let mut reopened = Pager::new(test_db.path(), 8)?;
         reopened.begin_read()?;

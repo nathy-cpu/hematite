@@ -70,9 +70,6 @@ impl Pager {
 
         if self.journal_mode == JournalMode::Wal {
             self.commit_wal_transaction()?;
-            if self.can_checkpoint_wal()? {
-                self.checkpoint_wal_unlocked()?;
-            }
             self.transition_state(PagerState::WriterFinished)?;
         } else {
             self.commit_rollback_transaction()?;

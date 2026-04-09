@@ -34,6 +34,7 @@ pub(crate) mod format;
 pub(crate) mod free_list;
 pub(crate) mod journal;
 pub(crate) mod journal_v3;
+pub(crate) mod metadata_page;
 pub(crate) mod overflow;
 pub(crate) mod overflow_v3;
 pub(crate) mod pager;

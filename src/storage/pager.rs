@@ -174,7 +174,6 @@ pub struct Pager {
     cache: PageCache,
     page_checksums: HashMap<PageId, u32>,
     journal_mode: JournalMode,
-    checksum_store_path: Option<PathBuf>,
     journal_path: Option<PathBuf>,
     wal_path: Option<PathBuf>,
     database_identity: Option<PathBuf>,
@@ -192,7 +191,6 @@ impl Pager {
     pub const CHECKSUM_METADATA_VERSION: u32 = 1;
 
     pub fn new<P: AsRef<Path>>(path: P, cache_capacity: usize) -> Result<Self> {
-        let checksum_store_path = Some(Self::checksum_store_path(path.as_ref()));
         let journal_path = Some(Self::journal_path(path.as_ref()));
         let wal_path = Some(Self::wal_path(path.as_ref()));
         let file_manager = FileManager::new(&path)?;
@@ -204,7 +202,6 @@ impl Pager {
             cache: PageCache::new(cache_capacity),
             page_checksums: HashMap::new(),
             journal_mode: JournalMode::Rollback,
-            checksum_store_path,
             journal_path,
             wal_path,
             database_identity,
@@ -230,7 +227,6 @@ impl Pager {
             cache: PageCache::new(cache_capacity),
             page_checksums: HashMap::new(),
             journal_mode: JournalMode::Rollback,
-            checksum_store_path: None,
             journal_path: None,
             wal_path: None,
             database_identity: None,
