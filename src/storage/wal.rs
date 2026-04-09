@@ -113,8 +113,20 @@ impl VisibleWalState {
         visible_next_page_id(self.file_len)
     }
 
+    pub fn contains_page(&self, page_id: PageId) -> bool {
+        page_id < self.visible_next_page_id() && !self.is_page_free(page_id)
+    }
+
     pub fn is_page_free(&self, page_id: PageId) -> bool {
         self.free_pages.contains(&page_id)
+    }
+
+    pub fn page_bytes(&self, page_id: PageId) -> Option<&[u8]> {
+        self.page_overrides.get(&page_id).map(Vec::as_slice)
+    }
+
+    pub fn checksum_for_page(&self, page_id: PageId) -> Option<u32> {
+        self.page_checksums.get(&page_id).copied()
     }
 }
 

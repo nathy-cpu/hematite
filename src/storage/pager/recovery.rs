@@ -315,9 +315,8 @@ impl Pager {
 
         if let Some(transaction) = self.active_rollback_transaction_mut() {
             for savepoint in &mut transaction.savepoints {
-                let live_at_savepoint =
-                    page_end <= savepoint.file_manager.file_len()
-                        && !savepoint.file_manager.free_pages().contains(&page_id);
+                let live_at_savepoint = page_end <= savepoint.file_manager.file_len()
+                    && !savepoint.file_manager.free_pages().contains(&page_id);
                 if live_at_savepoint && savepoint.captured_page_ids.insert(page_id) {
                     savepoint.page_records.push(JournalRecord {
                         page_id,
@@ -515,7 +514,10 @@ impl Pager {
             state: JournalState::Active,
             original_file_len: transaction.original_file_len,
             original_free_pages: transaction.original_free_pages,
-            original_checksums: transaction.original_checksums.into_iter().collect::<Vec<_>>(),
+            original_checksums: transaction
+                .original_checksums
+                .into_iter()
+                .collect::<Vec<_>>(),
             page_records: transaction.page_records,
         };
         self.restore_from_journal(&journal)
@@ -564,7 +566,7 @@ impl Pager {
         for page_id in page_ids {
             let page = self.cache.peek(page_id).cloned().ok_or_else(|| {
                 crate::error::HematiteError::StorageError(format!(
-                    "Dirty page {} missing from buffer pool",
+                    "Dirty page {} missing from page cache",
                     page_id
                 ))
             })?;

@@ -1,8 +1,6 @@
 use super::Pager;
 use crate::error::Result;
-use crate::storage::{
-    Page, PagerIntegrityReport, DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID,
-};
+use crate::storage::{Page, PagerIntegrityReport, DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID};
 use std::collections::HashSet;
 
 impl Pager {
@@ -80,7 +78,7 @@ impl Pager {
             let page = if self.cache.is_dirty(page_id) {
                 self.cache.peek(page_id).cloned().ok_or_else(|| {
                     crate::error::HematiteError::StorageError(format!(
-                        "Dirty page {} missing from buffer pool",
+                        "Dirty page {} missing from page cache",
                         page_id
                     ))
                 })?

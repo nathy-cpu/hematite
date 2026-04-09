@@ -12,7 +12,8 @@ impl Pager {
 
         if self.journal_mode == JournalMode::Wal {
             if let Some(transaction) = self.active_wal_transaction() {
-                if transaction.wal_free_pages.contains(&page_id) && page_id < transaction.wal_next_page_id
+                if transaction.wal_free_pages.contains(&page_id)
+                    && page_id < transaction.wal_next_page_id
                 {
                     return Err(crate::error::HematiteError::StorageError(format!(
                         "Page {} is deallocated in the active WAL transaction",
@@ -20,14 +21,11 @@ impl Pager {
                     )));
                 }
 
-                let base_visible_next_page_id = self
-                    .latest_wal_state
-                    .as_ref()
+                let base_visible_state = self.latest_wal_state.as_ref();
+                let base_visible_next_page_id = base_visible_state
                     .map(|state| state.visible_next_page_id())
                     .unwrap_or_else(|| self.file_manager.next_page_id());
-                let base_page_is_free = self
-                    .latest_wal_state
-                    .as_ref()
+                let base_page_is_free = base_visible_state
                     .map(|state| state.is_page_free(page_id))
                     .unwrap_or_else(|| self.file_manager.free_pages().contains(&page_id));
 
@@ -41,23 +39,18 @@ impl Pager {
             }
         }
 
-        if let Some(state) = self
-            .wal_read_snapshot
-            .as_ref()
-            .or(self.latest_wal_state.as_ref())
-        {
-            let visible_next_page_id = state.visible_next_page_id();
-            if page_id >= visible_next_page_id || state.is_page_free(page_id) {
+        if let Some(state) = self.current_wal_visible_state() {
+            if !state.contains_page(page_id) {
                 return Err(crate::error::HematiteError::StorageError(format!(
                     "Page {} is not allocated in the current WAL-visible state",
                     page_id
                 )));
             }
-            if let Some(data) = state.page_overrides.get(&page_id) {
-                let page = Page::from_bytes(page_id, data.clone())?;
-                if let Some(expected_checksum) = state.page_checksums.get(&page_id) {
+            if let Some(data) = state.page_bytes(page_id) {
+                let page = Page::from_bytes(page_id, data.to_vec())?;
+                if let Some(expected_checksum) = state.checksum_for_page(page_id) {
                     let actual_checksum = Self::calculate_page_checksum(&page);
-                    if actual_checksum != *expected_checksum {
+                    if actual_checksum != expected_checksum {
                         return Err(crate::error::HematiteError::CorruptedData(format!(
                             "WAL page checksum mismatch for page {}: expected {}, got {}",
                             page_id, expected_checksum, actual_checksum
@@ -67,6 +60,7 @@ impl Pager {
                 self.cache.put(page.clone());
                 return Ok(page);
             }
+            let visible_next_page_id = state.visible_next_page_id();
             if page_id >= self.file_manager.next_page_id() && page_id < visible_next_page_id {
                 let page = Page::new(page_id);
                 self.cache.put(page.clone());
@@ -76,14 +70,12 @@ impl Pager {
 
         let page = self.file_manager.read_page(page_id)?;
         let expected_checksum = self
-            .wal_read_snapshot
-            .as_ref()
-            .or(self.latest_wal_state.as_ref())
-            .and_then(|state| state.page_checksums.get(&page_id))
-            .or_else(|| self.page_checksums.get(&page_id));
+            .current_wal_visible_state()
+            .and_then(|state| state.checksum_for_page(page_id))
+            .or_else(|| self.page_checksums.get(&page_id).copied());
         if let Some(expected_checksum) = expected_checksum {
             let actual_checksum = Self::calculate_page_checksum(&page);
-            if actual_checksum != *expected_checksum {
+            if actual_checksum != expected_checksum {
                 return Err(crate::error::HematiteError::CorruptedData(format!(
                     "Page checksum mismatch for page {}: expected {}, got {}",
                     page_id, expected_checksum, actual_checksum

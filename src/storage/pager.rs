@@ -32,7 +32,7 @@
 //!      +-------------+--------------+
 //!      |                            |
 //!      v                            v
-//! buffer pool                 transaction state
+//! page cache                  transaction state
 //! dirty page ids              original pages / WAL frames
 //! checksum cache              free-page deltas / file-len deltas
 //!      |                            |
@@ -79,48 +79,47 @@
 mod cache;
 #[path = "pager/core.rs"]
 mod core;
+#[path = "pager/integrity.rs"]
+mod integrity;
 #[path = "pager/journal.rs"]
 mod journal;
 #[path = "pager/locking.rs"]
 mod locking;
-#[path = "pager/recovery.rs"]
-mod recovery;
-#[path = "pager/reader.rs"]
-mod reader;
 #[path = "pager/page_io.rs"]
 mod page_io;
-#[path = "pager/integrity.rs"]
-mod integrity;
-#[path = "pager/space.rs"]
-mod space;
-#[path = "pager/test_support.rs"]
-mod test_support;
+#[path = "pager/reader.rs"]
+mod reader;
+#[path = "pager/recovery.rs"]
+mod recovery;
 #[path = "pager/savepoint.rs"]
 mod savepoint;
+#[path = "pager/space.rs"]
+mod space;
 #[path = "pager/state.rs"]
 mod state;
+#[path = "pager/test_support.rs"]
+mod test_support;
 #[path = "pager/wal.rs"]
 mod wal;
 
+use self::cache::PageCache;
+use self::locking::WalReaderRegistration;
+use self::state::PagerLockMode;
 use crate::error::Result;
 use crate::storage::journal::JournalRecord;
 use crate::storage::wal::VisibleWalState;
 use crate::storage::{
-    file_manager::FileManagerSnapshot,
-    file_manager::FileManager,
-    Page, PageId, STORAGE_METADATA_PAGE_ID,
+    file_manager::FileManager, file_manager::FileManagerSnapshot, Page, PageId,
+    STORAGE_METADATA_PAGE_ID,
 };
-use self::cache::PageCache;
-use self::locking::WalReaderRegistration;
-use self::state::PagerLockMode;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::fs::File;
 use std::path::Path;
 use std::path::PathBuf;
 
-pub use self::state::{JournalMode, PagerState};
 pub(crate) use self::savepoint::PagerSnapshot;
+pub use self::state::{JournalMode, PagerState};
 
 #[derive(Debug, Clone)]
 pub(crate) struct RollbackTransaction {
@@ -295,6 +294,11 @@ impl Pager {
         }
     }
 
+    fn current_wal_visible_state(&self) -> Option<&VisibleWalState> {
+        self.wal_read_snapshot
+            .as_ref()
+            .or(self.latest_wal_state.as_ref())
+    }
 }
 
 impl Drop for Pager {
