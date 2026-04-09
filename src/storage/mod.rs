@@ -38,6 +38,7 @@ pub(crate) mod metadata_page;
 pub(crate) mod overflow;
 pub(crate) mod overflow_v3;
 pub(crate) mod pager;
+pub(crate) mod pager_metadata;
 pub(crate) mod types;
 pub(crate) mod wal;
 pub(crate) mod wal_v3;

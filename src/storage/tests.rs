@@ -100,7 +100,7 @@ mod wal_tests {
             }],
         }])?;
         partial_tail.truncate(partial_tail.len() - 17);
-        encoded.extend_from_slice(&partial_tail[8..]);
+        encoded.extend_from_slice(&partial_tail[24..]);
 
         let decoded = WalRecord::decode_file(&encoded)?;
         assert_eq!(decoded, vec![record]);

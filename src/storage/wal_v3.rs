@@ -3,6 +3,9 @@
 use crate::error::{HematiteError, Result};
 use crate::storage::PAGE_SIZE;
 use std::collections::BTreeMap;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::Path;
 
 const V3_WAL_MAGIC: &[u8; 4] = b"HTW3";
 const V3_WAL_VERSION: u32 = 1;
@@ -182,6 +185,9 @@ impl V3WalFile {
         let mut offset = V3_WAL_HEADER_SIZE;
         let mut frames = Vec::new();
         while offset < bytes.len() {
+            if bytes.len() - offset < V3_WAL_FRAME_PREFIX_SIZE + PAGE_SIZE {
+                break;
+            }
             let (frame, used) = V3WalFrame::decode(&bytes[offset..], &header)?;
             frames.push(frame);
             offset += used;
@@ -209,6 +215,56 @@ impl V3WalFile {
             pages.insert(frame.page_number, frame.page_bytes.clone());
         }
         Ok((max_db_page_count, pages))
+    }
+
+    pub(crate) fn load_from_path<P: AsRef<Path>>(path: P) -> Result<Option<Self>> {
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err.into()),
+        };
+
+        Ok(Some(Self::decode(&bytes)?))
+    }
+
+    pub(crate) fn append_frames_to_path<P: AsRef<Path>>(
+        path: P,
+        header: &V3WalHeader,
+        frames: &[V3WalFrame],
+    ) -> Result<()> {
+        let path = path.as_ref();
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .read(true)
+            .open(path)?;
+        let metadata = file.metadata()?;
+        if metadata.len() == 0 {
+            file.write_all(&header.encode())?;
+        } else if metadata.len() < V3_WAL_HEADER_SIZE as u64 {
+            return Err(HematiteError::StorageError(
+                "Existing v3 WAL file has a truncated header".to_string(),
+            ));
+        } else {
+            let existing_header = {
+                let bytes = fs::read(path)?;
+                V3WalHeader::decode(&bytes)?
+            };
+            if existing_header.page_size != header.page_size
+                || existing_header.salt_1 != header.salt_1
+                || existing_header.salt_2 != header.salt_2
+            {
+                return Err(HematiteError::StorageError(
+                    "Existing v3 WAL header does not match append request".to_string(),
+                ));
+            }
+        }
+
+        for frame in frames {
+            file.write_all(&frame.encode(header)?)?;
+        }
+        file.sync_all()?;
+        Ok(())
     }
 }
 
@@ -362,5 +418,33 @@ mod tests {
 
         let err = V3WalFile::decode(&encoded).unwrap_err();
         assert!(err.to_string().contains("checksum mismatch"));
+    }
+
+    #[test]
+    fn v3_wal_decode_ignores_truncated_tail_frame() {
+        let wal = V3WalFile {
+            header: V3WalHeader::default(),
+            frames: vec![
+                V3WalFrame {
+                    page_number: 1,
+                    database_page_count: 3,
+                    commit_sequence: 1,
+                    page_bytes: vec![7u8; crate::storage::PAGE_SIZE],
+                },
+                V3WalFrame {
+                    page_number: 2,
+                    database_page_count: 3,
+                    commit_sequence: 2,
+                    page_bytes: vec![9u8; crate::storage::PAGE_SIZE],
+                },
+            ],
+        };
+
+        let mut encoded = wal.encode().unwrap();
+        encoded.truncate(encoded.len() - 19);
+
+        let decoded = V3WalFile::decode(&encoded).unwrap();
+        assert_eq!(decoded.frames.len(), 1);
+        assert_eq!(decoded.frames[0].commit_sequence, 1);
     }
 }

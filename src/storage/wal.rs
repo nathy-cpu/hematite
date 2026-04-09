@@ -1,38 +1,13 @@
-//! Write-ahead log representation for pager-managed WAL mode.
-//!
-//! WAL mode separates "what is committed" from "what is checkpointed into the main file". Each
-//! committed record describes a complete pager-visible state transition.
-//!
-//! Record shape:
-//!
-//! ```text
-//! WalRecord
-//!   sequence number
-//!   visible file length
-//!   visible freelist snapshot
-//!   visible checksum table entries
-//!   page frames[]
-//!       page id
-//!       page bytes
-//! ```
-//!
-//! Reconstruction algorithm:
-//! - decode all complete records in order;
-//! - ignore a truncated tail record;
-//! - keep the last frame for each page id;
-//! - expose the latest committed sequence as a `VisibleWalState`.
-//!
-//! Readers do not see "the current WAL file". They see the last committed sequence captured when
-//! their read scope begins.
-
 use crate::error::{HematiteError, Result};
+use crate::storage::metadata_page;
+use crate::storage::pager::JournalMode;
+use crate::storage::pager_metadata::PersistedPagerState;
+use crate::storage::wal_v3::{V3WalFile, V3WalFrame, V3WalHeader};
 use crate::storage::{
     file_len_for_next_page_id, next_page_id_for_file_len, PageId, FIRST_ALLOCATABLE_PAGE_ID,
-    PAGE_SIZE,
+    PAGE_SIZE, STORAGE_METADATA_PAGE_ID,
 };
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +40,7 @@ impl VisibleWalState {
         }
     }
 
+    #[allow(dead_code)]
     pub fn apply_record(&self, record: &WalRecord) -> Result<Self> {
         if record.sequence <= self.visible_sequence {
             return Err(HematiteError::StorageError(
@@ -142,125 +118,175 @@ pub struct WalRecord {
     pub frames: Vec<WalFrame>,
 }
 
-impl WalRecord {
-    const MAGIC: [u8; 4] = *b"HTWL";
-    const VERSION: u32 = 1;
-    const FILE_HEADER_LEN: usize = 8;
+pub(crate) fn append_committed_frames_to_path<P: AsRef<Path>>(
+    path: P,
+    commit_sequence: u64,
+    database_page_count: PageId,
+    free_pages: &[PageId],
+    checksums: &HashMap<PageId, u32>,
+    base_metadata_page: &[u8],
+    frames: &[WalFrame],
+) -> Result<()> {
+    let header = existing_or_default_header(path.as_ref())?;
+    let frame_batch = synthesize_v3_frames(
+        commit_sequence,
+        database_page_count,
+        free_pages,
+        checksums,
+        base_metadata_page,
+        frames,
+    )?;
+    V3WalFile::append_frames_to_path(path, &header, &frame_batch)
+}
 
-    #[cfg(test)]
-    pub fn encode_file(records: &[Self]) -> Result<Vec<u8>> {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&Self::file_header());
-        for record in records {
-            bytes.extend_from_slice(&record.encode_entry()?);
-        }
-        Ok(bytes)
+pub(crate) fn load_visible_state_from_path_with_base<P: AsRef<Path>>(
+    path: P,
+    baseline_file_len: u64,
+    baseline_free_pages: Vec<PageId>,
+    baseline_checksums: HashMap<PageId, u32>,
+    baseline_metadata_page: &[u8],
+) -> Result<Option<VisibleWalState>> {
+    let Some(wal) = V3WalFile::load_from_path(path)? else {
+        return Ok(None);
+    };
+    let committed_groups = committed_frame_groups(&wal.frames);
+    if committed_groups.is_empty() {
+        return Ok(None);
     }
 
+    let latest_sequence = committed_groups.last().unwrap()[0].commit_sequence;
+    let (database_page_count, mut page_overrides_btree) =
+        visible_pages_from_committed_groups(&committed_groups)?;
+    let file_len = if database_page_count == 0 {
+        baseline_file_len
+    } else {
+        file_len_for_next_page_id(database_page_count)
+    };
+
+    let metadata_page_bytes = page_overrides_btree
+        .get(&STORAGE_METADATA_PAGE_ID)
+        .map(Vec::as_slice)
+        .unwrap_or(baseline_metadata_page);
+
+    let persisted = parse_metadata_page(metadata_page_bytes)
+        .unwrap_or_else(|| PersistedPagerState {
+            journal_mode: JournalMode::Wal,
+            free_pages: baseline_free_pages,
+            checksums: baseline_checksums,
+        });
+
+    let visible_next_page_id = next_page_id_for_file_len(file_len);
+    let free_page_set = persisted.free_pages.iter().copied().collect::<HashSet<_>>();
+    page_overrides_btree.retain(|page_id, _| {
+        *page_id < visible_next_page_id && !free_page_set.contains(page_id)
+    });
+
+    Ok(Some(VisibleWalState {
+        visible_sequence: latest_sequence,
+        file_len,
+        free_pages: persisted.free_pages,
+        page_checksums: persisted.checksums,
+        page_overrides: page_overrides_btree.into_iter().collect(),
+    }))
+}
+
+impl WalRecord {
+    #[cfg(test)]
+    pub fn encode_file(records: &[Self]) -> Result<Vec<u8>> {
+        let header = V3WalHeader::default();
+        let mut metadata_page = vec![0; PAGE_SIZE];
+        let mut frames = Vec::new();
+        for record in records {
+            let record_frames = synthesize_v3_frames(
+                record.sequence,
+                next_page_id_for_file_len(record.file_len),
+                &record.free_pages,
+                &record.checksums.iter().copied().collect(),
+                &metadata_page,
+                &record.frames,
+            )?;
+            if let Some(frame) = record_frames
+                .iter()
+                .find(|frame| frame.page_number == STORAGE_METADATA_PAGE_ID)
+            {
+                metadata_page = frame.page_bytes.clone();
+            }
+            frames.extend(record_frames);
+        }
+
+        V3WalFile { header, frames }.encode()
+    }
+
+    #[allow(dead_code)]
     pub fn decode_file(bytes: &[u8]) -> Result<Vec<Self>> {
-        if bytes.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        if bytes.len() < Self::FILE_HEADER_LEN {
-            return Err(HematiteError::StorageError(
-                "WAL file is truncated".to_string(),
-            ));
-        }
-
-        if bytes[..4] != Self::MAGIC {
-            return Err(HematiteError::StorageError(
-                "Invalid WAL file magic".to_string(),
-            ));
-        }
-
-        let version = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
-        if version != Self::VERSION {
-            return Err(HematiteError::StorageError(format!(
-                "Unsupported WAL file version {}",
-                version
-            )));
-        }
-
-        let mut offset = Self::FILE_HEADER_LEN;
+        let wal = V3WalFile::decode(bytes)?;
         let mut records = Vec::new();
-        while offset < bytes.len() {
-            if offset + 12 > bytes.len() {
-                break;
+        let mut metadata_page = vec![0; PAGE_SIZE];
+        for v3_frames in committed_frame_groups(&wal.frames) {
+            let sequence = v3_frames[0].commit_sequence;
+            let mut database_page_count = 0;
+            let mut record_frames = Vec::new();
+            for frame in &v3_frames {
+                database_page_count = database_page_count.max(frame.database_page_count);
+                if frame.page_number == STORAGE_METADATA_PAGE_ID {
+                    metadata_page = frame.page_bytes.clone();
+                    continue;
+                }
+                record_frames.push(WalFrame {
+                    page_id: frame.page_number,
+                    data: frame.page_bytes.clone(),
+                });
             }
 
-            let payload_len = u64::from_le_bytes([
-                bytes[offset],
-                bytes[offset + 1],
-                bytes[offset + 2],
-                bytes[offset + 3],
-                bytes[offset + 4],
-                bytes[offset + 5],
-                bytes[offset + 6],
-                bytes[offset + 7],
-            ]) as usize;
-            offset += 8;
+            let persisted = parse_metadata_page(&metadata_page).unwrap_or(PersistedPagerState {
+                journal_mode: JournalMode::Wal,
+                free_pages: Vec::new(),
+                checksums: HashMap::new(),
+            });
 
-            let expected_checksum = u32::from_le_bytes([
-                bytes[offset],
-                bytes[offset + 1],
-                bytes[offset + 2],
-                bytes[offset + 3],
-            ]);
-            offset += 4;
+            let mut checksums = persisted.checksums.into_iter().collect::<Vec<_>>();
+            checksums.sort_by_key(|(page_id, _)| *page_id);
 
-            if offset + payload_len > bytes.len() {
-                break;
-            }
-
-            let payload = &bytes[offset..offset + payload_len];
-            let actual_checksum = checksum_bytes(payload);
-            if actual_checksum != expected_checksum {
-                return Err(HematiteError::StorageError(
-                    "WAL record checksum mismatch".to_string(),
-                ));
-            }
-            records.push(Self::decode_payload(payload)?);
-            offset += payload_len;
+            records.push(Self {
+                sequence,
+                file_len: file_len_for_next_page_id(database_page_count),
+                free_pages: persisted.free_pages,
+                checksums,
+                frames: record_frames,
+            });
         }
 
         Self::validate_records(&records)?;
         Ok(records)
     }
 
+    #[allow(dead_code)]
     pub fn append_to_path<P: AsRef<Path>>(path: P, record: &Self) -> Result<()> {
-        let path = path.as_ref();
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .read(true)
-            .open(path)?;
-        let metadata = file.metadata()?;
-        if metadata.len() == 0 {
-            file.write_all(&Self::file_header())?;
-        } else if metadata.len() < Self::FILE_HEADER_LEN as u64 {
-            return Err(HematiteError::StorageError(
-                "Existing WAL file has a truncated header".to_string(),
-            ));
-        }
-        file.write_all(&record.encode_entry()?)?;
-        file.sync_all()?;
-        Ok(())
+        append_committed_frames_to_path(
+            path,
+            record.sequence,
+            next_page_id_for_file_len(record.file_len),
+            &record.free_pages,
+            &record.checksums.iter().copied().collect(),
+            &vec![0; PAGE_SIZE],
+            &record.frames,
+        )
     }
 
+    #[allow(dead_code)]
     pub fn load_visible_state_from_path<P: AsRef<Path>>(
         path: P,
     ) -> Result<Option<VisibleWalState>> {
-        let bytes = match fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => return Err(err.into()),
-        };
-
-        let records = Self::decode_file(&bytes)?;
-        Ok(Self::visible_state_from_records(&records))
+        load_visible_state_from_path_with_base(
+            path,
+            file_len_for_next_page_id(FIRST_ALLOCATABLE_PAGE_ID),
+            Vec::new(),
+            HashMap::new(),
+            &vec![0; PAGE_SIZE],
+        )
     }
 
+    #[allow(dead_code)]
     pub fn visible_state_from_records(records: &[Self]) -> Option<VisibleWalState> {
         let mut visible_state: Option<VisibleWalState> = None;
         for record in records {
@@ -278,6 +304,7 @@ impl WalRecord {
         visible_state
     }
 
+    #[allow(dead_code)]
     fn validate_records(records: &[Self]) -> Result<()> {
         let mut previous_sequence = 0u64;
         for record in records {
@@ -300,151 +327,132 @@ impl WalRecord {
         }
         Ok(())
     }
+}
 
-    fn file_header() -> [u8; Self::FILE_HEADER_LEN] {
-        let mut header = [0u8; Self::FILE_HEADER_LEN];
-        header[..4].copy_from_slice(&Self::MAGIC);
-        header[4..].copy_from_slice(&Self::VERSION.to_le_bytes());
-        header
+fn existing_or_default_header(path: &Path) -> Result<V3WalHeader> {
+    Ok(V3WalFile::load_from_path(path)?
+        .map(|wal| wal.header)
+        .unwrap_or_default())
+}
+
+fn synthesize_v3_frames(
+    commit_sequence: u64,
+    database_page_count: PageId,
+    free_pages: &[PageId],
+    checksums: &HashMap<PageId, u32>,
+    base_metadata_page: &[u8],
+    frames: &[WalFrame],
+) -> Result<Vec<V3WalFrame>> {
+    let persisted = PersistedPagerState {
+        journal_mode: JournalMode::Wal,
+        free_pages: free_pages.to_vec(),
+        checksums: checksums.clone(),
+    };
+    let metadata_payload = persisted.encode(1);
+
+    let mut base_page = if let Some(frame) = frames
+        .iter()
+        .find(|frame| frame.page_id == STORAGE_METADATA_PAGE_ID)
+    {
+        frame.data.clone()
+    } else {
+        base_metadata_page.to_vec()
+    };
+    if base_page.len() != PAGE_SIZE {
+        base_page = vec![0; PAGE_SIZE];
+    }
+    let metadata_page_bytes =
+        metadata_page::write_pager_metadata(&base_page, metadata_payload.as_bytes())?;
+
+    let mut v3_frames = Vec::with_capacity(frames.len() + 1);
+    let mut saw_metadata_page = false;
+    for frame in frames {
+        if frame.data.len() != PAGE_SIZE {
+            return Err(HematiteError::StorageError(format!(
+                "WAL frame {} has invalid image size {}",
+                frame.page_id,
+                frame.data.len()
+            )));
+        }
+        if frame.page_id == STORAGE_METADATA_PAGE_ID {
+            saw_metadata_page = true;
+            continue;
+        }
+        v3_frames.push(V3WalFrame {
+            page_number: frame.page_id,
+            database_page_count,
+            commit_sequence,
+            page_bytes: frame.data.clone(),
+        });
     }
 
-    fn encode_entry(&self) -> Result<Vec<u8>> {
-        let payload = self.encode_payload()?;
-        let mut bytes = Vec::with_capacity(12 + payload.len());
-        bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&checksum_bytes(&payload).to_le_bytes());
-        bytes.extend_from_slice(&payload);
-        Ok(bytes)
-    }
+    let _ = saw_metadata_page;
+    v3_frames.push(V3WalFrame {
+        page_number: STORAGE_METADATA_PAGE_ID,
+        database_page_count,
+        commit_sequence,
+        page_bytes: metadata_page_bytes,
+    });
+    Ok(v3_frames)
+}
 
-    fn encode_payload(&self) -> Result<Vec<u8>> {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&self.sequence.to_le_bytes());
-        bytes.extend_from_slice(&self.file_len.to_le_bytes());
-
-        bytes.extend_from_slice(&(self.free_pages.len() as u32).to_le_bytes());
-        for page_id in &self.free_pages {
-            bytes.extend_from_slice(&page_id.to_le_bytes());
-        }
-
-        bytes.extend_from_slice(&(self.checksums.len() as u32).to_le_bytes());
-        for (page_id, checksum) in &self.checksums {
-            bytes.extend_from_slice(&page_id.to_le_bytes());
-            bytes.extend_from_slice(&checksum.to_le_bytes());
-        }
-
-        bytes.extend_from_slice(&(self.frames.len() as u32).to_le_bytes());
-        for frame in &self.frames {
-            if frame.data.len() != PAGE_SIZE {
-                return Err(HematiteError::StorageError(format!(
-                    "WAL frame {} has invalid image size {}",
-                    frame.page_id,
-                    frame.data.len()
-                )));
-            }
-            bytes.extend_from_slice(&frame.page_id.to_le_bytes());
-            bytes.extend_from_slice(&frame.data);
-        }
-
-        Ok(bytes)
-    }
-
-    fn decode_payload(bytes: &[u8]) -> Result<Self> {
-        let mut offset = 0usize;
-        let sequence = read_u64(bytes, &mut offset, "WAL record is truncated")?;
-        let file_len = read_u64(bytes, &mut offset, "WAL record is truncated")?;
-
-        let free_count =
-            read_u32(bytes, &mut offset, "WAL free-page metadata is truncated")? as usize;
-        let mut free_pages = Vec::with_capacity(free_count);
-        for _ in 0..free_count {
-            free_pages.push(read_u32(
-                bytes,
-                &mut offset,
-                "WAL free-page metadata is truncated",
-            )?);
-        }
-
-        let checksum_count =
-            read_u32(bytes, &mut offset, "WAL checksum metadata is truncated")? as usize;
-        let mut checksums = Vec::with_capacity(checksum_count);
-        for _ in 0..checksum_count {
-            let page_id = read_u32(bytes, &mut offset, "WAL checksum metadata is truncated")?;
-            let checksum = read_u32(bytes, &mut offset, "WAL checksum metadata is truncated")?;
-            checksums.push((page_id, checksum));
-        }
-
-        let frame_count = read_u32(bytes, &mut offset, "WAL frame metadata is truncated")? as usize;
-        let mut frames = Vec::with_capacity(frame_count);
-        for _ in 0..frame_count {
-            let page_id = read_u32(bytes, &mut offset, "WAL frame metadata is truncated")?;
-            if offset + PAGE_SIZE > bytes.len() {
-                return Err(HematiteError::StorageError(
-                    "WAL frame image is truncated".to_string(),
-                ));
-            }
-            let data = bytes[offset..offset + PAGE_SIZE].to_vec();
-            offset += PAGE_SIZE;
-            frames.push(WalFrame { page_id, data });
-        }
-
-        if offset != bytes.len() {
-            return Err(HematiteError::StorageError(
-                "WAL record has trailing bytes".to_string(),
-            ));
-        }
-
-        Ok(Self {
-            sequence,
-            file_len,
-            free_pages,
-            checksums,
-            frames,
-        })
-    }
+fn parse_metadata_page(bytes: &[u8]) -> Option<PersistedPagerState> {
+    let metadata_bytes = metadata_page::read_pager_metadata(bytes).ok()??;
+    let metadata_str = String::from_utf8(metadata_bytes).ok()?;
+    PersistedPagerState::decode(&metadata_str, 1).ok()
 }
 
 fn visible_next_page_id(file_len: u64) -> PageId {
     next_page_id_for_file_len(file_len)
 }
 
-fn checksum_bytes(bytes: &[u8]) -> u32 {
-    let mut hash: u32 = 0x811C9DC5;
-    for byte in bytes {
-        hash ^= u32::from(*byte);
-        hash = hash.wrapping_mul(0x01000193);
+fn committed_frame_groups(frames: &[V3WalFrame]) -> Vec<Vec<V3WalFrame>> {
+    let mut groups = Vec::new();
+    let mut current = Vec::new();
+    let mut current_sequence = None;
+
+    for frame in frames {
+        match current_sequence {
+            Some(sequence) if sequence != frame.commit_sequence => {
+                if current
+                    .iter()
+                    .any(|frame: &V3WalFrame| frame.page_number == STORAGE_METADATA_PAGE_ID)
+                {
+                    groups.push(current);
+                }
+                current = Vec::new();
+                current_sequence = Some(frame.commit_sequence);
+            }
+            None => {
+                current_sequence = Some(frame.commit_sequence);
+            }
+            _ => {}
+        }
+        current.push(frame.clone());
     }
-    hash
+
+    if current
+        .iter()
+        .any(|frame: &V3WalFrame| frame.page_number == STORAGE_METADATA_PAGE_ID)
+    {
+        groups.push(current);
+    }
+
+    groups
 }
 
-fn read_u32(bytes: &[u8], offset: &mut usize, message: &str) -> Result<u32> {
-    if *offset + 4 > bytes.len() {
-        return Err(HematiteError::StorageError(message.to_string()));
-    }
-    let value = u32::from_le_bytes([
-        bytes[*offset],
-        bytes[*offset + 1],
-        bytes[*offset + 2],
-        bytes[*offset + 3],
-    ]);
-    *offset += 4;
-    Ok(value)
-}
+fn visible_pages_from_committed_groups(
+    groups: &[Vec<V3WalFrame>],
+) -> Result<(u32, HashMap<u32, Vec<u8>>)> {
+    let mut database_page_count = 0u32;
+    let mut pages = HashMap::new();
 
-fn read_u64(bytes: &[u8], offset: &mut usize, message: &str) -> Result<u64> {
-    if *offset + 8 > bytes.len() {
-        return Err(HematiteError::StorageError(message.to_string()));
+    for group in groups {
+        for frame in group {
+            database_page_count = database_page_count.max(frame.database_page_count);
+            pages.insert(frame.page_number, frame.page_bytes.clone());
+        }
     }
-    let value = u64::from_le_bytes([
-        bytes[*offset],
-        bytes[*offset + 1],
-        bytes[*offset + 2],
-        bytes[*offset + 3],
-        bytes[*offset + 4],
-        bytes[*offset + 5],
-        bytes[*offset + 6],
-        bytes[*offset + 7],
-    ]);
-    *offset += 8;
-    Ok(value)
+
+    Ok((database_page_count, pages))
 }

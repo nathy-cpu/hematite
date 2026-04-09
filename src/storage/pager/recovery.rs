@@ -1,11 +1,12 @@
 use super::{JournalMode, Pager};
 use crate::error::Result;
 use crate::storage::journal::{JournalRecord, JournalState, RollbackJournal};
-use crate::storage::wal::{VisibleWalState, WalFrame, WalRecord};
-use crate::storage::{
-    file_len_for_next_page_id, metadata_page, Page, PageId, STORAGE_METADATA_PAGE_ID, PAGE_SIZE,
+use crate::storage::pager_metadata::PersistedPagerState;
+use crate::storage::wal::{
+    append_committed_frames_to_path, load_visible_state_from_path_with_base, VisibleWalState,
+    WalFrame,
 };
-use std::collections::HashMap;
+use crate::storage::{metadata_page, Page, PageId, STORAGE_METADATA_PAGE_ID, PAGE_SIZE};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -85,153 +86,10 @@ impl Pager {
     }
 
     fn apply_persisted_state(&mut self, contents: &str) -> Result<()> {
-        let mut lines = contents.lines();
-        let version = lines
-            .next()
-            .ok_or_else(|| {
-                crate::error::HematiteError::StorageError(
-                    "Missing pager checksum metadata version".to_string(),
-                )
-            })?
-            .strip_prefix("version=")
-            .ok_or_else(|| {
-                crate::error::HematiteError::StorageError(
-                    "Pager checksum metadata is missing version prefix".to_string(),
-                )
-            })?
-            .parse::<u32>()
-            .map_err(|_| {
-                crate::error::HematiteError::StorageError(
-                    "Invalid pager checksum metadata version".to_string(),
-                )
-            })?;
-
-        if version != Self::CHECKSUM_METADATA_VERSION {
-            return Err(crate::error::HematiteError::StorageError(format!(
-                "Unsupported pager checksum metadata version: expected {}, got {}",
-                Self::CHECKSUM_METADATA_VERSION,
-                version
-            )));
-        }
-
-        let mut next_line = lines.next().ok_or_else(|| {
-            crate::error::HematiteError::StorageError(
-                "Missing pager freelist metadata count".to_string(),
-            )
-        })?;
-
-        if let Some(mode) = next_line.strip_prefix("journal_mode=") {
-            self.journal_mode = JournalMode::parse(mode)?;
-            next_line = lines.next().ok_or_else(|| {
-                crate::error::HematiteError::StorageError(
-                    "Missing pager freelist metadata count".to_string(),
-                )
-            })?;
-        } else {
-            self.journal_mode = JournalMode::Rollback;
-        }
-
-        let expected_free_count = next_line
-            .strip_prefix("free_count=")
-            .ok_or_else(|| {
-                crate::error::HematiteError::StorageError(
-                    "Pager freelist metadata is missing count prefix".to_string(),
-                )
-            })?
-            .parse::<usize>()
-            .map_err(|_| {
-                crate::error::HematiteError::StorageError(
-                    "Invalid pager freelist metadata count".to_string(),
-                )
-            })?;
-
-        let mut free_pages = Vec::with_capacity(expected_free_count);
-        for _ in 0..expected_free_count {
-            let line = lines.next().ok_or_else(|| {
-                crate::error::HematiteError::StorageError(
-                    "Pager freelist metadata ended early".to_string(),
-                )
-            })?;
-            let page_id = line
-                .strip_prefix("free|")
-                .ok_or_else(|| {
-                    crate::error::HematiteError::StorageError(
-                        "Invalid pager freelist metadata record".to_string(),
-                    )
-                })?
-                .parse::<u32>()
-                .map_err(|_| {
-                    crate::error::HematiteError::StorageError(
-                        "Invalid pager freelist page id".to_string(),
-                    )
-                })?;
-            free_pages.push(page_id);
-        }
-
-        let expected_count = lines
-            .next()
-            .ok_or_else(|| {
-                crate::error::HematiteError::StorageError(
-                    "Missing pager checksum metadata count".to_string(),
-                )
-            })?
-            .strip_prefix("checksum_count=")
-            .ok_or_else(|| {
-                crate::error::HematiteError::StorageError(
-                    "Pager checksum metadata is missing count prefix".to_string(),
-                )
-            })?
-            .parse::<usize>()
-            .map_err(|_| {
-                crate::error::HematiteError::StorageError(
-                    "Invalid pager checksum metadata count".to_string(),
-                )
-            })?;
-
-        let mut checksums = HashMap::new();
-        for line in lines {
-            if line.is_empty() {
-                continue;
-            }
-            let payload = line.strip_prefix("checksum|").ok_or_else(|| {
-                crate::error::HematiteError::StorageError(
-                    "Invalid pager checksum metadata record".to_string(),
-                )
-            })?;
-            let parts = payload.split('|').collect::<Vec<_>>();
-            if parts.len() != 2 {
-                return Err(crate::error::HematiteError::StorageError(
-                    "Invalid pager checksum metadata record".to_string(),
-                ));
-            }
-            let page_id = parts[0].parse::<u32>().map_err(|_| {
-                crate::error::HematiteError::StorageError(
-                    "Invalid pager checksum page id".to_string(),
-                )
-            })?;
-            let checksum = parts[1].parse::<u32>().map_err(|_| {
-                crate::error::HematiteError::StorageError(
-                    "Invalid pager checksum value".to_string(),
-                )
-            })?;
-            if checksums.insert(page_id, checksum).is_some() {
-                return Err(crate::error::HematiteError::StorageError(format!(
-                    "Duplicate pager checksum entry for page {}",
-                    page_id
-                )));
-            }
-        }
-
-        if checksums.len() != expected_count {
-            return Err(crate::error::HematiteError::StorageError(format!(
-                "Pager checksum metadata count mismatch: expected {}, got {}",
-                expected_count,
-                checksums.len()
-            )));
-        }
-
-        self.file_manager.set_free_pages(free_pages);
-        self.page_checksums = checksums;
+        let persisted = PersistedPagerState::decode(contents, Self::CHECKSUM_METADATA_VERSION)?;
+        self.journal_mode = persisted.journal_mode;
+        self.file_manager.set_free_pages(persisted.free_pages);
+        self.page_checksums = persisted.checksums;
         Ok(())
     }
 
@@ -268,7 +126,14 @@ impl Pager {
             return Ok(());
         };
 
-        self.latest_wal_state = WalRecord::load_visible_state_from_path(path)?;
+        let metadata_page = self.file_manager.read_page(STORAGE_METADATA_PAGE_ID)?;
+        self.latest_wal_state = load_visible_state_from_path_with_base(
+            path,
+            self.file_manager.file_len()?,
+            self.file_manager.free_pages().to_vec(),
+            self.page_checksums.clone(),
+            &metadata_page.data,
+        )?;
         if self.transaction.is_none() && self.wal_read_snapshot.is_none() {
             self.cache.reset();
         }
@@ -276,27 +141,12 @@ impl Pager {
     }
 
     pub(super) fn persist_checksums(&mut self) -> Result<()> {
-        let mut entries = self
-            .page_checksums
-            .iter()
-            .map(|(page_id, checksum)| (*page_id, *checksum))
-            .collect::<Vec<_>>();
-        entries.sort_by_key(|(page_id, _)| *page_id);
-
-        let mut lines = vec![
-            format!("version={}", Self::CHECKSUM_METADATA_VERSION),
-            format!("journal_mode={}", self.journal_mode.as_str()),
-            format!("free_count={}", self.file_manager.free_pages().len()),
-        ];
-        for page_id in self.file_manager.free_pages() {
-            lines.push(format!("free|{}", page_id));
+        let contents = PersistedPagerState {
+            journal_mode: self.journal_mode,
+            free_pages: self.file_manager.free_pages().to_vec(),
+            checksums: self.page_checksums.clone(),
         }
-        lines.push(format!("checksum_count={}", entries.len()));
-        for (page_id, checksum) in entries {
-            lines.push(format!("checksum|{}|{}", page_id, checksum));
-        }
-
-        let contents = lines.join("\n");
+        .encode(Self::CHECKSUM_METADATA_VERSION);
         let existing_page = self
             .cache
             .peek(STORAGE_METADATA_PAGE_ID)
@@ -520,9 +370,14 @@ impl Pager {
     }
 
     pub(super) fn commit_wal_transaction(&mut self) -> Result<()> {
-        let transaction = self.active_wal_transaction().ok_or_else(|| {
-            crate::error::HematiteError::StorageError("Pager transaction is not active".to_string())
-        })?;
+        let (wal_next_page_id, wal_free_pages) = {
+            let transaction = self.active_wal_transaction().ok_or_else(|| {
+                crate::error::HematiteError::StorageError(
+                    "Pager transaction is not active".to_string(),
+                )
+            })?;
+            (transaction.wal_next_page_id, transaction.wal_free_pages.clone())
+        };
         let next_sequence = self
             .latest_wal_state
             .as_ref()
@@ -545,38 +400,27 @@ impl Pager {
                 data: page.data,
             });
         }
-
-        let mut checksums = self
-            .page_checksums
-            .iter()
-            .map(|(page_id, checksum)| (*page_id, *checksum))
-            .collect::<Vec<_>>();
-        checksums.sort_by_key(|(page_id, _)| *page_id);
-
-        let record = WalRecord {
-            sequence: next_sequence,
-            file_len: file_len_for_next_page_id(transaction.wal_next_page_id),
-            free_pages: transaction.wal_free_pages.clone(),
-            checksums,
-            frames,
-        };
-
-        self.append_wal_record(record)?;
+        let metadata_page = self
+            .cache
+            .peek(STORAGE_METADATA_PAGE_ID)
+            .cloned()
+            .unwrap_or(self.file_manager.read_page(STORAGE_METADATA_PAGE_ID)?);
+        if let Some(path) = &self.wal_path {
+            append_committed_frames_to_path(
+                path,
+                next_sequence,
+                wal_next_page_id,
+                &wal_free_pages,
+                &self.page_checksums,
+                &metadata_page.data,
+                &frames,
+            )?;
+        }
+        self.load_latest_wal_state()?;
         for page_id in self.cache.dirty_page_ids() {
             self.cache.clear_dirty(page_id);
         }
         self.cache.reset();
-        Ok(())
-    }
-
-    pub(super) fn append_wal_record(&mut self, record: WalRecord) -> Result<()> {
-        let next_state = self.snapshot_wal_visible_state()?.apply_record(&record)?;
-
-        if let Some(path) = &self.wal_path {
-            WalRecord::append_to_path(path, &record)?;
-        }
-
-        self.latest_wal_state = Some(next_state);
         Ok(())
     }
 }

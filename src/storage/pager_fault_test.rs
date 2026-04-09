@@ -268,7 +268,7 @@ fn test_pager_reopen_ignores_truncated_wal_tail_after_committed_state() -> Resul
         }],
     }])?;
     let mut wal_bytes = fs::read(&wal_path)?;
-    wal_bytes.extend_from_slice(&partial_tail[8..partial_tail.len() - 17]);
+    wal_bytes.extend_from_slice(&partial_tail[24..partial_tail.len() - 17]);
     fs::write(&wal_path, wal_bytes)?;
 
     let mut reopened = Pager::new(&test_db, 10)?;
