@@ -39,7 +39,7 @@ pub struct FileManager {
     next_page_id: u32,
     free_list: FreeList,
     #[cfg(test)]
-    fail_next_write: bool,
+    fail_on_write_countdown: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -78,7 +78,7 @@ impl FileManager {
             next_page_id: 0,
             free_list: FreeList::new(),
             #[cfg(test)]
-            fail_next_write: false,
+            fail_on_write_countdown: None,
         };
 
         let mut manager = manager;
@@ -93,7 +93,7 @@ impl FileManager {
             next_page_id: 0,
             free_list: FreeList::new(),
             #[cfg(test)]
-            fail_next_write: false,
+            fail_on_write_countdown: None,
         };
 
         let mut manager = manager;
@@ -335,12 +335,15 @@ impl FileManager {
 
     fn write_all(&mut self, buf: &[u8]) -> Result<()> {
         #[cfg(test)]
-        if self.fail_next_write {
-            self.fail_next_write = false;
-            return Err(crate::error::HematiteError::IoError(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Injected IO error",
-            )));
+        if let Some(remaining_writes) = self.fail_on_write_countdown.as_mut() {
+            if *remaining_writes == 0 {
+                self.fail_on_write_countdown = None;
+                return Err(crate::error::HematiteError::IoError(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "Injected IO error",
+                )));
+            }
+            *remaining_writes -= 1;
         }
         match &mut self.backend {
             FileBackend::Disk(file) => {
@@ -380,6 +383,10 @@ impl FileManager {
 #[cfg(test)]
 impl FileManager {
     pub fn inject_write_failure(&mut self) {
-        self.fail_next_write = true;
+        self.inject_write_failure_after(0);
+    }
+
+    pub fn inject_write_failure_after(&mut self, writes_before_failure: usize) {
+        self.fail_on_write_countdown = Some(writes_before_failure);
     }
 }

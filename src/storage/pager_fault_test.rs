@@ -1,7 +1,10 @@
 use crate::storage::pager::{Pager, PagerState};
+use crate::storage::wal::{WalFrame, WalRecord};
 use crate::storage::types::{Page, DB_HEADER_PAGE_ID};
 use crate::error::Result;
 use crate::test_utils::TestDbFile;
+use crate::storage::JournalMode;
+use std::fs;
 
 #[test]
 fn test_pager_enters_error_state_on_flush_failure() -> Result<()> {
@@ -165,6 +168,112 @@ fn test_pager_begin_read_during_write_transaction_keeps_writer_state() -> Result
 
     pager.rollback_transaction()?;
     assert_eq!(pager.state(), PagerState::Open);
+
+    Ok(())
+}
+
+#[test]
+fn test_pager_checkpoint_failure_enters_error_state_and_reopen_uses_wal_state() -> Result<()> {
+    let test_db = TestDbFile::new("pager_fault_checkpoint_failure");
+    let wal_path = std::path::PathBuf::from(format!("{}.wal", test_db.path()));
+
+    let (first_page_id, second_page_id) = {
+        let mut setup = Pager::new(&test_db, 10)?;
+        let first_page_id = setup.allocate_page()?;
+        let second_page_id = setup.allocate_page()?;
+
+        let mut first_page = Page::new(first_page_id);
+        first_page.data[0] = 10;
+        setup.write_page(first_page)?;
+
+        let mut second_page = Page::new(second_page_id);
+        second_page.data[0] = 20;
+        setup.write_page(second_page)?;
+        setup.flush()?;
+        setup.set_journal_mode(JournalMode::Wal)?;
+        (first_page_id, second_page_id)
+    };
+
+    let mut pinned_reader = Pager::new(&test_db, 10)?;
+    pinned_reader.begin_read()?;
+
+    let mut writer = Pager::new(&test_db, 10)?;
+    writer.begin_transaction()?;
+    let mut first_page = writer.read_page(first_page_id)?;
+    first_page.data[0] = 11;
+    writer.write_page(first_page)?;
+
+    let mut second_page = writer.read_page(second_page_id)?;
+    second_page.data[0] = 21;
+    writer.write_page(second_page)?;
+    writer.commit_transaction()?;
+    assert!(wal_path.exists());
+
+    pinned_reader.end_read()?;
+
+    writer.inject_io_failure_after(1);
+    let checkpoint_err = writer.checkpoint_wal().unwrap_err();
+    assert!(checkpoint_err.to_string().contains("Injected IO error"));
+    assert_eq!(writer.state(), PagerState::Error);
+    assert!(wal_path.exists());
+
+    let mut reopened = Pager::new(&test_db, 10)?;
+    reopened.begin_read()?;
+    assert_eq!(reopened.read_page(first_page_id)?.data[0], 11);
+    assert_eq!(reopened.read_page(second_page_id)?.data[0], 21);
+    reopened.end_read()?;
+
+    Ok(())
+}
+
+#[test]
+fn test_pager_reopen_ignores_truncated_wal_tail_after_committed_state() -> Result<()> {
+    let test_db = TestDbFile::new("pager_fault_truncated_wal_tail");
+    let wal_path = std::path::PathBuf::from(format!("{}.wal", test_db.path()));
+
+    let page_id = {
+        let mut setup = Pager::new(&test_db, 10)?;
+        let page_id = setup.allocate_page()?;
+        let mut page = Page::new(page_id);
+        page.data[0] = 7;
+        setup.write_page(page)?;
+        setup.flush()?;
+        setup.set_journal_mode(JournalMode::Wal)?;
+        page_id
+    };
+
+    let mut pinned_reader = Pager::new(&test_db, 10)?;
+    pinned_reader.begin_read()?;
+
+    let mut writer = Pager::new(&test_db, 10)?;
+    writer.begin_transaction()?;
+    let mut page = writer.read_page(page_id)?;
+    page.data[0] = 99;
+    writer.write_page(page)?;
+    writer.commit_transaction()?;
+    assert!(wal_path.exists());
+
+    pinned_reader.end_read()?;
+
+    let partial_tail = WalRecord::encode_file(&[WalRecord {
+        sequence: 2,
+        file_len: 64 + 3 * crate::storage::PAGE_SIZE as u64,
+        free_pages: vec![],
+        checksums: vec![(page_id, 123)],
+        frames: vec![WalFrame {
+            page_id,
+            data: vec![42u8; crate::storage::PAGE_SIZE],
+        }],
+    }])?;
+    let mut wal_bytes = fs::read(&wal_path)?;
+    wal_bytes.extend_from_slice(&partial_tail[8..partial_tail.len() - 17]);
+    fs::write(&wal_path, wal_bytes)?;
+
+    let mut reopened = Pager::new(&test_db, 10)?;
+    reopened.begin_read()?;
+    assert_eq!(reopened.wal_snapshot_sequence(), Some(1));
+    assert_eq!(reopened.read_page(page_id)?.data[0], 99);
+    reopened.end_read()?;
 
     Ok(())
 }

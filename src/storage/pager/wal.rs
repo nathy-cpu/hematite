@@ -3,6 +3,14 @@ use crate::error::Result;
 use crate::storage::Page;
 
 impl Pager {
+    fn checkpoint_wal_guarded(&mut self) -> Result<()> {
+        if let Err(err) = self.checkpoint_wal_unlocked() {
+            self.enter_error_state();
+            return Err(err);
+        }
+        Ok(())
+    }
+
     pub fn set_journal_mode(&mut self, journal_mode: JournalMode) -> Result<()> {
         if self.transaction.is_some() {
             return Err(crate::error::HematiteError::StorageError(
@@ -18,7 +26,7 @@ impl Pager {
                     "Cannot switch from WAL while readers are active".to_string(),
                 ));
             }
-            self.checkpoint_wal_unlocked()?;
+            self.checkpoint_wal_guarded()?;
         }
         if journal_mode == JournalMode::Rollback {
             self.remove_wal_file()?;
@@ -49,7 +57,7 @@ impl Pager {
                 "Cannot checkpoint WAL while readers are active".to_string(),
             ));
         }
-        self.checkpoint_wal_unlocked()
+        self.checkpoint_wal_guarded()
     }
 
     pub(super) fn can_checkpoint_wal(&self) -> Result<bool> {

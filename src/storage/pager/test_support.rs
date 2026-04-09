@@ -16,6 +16,11 @@ impl Pager {
         self.file_manager.inject_write_failure();
     }
 
+    pub fn inject_io_failure_after(&mut self, writes_before_failure: usize) {
+        self.file_manager
+            .inject_write_failure_after(writes_before_failure);
+    }
+
     pub fn state(&self) -> PagerState {
         self.state
     }
