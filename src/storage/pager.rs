@@ -106,8 +106,9 @@ use crate::error::Result;
 use crate::storage::journal::JournalRecord;
 use crate::storage::wal::VisibleWalState;
 use crate::storage::{
+    file_manager::FileManagerSnapshot,
     file_manager::FileManager,
-    PageId, STORAGE_METADATA_PAGE_ID,
+    Page, PageId, STORAGE_METADATA_PAGE_ID,
 };
 use self::cache::PageCache;
 use self::state::PagerLockMode;
@@ -120,23 +121,36 @@ pub use self::state::{JournalMode, PagerState};
 pub(crate) use self::savepoint::PagerSnapshot;
 
 #[derive(Debug, Clone)]
-struct RollbackTransaction {
+pub(crate) struct RollbackTransaction {
     original_file_len: u64,
     original_free_pages: Vec<PageId>,
     original_checksums: HashMap<PageId, u32>,
     journaled_pages: HashSet<PageId>,
     page_records: Vec<JournalRecord>,
+    savepoints: Vec<RollbackSavepoint>,
+    next_savepoint_id: u64,
 }
 
 #[derive(Debug, Clone)]
-struct WalTransaction {
+struct RollbackSavepoint {
+    id: u64,
+    file_manager: FileManagerSnapshot,
+    page_checksums: HashMap<PageId, u32>,
+    dirty_pages: Vec<Page>,
+    transaction_page_record_count: usize,
+    page_records: Vec<JournalRecord>,
+    captured_page_ids: HashSet<PageId>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WalTransaction {
     wal_next_page_id: PageId,
     wal_free_pages: Vec<PageId>,
     original_checksums: HashMap<PageId, u32>,
 }
 
 #[derive(Debug, Clone)]
-enum PagerTransaction {
+pub(crate) enum PagerTransaction {
     Rollback(RollbackTransaction),
     Wal(WalTransaction),
 }

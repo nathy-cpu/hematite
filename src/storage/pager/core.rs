@@ -1,5 +1,6 @@
 use super::{
-    JournalMode, Pager, PagerState, PagerTransaction, RollbackTransaction, WalTransaction,
+    JournalMode, Pager, PagerState, PagerTransaction, RollbackSavepoint, RollbackTransaction,
+    WalTransaction,
 };
 use crate::error::Result;
 use std::collections::HashSet;
@@ -20,13 +21,28 @@ impl Pager {
         }
 
         self.transaction = Some(match self.journal_mode {
-            JournalMode::Rollback => PagerTransaction::Rollback(RollbackTransaction {
+            JournalMode::Rollback => {
+                let mut rollback = RollbackTransaction {
                 original_file_len: self.file_manager.file_len()?,
                 original_free_pages: self.file_manager.free_pages().to_vec(),
                 original_checksums: self.page_checksums.clone(),
                 journaled_pages: HashSet::new(),
                 page_records: Vec::new(),
-            }),
+                    savepoints: Vec::new(),
+                    next_savepoint_id: 1,
+                };
+                let baseline = RollbackSavepoint {
+                    id: 0,
+                    file_manager: self.file_manager.snapshot()?,
+                    page_checksums: self.page_checksums.clone(),
+                    dirty_pages: Vec::new(),
+                    transaction_page_record_count: 0,
+                    page_records: Vec::new(),
+                    captured_page_ids: HashSet::new(),
+                };
+                rollback.savepoints.push(baseline);
+                PagerTransaction::Rollback(rollback)
+            }
             JournalMode::Wal => PagerTransaction::Wal(WalTransaction {
                 wal_next_page_id: self.file_manager.next_page_id(),
                 wal_free_pages: self.file_manager.free_pages().to_vec(),

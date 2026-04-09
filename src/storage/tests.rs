@@ -607,6 +607,37 @@ mod pager_tests {
     }
 
     #[test]
+    fn test_pager_restore_snapshot_recovers_flushed_post_savepoint_page_changes(
+    ) -> crate::error::Result<()> {
+        let test_db =
+            TestDbFile::new("_test_pager_restore_snapshot_recovers_flushed_post_savepoint_changes");
+        let mut pager = Pager::new(test_db.path(), 8)?;
+        let page_id = pager.allocate_page()?;
+
+        let mut page = Page::new(page_id);
+        page.data[0] = 10;
+        pager.write_page(page)?;
+        pager.flush()?;
+
+        pager.begin_transaction()?;
+        let snapshot = pager.snapshot()?;
+
+        let mut updated = pager.read_page(page_id)?;
+        updated.data[0] = 42;
+        pager.write_page(updated)?;
+        pager.flush()?;
+
+        pager.restore_snapshot(snapshot)?;
+        assert_eq!(pager.read_page(page_id)?.data[0], 10);
+
+        pager.commit_transaction()?;
+
+        let mut reopened = Pager::new(test_db.path(), 8)?;
+        assert_eq!(reopened.read_page(page_id)?.data[0], 10);
+        Ok(())
+    }
+
+    #[test]
     fn test_pager_allows_multiple_readers() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_pager_multiple_readers");
         let mut first = Pager::new(test_db.path(), 8)?;

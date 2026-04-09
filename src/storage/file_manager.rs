@@ -48,6 +48,16 @@ pub(crate) struct FileManagerSnapshot {
     free_pages: Vec<PageId>,
 }
 
+impl FileManagerSnapshot {
+    pub(crate) fn file_len(&self) -> u64 {
+        self.file_len
+    }
+
+    pub(crate) fn free_pages(&self) -> &[PageId] {
+        &self.free_pages
+    }
+}
+
 #[derive(Debug)]
 enum FileBackend {
     Disk(File),

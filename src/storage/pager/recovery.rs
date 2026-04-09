@@ -309,7 +309,26 @@ impl Pager {
             return Ok(());
         }
 
-        let page = self.file_manager.read_page(page_id)?;
+        let page = if let Some(page) = self.cache.peek(page_id) {
+            page.clone()
+        } else {
+            self.file_manager.read_page(page_id)?
+        };
+
+        if let Some(transaction) = self.active_rollback_transaction_mut() {
+            for savepoint in &mut transaction.savepoints {
+                let live_at_savepoint =
+                    page_end <= savepoint.file_manager.file_len()
+                        && !savepoint.file_manager.free_pages().contains(&page_id);
+                if live_at_savepoint && savepoint.captured_page_ids.insert(page_id) {
+                    savepoint.page_records.push(JournalRecord {
+                        page_id,
+                        data: page.data.to_vec(),
+                    });
+                }
+            }
+        }
+
         let record = {
             let Some(transaction) = self.active_rollback_transaction_mut() else {
                 return Ok(());
