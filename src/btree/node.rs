@@ -14,6 +14,7 @@ use crate::btree::{BTreeKey, BTreeValue, NodeType, BTREE_ORDER};
 use crate::error::{HematiteError, Result};
 use crate::storage::format::{PageKind, DATABASE_HEADER_SIZE};
 use crate::storage::{Page, PageId, Pager, PAGE_SIZE};
+use std::sync::Arc;
 #[cfg(test)]
 use crate::storage::INVALID_PAGE_ID;
 
@@ -37,7 +38,7 @@ pub struct BTreeNode {
 
     pub key_count: usize,
     pub payload_len: usize,
-    pub raw_page: Option<Page>,
+    pub raw_page: Option<Arc<Page>>,
     pub is_decoded: bool,
     pub cell_offsets: Vec<u16>,
 }
@@ -136,6 +137,10 @@ impl BTreeNode {
     }
 
     pub fn from_page(page: Page) -> Result<Self> {
+        Self::from_shared_page(Arc::new(page))
+    }
+
+    pub fn from_shared_page(page: Arc<Page>) -> Result<Self> {
         if page.data.len() != PAGE_SIZE {
             return Err(HematiteError::InvalidPage(page.id));
         }
@@ -444,7 +449,7 @@ impl BTreeNode {
         if self.is_decoded {
             self.values[index] = new_value.clone();
         }
-        self.raw_page = Some(page.clone());
+        self.raw_page = Some(Arc::new(page.clone()));
         Ok(true)
     }
 
@@ -458,53 +463,20 @@ impl BTreeNode {
 
     #[cfg(test)]
     fn search_leaf(&self, key: &BTreeKey) -> SearchResult {
-        let mut left = 0;
-        let mut right = self.key_count;
-        while left < right {
-            let mid = (left + right) / 2;
-            let mid_key_bytes = self.get_key_view(mid).unwrap();
-            match key.as_bytes().cmp(mid_key_bytes) {
-                std::cmp::Ordering::Equal => {
-                    return SearchResult::Found(self.get_value_procedural(mid).unwrap());
-                }
-                std::cmp::Ordering::Less => right = mid,
-                std::cmp::Ordering::Greater => left = mid + 1,
-            }
+        if let Some(index) = self.exact_key_index(key) {
+            SearchResult::Found(self.get_value_procedural(index).unwrap())
+        } else {
+            SearchResult::NotFound(INVALID_PAGE_ID)
         }
-        SearchResult::NotFound(INVALID_PAGE_ID)
     }
 
     #[cfg(test)]
     fn search_internal(&self, key: &BTreeKey) -> SearchResult {
-        let mut left = 0;
-        let mut right = self.key_count;
-        while left < right {
-            let mid = (left + right) / 2;
-            let mid_key_bytes = self.get_key_view(mid).unwrap();
-            match key.as_bytes().cmp(mid_key_bytes) {
-                std::cmp::Ordering::Equal => {
-                    return SearchResult::NotFound(self.get_child_procedural(mid + 1).unwrap());
-                }
-                std::cmp::Ordering::Less => right = mid,
-                std::cmp::Ordering::Greater => left = mid + 1,
-            }
-        }
-        SearchResult::NotFound(self.get_child_procedural(left).unwrap())
+        SearchResult::NotFound(self.get_child_procedural(self.upper_bound_index(key)).unwrap())
     }
 
     pub fn find_child(&self, key: &BTreeKey) -> PageId {
-        let mut left = 0;
-        let mut right = self.key_count;
-        while left < right {
-            let mid = (left + right) / 2;
-            let mid_key_bytes = self.get_key_view(mid).unwrap();
-            if key.as_bytes() < mid_key_bytes {
-                right = mid;
-            } else {
-                left = mid + 1;
-            }
-        }
-        self.get_child_procedural(left).unwrap()
+        self.get_child_procedural(self.upper_bound_index(key)).unwrap()
     }
 
     pub fn insert_leaf(&mut self, key: BTreeKey, value: BTreeValue) -> Result<()> {
@@ -706,21 +678,60 @@ impl BTreeNode {
     }
 
     pub fn find_child_index(&self, key: &BTreeKey) -> usize {
+        self.upper_bound_index(key)
+    }
+
+    pub fn lower_bound_index(&self, key: &BTreeKey) -> usize {
+        let mut left = 0;
+        let mut right = self.key_count;
+        while left < right {
+            let mid = (left + right) / 2;
+            let mid_key_bytes = self.get_key_view(mid).unwrap();
+            if mid_key_bytes < key.as_bytes() {
+                left = mid + 1;
+            } else {
+                right = mid;
+            }
+        }
+        left
+    }
+
+    pub fn exact_key_index(&self, key: &BTreeKey) -> Option<usize> {
+        let index = self.lower_bound_index(key);
+        if index < self.key_count && self.get_key_view(index).unwrap() == key.as_bytes() {
+            Some(index)
+        } else {
+            None
+        }
+    }
+
+    pub fn upper_bound_index(&self, key: &BTreeKey) -> usize {
         if self.is_decoded {
-            for (i, k) in self.keys.iter().enumerate() {
-                if key < k {
-                    return i;
+            let mut left = 0;
+            let mut right = self.keys.len();
+            while left < right {
+                let mid = (left + right) / 2;
+                if self.keys[mid].as_bytes() <= key.as_bytes() {
+                    left = mid + 1;
+                } else {
+                    right = mid;
                 }
             }
-            return self.keys.len();
+            return left;
         }
 
-        for i in 0..self.key_count {
-            if key.as_bytes() < self.get_key_view(i).unwrap() {
-                return i;
+        let mut left = 0;
+        let mut right = self.key_count;
+        while left < right {
+            let mid = (left + right) / 2;
+            let mid_key_bytes = self.get_key_view(mid).unwrap();
+            if mid_key_bytes <= key.as_bytes() {
+                left = mid + 1;
+            } else {
+                right = mid;
             }
         }
-        self.key_count
+        left
     }
 
     pub fn can_merge_with(&self, other: &BTreeNode) -> bool {

@@ -1,5 +1,6 @@
 use crate::storage::{Page, PageId};
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CachedPageMeta {
@@ -14,7 +15,7 @@ pub(crate) struct CachedPageMeta {
 
 #[derive(Debug, Clone)]
 struct CachedPageEntry {
-    page: Page,
+    page: Arc<Page>,
     meta: CachedPageMeta,
 }
 
@@ -41,17 +42,21 @@ impl PageCache {
         self.capacity
     }
 
-    pub(crate) fn get(&mut self, page_id: PageId) -> Option<&Page> {
-        if self.entries.contains_key(&page_id) {
+    pub(crate) fn get(&mut self, page_id: PageId) -> Option<Arc<Page>> {
+        let page = self.entries.get(&page_id).map(|entry| entry.page.clone());
+        if page.is_some() {
             self.touch(page_id);
-            self.entries.get(&page_id).map(|entry| &entry.page)
-        } else {
-            None
         }
+        page
     }
 
     pub(crate) fn peek(&self, page_id: PageId) -> Option<&Page> {
-        self.entries.get(&page_id).map(|entry| &entry.page)
+        self.entries.get(&page_id).map(|entry| entry.page.as_ref())
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn peek_shared(&self, page_id: PageId) -> Option<Arc<Page>> {
+        self.entries.get(&page_id).map(|entry| entry.page.clone())
     }
 
     pub(crate) fn meta(&self, page_id: PageId) -> Option<&CachedPageMeta> {
@@ -59,6 +64,10 @@ impl PageCache {
     }
 
     pub(crate) fn put(&mut self, page: Page) {
+        self.put_shared(Arc::new(page));
+    }
+
+    pub(crate) fn put_shared(&mut self, page: Arc<Page>) {
         let page_id = page.id;
         self.evict_if_needed(Some(page_id));
         let meta = self
@@ -86,7 +95,7 @@ impl PageCache {
             .entries
             .entry(page_id)
             .or_insert_with(|| CachedPageEntry {
-                page: Page::new(page_id),
+                page: Arc::new(Page::new(page_id)),
                 meta: CachedPageMeta::default(),
             })
             .meta;
@@ -135,12 +144,12 @@ impl PageCache {
             .count()
     }
 
-    #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn pin(&mut self, page_id: PageId) {
         self.entries
             .entry(page_id)
             .or_insert_with(|| CachedPageEntry {
-                page: Page::new(page_id),
+                page: Arc::new(Page::new(page_id)),
                 meta: CachedPageMeta::default(),
             })
             .meta
@@ -159,7 +168,7 @@ impl PageCache {
         self.entries
             .entry(page_id)
             .or_insert_with(|| CachedPageEntry {
-                page: Page::new(page_id),
+                page: Arc::new(Page::new(page_id)),
                 meta: CachedPageMeta::default(),
             })
             .meta
@@ -171,7 +180,7 @@ impl PageCache {
         self.entries
             .entry(page_id)
             .or_insert_with(|| CachedPageEntry {
-                page: Page::new(page_id),
+                page: Arc::new(Page::new(page_id)),
                 meta: CachedPageMeta::default(),
             })
             .meta
@@ -183,7 +192,7 @@ impl PageCache {
         self.entries
             .entry(page_id)
             .or_insert_with(|| CachedPageEntry {
-                page: Page::new(page_id),
+                page: Arc::new(Page::new(page_id)),
                 meta: CachedPageMeta::default(),
             })
             .meta

@@ -2,12 +2,17 @@ use super::{JournalMode, Pager, PagerLockMode, PagerState, STORAGE_METADATA_PAGE
 use crate::error::Result;
 use crate::storage::Page;
 use crate::storage::PageId;
+use std::sync::Arc;
 
 impl Pager {
     pub fn read_page(&mut self, page_id: PageId) -> Result<Page> {
+        Ok((*self.read_page_shared(page_id)?).clone())
+    }
+
+    pub(crate) fn read_page_shared(&mut self, page_id: PageId) -> Result<Arc<Page>> {
         self.check_error_state()?;
         if let Some(page) = self.cache.get(page_id) {
-            return Ok(page.clone());
+            return Ok(page);
         }
 
         if self.journal_mode == JournalMode::Wal {
@@ -32,8 +37,8 @@ impl Pager {
                 if (page_id >= base_visible_next_page_id || base_page_is_free)
                     && page_id < transaction.wal_next_page_id
                 {
-                    let page = Page::new(page_id);
-                    self.cache.put(page.clone());
+                    let page = Arc::new(Page::new(page_id));
+                    self.cache.put_shared(page.clone());
                     return Ok(page);
                 }
             }
@@ -47,7 +52,7 @@ impl Pager {
                 )));
             }
             if let Some(data) = state.page_bytes(page_id) {
-                let page = Page::from_bytes(page_id, data.to_vec())?;
+                let page = Arc::new(Page::from_bytes(page_id, data.to_vec())?);
                 if let Some(expected_checksum) = state.checksum_for_page(page_id) {
                     let actual_checksum = Self::calculate_page_checksum(&page);
                     if actual_checksum != expected_checksum {
@@ -57,18 +62,18 @@ impl Pager {
                         )));
                     }
                 }
-                self.cache.put(page.clone());
+                self.cache.put_shared(page.clone());
                 return Ok(page);
             }
             let visible_next_page_id = state.visible_next_page_id();
             if page_id >= self.file_manager.next_page_id() && page_id < visible_next_page_id {
-                let page = Page::new(page_id);
-                self.cache.put(page.clone());
+                let page = Arc::new(Page::new(page_id));
+                self.cache.put_shared(page.clone());
                 return Ok(page);
             }
         }
 
-        let page = self.file_manager.read_page(page_id)?;
+        let page = Arc::new(self.file_manager.read_page(page_id)?);
         let expected_checksum = self
             .current_wal_visible_state()
             .and_then(|state| state.checksum_for_page(page_id))
@@ -82,7 +87,7 @@ impl Pager {
                 )));
             }
         }
-        self.cache.put(page.clone());
+        self.cache.put_shared(page.clone());
         Ok(page)
     }
 

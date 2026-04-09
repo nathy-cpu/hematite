@@ -191,46 +191,23 @@ impl BTreeCursor {
         let at_end = {
             let mut storage = self.lock_storage()?;
             loop {
-                let page = storage.read_page(current_page_id)?;
-                let node = BTreeNode::from_page(page)?;
+                let page = storage.read_page_shared(current_page_id)?;
+                let node = BTreeNode::from_shared_page(page)?;
 
                 match node.node_type {
                     NodeType::Leaf => {
-                        let mut frame = CursorFrame {
+                        let index = node.lower_bound_index(key);
+                        let frame = CursorFrame {
                             page_id: current_page_id,
                             node,
-                            index: 0,
+                            index,
                         };
-
-                        let mut left = 0;
-                        let mut right = frame.node.key_count;
-
-                        while left < right {
-                            let mid = (left + right) / 2;
-                            let mid_key_bytes = frame.node.get_key_view(mid)?;
-                            if mid_key_bytes < key.as_bytes() {
-                                left = mid + 1;
-                            } else {
-                                right = mid;
-                            }
-                        }
-
-                        frame.index = left;
-                        let reached_end = left >= frame.node.key_count;
+                        let reached_end = index >= frame.node.key_count;
                         frames.push(frame);
                         break reached_end;
                     }
                     NodeType::Internal => {
-                        let mut child_index = 0;
-                        for i in 0..node.key_count {
-                            let node_key_bytes = node.get_key_view(i)?;
-                            if node_key_bytes < key.as_bytes() {
-                                child_index = i + 1;
-                            } else {
-                                break;
-                            }
-                        }
-
+                        let child_index = node.upper_bound_index(key);
                         let next_child = node.get_child_procedural(child_index)?;
                         frames.push(CursorFrame {
                             page_id: current_page_id,
@@ -374,8 +351,8 @@ impl BTreeCursor {
         let mut storage = self.lock_storage()?;
 
         loop {
-            let page = storage.read_page(current_page_id)?;
-            let node = BTreeNode::from_page(page)?;
+            let page = storage.read_page_shared(current_page_id)?;
+            let node = BTreeNode::from_shared_page(page)?;
             let next_child = match node.node_type {
                 NodeType::Leaf => None,
                 NodeType::Internal => {
@@ -413,8 +390,8 @@ impl BTreeCursor {
         let mut storage = self.lock_storage()?;
 
         loop {
-            let page = storage.read_page(current_page_id)?;
-            let node = BTreeNode::from_page(page)?;
+            let page = storage.read_page_shared(current_page_id)?;
+            let node = BTreeNode::from_shared_page(page)?;
 
             let index = if node.node_type == NodeType::Leaf {
                 node.key_count.saturating_sub(1)

@@ -68,8 +68,8 @@ impl BTreeIndex {
         let mut current_page_id = self.root_page_id;
 
         loop {
-            let page = storage.read_page(current_page_id)?;
-            let node = BTreeNode::from_page(page)?;
+            let page = storage.read_page_shared(current_page_id)?;
+            let node = BTreeNode::from_shared_page(page)?;
 
             match node.search(key) {
                 SearchResult::Found(value) => return Ok(Some(value)),
@@ -88,26 +88,14 @@ impl BTreeIndex {
         let mut current_page_id = self.root_page_id;
 
         loop {
-            let page = storage.read_page(current_page_id)?;
-            let node = BTreeNode::from_page(page)?;
+            let page = storage.read_page_shared(current_page_id)?;
+            let node = BTreeNode::from_shared_page(page)?;
 
             match node.node_type {
                 NodeType::Leaf => {
-                    let mut left = 0usize;
-                    let mut right = node.key_count;
-
-                    while left < right {
-                        let mid = (left + right) / 2;
-                        let mid_key_bytes = node.get_key_view(mid)?;
-                        match key.as_bytes().cmp(mid_key_bytes) {
-                            std::cmp::Ordering::Equal => {
-                                return Ok(Some(C::decode_value(node.get_value_view(mid)?)?));
-                            }
-                            std::cmp::Ordering::Less => right = mid,
-                            std::cmp::Ordering::Greater => left = mid + 1,
-                        }
+                    if let Some(index) = node.exact_key_index(&key) {
+                        return Ok(Some(C::decode_value(node.get_value_view(index)?)?));
                     }
-
                     return Ok(None);
                 }
                 NodeType::Internal => {
