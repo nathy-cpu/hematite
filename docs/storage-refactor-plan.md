@@ -296,9 +296,9 @@ The current lock layer is still based on the existing in-process registry model.
 
 The snapshot logic has been extracted, which is useful, but it has not yet been reimplemented as a thin savepoint-based compatibility layer over a rebuilt rollback core.
 
-#### 3. Rollback mode still largely reflects the older behavior model
+#### 3. Savepoint compatibility is still layered on rollback snapshots
 
-Rollback handling is now isolated in its own module, but it has not yet been rebuilt around the intended page-journal-first sequencing. This is the biggest gap between "well-factored current implementation" and "new pager design."
+Rollback itself is now journal-first, but savepoint compatibility is still implemented by broad snapshot/restore behavior above that core. That is useful for correctness, but it is not yet the pager-owned savepoint/subjournal design the rewrite is aiming for.
 
 #### 4. WAL has been extracted, but not rewritten
 
@@ -308,7 +308,6 @@ The WAL path is better separated than before, but it still rides on the current 
 
 These goals from the original plan are still substantially ahead of us:
 
-- a true rollback-journal rewrite that replaces broad snapshot-shaped behavior with page-granular journaling semantics
 - a pager-owned savepoint/subjournal model
 - a replacement for the current in-process lock registry as the correctness backbone
 - a ground-up WAL rewrite on top of the rebuilt pager core
@@ -323,25 +322,27 @@ The rewrite is no longer just a plan. We have completed the structural preparati
 - lock coordination is cleaner
 - test coverage is stronger
 
-But the project is still in the "prepare the ground" stage, not yet the "replace the rollback engine" stage.
+The project is no longer only in the "prepare the ground" stage. The rollback engine itself has started to change shape.
 
 That distinction matters:
 
 - We have reduced the risk of the real rewrite.
-- We have not yet achieved the main behavioral goal of the real rewrite.
+- We have achieved the first major behavioral goal of the real rewrite in rollback mode.
+- The remaining hard work now sits in savepoints, locking, WAL, and the deeper reliability matrix.
 
 ### Recommended Next Step
 
-The next highest-value step is to begin the rollback-core rewrite itself.
+The next highest-value step is to start the savepoint/subjournal rewrite on top of the new rollback core.
 
 That should start with a small, well-bounded slice:
 
-- document the exact current rollback begin/commit/rollback behavior we must preserve at the public boundary
-- identify where broad transaction snapshots are still doing work that should belong to page-granular rollback handling
-- introduce the first rollback-core helper that records original page images in a more explicit journal-shaped way without yet changing the upper-layer API
+- identify where current savepoint restore still depends on broad pager snapshots
+- introduce pager-owned rollback/savepoint state that can survive restore without reconstructing as much pager state
+- keep the public snapshot compatibility API intact while progressively shrinking what it has to clone
 
 In short:
 
 - the scaffolding work is in good shape
 - the lock/state groundwork is now credible
-- the next milestone should be the first true rollback-behavior rewrite, not more facade extraction
+- the rollback core now has a true journal-first shape
+- the next milestone should be savepoint/subjournal behavior, not more facade extraction
