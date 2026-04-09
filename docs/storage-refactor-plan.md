@@ -292,15 +292,23 @@ This is not a full SQLite `PCache` clone, but it is enough to treat the current 
 
 ### What Is Only Partially Done
 
-#### 1. WAL has been extracted, but not rewritten
+#### 1. Fault-injection coverage is still behind the new core
 
-The WAL path is better separated than before, but it still rides on the current pager behavior rather than a freshly rebuilt core. This is expected, because WAL was intentionally planned after rollback.
+The WAL path is no longer only structurally extracted. Recent work moved committed WAL visibility into pager-owned state transitions:
+
+- commits now advance the in-memory WAL-visible snapshot directly instead of appending to disk and then re-decoding the entire WAL file to learn what was just committed
+- new WAL writers seed their file length, freelist, and checksum baseline from the latest WAL-visible state rather than the checkpointed main-file state
+- WAL-visible page overlays now discard frames for pages that later become free or fall beyond the visible file length
+- WAL reads now respect the WAL-visible allocation/free-page boundary instead of falling back to stale main-file bytes
+
+That is enough to treat the WAL rewrite milestone as behaviorally landed.
+
+What remains behind is the reliability matrix around partial writes, checkpoint interruption, and reopen-after-failure scenarios.
 
 ### What Has Not Really Started Yet
 
 These goals from the original plan are still substantially ahead of us:
 
-- a ground-up WAL rewrite on top of the rebuilt pager core
 - the deeper SQLite-style failure-injection and hot-journal recovery matrix described in the original plan
 
 ### What This Means In Practice
@@ -319,17 +327,18 @@ That distinction matters:
 - We have reduced the risk of the real rewrite.
 - We have achieved the first major behavioral goal of the real rewrite in rollback mode.
 - We have moved savepoints onto pager-owned rollback savepoint machinery.
-- The remaining hard work now sits in WAL and the deeper reliability matrix.
+- We have moved WAL visibility and writer baselines onto pager-owned state rather than full-file rediscovery.
+- The remaining hard work now sits in the deeper reliability matrix.
 
 ### Recommended Next Step
 
-The next highest-value step is to start the WAL rewrite on top of the rollback, savepoint, and new lock cores.
+The next highest-value step is to start the failure-path matrix on top of the rollback, savepoint, lock, and WAL cores.
 
 That should start with a small, well-bounded slice:
 
-- move WAL reader snapshot registration and writer-visible-state ownership fully behind pager-core protocols
-- keep `checkpoint_wal()` and journal-mode switching behavior the same at the public boundary
-- add failure-path tests for checkpoint, reopen, and stale-reader visibility as the WAL internals change
+- add a checkpoint-interruption regression that verifies reopen behavior stays correct
+- add a partial-WAL-write reopen regression that proves truncated tails are ignored under realistic pager flows
+- keep `checkpoint_wal()` and journal-mode switching behavior the same at the public boundary while hardening failure handling
 
 In short:
 
@@ -337,4 +346,5 @@ In short:
 - the lock/state groundwork is now real enough to build on
 - the rollback core now has a true journal-first shape
 - savepoint behavior now has a pager-owned core too
-- the next milestone should be WAL behavior, not more facade extraction
+- WAL behavior now has a pager-owned visible-state core too
+- the next milestone should be reliability hardening, not more facade extraction
