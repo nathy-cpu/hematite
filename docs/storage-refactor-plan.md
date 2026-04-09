@@ -316,6 +316,18 @@ That is enough to treat the original fault-injection milestone as landed for thi
 
 There are no longer any major correctness milestones from the original rewrite plan still sitting untouched. The remaining work is mostly cleanup, consolidation, and future performance-oriented follow-through.
 
+#### 2. Cleanup is complete, while file-format migration remains intentionally deferred
+
+The cleanup part of the original final phase is now done:
+
+- stale rewrite-era status and milestone notes have been refreshed to match the current codebase
+- pager/WAL helper paths have been consolidated so the current read path reflects the pager-owned visible-state model more directly
+- storage terminology has been cleaned up to reflect the page-cache design rather than older buffer-pool wording
+
+What we did **not** do in this phase was silently change the storage file format.
+
+That was deliberate. Optional file-format migration was always a separate risk class from cleanup, and it should only happen under an explicit migration plan rather than being bundled into a “finish the rewrite” sweep.
+
 ### What This Means In Practice
 
 The rewrite is no longer just a plan. We have completed the structural preparation work that makes the harder parts possible:
@@ -338,13 +350,13 @@ That distinction matters:
 
 ### Recommended Next Step
 
-The next highest-value step is no longer another core correctness rewrite. It is to consolidate what is now in place and only then decide what to simplify or optimize.
+The next highest-value step is no longer another core correctness rewrite. Cleanup and consolidation are now complete enough that the next decision should come from either performance work or an explicit future migration plan.
 
 That should start with a small, well-bounded slice:
 
 - keep the new checkpoint-failure and truncated-WAL-tail regressions green while touching pager internals
-- remove or simplify leftover compatibility code only when the current test matrix still holds
 - let performance profiling, not architectural uncertainty, drive the next storage changes
+- if file-format migration becomes necessary, treat it as a new tracked effort with its own rollout and compatibility story
 
 In short:
 
@@ -353,4 +365,5 @@ In short:
 - the rollback core now has a true journal-first shape
 - savepoint behavior now has a pager-owned core too
 - WAL behavior now has a pager-owned visible-state core too
-- the next milestone should be cleanup or performance work, not more correctness scaffolding
+- cleanup is complete without folding in a risky file-format migration
+- the next milestone should be performance work or an explicit migration project, not more correctness scaffolding

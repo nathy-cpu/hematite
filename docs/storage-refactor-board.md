@@ -33,7 +33,7 @@ Use it alongside [storage-refactor-plan.md](./storage-refactor-plan.md):
 | `M12` Locking Model Rewrite | Replace the current in-process registry as the true correctness backbone | `Done` | File-backed rollback and WAL lock sidecars now coordinate readers, writers, and WAL reader snapshots through OS locks; external lock-file tests and threaded rollback/WAL tests pass in the full suite | Move on to rebuilding WAL semantics on top of the new lock backbone |
 | `M13` WAL Rewrite | Rebuild WAL on top of the new pager core instead of layering on current behavior | `Done` | WAL commits now advance pager-owned visible state directly, new writers seed from the latest WAL-visible file/free-page/checksum state, and WAL-visible reads now respect freed/truncated pages instead of falling back to stale main-file bytes; storage + threaded WAL tests pass in the full suite | Move on to the failure-path matrix that hardens the new WAL core |
 | `M14` Fault Injection Matrix | Add SQLite-style failure-path testing for journal, commit, checkpoint, and recovery edges | `Done` | Pager fault coverage now includes injected checkpoint copyback failure with reopen validation, truncated WAL-tail reopen behavior, rollback flush failure, and rollback recovery-after-error paths; full storage + SQL suites remain green | Keep extending only when a new storage behavior adds a new failure surface |
-| `M15` Cleanup And Optional Format Migration | Remove obsolete compatibility machinery after the new core is complete | `Blocked` | Too early; depends on rollback and WAL rewrites landing first | Revisit only after `M10` through `M14` materially advance |
+| `M15` Cleanup And Optional Format Migration | Remove obsolete compatibility machinery after the new core is complete | `Done` | The remaining rewrite-era cleanup has been applied: stale rewrite status has been removed from the docs, pager/WAL helper paths were consolidated, and storage terminology now reflects the current page-cache design; optional file-format migration is intentionally deferred rather than mixed into cleanup | Treat future file-format changes as a separate explicit project, not part of the completed rewrite |
 
 ## What Is Actually Finished Right Now
 
@@ -54,6 +54,7 @@ These are the milestones we can honestly treat as completed:
 - `M12` Locking Model Rewrite
 - `M13` WAL Rewrite
 - `M14` Fault Injection Matrix
+- `M15` Cleanup And Optional Format Migration
 
 ## Validation Checkpoint
 
@@ -85,25 +86,23 @@ Behavioral evidence:
 
 This checkpoint confirms that the scaffolding milestones are complete enough to build on.
 
-It does **not** mean that WAL has been behaviorally rewritten yet.
-
 More specifically:
 
 - `M0` to `M3` are both structurally and behaviorally convincing
 - `M4` to `M7` are structurally complete and well validated
-- the remaining real behavior risk is now mostly cleanup and future format/perf work rather than missing pager failure coverage
+- the remaining real behavior risk is now mostly future format/perf work rather than missing pager failure coverage
 
 ## What Still Carries The Real Rewrite Risk
 
-There are no remaining rewrite-critical milestones before cleanup.
+There are no remaining rewrite-critical milestones in the storage rewrite board.
 
 ## Recommended Execution Order From Here
 
 1. Revisit cache or pager internals only if new correctness or performance work exposes a concrete need.
-2. Treat `M15` as cleanup and consolidation, not another core-storage rewrite.
+2. Treat any file-format migration as a new project with its own compatibility and rollout plan.
 
 ## Immediate Next Actions
 
 - Keep the checkpoint-failure and truncated-WAL-tail regressions green as future storage work lands.
-- Trim leftover compatibility scaffolding only after the current rollback/WAL/fault matrix stays stable.
 - Use performance work, not architectural uncertainty, to decide the next storage changes.
+- If a file-format migration becomes desirable later, plan it explicitly instead of hiding it inside cleanup.
