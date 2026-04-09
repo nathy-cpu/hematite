@@ -37,6 +37,7 @@ pub(crate) mod overflow;
 pub(crate) mod pager;
 pub(crate) mod types;
 pub(crate) mod wal;
+pub(crate) mod wal_v3;
 
 pub use pager::{JournalMode, Pager};
 pub use types::{
