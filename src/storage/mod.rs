@@ -11,8 +11,8 @@
 //!                |
 //!    +-----------+-----------+
 //!    |           |           |
-//! buffer      free pages   durability
-//! pool        + file len   (rollback/WAL)
+//! page cache  free pages   durability
+//!             + file len   (rollback/WAL)
 //! ```
 //!
 //! Responsibilities:
@@ -29,7 +29,6 @@
 //!   representation can evolve without leaking into higher layers;
 //! - this is the storage half of the future generic fork point.
 
-pub(crate) mod buffer_pool;
 pub(crate) mod file_manager;
 pub(crate) mod free_list;
 pub(crate) mod journal;
@@ -45,6 +44,6 @@ pub use types::{
 };
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod pager_fault_test;
+#[cfg(test)]
+mod tests;

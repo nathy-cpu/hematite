@@ -81,7 +81,9 @@ impl Pager {
         })?;
         let id = savepoint.id.max(1);
         transaction.next_savepoint_id = id.saturating_add(1);
-        transaction.savepoints.push(RollbackSavepoint { id, ..savepoint });
+        transaction
+            .savepoints
+            .push(RollbackSavepoint { id, ..savepoint });
         Ok(id)
     }
 
@@ -136,7 +138,9 @@ impl Pager {
     }
 
     pub(crate) fn snapshot(&mut self) -> Result<PagerSnapshot> {
-        if self.journal_mode == super::JournalMode::Rollback && self.active_rollback_transaction().is_some() {
+        if self.journal_mode == super::JournalMode::Rollback
+            && self.active_rollback_transaction().is_some()
+        {
             return Ok(PagerSnapshot::RollbackSavepoint {
                 id: self.create_rollback_savepoint()?,
             });

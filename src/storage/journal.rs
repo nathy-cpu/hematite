@@ -125,14 +125,12 @@ impl RollbackJournal {
         original_free_page_count: usize,
         original_checksum_count: usize,
     ) -> u64 {
-        (
-            Self::HEADER_PREFIX_LEN
-                + 4
-                + original_free_page_count * std::mem::size_of::<PageId>()
-                + 4
-                + original_checksum_count
-                    * (std::mem::size_of::<PageId>() + std::mem::size_of::<u32>())
-        ) as u64
+        (Self::HEADER_PREFIX_LEN
+            + 4
+            + original_free_page_count * std::mem::size_of::<PageId>()
+            + 4
+            + original_checksum_count
+                * (std::mem::size_of::<PageId>() + std::mem::size_of::<u32>())) as u64
     }
 
     pub(crate) fn state_offset() -> u64 {

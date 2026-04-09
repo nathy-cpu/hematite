@@ -26,7 +26,9 @@
 
 use crate::btree::{BTreeKey, BTreeValue, NodeType, BTREE_ORDER};
 use crate::error::{HematiteError, Result};
-use crate::storage::{Page, PageId, Pager, INVALID_PAGE_ID, PAGE_SIZE};
+use crate::storage::{Page, PageId, Pager, PAGE_SIZE};
+#[cfg(test)]
+use crate::storage::INVALID_PAGE_ID;
 
 pub const MAX_KEY_SIZE: usize = 256;
 pub const MAX_VALUE_SIZE: usize = 1024;
@@ -444,7 +446,9 @@ impl BTreeNode {
 
     pub fn get_key_view(&self, target_index: usize) -> Result<&[u8]> {
         if target_index >= self.key_count {
-            return Err(HematiteError::StorageError("Index out of bounds".to_string()));
+            return Err(HematiteError::StorageError(
+                "Index out of bounds".to_string(),
+            ));
         }
         if self.is_decoded {
             return Ok(&self.keys[target_index].data);
@@ -457,12 +461,15 @@ impl BTreeNode {
     }
 
     pub fn get_key_procedural(&self, target_index: usize) -> Result<BTreeKey> {
-        self.get_key_view(target_index).map(|v| BTreeKey::new(v.to_vec()))
+        self.get_key_view(target_index)
+            .map(|v| BTreeKey::new(v.to_vec()))
     }
 
     pub fn get_child_procedural(&self, target_index: usize) -> Result<PageId> {
         if target_index > self.key_count || self.node_type != NodeType::Internal {
-            return Err(HematiteError::StorageError("Index out of bounds".to_string()));
+            return Err(HematiteError::StorageError(
+                "Index out of bounds".to_string(),
+            ));
         }
         if self.is_decoded {
             return Ok(self.children[target_index]);
@@ -481,7 +488,9 @@ impl BTreeNode {
 
     pub fn get_value_view(&self, target_index: usize) -> Result<&[u8]> {
         if target_index >= self.key_count || self.node_type != NodeType::Leaf {
-            return Err(HematiteError::StorageError("Index out of bounds".to_string()));
+            return Err(HematiteError::StorageError(
+                "Index out of bounds".to_string(),
+            ));
         }
         if self.is_decoded {
             return Ok(&self.values[target_index].data);
@@ -495,7 +504,8 @@ impl BTreeNode {
     }
 
     pub fn get_value_procedural(&self, target_index: usize) -> Result<BTreeValue> {
-        self.get_value_view(target_index).map(|v| BTreeValue::new(v.to_vec()))
+        self.get_value_view(target_index)
+            .map(|v| BTreeValue::new(v.to_vec()))
     }
 
     pub fn to_page(&self, page: &mut Page) -> Result<()> {
@@ -608,7 +618,8 @@ impl BTreeNode {
         } else {
             let page_data = &self.raw_page.as_ref().unwrap().data;
             let offset = self.cell_offsets[self.key_count + index] as usize;
-            current_val_len = u16::from_le_bytes([page_data[offset], page_data[offset + 1]]) as usize;
+            current_val_len =
+                u16::from_le_bytes([page_data[offset], page_data[offset + 1]]) as usize;
         }
 
         if current_val_len != new_value.data.len() {
@@ -631,10 +642,11 @@ impl BTreeNode {
             self.values[index] = new_value.clone();
         }
         self.raw_page = Some(page.clone());
-        
+
         Ok(true)
     }
 
+    #[cfg(test)]
     pub fn search(&self, key: &BTreeKey) -> SearchResult {
         match self.node_type {
             NodeType::Leaf => self.search_leaf(key),
@@ -642,6 +654,7 @@ impl BTreeNode {
         }
     }
 
+    #[cfg(test)]
     fn search_leaf(&self, key: &BTreeKey) -> SearchResult {
         let mut left = 0;
         let mut right = self.key_count;
@@ -664,6 +677,7 @@ impl BTreeNode {
         SearchResult::NotFound(INVALID_PAGE_ID)
     }
 
+    #[cfg(test)]
     fn search_internal(&self, key: &BTreeKey) -> SearchResult {
         let mut left = 0;
         let mut right = self.key_count;
@@ -760,9 +774,9 @@ impl BTreeNode {
             .iter()
             .position(|k| k > &new_key)
             .unwrap_or(self.keys.len());
-            
+
         let is_append = pos == self.keys.len();
-        
+
         self.keys.insert(pos, new_key);
         self.values.insert(pos, new_value);
 
@@ -781,7 +795,7 @@ impl BTreeNode {
         } else {
             self.best_leaf_split_pos()
         };
-        
+
         new_node.keys = self.keys.split_off(split_pos);
         new_node.values = self.values.split_off(split_pos);
         let split_key = new_node.keys[0].clone();
@@ -807,9 +821,9 @@ impl BTreeNode {
             .iter()
             .position(|k| k >= &new_key)
             .unwrap_or(self.keys.len());
-            
+
         let is_append = pos == self.keys.len();
-        
+
         self.keys.insert(pos, new_key);
         self.children.insert(pos + 1, new_child);
 
@@ -1034,6 +1048,7 @@ impl BTreeNode {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 pub enum SearchResult {
     Found(BTreeValue),

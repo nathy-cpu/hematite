@@ -97,6 +97,7 @@ mod savepoint;
 mod space;
 #[path = "pager/state.rs"]
 mod state;
+#[cfg(test)]
 #[path = "pager/test_support.rs"]
 mod test_support;
 #[path = "pager/wal.rs"]

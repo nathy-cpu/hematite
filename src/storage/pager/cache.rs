@@ -82,10 +82,14 @@ impl PageCache {
     }
 
     pub(crate) fn mark_dirty(&mut self, page_id: PageId) {
-        let meta = &mut self.entries.entry(page_id).or_insert_with(|| CachedPageEntry {
-            page: Page::new(page_id),
-            meta: CachedPageMeta::default(),
-        }).meta;
+        let meta = &mut self
+            .entries
+            .entry(page_id)
+            .or_insert_with(|| CachedPageEntry {
+                page: Page::new(page_id),
+                meta: CachedPageMeta::default(),
+            })
+            .meta;
         if !meta.dirty {
             meta.dirty_sequence = Some(self.next_dirty_sequence);
             self.next_dirty_sequence = self.next_dirty_sequence.saturating_add(1);
@@ -125,9 +129,13 @@ impl PageCache {
     }
 
     pub(crate) fn dirty_count(&self) -> usize {
-        self.entries.values().filter(|entry| entry.meta.dirty).count()
+        self.entries
+            .values()
+            .filter(|entry| entry.meta.dirty)
+            .count()
     }
 
+    #[cfg(test)]
     pub(crate) fn pin(&mut self, page_id: PageId) {
         self.entries
             .entry(page_id)

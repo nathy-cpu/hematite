@@ -283,18 +283,12 @@ impl Pager {
         let dir = self.wal_readers_dir_path()?.ok_or_else(|| {
             HematiteError::InternalError("Pager database identity is not available".to_string())
         })?;
-        Ok(dir.join(format!(
-            "reader-{}-seq-{}.lock",
-            registration_id, sequence
-        )))
+        Ok(dir.join(format!("reader-{}-seq-{}.lock", registration_id, sequence)))
     }
 
     fn parse_wal_reader_sequence_path(path: &Path) -> Option<u64> {
         let file_name = path.file_name()?.to_str()?;
-        let sequence = file_name
-            .rsplit_once("-seq-")?
-            .1
-            .strip_suffix(".lock")?;
+        let sequence = file_name.rsplit_once("-seq-")?.1.strip_suffix(".lock")?;
         sequence.parse::<u64>().ok()
     }
 

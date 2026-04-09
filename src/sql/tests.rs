@@ -3315,7 +3315,8 @@ mod connection_tests {
 
     #[test]
     fn test_close_of_stale_rollback_connection_does_not_rewrite_checksums() -> Result<()> {
-        let db = TestDbFile::new("_test_close_of_stale_rollback_connection_does_not_rewrite_checksums");
+        let db =
+            TestDbFile::new("_test_close_of_stale_rollback_connection_does_not_rewrite_checksums");
         let mut setup = Connection::new(db.path())?;
         setup.execute("CREATE TABLE items (id INT PRIMARY KEY, note TEXT NOT NULL);")?;
         setup.execute("INSERT INTO items (id, note) VALUES (1, 'before');")?;

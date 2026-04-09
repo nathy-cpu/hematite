@@ -23,11 +23,11 @@ impl Pager {
         self.transaction = Some(match self.journal_mode {
             JournalMode::Rollback => {
                 let mut rollback = RollbackTransaction {
-                original_file_len: self.file_manager.file_len()?,
-                original_free_pages: self.file_manager.free_pages().to_vec(),
-                original_checksums: self.page_checksums.clone(),
-                journaled_pages: HashSet::new(),
-                page_records: Vec::new(),
+                    original_file_len: self.file_manager.file_len()?,
+                    original_free_pages: self.file_manager.free_pages().to_vec(),
+                    original_checksums: self.page_checksums.clone(),
+                    journaled_pages: HashSet::new(),
+                    page_records: Vec::new(),
                     savepoints: Vec::new(),
                     next_savepoint_id: 1,
                 };

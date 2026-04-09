@@ -1,128 +1,5 @@
 //! Centralized tests for the storage module
 
-mod buffer_pool_tests {
-    use crate::storage::buffer_pool::*;
-    use crate::storage::Page;
-
-    #[test]
-    fn test_buffer_pool_basic_operations() {
-        let mut pool = BufferPool::new(3);
-        let page_id = 1;
-        let page = Page::new(page_id);
-
-        // Test empty pool
-        assert!(pool.get(page_id).is_none());
-        assert_eq!(pool.len(), 0);
-
-        // Test put and get
-        pool.put(page.clone());
-        assert!(pool.get(page_id).is_some());
-        assert_eq!(pool.len(), 1);
-    }
-
-    #[test]
-    fn test_buffer_pool_lru_eviction() {
-        let mut pool = BufferPool::new(2);
-
-        // Fill pool to capacity
-        let page1 = Page::new(1);
-        let page2 = Page::new(2);
-        pool.put(page1.clone());
-        pool.put(page2.clone());
-
-        assert_eq!(pool.len(), 2);
-
-        // Add third page (should evict first)
-        let page3 = Page::new(3);
-        pool.put(page3.clone());
-
-        assert_eq!(pool.len(), 2);
-        assert!(pool.get(1).is_none()); // Evicted
-        assert!(pool.get(2).is_some()); // Still present
-        assert!(pool.get(3).is_some()); // New page
-    }
-
-    #[test]
-    fn test_buffer_pool_lru_update() {
-        let mut pool = BufferPool::new(3);
-
-        let page1 = Page::new(1);
-        let page2 = Page::new(2);
-        let page3 = Page::new(3);
-
-        // Add pages
-        pool.put(page1);
-        pool.put(page2);
-        pool.put(page3);
-
-        // Access page1 (should make it most recently used)
-        pool.get(1);
-
-        // Add page4 (should evict page2, not page1)
-        let page4 = Page::new(4);
-        pool.put(page4);
-
-        assert!(pool.get(1).is_some()); // Still present (accessed)
-        assert!(pool.get(2).is_none()); // Evicted (least recently used)
-        assert!(pool.get(3).is_some()); // Still present
-        assert!(pool.get(4).is_some()); // New page
-    }
-
-    #[test]
-    fn test_buffer_pool_update_existing() {
-        let mut pool = BufferPool::new(2);
-
-        let page_id = 1;
-        let page1 = Page::new(page_id);
-        let mut page2 = Page::new(page_id);
-        page2.data[0] = 42; // Modified page
-
-        // Add first page
-        pool.put(page1);
-        assert_eq!(pool.get(page_id).unwrap().data[0], 0);
-
-        // Update with modified page
-        pool.put(page2);
-        assert_eq!(pool.get(page_id).unwrap().data[0], 42);
-        assert_eq!(pool.len(), 1); // Still only one page
-    }
-
-    #[test]
-    fn test_buffer_pool_remove() {
-        let mut pool = BufferPool::new(3);
-
-        let page1 = Page::new(1);
-        let page2 = Page::new(2);
-
-        pool.put(page1);
-        pool.put(page2);
-
-        assert_eq!(pool.len(), 2);
-
-        // Remove page1
-        pool.remove(1);
-        assert_eq!(pool.len(), 1);
-        assert!(pool.get(1).is_none());
-        assert!(pool.get(2).is_some());
-
-        // Remove non-existent page
-        pool.remove(999);
-        assert_eq!(pool.len(), 1); // No change
-    }
-
-    #[test]
-    fn test_buffer_pool_capacity_zero() {
-        let mut pool = BufferPool::new(0);
-
-        let page = Page::new(1);
-        pool.put(page);
-
-        // Pool should remain empty since capacity is 0
-        assert_eq!(pool.len(), 0);
-        assert!(pool.get(1).is_none());
-    }
-}
-
 mod freelist_tests {
     use crate::storage::free_list::FreeList;
 
@@ -251,8 +128,7 @@ mod wal_tests {
     }
 
     #[test]
-    fn test_wal_visible_state_discards_frames_for_pages_freed_later(
-    ) -> crate::error::Result<()> {
+    fn test_wal_visible_state_discards_frames_for_pages_freed_later() -> crate::error::Result<()> {
         let live_page_id = 2;
         let freed_page_id = 3;
 
@@ -655,8 +531,7 @@ mod pager_tests {
     }
 
     #[test]
-    fn test_pager_restore_snapshot_rewrites_active_rollback_journal(
-    ) -> crate::error::Result<()> {
+    fn test_pager_restore_snapshot_rewrites_active_rollback_journal() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_pager_restore_snapshot_rewrites_journal");
         let journal_path = std::path::PathBuf::from(format!("{}.journal", test_db.path()));
 

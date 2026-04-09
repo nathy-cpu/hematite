@@ -1,9 +1,9 @@
-use crate::storage::pager::{Pager, PagerState};
-use crate::storage::wal::{WalFrame, WalRecord};
-use crate::storage::types::{Page, DB_HEADER_PAGE_ID};
 use crate::error::Result;
-use crate::test_utils::TestDbFile;
+use crate::storage::pager::{Pager, PagerState};
+use crate::storage::types::{Page, DB_HEADER_PAGE_ID};
+use crate::storage::wal::{WalFrame, WalRecord};
 use crate::storage::JournalMode;
+use crate::test_utils::TestDbFile;
 use std::fs;
 
 #[test]
@@ -32,7 +32,10 @@ fn test_pager_enters_error_state_on_flush_failure() -> Result<()> {
     // 6. Subsequent operations should fail immediately
     let read_result = pager.read_page(DB_HEADER_PAGE_ID);
     assert!(read_result.is_err());
-    assert!(read_result.unwrap_err().to_string().contains("Pager is in an error state"));
+    assert!(read_result
+        .unwrap_err()
+        .to_string()
+        .contains("Pager is in an error state"));
 
     Ok(())
 }
@@ -40,7 +43,7 @@ fn test_pager_enters_error_state_on_flush_failure() -> Result<()> {
 #[test]
 fn test_pager_recovery_from_error_state_via_rollback() -> Result<()> {
     let test_db = TestDbFile::new("pager_fault_rollback");
-    
+
     // Create initial DB
     {
         let mut pager = Pager::new(&test_db, 10)?;
@@ -52,7 +55,7 @@ fn test_pager_recovery_from_error_state_via_rollback() -> Result<()> {
 
     let mut pager = Pager::new(&test_db, 10)?;
     pager.begin_transaction()?;
-    
+
     let mut page = Page::new(2);
     page.data[0] = 2;
     pager.write_page(page)?;
@@ -66,11 +69,11 @@ fn test_pager_recovery_from_error_state_via_rollback() -> Result<()> {
 
     // Rollback should be possible? Actually, the plan says:
     // "reject all reads and mutations until a hard reset or rollback is performed."
-    
+
     // Let's check if rollback_transaction clears the error state.
     // Looking at pager.rs, rollback might need to be updated to clear Error state if it's safe.
     // Usually, SQLite requires a rollback to clear the error.
-    
+
     pager.rollback_transaction()?;
     assert_eq!(pager.state(), PagerState::Open);
 
@@ -134,10 +137,9 @@ fn test_pager_reader_scope_cannot_upgrade_to_writer_transaction() -> Result<()> 
     assert_eq!(pager.state(), PagerState::Reader);
 
     let err = pager.begin_transaction().unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("cannot upgrade a shared database lock to a write lock")
-    );
+    assert!(err
+        .to_string()
+        .contains("cannot upgrade a shared database lock to a write lock"));
     assert_eq!(pager.state(), PagerState::Reader);
 
     pager.end_read()?;

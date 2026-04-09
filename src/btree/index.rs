@@ -14,6 +14,7 @@
 
 use crate::btree::cursor::BTreeCursor;
 use crate::btree::node::BTreeNode;
+#[cfg(test)]
 use crate::btree::node::SearchResult;
 use crate::btree::KeyValueCodec;
 use crate::btree::{BTreeKey, BTreeValue, NodeType};
@@ -61,6 +62,7 @@ impl BTreeIndex {
         self.root_page_id
     }
 
+    #[cfg(test)]
     pub fn search(&mut self, key: &BTreeKey) -> Result<Option<BTreeValue>> {
         let mut storage = self.lock_storage()?;
         let mut current_page_id = self.root_page_id;
@@ -168,7 +170,9 @@ impl BTreeIndex {
                     node.keys.remove(existing_index);
                     node.values.remove(existing_index);
 
-                    if node.keys.len() < crate::btree::node::MAX_KEYS && node.can_insert_key_value(&key, &value) {
+                    if node.keys.len() < crate::btree::node::MAX_KEYS
+                        && node.can_insert_key_value(&key, &value)
+                    {
                         node.insert_leaf(key, value)?;
                         node.to_page(&mut page)?;
                         self.lock_storage()?.write_page(page)?;
