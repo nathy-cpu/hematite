@@ -21,6 +21,7 @@ pub mod codec;
 pub(crate) mod cursor;
 pub(crate) mod index;
 pub(crate) mod node;
+pub(crate) mod page_format;
 pub(crate) mod tree;
 pub mod typed;
 pub(crate) mod value_store;
