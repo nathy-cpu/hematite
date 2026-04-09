@@ -71,11 +71,41 @@ pub fn validate_overflow_chain(
         ));
     }
 
-    let pages = load_overflow_pages(storage, first_page, expected_len)?;
-    let payload = decode_overflow_chain(&pages, expected_len)?;
+    let mut current = match first_page {
+        Some(page_id) => page_id,
+        None => unreachable!("handled above"),
+    };
+    let mut visited = HashSet::new();
+    let mut remaining = expected_len;
+    let mut page_count = 0usize;
+    let mut payload_len = 0usize;
+
+    while current != 0 && remaining > 0 {
+        if !visited.insert(current) {
+            return Err(HematiteError::CorruptedData(
+                "Overflow chain cycle detected".to_string(),
+            ));
+        }
+
+        let page = storage.read_page_shared(current)?;
+        let expected_chunk_len = remaining.min(OVERFLOW_CHUNK_CAPACITY);
+        let decoded = V3OverflowPage::decode(page.as_ref(), expected_chunk_len)?;
+        let chunk_len = decoded.payload_chunk.len();
+        remaining = remaining.saturating_sub(chunk_len);
+        payload_len += chunk_len;
+        page_count += 1;
+        current = decoded.next_page_id;
+    }
+
+    if remaining > 0 {
+        return Err(HematiteError::CorruptedData(
+            "Overflow chain ended before expected payload length".to_string(),
+        ));
+    }
+
     Ok(OverflowChainReport {
-        page_count: pages.len(),
-        payload_len: payload.len(),
+        page_count,
+        payload_len,
     })
 }
 
@@ -97,7 +127,7 @@ pub fn collect_overflow_page_ids(
             ));
         }
 
-        let page = storage.read_page(current)?;
+        let page = storage.read_page_shared(current)?;
         if page.data[0] != crate::storage::format::PageKind::Overflow as u8 {
             return Err(HematiteError::CorruptedData(
                 "Overflow page kind mismatch while collecting page ids".to_string(),

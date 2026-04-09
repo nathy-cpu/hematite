@@ -405,8 +405,8 @@ fn validate_tree_overflow_pages(
     free_pages: &HashSet<PageId>,
     owned_overflow_pages: &mut HashSet<PageId>,
 ) -> Result<()> {
-    let page = storage.read_page(root_page_id)?;
-    let node = BTreeNode::from_page_decoded(page)?;
+    let page = storage.read_page_shared(root_page_id)?;
+    let node = BTreeNode::from_shared_page_decoded(page)?;
 
     match node.node_type {
         NodeType::Leaf => {
