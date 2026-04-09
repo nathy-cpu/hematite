@@ -242,6 +242,9 @@ impl Pager {
         };
 
         self.latest_wal_state = WalRecord::load_visible_state_from_path(path)?;
+        if self.transaction.is_none() && self.wal_read_snapshot.is_none() {
+            self.cache.reset();
+        }
         Ok(())
     }
 
@@ -595,6 +598,7 @@ impl Pager {
         for page_id in self.cache.dirty_page_ids() {
             self.cache.clear_dirty(page_id);
         }
+        self.cache.reset();
         self.persist_checksums()
     }
 

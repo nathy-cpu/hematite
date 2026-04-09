@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CachedPageMeta {
-    pub(crate) pin_count: usize,
+    pub(crate) manual_pin_count: usize,
     pub(crate) dirty: bool,
     pub(crate) writeable: bool,
     pub(crate) journaled: bool,
@@ -61,6 +61,14 @@ impl PageCache {
 
     pub(crate) fn meta(&self, page_id: PageId) -> Option<&CachedPageMeta> {
         self.entries.get(&page_id).map(|entry| &entry.meta)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pin_count(&self, page_id: PageId) -> usize {
+        self.entries
+            .get(&page_id)
+            .map(Self::entry_pin_count)
+            .unwrap_or(0)
     }
 
     pub(crate) fn put(&mut self, page: Page) {
@@ -153,13 +161,13 @@ impl PageCache {
                 meta: CachedPageMeta::default(),
             })
             .meta
-            .pin_count += 1;
+            .manual_pin_count += 1;
     }
 
     #[allow(dead_code)]
     pub(crate) fn unpin(&mut self, page_id: PageId) {
         if let Some(meta) = self.entries.get_mut(&page_id).map(|entry| &mut entry.meta) {
-            meta.pin_count = meta.pin_count.saturating_sub(1);
+            meta.manual_pin_count = meta.manual_pin_count.saturating_sub(1);
         }
     }
 
@@ -220,7 +228,7 @@ impl PageCache {
             let candidate = self.lru_order.iter().rev().copied().find(|page_id| {
                 self.entries
                     .get(page_id)
-                    .map(|entry| !entry.meta.dirty && entry.meta.pin_count == 0)
+                    .map(|entry| !entry.meta.dirty && Self::entry_pin_count(entry) == 0)
                     .unwrap_or(true)
             });
 
@@ -232,6 +240,11 @@ impl PageCache {
 
             self.remove(page_id);
         }
+    }
+
+    fn entry_pin_count(entry: &CachedPageEntry) -> usize {
+        let shared_pin_count = Arc::strong_count(&entry.page).saturating_sub(1);
+        entry.meta.manual_pin_count + shared_pin_count
     }
 }
 
@@ -262,11 +275,33 @@ mod tests {
     fn pinned_pages_are_not_evicted() {
         let mut cache = PageCache::new(1);
         cache.put(Page::new(1));
-        cache.pin(1);
+        let held = cache.get(1).expect("page should be cached");
         cache.put(Page::new(2));
 
         assert!(cache.get(1).is_some());
         assert!(cache.get(2).is_some());
+        drop(held);
+    }
+
+    #[test]
+    fn shared_handles_count_as_live_pins_until_dropped() {
+        let mut cache = PageCache::new(2);
+        cache.put(Page::new(1));
+
+        let held = cache.get(1).expect("page should be cached");
+        assert_eq!(cache.pin_count(1), 1);
+
+        cache.put(Page::new(2));
+        assert!(cache.peek(1).is_some());
+        assert!(cache.peek(2).is_some());
+
+        drop(held);
+        assert_eq!(cache.pin_count(1), 0);
+
+        cache.put(Page::new(3));
+        assert!(cache.peek(1).is_none());
+        assert!(cache.peek(2).is_some());
+        assert!(cache.peek(3).is_some());
     }
 
     #[test]
@@ -310,24 +345,26 @@ mod tests {
         cache.set_dont_write(1, true);
 
         let meta = cache.meta(1).expect("page metadata should exist");
-        assert_eq!(meta.pin_count, 1);
+        assert_eq!(meta.manual_pin_count, 1);
         assert!(meta.dirty);
         assert!(meta.writeable);
         assert!(meta.journaled);
         assert!(meta.need_sync);
         assert!(meta.dont_write);
         assert!(meta.dirty_sequence.is_some());
+        assert_eq!(cache.pin_count(1), 1);
 
         cache.unpin(1);
         cache.clear_dirty(1);
 
         let meta = cache.meta(1).expect("page metadata should still exist");
-        assert_eq!(meta.pin_count, 0);
+        assert_eq!(meta.manual_pin_count, 0);
         assert!(!meta.dirty);
         assert!(!meta.writeable);
         assert!(!meta.journaled);
         assert!(!meta.need_sync);
         assert!(!meta.dont_write);
         assert!(meta.dirty_sequence.is_none());
+        assert_eq!(cache.pin_count(1), 0);
     }
 }

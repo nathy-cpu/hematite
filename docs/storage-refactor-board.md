@@ -39,7 +39,7 @@ overhaul:
 | `F2` Main File Layout Rewrite | Replace the current file prelude and custom reserved-page assumptions with the new database-file layout | `Done` | The live `FileManager`, WAL visibility math, rollback/WAL recovery, and catalog open-create flow now use a page-addressed main file with reserved pages `0` and `1`, and the old 64-byte prelude assumptions are removed from the active path | Carry the new layout assumptions into the remaining durable metadata cleanup work |
 | `F3` Slotted B-tree Pages | Replace contiguous serialized node pages with SQLite-like slotted pages, cell pointers, freeblocks, and fragments | `Done` | `src/btree/node.rs` now serializes and reads live tree pages through the slotted-page model and the library suite passes on that path | Build cursor/read-path optimizations on top of the new page format |
 | `F4` Overflow Rewrite | Rebuild overflow storage around the new cell model and local-payload split rules | `Done` | `src/storage/overflow.rs` now uses the v3 overflow page format, and large-value tree/storage tests pass on reopen, delete, and corruption cases | Remove any remaining assumptions that expect the old overflow bytes |
-| `F5` Real Page Cache | Turn the cache into a production pinned-page cache rather than an owned-page map with metadata | `In Progress` | The live cache now stores shared page images internally and the pager exposes an internal shared read path, but real production pin lifetimes and eviction discipline are not wired through all callers yet | Finish pin/unpin ownership and make cache residency policy depend on those handles instead of metadata alone |
+| `F5` Real Page Cache | Turn the cache into a production pinned-page cache rather than an owned-page map with metadata | `Done` | The live cache now stores shared page images internally, eviction respects active shared page handles as real pins, and WAL snapshot/visibility changes explicitly invalidate cached pages so the stronger residency model stays correct under concurrency | Build the remaining read-side work on top of the now-stable pinned cache |
 | `F6` Rollback Journal Rewrite | Rebuild rollback journaling against the new page format and page-state model | `Not Started` | Current rollback journal still reflects the old storage format and metadata model | Journal the new page images and new structural metadata correctly |
 | `F7` Sidecar Metadata Removal | Remove `.pager_checksums` and other sidecar-driven durable metadata from the hot path | `Not Started` | Current storage still persists checksum/freelist state through sidecars | Move durable metadata responsibility into the main file and journal/WAL protocols |
 | `F8` WAL Frame Rewrite | Replace the current visible-state WAL with a frame-oriented WAL closer to SQLite's approach | `Not Started` | Current WAL still stores full visible-state transitions | Design and implement frame append, commit boundary, and checkpoint flow |
@@ -65,7 +65,7 @@ Finished as groundwork from the prior campaign:
 
 Not finished:
 
-- `F5` onward, with `F5` and `F9` now partially implemented
+- `F6` onward, with `F9` partially implemented
 
 ## Important Interpretation
 
