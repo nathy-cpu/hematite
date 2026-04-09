@@ -33,6 +33,7 @@ pub(crate) mod file_manager;
 pub(crate) mod format;
 pub(crate) mod free_list;
 pub(crate) mod journal;
+pub(crate) mod journal_v3;
 pub(crate) mod overflow;
 pub(crate) mod pager;
 pub(crate) mod types;
