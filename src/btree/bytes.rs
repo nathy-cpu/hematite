@@ -108,8 +108,8 @@ impl ByteTreeStore {
 
     pub fn read_reserved_blob(&self, page_id: PageId) -> Result<Option<Vec<u8>>> {
         let mut pager = self.lock_storage()?;
-        match pager.read_page(page_id) {
-            Ok(page) => Ok(Some(page.data)),
+        match pager.read_page_shared(page_id) {
+            Ok(page) => Ok(Some(page.data.clone())),
             Err(_) => Ok(None),
         }
     }
@@ -379,17 +379,18 @@ impl ByteTree {
 }
 
 fn free_tree_overflow(storage: &mut Pager, root_page_id: PageId) -> Result<()> {
-    let page = storage.read_page(root_page_id)?;
-    let node = BTreeNode::from_page_decoded(page)?;
+    let page = storage.read_page_shared(root_page_id)?;
+    let node = BTreeNode::from_shared_page(page)?;
 
     match node.node_type {
         NodeType::Leaf => {
-            for value in node.values {
-                free_stored_value_overflow(storage, value.as_bytes())?;
+            for index in 0..node.key_count {
+                free_stored_value_overflow(storage, node.get_value_view(index)?)?;
             }
         }
         NodeType::Internal => {
-            for child_page_id in node.children {
+            for child_index in 0..=node.key_count {
+                let child_page_id = node.get_child_procedural(child_index)?;
                 free_tree_overflow(storage, child_page_id)?;
             }
         }
@@ -406,12 +407,12 @@ fn validate_tree_overflow_pages(
     owned_overflow_pages: &mut HashSet<PageId>,
 ) -> Result<()> {
     let page = storage.read_page_shared(root_page_id)?;
-    let node = BTreeNode::from_shared_page_decoded(page)?;
+    let node = BTreeNode::from_shared_page(page)?;
 
     match node.node_type {
         NodeType::Leaf => {
-            for value in node.values {
-                let layout = StoredValueLayout::decode(value.as_bytes())?;
+            for index in 0..node.key_count {
+                let layout = StoredValueLayout::decode(node.get_value_view(index)?)?;
                 if layout.overflow_first_page != crate::storage::INVALID_PAGE_ID {
                     let first_page = Some(layout.overflow_first_page);
                     validate_overflow_chain(storage, first_page, layout.overflow_len())?;
@@ -439,7 +440,8 @@ fn validate_tree_overflow_pages(
             }
         }
         NodeType::Internal => {
-            for child_page_id in node.children {
+            for child_index in 0..=node.key_count {
+                let child_page_id = node.get_child_procedural(child_index)?;
                 validate_tree_overflow_pages(
                     storage,
                     child_page_id,

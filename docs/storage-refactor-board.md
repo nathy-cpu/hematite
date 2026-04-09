@@ -43,7 +43,7 @@ overhaul:
 | `F6` Rollback Journal Rewrite | Rebuild rollback journaling against the new page format and page-state model | `Done` | The live rollback path now persists and recovers through the `v3` rollback journal codec with the new on-disk header/record layout, and rollback crash/snapshot tests pass on that runtime path | Use the now-live `v3` rollback path as the baseline while removing remaining sidecar metadata in `F7` |
 | `F7` Sidecar Metadata Removal | Remove `.pager_checksums` and other sidecar-driven durable metadata from the hot path | `Done` | Pager checksum/freelist metadata now lives in reserved page `1` through a shared metadata-page codec, legacy sidecars are migrated on open, test temp cleanup no longer depends on `.pager_checksums`, and WAL commits no longer rewrite main-file metadata on every append | Carry the main-file metadata split forward into the WAL frame rewrite so frame/checkpoint metadata stays single-sourced |
 | `F8` WAL Frame Rewrite | Replace the current visible-state WAL with a frame-oriented WAL closer to SQLite's approach | `Done` | The live WAL runtime now appends `v3` page frames with explicit commit sequences and metadata-page commit markers, reopen/checkpoint visibility is reconstructed from committed frame groups instead of full visible-state records, and WAL fault/threaded tests pass on the frame path | Build the remaining cursor/read-path and migration decisions on top of the now-live frame log |
-| `F9` Cursor And Read-Path Rewrite | Rebuild B-tree navigation around the new slotted-page format | `In Progress` | Hot B-tree point-lookups and cursor descent already use the pager's shared-page path, tree open/validation/page-id/stats walkers now read slotted pages through shared-page lazy nodes, and overflow-chain validation/collection no longer clones pages on read-only integrity passes | Continue moving any remaining read-only inspection helpers and cursor-adjacent callers onto the same cheaper shared-page path |
+| `F9` Cursor And Read-Path Rewrite | Rebuild B-tree navigation around the new slotted-page format | `Done` | Hot B-tree point-lookups and cursor descent use the pager's shared-page path, tree open/validation/page-id/stats walkers now inspect slotted pages through shared-page lazy nodes, overflow-chain validation/collection no longer clones pages on read-only integrity passes, and the full test suite passes on the completed read-path cutover | Move to the format migration decision and then re-benchmark the new storage shape |
 | `F10` Format Migration Decision | Choose and implement either offline migration or explicit old-format retirement | `Not Started` | No final migration story exists yet | Decide whether to ship a migrator or require fresh databases |
 | `F11` Performance Validation Campaign | Re-benchmark only after the new format and lower storage model are real | `Not Started` | Current benchmarks still measure the old-format storage shape despite pager cleanup | Re-run point-read, append-write, mixed, and overflow-heavy workloads |
 
@@ -56,6 +56,11 @@ Finished for the new overhaul:
 - `F2` Main File Layout Rewrite
 - `F3` Slotted B-tree Pages
 - `F4` Overflow Rewrite
+- `F5` Real Page Cache
+- `F6` Rollback Journal Rewrite
+- `F7` Sidecar Metadata Removal
+- `F8` WAL Frame Rewrite
+- `F9` Cursor And Read-Path Rewrite
 
 Finished as groundwork from the prior campaign:
 
@@ -65,7 +70,8 @@ Finished as groundwork from the prior campaign:
 
 Not finished:
 
-- `F8` onward, with `F9` partially implemented
+- `F10` Format Migration Decision
+- `F11` Performance Validation Campaign
 
 ## Important Interpretation
 

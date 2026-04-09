@@ -283,15 +283,15 @@ fn collect_tree_space_stats_recursive(
     }
 
     let page = pager.read_page_shared(page_id)?;
-    let node = BTreeNode::from_shared_page_decoded(page)?;
+    let node = BTreeNode::from_shared_page(page)?;
     stats.page_ids.push(page_id);
-    stats.used_bytes += node.estimate_serialized_size();
+    stats.used_bytes += node.serialized_size_on_page()?;
 
     match node.node_type {
         NodeType::Leaf => {
             stats.leaf_pages += 1;
-            for value in &node.values {
-                let layout = StoredValueLayout::decode(value.as_bytes())?;
+            for index in 0..node.key_count {
+                let layout = StoredValueLayout::decode(node.get_value_view(index)?)?;
                 if layout.overflow_first_page != INVALID_PAGE_ID {
                     let overflow_page_ids =
                         collect_overflow_page_ids(pager, Some(layout.overflow_first_page))?;
@@ -312,7 +312,8 @@ fn collect_tree_space_stats_recursive(
         }
         NodeType::Internal => {
             stats.internal_pages += 1;
-            for child_page_id in node.children {
+            for child_index in 0..=node.key_count {
+                let child_page_id = node.get_child_procedural(child_index)?;
                 collect_tree_space_stats_recursive(pager, child_page_id, visited, stats)?;
             }
         }

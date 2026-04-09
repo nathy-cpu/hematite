@@ -113,6 +113,27 @@ impl BTreeNode {
         header_size + self.keys.len() * 2 + cell_body_bytes
     }
 
+    pub fn serialized_size_on_page(&self) -> Result<usize> {
+        if self.is_decoded {
+            return Ok(self.estimate_serialized_size());
+        }
+
+        let header_size = match self.node_type {
+            NodeType::Leaf => LEAF_HEADER_SIZE,
+            NodeType::Internal => INTERIOR_HEADER_SIZE,
+        };
+        let cell_body_bytes = (0..self.key_count)
+            .map(|index| {
+                let (start, end) = self.cell_range_for_index(index)?;
+                Ok(end - start)
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .sum::<usize>();
+
+        Ok(header_size + self.key_count * 2 + cell_body_bytes)
+    }
+
     pub fn will_fit_in_page(&self) -> bool {
         self.estimate_serialized_size() + page_header_offset(self.page_id) <= PAGE_SIZE
     }
