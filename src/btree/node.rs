@@ -207,6 +207,12 @@ impl BTreeNode {
         Ok(node)
     }
 
+    pub fn from_shared_page_decoded(page: Arc<Page>) -> Result<Self> {
+        let mut node = Self::from_shared_page(page)?;
+        node.decode()?;
+        Ok(node)
+    }
+
     pub fn decode(&mut self) -> Result<()> {
         if self.is_decoded {
             return Ok(());

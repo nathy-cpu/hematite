@@ -50,8 +50,8 @@ impl BTreeManager {
     }
 
     pub fn open_tree(&mut self, root_page_id: PageId) -> Result<BTreeIndex> {
-        let page = self.lock_storage()?.read_page(root_page_id)?;
-        let _node = BTreeNode::from_page_decoded(page)?;
+        let page = self.lock_storage()?.read_page_shared(root_page_id)?;
+        let _node = BTreeNode::from_shared_page(page)?;
         Ok(BTreeIndex::from_shared_storage(
             self.storage.clone(),
             root_page_id,
@@ -64,8 +64,8 @@ impl BTreeManager {
     }
 
     fn delete_tree_recursive(&mut self, page_id: PageId) -> Result<()> {
-        let page = self.lock_storage()?.read_page(page_id)?;
-        let node = BTreeNode::from_page_decoded(page)?;
+        let page = self.lock_storage()?.read_page_shared(page_id)?;
+        let node = BTreeNode::from_shared_page_decoded(page)?;
 
         match node.node_type {
             NodeType::Leaf => {
@@ -116,20 +116,21 @@ impl BTreeManager {
             return Ok(false);
         }
 
-        let page = self.lock_storage()?.read_page(page_id)?;
-        let node = BTreeNode::from_page_decoded(page)?;
+        let page = self.lock_storage()?.read_page_shared(page_id)?;
+        let node = BTreeNode::from_shared_page(page)?;
 
-        for i in 1..node.keys.len() {
-            if node.keys[i - 1] >= node.keys[i] {
+        for i in 1..node.key_count {
+            if node.get_key_view(i - 1)? >= node.get_key_view(i)? {
                 return Ok(false);
             }
         }
-        for key in &node.keys {
+        for index in 0..node.key_count {
+            let key = node.get_key_view(index)?;
             if let Some(lower) = &lower_bound {
                 let below_lower = if lower.inclusive {
-                    key.as_bytes() < lower.key.as_slice()
+                    key < lower.key.as_slice()
                 } else {
-                    key.as_bytes() <= lower.key.as_slice()
+                    key <= lower.key.as_slice()
                 };
                 if below_lower {
                     return Ok(false);
@@ -137,9 +138,9 @@ impl BTreeManager {
             }
             if let Some(upper) = &upper_bound {
                 let above_upper = if upper.inclusive {
-                    key.as_bytes() > upper.key.as_slice()
+                    key > upper.key.as_slice()
                 } else {
-                    key.as_bytes() >= upper.key.as_slice()
+                    key >= upper.key.as_slice()
                 };
                 if above_upper {
                     return Ok(false);
@@ -164,27 +165,31 @@ impl BTreeManager {
                 Ok(true)
             }
             NodeType::Internal => {
-                if node.children.len() != node.keys.len() + 1 {
+                if node.key_count == 0 && node.get_child_procedural(0).is_err() {
                     return Ok(false);
                 }
-                if !node.values.is_empty() {
+                if node.is_decoded && node.children.len() != node.keys.len() + 1 {
+                    return Ok(false);
+                }
+                if node.is_decoded && !node.values.is_empty() {
                     return Ok(false);
                 }
 
-                for (child_index, child_page_id) in node.children.iter().copied().enumerate() {
+                for child_index in 0..=node.key_count {
+                    let child_page_id = node.get_child_procedural(child_index)?;
                     let child_lower = if child_index == 0 {
                         lower_bound.clone()
                     } else {
                         Some(KeyBound {
-                            key: node.keys[child_index - 1].as_bytes().to_vec(),
+                            key: node.get_key_view(child_index - 1)?.to_vec(),
                             inclusive: true,
                         })
                     };
-                    let child_upper = if child_index == node.keys.len() {
+                    let child_upper = if child_index == node.key_count {
                         upper_bound.clone()
                     } else {
                         Some(KeyBound {
-                            key: node.keys[child_index].as_bytes().to_vec(),
+                            key: node.get_key_view(child_index)?.to_vec(),
                             inclusive: false,
                         })
                     };
@@ -236,10 +241,11 @@ pub fn collect_tree_page_ids(
     out: &mut Vec<PageId>,
 ) -> Result<()> {
     out.push(page_id);
-    let page = pager.read_page(page_id)?;
-    let node = BTreeNode::from_page_decoded(page)?;
+    let page = pager.read_page_shared(page_id)?;
+    let node = BTreeNode::from_shared_page(page)?;
     if node.node_type == NodeType::Internal {
-        for child_page_id in node.children {
+        for child_index in 0..=node.key_count {
+            let child_page_id = node.get_child_procedural(child_index)?;
             collect_tree_page_ids(pager, child_page_id, out)?;
         }
     }
@@ -276,8 +282,8 @@ fn collect_tree_space_stats_recursive(
         )));
     }
 
-    let page = pager.read_page(page_id)?;
-    let node = BTreeNode::from_page_decoded(page)?;
+    let page = pager.read_page_shared(page_id)?;
+    let node = BTreeNode::from_shared_page_decoded(page)?;
     stats.page_ids.push(page_id);
     stats.used_bytes += node.estimate_serialized_size();
 
