@@ -11,6 +11,14 @@ pub(crate) const DATABASE_HEADER_NEXT_TABLE_ID_OFFSET: usize = 96;
 pub(crate) const MAX_EMBEDDED_PAYLOAD_FRACTION: u8 = 64;
 pub(crate) const MIN_EMBEDDED_PAYLOAD_FRACTION: u8 = 32;
 pub(crate) const LEAF_PAYLOAD_FRACTION: u8 = 32;
+const BTREE_LEAF_HEADER_SIZE: usize = 8;
+const BTREE_INTERIOR_HEADER_SIZE: usize = 12;
+const OFFSET_PAGE_KIND: usize = 0;
+const OFFSET_FIRST_FREEBLOCK: usize = 1;
+const OFFSET_CELL_COUNT: usize = 3;
+const OFFSET_CELL_CONTENT_START: usize = 5;
+const OFFSET_FRAGMENTED_FREE_BYTES: usize = 7;
+const OFFSET_RIGHTMOST_CHILD: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FormatGeneration {
@@ -234,6 +242,42 @@ impl DatabaseHeaderV3 {
     }
 }
 
+pub(crate) fn detect_format_generation(bytes: &[u8]) -> Option<FormatGeneration> {
+    if bytes.len() < DATABASE_HEADER_SIZE {
+        return None;
+    }
+    if &bytes[..16] != DATABASE_HEADER_MAGIC {
+        return None;
+    }
+
+    match (bytes[18], bytes[19]) {
+        (3, 3) => Some(FormatGeneration::V3),
+        _ => None,
+    }
+}
+
+pub(crate) fn bootstrap_database_page_one(
+    header: &DatabaseHeaderV3,
+    root_page_kind: PageKind,
+) -> Result<[u8; PAGE_SIZE]> {
+    if !matches!(root_page_kind, PageKind::LeafTable | PageKind::InteriorTable) {
+        return Err(HematiteError::StorageError(format!(
+            "Unsupported page-one root kind {:?}",
+            root_page_kind
+        )));
+    }
+
+    let mut bytes = [0u8; PAGE_SIZE];
+    bytes[..DATABASE_HEADER_SIZE].copy_from_slice(&header.encode());
+    initialize_btree_page_header(
+        &mut bytes,
+        DATABASE_HEADER_SIZE,
+        root_page_kind,
+        PAGE_SIZE as u16,
+    )?;
+    Ok(bytes)
+}
+
 pub(crate) fn usable_space(page_size: usize, reserved_space: usize) -> usize {
     page_size.saturating_sub(reserved_space)
 }
@@ -305,6 +349,48 @@ fn read_u32_be(bytes: &[u8], offset: usize) -> u32 {
     ])
 }
 
+fn initialize_btree_page_header(
+    bytes: &mut [u8],
+    offset: usize,
+    kind: PageKind,
+    cell_content_start: u16,
+) -> Result<()> {
+    let header_size = match kind {
+        PageKind::LeafTable | PageKind::LeafIndex => BTREE_LEAF_HEADER_SIZE,
+        PageKind::InteriorTable | PageKind::InteriorIndex => BTREE_INTERIOR_HEADER_SIZE,
+        _ => {
+            return Err(HematiteError::StorageError(format!(
+                "Page kind {:?} is not a b-tree page",
+                kind
+            )));
+        }
+    };
+
+    if offset + header_size > bytes.len() {
+        return Err(HematiteError::StorageError(
+            "v3 b-tree page header exceeds page bounds".to_string(),
+        ));
+    }
+
+    bytes[offset + OFFSET_PAGE_KIND] = kind as u8;
+    write_u16_be(bytes, offset + OFFSET_FIRST_FREEBLOCK, 0);
+    write_u16_be(bytes, offset + OFFSET_CELL_COUNT, 0);
+    write_u16_be(bytes, offset + OFFSET_CELL_CONTENT_START, cell_content_start);
+    bytes[offset + OFFSET_FRAGMENTED_FREE_BYTES] = 0;
+    if matches!(kind, PageKind::InteriorTable | PageKind::InteriorIndex) {
+        write_u32_be(bytes, offset + OFFSET_RIGHTMOST_CHILD, 0);
+    }
+    Ok(())
+}
+
+fn write_u16_be(bytes: &mut [u8], offset: usize, value: u16) {
+    bytes[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
+}
+
+fn write_u32_be(bytes: &mut [u8], offset: usize, value: u32) {
+    bytes[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
+}
+
 fn checksum_bytes(bytes: &[u8]) -> u32 {
     let mut hash: u32 = 0x811C9DC5;
     for byte in bytes {
@@ -317,8 +403,9 @@ fn checksum_bytes(bytes: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        choose_local_payload_size, decode_varint, encode_varint, max_local_payload,
-        min_local_payload, usable_space, DatabaseHeaderV3, PageKind, DATABASE_HEADER_SIZE,
+        bootstrap_database_page_one, choose_local_payload_size, decode_varint,
+        detect_format_generation, encode_varint, max_local_payload, min_local_payload,
+        usable_space, DatabaseHeaderV3, FormatGeneration, PageKind, DATABASE_HEADER_SIZE,
     };
 
     #[test]
@@ -344,6 +431,16 @@ mod tests {
 
         let err = DatabaseHeaderV3::decode(&encoded).unwrap_err();
         assert!(err.to_string().contains("checksum mismatch"));
+    }
+
+    #[test]
+    fn format_detection_recognizes_v3_header() {
+        let header = DatabaseHeaderV3::default();
+        let encoded = header.encode();
+        assert_eq!(
+            detect_format_generation(&encoded),
+            Some(FormatGeneration::V3)
+        );
     }
 
     #[test]
@@ -381,5 +478,15 @@ mod tests {
             assert_eq!(decoded, value);
             assert_eq!(used, encoded.len());
         }
+    }
+
+    #[test]
+    fn bootstrap_page_one_writes_header_and_root_page_header() {
+        let header = DatabaseHeaderV3::default();
+        let page = bootstrap_database_page_one(&header, PageKind::LeafTable).unwrap();
+
+        assert_eq!(&page[..DATABASE_HEADER_SIZE], &header.encode());
+        assert_eq!(page[100], PageKind::LeafTable as u8);
+        assert_eq!(u16::from_be_bytes([page[105], page[106]]), 4096);
     }
 }
