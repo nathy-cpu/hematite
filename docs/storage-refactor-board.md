@@ -32,7 +32,7 @@ Use it alongside [storage-refactor-plan.md](./storage-refactor-plan.md):
 | `M11` Savepoint/Subjournal Rewrite | Rebuild savepoint internals on top of the new rollback core | `Done` | Rollback transactions now own internal pager savepoints; rollback-mode snapshots create savepoint handles instead of cloning the full pager; writes feed per-savepoint page capture; savepoint restore rebuilds cache/journal state from pager-owned savepoint data | Keep future work focused on locking and WAL rather than re-expanding snapshot cloning |
 | `M12` Locking Model Rewrite | Replace the current in-process registry as the true correctness backbone | `Done` | File-backed rollback and WAL lock sidecars now coordinate readers, writers, and WAL reader snapshots through OS locks; external lock-file tests and threaded rollback/WAL tests pass in the full suite | Move on to rebuilding WAL semantics on top of the new lock backbone |
 | `M13` WAL Rewrite | Rebuild WAL on top of the new pager core instead of layering on current behavior | `Done` | WAL commits now advance pager-owned visible state directly, new writers seed from the latest WAL-visible file/free-page/checksum state, and WAL-visible reads now respect freed/truncated pages instead of falling back to stale main-file bytes; storage + threaded WAL tests pass in the full suite | Move on to the failure-path matrix that hardens the new WAL core |
-| `M14` Fault Injection Matrix | Add SQLite-style failure-path testing for journal, commit, checkpoint, and recovery edges | `Not Started` | We have pager fault tests, but not the broader failure matrix yet | Introduce one rollback journal failure test at a time once rollback rewrite begins |
+| `M14` Fault Injection Matrix | Add SQLite-style failure-path testing for journal, commit, checkpoint, and recovery edges | `Done` | Pager fault coverage now includes injected checkpoint copyback failure with reopen validation, truncated WAL-tail reopen behavior, rollback flush failure, and rollback recovery-after-error paths; full storage + SQL suites remain green | Keep extending only when a new storage behavior adds a new failure surface |
 | `M15` Cleanup And Optional Format Migration | Remove obsolete compatibility machinery after the new core is complete | `Blocked` | Too early; depends on rollback and WAL rewrites landing first | Revisit only after `M10` through `M14` materially advance |
 
 ## What Is Actually Finished Right Now
@@ -53,6 +53,7 @@ These are the milestones we can honestly treat as completed:
 - `M11` Savepoint/Subjournal Rewrite
 - `M12` Locking Model Rewrite
 - `M13` WAL Rewrite
+- `M14` Fault Injection Matrix
 
 ## Validation Checkpoint
 
@@ -90,21 +91,19 @@ More specifically:
 
 - `M0` to `M3` are both structurally and behaviorally convincing
 - `M4` to `M7` are structurally complete and well validated
-- the remaining real behavior risk now sits in the deeper fault-injection matrix
+- the remaining real behavior risk is now mostly cleanup and future format/perf work rather than missing pager failure coverage
 
 ## What Still Carries The Real Rewrite Risk
 
-These are the milestones that will actually determine whether the rewrite succeeds:
-
-- `M14` Fault Injection Matrix
+There are no remaining rewrite-critical milestones before cleanup.
 
 ## Recommended Execution Order From Here
 
-1. Start `M14` by adding the first checkpoint and reopen failure-path tests against the new WAL core.
-2. Revisit cache internals only if the new failure-path work exposes a specific need.
+1. Revisit cache or pager internals only if new correctness or performance work exposes a concrete need.
+2. Treat `M15` as cleanup and consolidation, not another core-storage rewrite.
 
 ## Immediate Next Actions
 
-- Add the first checkpoint failure and reopen-after-partial-WAL-write regressions.
-- Keep validating threaded multi-connection rollback and WAL behavior as failure-path coverage expands.
-- Use the new WAL-visible freed-page/read-path regressions as guard rails while hardening crash semantics.
+- Keep the checkpoint-failure and truncated-WAL-tail regressions green as future storage work lands.
+- Trim leftover compatibility scaffolding only after the current rollback/WAL/fault matrix stays stable.
+- Use performance work, not architectural uncertainty, to decide the next storage changes.

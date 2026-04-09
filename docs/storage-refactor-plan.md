@@ -292,7 +292,7 @@ This is not a full SQLite `PCache` clone, but it is enough to treat the current 
 
 ### What Is Only Partially Done
 
-#### 1. Fault-injection coverage is still behind the new core
+#### 1. Fault-injection coverage now reaches the new core
 
 The WAL path is no longer only structurally extracted. Recent work moved committed WAL visibility into pager-owned state transitions:
 
@@ -303,13 +303,18 @@ The WAL path is no longer only structurally extracted. Recent work moved committ
 
 That is enough to treat the WAL rewrite milestone as behaviorally landed.
 
-What remains behind is the reliability matrix around partial writes, checkpoint interruption, and reopen-after-failure scenarios.
+Recent fault-path work also pushed the reliability matrix forward in concrete pager terms:
+
+- injected checkpoint copyback failure now forces the current pager into `Error`
+- reopen after checkpoint failure still recovers the last committed WAL-visible state
+- reopen ignores a truncated WAL tail after a real committed transaction instead of treating the file as corrupt
+- rollback-mode flush failure and rollback-based recovery remain covered
+
+That is enough to treat the original fault-injection milestone as landed for this rewrite cycle.
 
 ### What Has Not Really Started Yet
 
-These goals from the original plan are still substantially ahead of us:
-
-- the deeper SQLite-style failure-injection and hot-journal recovery matrix described in the original plan
+There are no longer any major correctness milestones from the original rewrite plan still sitting untouched. The remaining work is mostly cleanup, consolidation, and future performance-oriented follow-through.
 
 ### What This Means In Practice
 
@@ -328,17 +333,18 @@ That distinction matters:
 - We have achieved the first major behavioral goal of the real rewrite in rollback mode.
 - We have moved savepoints onto pager-owned rollback savepoint machinery.
 - We have moved WAL visibility and writer baselines onto pager-owned state rather than full-file rediscovery.
-- The remaining hard work now sits in the deeper reliability matrix.
+- We have added pager-level failure-path regressions for rollback flush failure, checkpoint copyback failure, and truncated WAL reopen behavior.
+- The remaining hard work now sits more in cleanup and performance than in missing pager correctness scaffolding.
 
 ### Recommended Next Step
 
-The next highest-value step is to start the failure-path matrix on top of the rollback, savepoint, lock, and WAL cores.
+The next highest-value step is no longer another core correctness rewrite. It is to consolidate what is now in place and only then decide what to simplify or optimize.
 
 That should start with a small, well-bounded slice:
 
-- add a checkpoint-interruption regression that verifies reopen behavior stays correct
-- add a partial-WAL-write reopen regression that proves truncated tails are ignored under realistic pager flows
-- keep `checkpoint_wal()` and journal-mode switching behavior the same at the public boundary while hardening failure handling
+- keep the new checkpoint-failure and truncated-WAL-tail regressions green while touching pager internals
+- remove or simplify leftover compatibility code only when the current test matrix still holds
+- let performance profiling, not architectural uncertainty, drive the next storage changes
 
 In short:
 
@@ -347,4 +353,4 @@ In short:
 - the rollback core now has a true journal-first shape
 - savepoint behavior now has a pager-owned core too
 - WAL behavior now has a pager-owned visible-state core too
-- the next milestone should be reliability hardening, not more facade extraction
+- the next milestone should be cleanup or performance work, not more correctness scaffolding
