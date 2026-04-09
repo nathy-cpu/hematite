@@ -7,7 +7,7 @@ use crate::storage::{Page, PageId, PAGE_SIZE};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 impl Pager {
@@ -310,16 +310,21 @@ impl Pager {
         }
 
         let page = self.file_manager.read_page(page_id)?;
-        let Some(transaction) = self.active_rollback_transaction_mut() else {
-            return Ok(());
+        let record = {
+            let Some(transaction) = self.active_rollback_transaction_mut() else {
+                return Ok(());
+            };
+            let record = JournalRecord {
+                page_id,
+                data: page.data,
+            };
+            transaction.page_records.push(record.clone());
+            transaction.journaled_pages.insert(page_id);
+            record
         };
-        transaction.page_records.push(JournalRecord {
-            page_id,
-            data: page.data,
-        });
-        transaction.journaled_pages.insert(page_id);
         self.cache.mark_journaled(page_id);
-        self.persist_journal(JournalState::Active)
+        self.append_rollback_journal_record(&record)?;
+        Ok(())
     }
 
     pub(super) fn persist_journal(&self, state: JournalState) -> Result<()> {
@@ -350,6 +355,83 @@ impl Pager {
         file.write_all(&bytes)?;
         file.sync_all()?;
         Ok(())
+    }
+
+    pub(super) fn initialize_rollback_journal(&self) -> Result<()> {
+        let Some(transaction) = self.active_rollback_transaction() else {
+            return Ok(());
+        };
+        let Some(path) = &self.journal_path else {
+            return Ok(());
+        };
+
+        let journal = RollbackJournal {
+            state: JournalState::Active,
+            original_file_len: transaction.original_file_len,
+            original_free_pages: transaction.original_free_pages.clone(),
+            original_checksums: transaction
+                .original_checksums
+                .iter()
+                .map(|(page_id, checksum)| (*page_id, *checksum))
+                .collect(),
+            page_records: Vec::new(),
+        };
+        let bytes = journal.encode_header(0);
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        Ok(())
+    }
+
+    pub(super) fn append_rollback_journal_record(&self, record: &JournalRecord) -> Result<()> {
+        let Some(transaction) = self.active_rollback_transaction() else {
+            return Ok(());
+        };
+        let Some(path) = &self.journal_path else {
+            return Ok(());
+        };
+
+        let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+        file.seek(SeekFrom::End(0))?;
+        file.write_all(&record.encode()?)?;
+
+        let page_count_offset = RollbackJournal::page_count_offset(
+            transaction.original_free_pages.len(),
+            transaction.original_checksums.len(),
+        );
+        let page_count = transaction.page_records.len() as u32;
+        file.seek(SeekFrom::Start(page_count_offset))?;
+        file.write_all(&page_count.to_le_bytes())?;
+        file.sync_all()?;
+        Ok(())
+    }
+
+    pub(super) fn mark_rollback_journal_committed(&self) -> Result<()> {
+        let Some(path) = &self.journal_path else {
+            return Ok(());
+        };
+
+        let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+        file.seek(SeekFrom::Start(RollbackJournal::state_offset()))?;
+        file.write_all(&[JournalState::Committed as u8])?;
+        file.sync_all()?;
+        Ok(())
+    }
+
+    pub(super) fn sync_rollback_journal_from_transaction(&self) -> Result<()> {
+        if self.journal_mode != JournalMode::Rollback {
+            return Ok(());
+        }
+
+        if self.active_rollback_transaction().is_some() {
+            self.persist_journal(JournalState::Active)
+        } else {
+            self.remove_journal_file()
+        }
     }
 
     pub(super) fn remove_journal_file(&self) -> Result<()> {
@@ -387,6 +469,9 @@ impl Pager {
         let journal = RollbackJournal::decode(&bytes)?;
         match journal.state {
             JournalState::Active => {
+                if self.has_live_writer()? {
+                    return Ok(());
+                }
                 self.restore_from_journal(&journal)?;
                 self.remove_journal_file()?;
             }
@@ -398,6 +483,14 @@ impl Pager {
     }
 
     pub(super) fn rollback_from_active_transaction(&mut self) -> Result<()> {
+        if self.journal_path.is_some() {
+            let Some(path) = &self.journal_path else {
+                unreachable!();
+            };
+            let journal = RollbackJournal::decode(&fs::read(path)?)?;
+            return self.restore_from_journal(&journal);
+        }
+
         let transaction = self.active_rollback_transaction().cloned().ok_or_else(|| {
             crate::error::HematiteError::StorageError("Pager transaction is not active".to_string())
         })?;

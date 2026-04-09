@@ -62,6 +62,8 @@ pub struct RollbackJournal {
 impl RollbackJournal {
     const MAGIC: [u8; 4] = *b"HTRJ";
     const VERSION: u32 = 1;
+    const STATE_OFFSET: u64 = 8;
+    const HEADER_PREFIX_LEN: usize = 17;
 
     pub fn encode(&self) -> Result<Vec<u8>> {
         let mut bytes = Vec::new();
@@ -95,6 +97,46 @@ impl RollbackJournal {
         }
 
         Ok(bytes)
+    }
+
+    pub(crate) fn encode_header(&self, page_count: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&Self::MAGIC);
+        bytes.extend_from_slice(&Self::VERSION.to_le_bytes());
+        bytes.push(self.state as u8);
+        bytes.extend_from_slice(&self.original_file_len.to_le_bytes());
+
+        bytes.extend_from_slice(&(self.original_free_pages.len() as u32).to_le_bytes());
+        for page_id in &self.original_free_pages {
+            bytes.extend_from_slice(&page_id.to_le_bytes());
+        }
+
+        bytes.extend_from_slice(&(self.original_checksums.len() as u32).to_le_bytes());
+        for (page_id, checksum) in &self.original_checksums {
+            bytes.extend_from_slice(&page_id.to_le_bytes());
+            bytes.extend_from_slice(&checksum.to_le_bytes());
+        }
+
+        bytes.extend_from_slice(&page_count.to_le_bytes());
+        bytes
+    }
+
+    pub(crate) fn page_count_offset(
+        original_free_page_count: usize,
+        original_checksum_count: usize,
+    ) -> u64 {
+        (
+            Self::HEADER_PREFIX_LEN
+                + 4
+                + original_free_page_count * std::mem::size_of::<PageId>()
+                + 4
+                + original_checksum_count
+                    * (std::mem::size_of::<PageId>() + std::mem::size_of::<u32>())
+        ) as u64
+    }
+
+    pub(crate) fn state_offset() -> u64 {
+        Self::STATE_OFFSET
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self> {
@@ -183,6 +225,23 @@ impl RollbackJournal {
             original_checksums,
             page_records,
         })
+    }
+}
+
+impl JournalRecord {
+    pub(crate) fn encode(&self) -> Result<Vec<u8>> {
+        if self.data.len() != PAGE_SIZE {
+            return Err(HematiteError::StorageError(format!(
+                "Journal page {} has invalid image size {}",
+                self.page_id,
+                self.data.len()
+            )));
+        }
+
+        let mut bytes = Vec::with_capacity(4 + PAGE_SIZE);
+        bytes.extend_from_slice(&self.page_id.to_le_bytes());
+        bytes.extend_from_slice(&self.data);
+        Ok(bytes)
     }
 }
 

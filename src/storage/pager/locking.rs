@@ -66,6 +66,14 @@ impl Pager {
         })
     }
 
+    pub(super) fn has_live_writer(&self) -> Result<bool> {
+        let Some(path) = self.database_identity.as_ref() else {
+            return Ok(false);
+        };
+        let registry = self.lock_registry_map()?;
+        Ok(registry.get(path).map(|entry| entry.writer).unwrap_or(false))
+    }
+
     pub(super) fn acquire_shared_lock(&mut self) -> Result<()> {
         match self.lock_mode {
             PagerLockMode::Write if self.journal_mode == JournalMode::Wal => return Ok(()),

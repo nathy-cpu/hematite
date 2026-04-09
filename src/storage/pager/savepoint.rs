@@ -36,6 +36,7 @@ impl Pager {
         self.cache = snapshot.cache;
         self.page_checksums = snapshot.page_checksums;
         self.transaction = snapshot.transaction;
+        self.sync_rollback_journal_from_transaction()?;
         Ok(())
     }
 }
