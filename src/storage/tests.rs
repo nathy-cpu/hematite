@@ -528,7 +528,7 @@ mod pager_tests {
         pager.flush()?;
         drop(pager);
 
-        fs::write(&journal_path, b"HTRJ\x01\x00")?;
+        fs::write(&journal_path, b"HTJ3\x00\x00")?;
 
         let err = Pager::new(test_db.path(), 8).unwrap_err();
         assert!(err.to_string().contains("truncated"));
