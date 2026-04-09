@@ -82,6 +82,54 @@ impl TestDbFile {
         Self::journal_path_for(&self.path)
     }
 
+    fn rollback_lock_path(&self) -> PathBuf {
+        Self::rollback_lock_path_for(&self.path)
+    }
+
+    fn rollback_lock_path_for(path: &Path) -> PathBuf {
+        let mut file_name = path
+            .file_name()
+            .map(OsString::from)
+            .unwrap_or_else(|| OsString::from("hematite.db"));
+        file_name.push(".rollback.lock");
+        match path.parent() {
+            Some(parent) => parent.join(file_name),
+            None => PathBuf::from(file_name),
+        }
+    }
+
+    fn wal_write_lock_path(&self) -> PathBuf {
+        Self::wal_write_lock_path_for(&self.path)
+    }
+
+    fn wal_write_lock_path_for(path: &Path) -> PathBuf {
+        let mut file_name = path
+            .file_name()
+            .map(OsString::from)
+            .unwrap_or_else(|| OsString::from("hematite.db"));
+        file_name.push(".wal.write.lock");
+        match path.parent() {
+            Some(parent) => parent.join(file_name),
+            None => PathBuf::from(file_name),
+        }
+    }
+
+    fn wal_readers_dir(&self) -> PathBuf {
+        Self::wal_readers_dir_for(&self.path)
+    }
+
+    fn wal_readers_dir_for(path: &Path) -> PathBuf {
+        let mut file_name = path
+            .file_name()
+            .map(OsString::from)
+            .unwrap_or_else(|| OsString::from("hematite.db"));
+        file_name.push(".wal.readers");
+        match path.parent() {
+            Some(parent) => parent.join(file_name),
+            None => PathBuf::from(file_name),
+        }
+    }
+
     fn journal_path_for(path: &Path) -> PathBuf {
         let mut file_name = path
             .file_name()
@@ -100,6 +148,9 @@ impl TestDbFile {
         let _ = fs::remove_file(Self::pager_checksum_temp_path_for(path));
         let _ = fs::remove_file(Self::wal_path_for(path));
         let _ = fs::remove_file(Self::journal_path_for(path));
+        let _ = fs::remove_file(Self::rollback_lock_path_for(path));
+        let _ = fs::remove_file(Self::wal_write_lock_path_for(path));
+        let _ = fs::remove_dir_all(Self::wal_readers_dir_for(path));
     }
 }
 
@@ -110,6 +161,9 @@ impl Drop for TestDbFile {
         let _ = fs::remove_file(self.pager_checksum_temp_path());
         let _ = fs::remove_file(self.wal_path());
         let _ = fs::remove_file(self.journal_path());
+        let _ = fs::remove_file(self.rollback_lock_path());
+        let _ = fs::remove_file(self.wal_write_lock_path());
+        let _ = fs::remove_dir_all(self.wal_readers_dir());
     }
 }
 

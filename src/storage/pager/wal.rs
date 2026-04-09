@@ -57,27 +57,23 @@ impl Pager {
             return Ok(true);
         }
 
-        let path = self.database_identity_path()?;
-        let registry = self.lock_registry_map()?;
-        let Some(entry) = registry.get(path) else {
-            return Ok(true);
-        };
-
-        if entry.writer && self.lock_mode != PagerLockMode::Write {
+        if self.lock_mode != PagerLockMode::Write && self.wal_writer_active()? {
             return Ok(false);
         }
-        if entry.readers == 0 {
+
+        let active_sequences = self.active_wal_reader_sequences()?;
+        if active_sequences.is_empty() {
             return Ok(true);
         }
+
         let latest_sequence = self
             .latest_wal_state
             .as_ref()
             .map(|state| state.visible_sequence)
             .unwrap_or(0);
-        Ok(entry
-            .wal_reader_sequences
-            .keys()
-            .all(|sequence| *sequence == latest_sequence))
+        Ok(active_sequences
+            .into_iter()
+            .all(|sequence| sequence == latest_sequence))
     }
 
     pub(super) fn checkpoint_wal_unlocked(&mut self) -> Result<()> {

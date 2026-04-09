@@ -19,7 +19,10 @@ impl Pager {
                 return Ok(());
             }
             let snapshot = self.snapshot_wal_visible_state()?;
-            self.register_wal_reader_sequence(snapshot.visible_sequence)?;
+            if let Err(err) = self.register_wal_reader_sequence(snapshot.visible_sequence) {
+                let _ = self.leave_reader_scope();
+                return Err(err);
+            }
             self.wal_read_snapshot = Some(snapshot);
         }
         if !matches!(self.lock_mode, PagerLockMode::Write) {

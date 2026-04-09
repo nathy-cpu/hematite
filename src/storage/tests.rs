@@ -256,7 +256,13 @@ mod pager_tests {
     use crate::storage::wal::{WalFrame, WalRecord};
     use crate::storage::{JournalMode, Page};
     use crate::test_utils::TestDbFile;
+    use std::ffi::OsString;
     use std::fs;
+    #[cfg(unix)]
+    use std::fs::OpenOptions;
+    #[cfg(unix)]
+    use std::os::fd::AsRawFd;
+    use std::path::{Path, PathBuf};
     use std::sync::{Arc, Barrier};
     use std::thread;
 
@@ -267,6 +273,68 @@ mod pager_tests {
             hash = hash.wrapping_mul(0x01000193);
         }
         hash
+    }
+
+    fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+        let mut file_name = path
+            .file_name()
+            .map(OsString::from)
+            .unwrap_or_else(|| OsString::from("hematite.db"));
+        file_name.push(suffix);
+        match path.parent() {
+            Some(parent) => parent.join(file_name),
+            None => PathBuf::from(file_name),
+        }
+    }
+
+    #[cfg(unix)]
+    fn lock_file_exclusive(path: &Path) -> crate::error::Result<std::fs::File> {
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(path)?;
+        let rc = unsafe { test_flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
+        if rc == 0 {
+            Ok(file)
+        } else {
+            Err(std::io::Error::last_os_error().into())
+        }
+    }
+
+    #[cfg(unix)]
+    fn lock_file_shared(path: &Path) -> crate::error::Result<std::fs::File> {
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(path)?;
+        let rc = unsafe { test_flock(file.as_raw_fd(), LOCK_SH | LOCK_NB) };
+        if rc == 0 {
+            Ok(file)
+        } else {
+            Err(std::io::Error::last_os_error().into())
+        }
+    }
+
+    #[cfg(unix)]
+    fn unlock_file(file: &std::fs::File) {
+        let _ = unsafe { test_flock(file.as_raw_fd(), LOCK_UN) };
+    }
+
+    #[cfg(unix)]
+    const LOCK_SH: i32 = 1;
+    #[cfg(unix)]
+    const LOCK_EX: i32 = 2;
+    #[cfg(unix)]
+    const LOCK_NB: i32 = 4;
+    #[cfg(unix)]
+    const LOCK_UN: i32 = 8;
+
+    #[cfg(unix)]
+    unsafe extern "C" {
+        #[link_name = "flock"]
+        fn test_flock(fd: i32, operation: i32) -> i32;
     }
 
     #[test]
@@ -667,6 +735,25 @@ mod pager_tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_pager_respects_external_rollback_lock_file() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_external_rollback_lock");
+        let rollback_lock_path = sidecar_path(test_db.as_path(), ".rollback.lock");
+        let external_lock = lock_file_shared(&rollback_lock_path)?;
+
+        let mut writer = Pager::new(test_db.path(), 8)?;
+        let err = writer.begin_transaction().unwrap_err();
+        assert!(err.to_string().contains("locked"));
+
+        unlock_file(&external_lock);
+        drop(external_lock);
+
+        writer.begin_transaction()?;
+        writer.rollback_transaction()?;
+        Ok(())
+    }
+
     #[test]
     fn test_pager_blocks_reader_while_writer_is_active() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_pager_reader_blocked_by_writer");
@@ -680,6 +767,26 @@ mod pager_tests {
 
         reader.begin_read()?;
         reader.end_read()?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_pager_respects_external_wal_writer_lock_file() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_external_wal_writer_lock");
+        let wal_write_lock_path = sidecar_path(test_db.as_path(), ".wal.write.lock");
+        let external_lock = lock_file_exclusive(&wal_write_lock_path)?;
+
+        let mut writer = Pager::new(test_db.path(), 8)?;
+        writer.set_journal_mode(JournalMode::Wal)?;
+        let err = writer.begin_transaction().unwrap_err();
+        assert!(err.to_string().contains("locked"));
+
+        unlock_file(&external_lock);
+        drop(external_lock);
+
+        writer.begin_transaction()?;
+        writer.rollback_transaction()?;
         Ok(())
     }
 

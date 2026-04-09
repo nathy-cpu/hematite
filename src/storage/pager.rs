@@ -111,9 +111,11 @@ use crate::storage::{
     Page, PageId, STORAGE_METADATA_PAGE_ID,
 };
 use self::cache::PageCache;
+use self::locking::WalReaderRegistration;
 use self::state::PagerLockMode;
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::fs::File;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -178,6 +180,9 @@ pub struct Pager {
     wal_path: Option<PathBuf>,
     database_identity: Option<PathBuf>,
     lock_mode: PagerLockMode,
+    rollback_lock_file: Option<File>,
+    wal_write_lock_file: Option<File>,
+    wal_reader_registration: Option<WalReaderRegistration>,
     wal_read_snapshot: Option<VisibleWalState>,
     latest_wal_state: Option<VisibleWalState>,
     transaction: Option<PagerTransaction>,
@@ -205,6 +210,9 @@ impl Pager {
             wal_path,
             database_identity,
             lock_mode: PagerLockMode::None,
+            rollback_lock_file: None,
+            wal_write_lock_file: None,
+            wal_reader_registration: None,
             wal_read_snapshot: None,
             latest_wal_state: None,
             transaction: None,
@@ -228,6 +236,9 @@ impl Pager {
             wal_path: None,
             database_identity: None,
             lock_mode: PagerLockMode::None,
+            rollback_lock_file: None,
+            wal_write_lock_file: None,
+            wal_reader_registration: None,
             wal_read_snapshot: None,
             latest_wal_state: None,
             transaction: None,
