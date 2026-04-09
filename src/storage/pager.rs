@@ -120,17 +120,28 @@ pub use self::state::{JournalMode, PagerState};
 pub(crate) use self::savepoint::PagerSnapshot;
 
 #[derive(Debug, Clone)]
-struct PagerTransaction {
+struct RollbackTransaction {
     original_file_len: u64,
     original_free_pages: Vec<PageId>,
     original_checksums: HashMap<PageId, u32>,
-    wal_next_page_id: PageId,
-    wal_free_pages: Vec<PageId>,
     journaled_pages: HashSet<PageId>,
     page_records: Vec<JournalRecord>,
 }
 
-fn compact_transaction_free_pages(transaction: &mut PagerTransaction) {
+#[derive(Debug, Clone)]
+struct WalTransaction {
+    wal_next_page_id: PageId,
+    wal_free_pages: Vec<PageId>,
+    original_checksums: HashMap<PageId, u32>,
+}
+
+#[derive(Debug, Clone)]
+enum PagerTransaction {
+    Rollback(RollbackTransaction),
+    Wal(WalTransaction),
+}
+
+fn compact_transaction_free_pages(transaction: &mut WalTransaction) {
     transaction.wal_free_pages.sort_unstable();
     transaction.wal_free_pages.dedup();
     while let Some(&last_page_id) = transaction.wal_free_pages.last() {
@@ -229,6 +240,34 @@ impl Pager {
 
     pub fn journal_mode(&self) -> JournalMode {
         self.journal_mode
+    }
+
+    fn active_rollback_transaction(&self) -> Option<&RollbackTransaction> {
+        match &self.transaction {
+            Some(PagerTransaction::Rollback(transaction)) => Some(transaction),
+            _ => None,
+        }
+    }
+
+    fn active_rollback_transaction_mut(&mut self) -> Option<&mut RollbackTransaction> {
+        match &mut self.transaction {
+            Some(PagerTransaction::Rollback(transaction)) => Some(transaction),
+            _ => None,
+        }
+    }
+
+    fn active_wal_transaction(&self) -> Option<&WalTransaction> {
+        match &self.transaction {
+            Some(PagerTransaction::Wal(transaction)) => Some(transaction),
+            _ => None,
+        }
+    }
+
+    fn active_wal_transaction_mut(&mut self) -> Option<&mut WalTransaction> {
+        match &mut self.transaction {
+            Some(PagerTransaction::Wal(transaction)) => Some(transaction),
+            _ => None,
+        }
     }
 
 }

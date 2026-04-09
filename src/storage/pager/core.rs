@@ -1,4 +1,6 @@
-use super::{JournalMode, Pager, PagerState, PagerTransaction};
+use super::{
+    JournalMode, Pager, PagerState, PagerTransaction, RollbackTransaction, WalTransaction,
+};
 use crate::error::Result;
 use std::collections::HashSet;
 
@@ -17,16 +19,20 @@ impl Pager {
             return Err(err);
         }
 
-        let transaction = PagerTransaction {
-            original_file_len: self.file_manager.file_len()?,
-            original_free_pages: self.file_manager.free_pages().to_vec(),
-            original_checksums: self.page_checksums.clone(),
-            wal_next_page_id: self.file_manager.next_page_id(),
-            wal_free_pages: self.file_manager.free_pages().to_vec(),
-            journaled_pages: HashSet::new(),
-            page_records: Vec::new(),
-        };
-        self.transaction = Some(transaction);
+        self.transaction = Some(match self.journal_mode {
+            JournalMode::Rollback => PagerTransaction::Rollback(RollbackTransaction {
+                original_file_len: self.file_manager.file_len()?,
+                original_free_pages: self.file_manager.free_pages().to_vec(),
+                original_checksums: self.page_checksums.clone(),
+                journaled_pages: HashSet::new(),
+                page_records: Vec::new(),
+            }),
+            JournalMode::Wal => PagerTransaction::Wal(WalTransaction {
+                wal_next_page_id: self.file_manager.next_page_id(),
+                wal_free_pages: self.file_manager.free_pages().to_vec(),
+                original_checksums: self.page_checksums.clone(),
+            }),
+        });
         self.transition_state(PagerState::WriterLocked)?;
         if self.journal_mode == JournalMode::Rollback {
             self.begin_rollback_transaction()?;

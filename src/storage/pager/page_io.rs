@@ -11,7 +11,7 @@ impl Pager {
         }
 
         if self.journal_mode == JournalMode::Wal {
-            if let Some(transaction) = &self.transaction {
+            if let Some(transaction) = self.active_wal_transaction() {
                 if page_id >= self.file_manager.next_page_id()
                     && page_id < transaction.wal_next_page_id
                 {

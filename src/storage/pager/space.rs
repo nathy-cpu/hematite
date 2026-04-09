@@ -7,7 +7,7 @@ impl Pager {
     pub fn allocate_page(&mut self) -> Result<PageId> {
         self.check_error_state()?;
         if self.journal_mode == JournalMode::Wal {
-            if let Some(transaction) = &mut self.transaction {
+            if let Some(transaction) = self.active_wal_transaction_mut() {
                 if let Some(page_id) = transaction.wal_free_pages.pop() {
                     return Ok(page_id);
                 }
@@ -25,7 +25,7 @@ impl Pager {
         self.cache.remove(page_id);
         self.page_checksums.remove(&page_id);
         if self.journal_mode == JournalMode::Wal {
-            if let Some(transaction) = &mut self.transaction {
+            if let Some(transaction) = self.active_wal_transaction_mut() {
                 if !transaction.wal_free_pages.contains(&page_id) {
                     transaction.wal_free_pages.push(page_id);
                 }

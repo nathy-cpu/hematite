@@ -296,7 +296,7 @@ impl Pager {
             return Ok(());
         }
 
-        let Some(transaction) = &mut self.transaction else {
+        let Some(transaction) = self.active_rollback_transaction() else {
             return Ok(());
         };
 
@@ -310,6 +310,9 @@ impl Pager {
         }
 
         let page = self.file_manager.read_page(page_id)?;
+        let Some(transaction) = self.active_rollback_transaction_mut() else {
+            return Ok(());
+        };
         transaction.page_records.push(JournalRecord {
             page_id,
             data: page.data,
@@ -320,7 +323,7 @@ impl Pager {
     }
 
     pub(super) fn persist_journal(&self, state: JournalState) -> Result<()> {
-        let Some(transaction) = &self.transaction else {
+        let Some(transaction) = self.active_rollback_transaction() else {
             return Ok(());
         };
         let Some(path) = &self.journal_path else {
@@ -395,7 +398,7 @@ impl Pager {
     }
 
     pub(super) fn rollback_from_active_transaction(&mut self) -> Result<()> {
-        let transaction = self.transaction.clone().ok_or_else(|| {
+        let transaction = self.active_rollback_transaction().cloned().ok_or_else(|| {
             crate::error::HematiteError::StorageError("Pager transaction is not active".to_string())
         })?;
         let journal = RollbackJournal {
@@ -426,7 +429,7 @@ impl Pager {
     }
 
     pub(super) fn rollback_wal_transaction(&mut self) -> Result<()> {
-        let transaction = self.transaction.clone().ok_or_else(|| {
+        let transaction = self.active_wal_transaction().cloned().ok_or_else(|| {
             crate::error::HematiteError::StorageError("Pager transaction is not active".to_string())
         })?;
         self.cache.reset();
@@ -435,7 +438,7 @@ impl Pager {
     }
 
     pub(super) fn commit_wal_transaction(&mut self) -> Result<()> {
-        let transaction = self.transaction.as_ref().ok_or_else(|| {
+        let transaction = self.active_wal_transaction().ok_or_else(|| {
             crate::error::HematiteError::StorageError("Pager transaction is not active".to_string())
         })?;
         let next_sequence = self
