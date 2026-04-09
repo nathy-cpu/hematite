@@ -43,11 +43,15 @@ impl Pager {
                 rollback.savepoints.push(baseline);
                 PagerTransaction::Rollback(rollback)
             }
-            JournalMode::Wal => PagerTransaction::Wal(WalTransaction {
-                wal_next_page_id: self.file_manager.next_page_id(),
-                wal_free_pages: self.file_manager.free_pages().to_vec(),
-                original_checksums: self.page_checksums.clone(),
-            }),
+            JournalMode::Wal => {
+                let visible_state = self.snapshot_wal_visible_state()?;
+                self.page_checksums = visible_state.page_checksums.clone();
+                PagerTransaction::Wal(WalTransaction {
+                    wal_next_page_id: visible_state.visible_next_page_id(),
+                    wal_free_pages: visible_state.free_pages.clone(),
+                    original_checksums: visible_state.page_checksums,
+                })
+            }
         });
         self.transition_state(PagerState::WriterLocked)?;
         if self.journal_mode == JournalMode::Rollback {

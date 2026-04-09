@@ -47,6 +47,77 @@ pub struct VisibleWalState {
     pub page_overrides: HashMap<PageId, Vec<u8>>,
 }
 
+impl VisibleWalState {
+    pub fn from_database_state(
+        file_len: u64,
+        free_pages: Vec<PageId>,
+        page_checksums: HashMap<PageId, u32>,
+    ) -> Self {
+        Self {
+            visible_sequence: 0,
+            file_len,
+            free_pages,
+            page_checksums,
+            page_overrides: HashMap::new(),
+        }
+    }
+
+    pub fn apply_record(&self, record: &WalRecord) -> Result<Self> {
+        if record.sequence <= self.visible_sequence {
+            return Err(HematiteError::StorageError(
+                "WAL sequences must increase strictly".to_string(),
+            ));
+        }
+
+        let visible_next_page_id = visible_next_page_id(record.file_len);
+        let free_page_set = record.free_pages.iter().copied().collect::<HashSet<_>>();
+
+        let mut page_overrides = self.page_overrides.clone();
+        page_overrides.retain(|page_id, _| {
+            *page_id < visible_next_page_id && !free_page_set.contains(page_id)
+        });
+
+        for frame in &record.frames {
+            if frame.data.len() != PAGE_SIZE {
+                return Err(HematiteError::StorageError(format!(
+                    "WAL frame {} has invalid image size {}",
+                    frame.page_id,
+                    frame.data.len()
+                )));
+            }
+            if frame.page_id >= visible_next_page_id {
+                return Err(HematiteError::StorageError(format!(
+                    "WAL frame {} exceeds visible page range",
+                    frame.page_id
+                )));
+            }
+            if free_page_set.contains(&frame.page_id) {
+                return Err(HematiteError::StorageError(format!(
+                    "WAL record {} marks page {} free and dirty",
+                    record.sequence, frame.page_id
+                )));
+            }
+            page_overrides.insert(frame.page_id, frame.data.clone());
+        }
+
+        Ok(Self {
+            visible_sequence: record.sequence,
+            file_len: record.file_len,
+            free_pages: record.free_pages.clone(),
+            page_checksums: record.checksums.iter().copied().collect(),
+            page_overrides,
+        })
+    }
+
+    pub fn visible_next_page_id(&self) -> PageId {
+        visible_next_page_id(self.file_len)
+    }
+
+    pub fn is_page_free(&self, page_id: PageId) -> bool {
+        self.free_pages.contains(&page_id)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WalRecord {
     pub sequence: u64,
@@ -176,21 +247,16 @@ impl WalRecord {
     }
 
     pub fn visible_state_from_records(records: &[Self]) -> Option<VisibleWalState> {
-        let last_record = records.last()?;
-        let mut page_overrides = HashMap::new();
+        let mut visible_state: Option<VisibleWalState> = None;
         for record in records {
-            for frame in &record.frames {
-                page_overrides.insert(frame.page_id, frame.data.clone());
-            }
+            visible_state = Some(match &visible_state {
+                Some(state) => state.apply_record(record).ok()?,
+                None => VisibleWalState::from_database_state(64, Vec::new(), HashMap::new())
+                    .apply_record(record)
+                    .ok()?,
+            });
         }
-
-        Some(VisibleWalState {
-            visible_sequence: last_record.sequence,
-            file_len: last_record.file_len,
-            free_pages: last_record.free_pages.clone(),
-            page_checksums: last_record.checksums.iter().copied().collect(),
-            page_overrides,
-        })
+        visible_state
     }
 
     fn validate_records(records: &[Self]) -> Result<()> {
@@ -317,6 +383,11 @@ impl WalRecord {
             frames,
         })
     }
+}
+
+fn visible_next_page_id(file_len: u64) -> PageId {
+    let page_regions = file_len.saturating_sub(64) / PAGE_SIZE as u64;
+    (page_regions as PageId).max(2)
 }
 
 fn checksum_bytes(bytes: &[u8]) -> u32 {

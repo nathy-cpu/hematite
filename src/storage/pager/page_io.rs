@@ -12,7 +12,26 @@ impl Pager {
 
         if self.journal_mode == JournalMode::Wal {
             if let Some(transaction) = self.active_wal_transaction() {
-                if page_id >= self.file_manager.next_page_id()
+                if transaction.wal_free_pages.contains(&page_id) && page_id < transaction.wal_next_page_id
+                {
+                    return Err(crate::error::HematiteError::StorageError(format!(
+                        "Page {} is deallocated in the active WAL transaction",
+                        page_id
+                    )));
+                }
+
+                let base_visible_next_page_id = self
+                    .latest_wal_state
+                    .as_ref()
+                    .map(|state| state.visible_next_page_id())
+                    .unwrap_or_else(|| self.file_manager.next_page_id());
+                let base_page_is_free = self
+                    .latest_wal_state
+                    .as_ref()
+                    .map(|state| state.is_page_free(page_id))
+                    .unwrap_or_else(|| self.file_manager.free_pages().contains(&page_id));
+
+                if (page_id >= base_visible_next_page_id || base_page_is_free)
                     && page_id < transaction.wal_next_page_id
                 {
                     let page = Page::new(page_id);
@@ -27,6 +46,13 @@ impl Pager {
             .as_ref()
             .or(self.latest_wal_state.as_ref())
         {
+            let visible_next_page_id = state.visible_next_page_id();
+            if page_id >= visible_next_page_id || state.is_page_free(page_id) {
+                return Err(crate::error::HematiteError::StorageError(format!(
+                    "Page {} is not allocated in the current WAL-visible state",
+                    page_id
+                )));
+            }
             if let Some(data) = state.page_overrides.get(&page_id) {
                 let page = Page::from_bytes(page_id, data.clone())?;
                 if let Some(expected_checksum) = state.page_checksums.get(&page_id) {
@@ -41,9 +67,6 @@ impl Pager {
                 self.cache.put(page.clone());
                 return Ok(page);
             }
-            let visible_page_regions =
-                state.file_len.saturating_sub(64) / crate::storage::PAGE_SIZE as u64;
-            let visible_next_page_id = (visible_page_regions as u32).max(2);
             if page_id >= self.file_manager.next_page_id() && page_id < visible_next_page_id {
                 let page = Page::new(page_id);
                 self.cache.put(page.clone());

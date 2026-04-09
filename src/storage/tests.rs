@@ -165,7 +165,8 @@ mod freelist_tests {
 }
 
 mod wal_tests {
-    use crate::storage::wal::{WalFrame, WalRecord};
+    use crate::storage::wal::{VisibleWalState, WalFrame, WalRecord};
+    use std::collections::HashMap;
 
     #[test]
     fn test_wal_record_file_roundtrip() -> crate::error::Result<()> {
@@ -247,6 +248,64 @@ mod wal_tests {
 
         let err = WalRecord::decode_file(&encoded).unwrap_err();
         assert!(err.to_string().contains("checksum mismatch"));
+    }
+
+    #[test]
+    fn test_wal_visible_state_discards_frames_for_pages_freed_later(
+    ) -> crate::error::Result<()> {
+        let live_page_id = 2;
+        let freed_page_id = 3;
+
+        let first = WalRecord {
+            sequence: 1,
+            file_len: 64 + 4 * crate::storage::PAGE_SIZE as u64,
+            free_pages: vec![],
+            checksums: vec![(live_page_id, 11), (freed_page_id, 22)],
+            frames: vec![
+                WalFrame {
+                    page_id: live_page_id,
+                    data: vec![7u8; crate::storage::PAGE_SIZE],
+                },
+                WalFrame {
+                    page_id: freed_page_id,
+                    data: vec![9u8; crate::storage::PAGE_SIZE],
+                },
+            ],
+        };
+        let second = WalRecord {
+            sequence: 2,
+            file_len: 64 + 4 * crate::storage::PAGE_SIZE as u64,
+            free_pages: vec![freed_page_id],
+            checksums: vec![(live_page_id, 33)],
+            frames: vec![WalFrame {
+                page_id: live_page_id,
+                data: vec![5u8; crate::storage::PAGE_SIZE],
+            }],
+        };
+
+        let state = WalRecord::visible_state_from_records(&[first, second])
+            .expect("visible state should exist for committed WAL records");
+        assert_eq!(state.visible_sequence, 2);
+        assert_eq!(state.page_overrides.get(&live_page_id).unwrap()[0], 5);
+        assert!(!state.page_overrides.contains_key(&freed_page_id));
+        Ok(())
+    }
+
+    #[test]
+    fn test_wal_visible_state_apply_record_rejects_non_increasing_sequences() {
+        let state = VisibleWalState::from_database_state(64, Vec::new(), HashMap::new());
+        let err = state
+            .apply_record(&WalRecord {
+                sequence: 0,
+                file_len: 64,
+                free_pages: vec![],
+                checksums: vec![],
+                frames: vec![],
+            })
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("WAL sequences must increase strictly"));
     }
 }
 
@@ -1339,6 +1398,47 @@ mod pager_tests {
         writer.checkpoint_wal()?;
         let mut reopened = Pager::new(test_db.path(), 8)?;
         assert!(reopened.read_page(trailing_page_id).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_latest_wal_reader_does_not_see_freed_page_after_commit(
+    ) -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_latest_wal_reader_does_not_see_freed_page");
+
+        let trailing_page_id = {
+            let mut pager = Pager::new(test_db.path(), 8)?;
+            let first_page_id = pager.allocate_page()?;
+            let trailing_page_id = pager.allocate_page()?;
+
+            let mut first_page = Page::new(first_page_id);
+            first_page.data[0] = 11;
+            pager.write_page(first_page)?;
+
+            let mut trailing_page = Page::new(trailing_page_id);
+            trailing_page.data[0] = 33;
+            pager.write_page(trailing_page)?;
+            pager.flush()?;
+            pager.set_journal_mode(JournalMode::Wal)?;
+            trailing_page_id
+        };
+
+        let mut stale_reader = Pager::new(test_db.path(), 8)?;
+        stale_reader.begin_read()?;
+        assert_eq!(stale_reader.read_page(trailing_page_id)?.data[0], 33);
+
+        let mut writer = Pager::new(test_db.path(), 8)?;
+        writer.begin_transaction()?;
+        writer.deallocate_page(trailing_page_id)?;
+        writer.commit_transaction()?;
+
+        let mut latest_reader = Pager::new(test_db.path(), 8)?;
+        latest_reader.begin_read()?;
+        assert!(latest_reader.read_page(trailing_page_id).is_err());
+        latest_reader.end_read()?;
+
+        assert_eq!(stale_reader.read_page(trailing_page_id)?.data[0], 33);
+        stale_reader.end_read()?;
         Ok(())
     }
 

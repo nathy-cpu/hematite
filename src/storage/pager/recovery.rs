@@ -223,13 +223,11 @@ impl Pager {
             return Ok(state.clone());
         }
 
-        Ok(VisibleWalState {
-            visible_sequence: 0,
-            file_len: self.file_manager.file_len()?,
-            free_pages: self.file_manager.free_pages().to_vec(),
-            page_checksums: self.page_checksums.clone(),
-            page_overrides: HashMap::new(),
-        })
+        Ok(VisibleWalState::from_database_state(
+            self.file_manager.file_len()?,
+            self.file_manager.free_pages().to_vec(),
+            self.page_checksums.clone(),
+        ))
     }
 
     pub(super) fn load_latest_wal_state(&mut self) -> Result<()> {
@@ -599,23 +597,13 @@ impl Pager {
     }
 
     pub(super) fn append_wal_record(&mut self, record: WalRecord) -> Result<()> {
+        let next_state = self.snapshot_wal_visible_state()?.apply_record(&record)?;
+
         if let Some(path) = &self.wal_path {
             WalRecord::append_to_path(path, &record)?;
-        } else {
-            self.latest_wal_state = Some(VisibleWalState {
-                visible_sequence: record.sequence,
-                file_len: record.file_len,
-                free_pages: record.free_pages.clone(),
-                page_checksums: record.checksums.iter().copied().collect(),
-                page_overrides: record
-                    .frames
-                    .iter()
-                    .map(|frame| (frame.page_id, frame.data.clone()))
-                    .collect(),
-            });
-            return Ok(());
         }
 
-        self.load_latest_wal_state()
+        self.latest_wal_state = Some(next_state);
+        Ok(())
     }
 }
