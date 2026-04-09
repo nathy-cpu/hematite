@@ -8,14 +8,12 @@
 //!
 //! ```text
 //! byte offset 0
-//! +-------------------------------+
-//! | 64-byte file header region    |
-//! +-------------------------------+
-//! | logical page 0  | db header   |
 //! +-----------------+-------------+
-//! | logical page 1  | metadata    |
+//! | logical page 1  | db header   |
 //! +-----------------+-------------+
-//! | logical page 2+ | payload     |
+//! | logical page 2  | metadata    |
+//! +-----------------+-------------+
+//! | logical page 3+ | payload     |
 //! +-----------------+-------------+
 //! ```
 //!

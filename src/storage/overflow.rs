@@ -1,31 +1,17 @@
 //! Overflow page chains for large payloads.
 //!
-//! Overflow pages are used when a value cannot fit entirely in the local payload space offered by
-//! its owning page or cell format.
-//!
-//! Page layout:
-//!
-//! ```text
-//! +----------------------+----------------------+-------------------+
-//! | magic "OVR1" (4)     | next page id (4)     | chunk length (4)  |
-//! +----------------------+----------------------+-------------------+
-//! | payload bytes for this chunk                                 |
-//! +--------------------------------------------------------------+
-//! ```
-//!
-//! A chain is a forward-linked list terminated by `INVALID_PAGE_ID`. The helper functions in this
-//! file implement four operations:
-//! - write a payload into a new chain;
-//! - read a chain back into a contiguous byte vector;
-//! - collect/validate the page ids in a chain;
-//! - free the whole chain.
+//! This is the live overflow API used by the tree/value-store layer. The public helper shape stays
+//! the same, but the on-page bytes now use the v3 overflow page format.
 
 use crate::error::{HematiteError, Result};
-use crate::storage::{Page, PageId, Pager, INVALID_PAGE_ID, PAGE_SIZE};
+use crate::storage::overflow_v3::{
+    decode_overflow_chain, encode_overflow_chain, split_payload_into_overflow_chunks,
+    V3OverflowPage, V3_OVERFLOW_PAYLOAD_CAPACITY,
+};
+use crate::storage::{PageId, Pager};
+use std::collections::HashSet;
 
-pub const OVERFLOW_MAGIC: &[u8; 4] = b"OVR1";
-pub const OVERFLOW_HEADER_SIZE: usize = 12; // magic(4) + next_page_id(4) + chunk_len(4)
-pub const OVERFLOW_CHUNK_CAPACITY: usize = PAGE_SIZE - OVERFLOW_HEADER_SIZE;
+pub const OVERFLOW_CHUNK_CAPACITY: usize = V3_OVERFLOW_PAYLOAD_CAPACITY;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OverflowChainReport {
@@ -38,40 +24,17 @@ pub fn write_overflow_chain(storage: &mut Pager, payload: &[u8]) -> Result<Optio
         return Ok(None);
     }
 
-    let mut pages = Vec::new();
-    let mut offset = 0usize;
-
-    while offset < payload.len() {
-        let page_id = storage.allocate_page()?;
-        pages.push(page_id);
-        let take = OVERFLOW_CHUNK_CAPACITY.min(payload.len() - offset);
-        offset += take;
+    let page_count = split_payload_into_overflow_chunks(payload).len();
+    let mut page_ids = Vec::with_capacity(page_count);
+    for _ in 0..page_count {
+        page_ids.push(storage.allocate_page()?);
     }
 
-    let mut cursor = 0usize;
-    let mut payload_offset = 0usize;
-    while cursor < pages.len() {
-        let page_id = pages[cursor];
-        let next_page = if cursor + 1 < pages.len() {
-            pages[cursor + 1]
-        } else {
-            INVALID_PAGE_ID
-        };
-        let chunk_len = OVERFLOW_CHUNK_CAPACITY.min(payload.len() - payload_offset);
-
-        let mut page = Page::new(page_id);
-        page.data[0..4].copy_from_slice(OVERFLOW_MAGIC);
-        page.data[4..8].copy_from_slice(&next_page.to_le_bytes());
-        page.data[8..12].copy_from_slice(&(chunk_len as u32).to_le_bytes());
-        page.data[OVERFLOW_HEADER_SIZE..OVERFLOW_HEADER_SIZE + chunk_len]
-            .copy_from_slice(&payload[payload_offset..payload_offset + chunk_len]);
+    let pages = encode_overflow_chain(&page_ids, payload)?;
+    for page in pages {
         storage.write_page(page)?;
-
-        payload_offset += chunk_len;
-        cursor += 1;
     }
-
-    Ok(pages.first().copied())
+    Ok(page_ids.first().copied())
 }
 
 pub fn read_overflow_chain(
@@ -79,75 +42,15 @@ pub fn read_overflow_chain(
     first_page: Option<PageId>,
     expected_len: usize,
 ) -> Result<Vec<u8>> {
-    if first_page.is_none() {
-        return Ok(Vec::new());
-    }
-
-    let mut out = Vec::with_capacity(expected_len);
-    let mut current = first_page.unwrap_or(INVALID_PAGE_ID);
-    let mut visited = std::collections::HashSet::new();
-
-    while current != INVALID_PAGE_ID && out.len() < expected_len {
-        if !visited.insert(current) {
-            return Err(HematiteError::CorruptedData(
-                "Overflow chain cycle detected".to_string(),
-            ));
-        }
-        let page = storage.read_page(current)?;
-        if &page.data[0..4] != OVERFLOW_MAGIC {
-            return Err(HematiteError::CorruptedData(
-                "Overflow page magic mismatch".to_string(),
-            ));
-        }
-
-        let next_page =
-            u32::from_le_bytes([page.data[4], page.data[5], page.data[6], page.data[7]]);
-        let chunk_len =
-            u32::from_le_bytes([page.data[8], page.data[9], page.data[10], page.data[11]]) as usize;
-        if chunk_len > OVERFLOW_CHUNK_CAPACITY {
-            return Err(HematiteError::CorruptedData(
-                "Overflow chunk length exceeds page capacity".to_string(),
-            ));
-        }
-
-        out.extend_from_slice(&page.data[OVERFLOW_HEADER_SIZE..OVERFLOW_HEADER_SIZE + chunk_len]);
-        current = next_page;
-    }
-
-    if out.len() < expected_len {
-        return Err(HematiteError::CorruptedData(
-            "Overflow chain ended before expected payload length".to_string(),
-        ));
-    }
-    out.truncate(expected_len);
-    Ok(out)
+    let pages = load_overflow_pages(storage, first_page, expected_len)?;
+    decode_overflow_chain(&pages, expected_len)
 }
 
 pub fn free_overflow_chain(storage: &mut Pager, first_page: Option<PageId>) -> Result<()> {
-    let mut current = match first_page {
-        Some(page_id) => page_id,
-        None => return Ok(()),
-    };
-    let mut visited = std::collections::HashSet::new();
-
-    while current != INVALID_PAGE_ID {
-        if !visited.insert(current) {
-            return Err(HematiteError::CorruptedData(
-                "Overflow chain cycle detected while freeing".to_string(),
-            ));
-        }
-        let page = storage.read_page(current)?;
-        if &page.data[0..4] != OVERFLOW_MAGIC {
-            return Err(HematiteError::CorruptedData(
-                "Overflow page magic mismatch while freeing".to_string(),
-            ));
-        }
-        let next_page =
-            u32::from_le_bytes([page.data[4], page.data[5], page.data[6], page.data[7]]);
-        storage.deallocate_page(current)?;
-        current = next_page;
+    let page_ids = collect_overflow_page_ids(storage, first_page)?;
+    for page_id in page_ids {
+        storage.deallocate_page(page_id)?;
     }
-
     Ok(())
 }
 
@@ -168,46 +71,11 @@ pub fn validate_overflow_chain(
         ));
     }
 
-    let mut current = first_page.unwrap_or(INVALID_PAGE_ID);
-    let mut visited = std::collections::HashSet::new();
-    let mut total_payload = 0usize;
-    let mut pages = 0usize;
-
-    while current != INVALID_PAGE_ID && total_payload < expected_len {
-        if !visited.insert(current) {
-            return Err(HematiteError::CorruptedData(
-                "Overflow chain cycle detected during validation".to_string(),
-            ));
-        }
-        let page = storage.read_page(current)?;
-        if &page.data[0..4] != OVERFLOW_MAGIC {
-            return Err(HematiteError::CorruptedData(
-                "Overflow page magic mismatch during validation".to_string(),
-            ));
-        }
-        let next_page =
-            u32::from_le_bytes([page.data[4], page.data[5], page.data[6], page.data[7]]);
-        let chunk_len =
-            u32::from_le_bytes([page.data[8], page.data[9], page.data[10], page.data[11]]) as usize;
-        if chunk_len > OVERFLOW_CHUNK_CAPACITY {
-            return Err(HematiteError::CorruptedData(
-                "Overflow chunk length exceeds page capacity during validation".to_string(),
-            ));
-        }
-        total_payload += chunk_len;
-        pages += 1;
-        current = next_page;
-    }
-
-    if total_payload < expected_len {
-        return Err(HematiteError::CorruptedData(
-            "Overflow chain payload shorter than expected length".to_string(),
-        ));
-    }
-
+    let pages = load_overflow_pages(storage, first_page, expected_len)?;
+    let payload = decode_overflow_chain(&pages, expected_len)?;
     Ok(OverflowChainReport {
-        page_count: pages,
-        payload_len: total_payload,
+        page_count: pages.len(),
+        payload_len: payload.len(),
     })
 }
 
@@ -220,23 +88,61 @@ pub fn collect_overflow_page_ids(
         Some(page_id) => page_id,
         None => return Ok(ids),
     };
-    let mut visited = std::collections::HashSet::new();
+    let mut visited = HashSet::new();
 
-    while current != INVALID_PAGE_ID {
+    while current != 0 {
         if !visited.insert(current) {
             return Err(HematiteError::CorruptedData(
                 "Overflow chain cycle detected while collecting page ids".to_string(),
             ));
         }
+
         let page = storage.read_page(current)?;
-        if &page.data[0..4] != OVERFLOW_MAGIC {
+        if page.data[0] != crate::storage::format::PageKind::Overflow as u8 {
             return Err(HematiteError::CorruptedData(
-                "Overflow page magic mismatch while collecting page ids".to_string(),
+                "Overflow page kind mismatch while collecting page ids".to_string(),
             ));
         }
         ids.push(current);
-        current = u32::from_le_bytes([page.data[4], page.data[5], page.data[6], page.data[7]]);
+        current = u32::from_be_bytes([page.data[4], page.data[5], page.data[6], page.data[7]]);
     }
 
     Ok(ids)
+}
+
+fn load_overflow_pages(
+    storage: &mut Pager,
+    first_page: Option<PageId>,
+    expected_len: usize,
+) -> Result<Vec<crate::storage::Page>> {
+    let mut pages = Vec::new();
+    let mut current = match first_page {
+        Some(page_id) => page_id,
+        None => return Ok(pages),
+    };
+    let mut visited = HashSet::new();
+    let mut remaining = expected_len;
+
+    while current != 0 && remaining > 0 {
+        if !visited.insert(current) {
+            return Err(HematiteError::CorruptedData(
+                "Overflow chain cycle detected".to_string(),
+            ));
+        }
+
+        let page = storage.read_page(current)?;
+        let expected_chunk_len = remaining.min(OVERFLOW_CHUNK_CAPACITY);
+        let decoded = V3OverflowPage::decode(&page, expected_chunk_len)?;
+        remaining = remaining.saturating_sub(decoded.payload_chunk.len());
+        current = decoded.next_page_id;
+        pages.push(page);
+    }
+
+    if remaining > 0 {
+        return Err(HematiteError::CorruptedData(
+            "Overflow chain ended before expected payload length".to_string(),
+        ));
+    }
+
+    Ok(pages)
 }

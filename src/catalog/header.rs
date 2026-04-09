@@ -1,14 +1,14 @@
 //! Database header management for Hematite database.
 //!
 //! M0 storage contract notes:
-//! - The database header is always stored at page 0.
+//! - The database header is always stored at reserved page 1.
 //! - Header versioning is strict: older on-disk versions are rejected.
 //! - Header checksum covers all semantic header fields to detect corruption.
 
 use super::ids::TableId;
 use crate::error::Result;
 
-/// Database header structure stored on page 0.
+/// Database header structure stored on reserved page 1.
 #[derive(Debug, Clone)]
 pub struct DatabaseHeader {
     /// Magic bytes to identify Hematite database files
@@ -31,8 +31,8 @@ impl DatabaseHeader {
     /// Version 2 is the first version after the M0 storage reset that intentionally
     /// breaks compatibility with previous files.
     pub const CURRENT_VERSION: u32 = 2;
-    /// Fixed page ID for database header (consistent with existing implementation)
-    pub const HEADER_PAGE_ID: u32 = 0;
+    /// Fixed reserved page ID for the database header.
+    pub const HEADER_PAGE_ID: u32 = 1;
 
     /// Create a new database header with default values
     pub fn new(schema_root_page: u32) -> Self {

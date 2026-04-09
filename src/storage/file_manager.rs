@@ -8,14 +8,13 @@
 //!
 //! ```text
 //! file offset
-//!   = 64-byte file header
-//!   + (page_id * PAGE_SIZE)
+//!   = (page_id - 1) * PAGE_SIZE
 //! ```
 //!
 //! Reserved logical pages:
-//! - page `0`: database header
-//! - page `1`: storage metadata
-//! - page `2+`: allocatable payload pages
+//! - page `1`: database header
+//! - page `2`: storage metadata
+//! - page `3+`: allocatable payload pages
 //!
 //! Allocation model:
 //! - reuse a page id from the freelist if one exists;
@@ -31,7 +30,10 @@ use crate::storage::format::{
     bootstrap_database_page_one, detect_format_generation, DatabaseHeaderV3, FormatGeneration,
     PageKind,
 };
-use crate::storage::{Page, PageId, PAGE_SIZE, STORAGE_METADATA_PAGE_ID};
+use crate::storage::{
+    file_len_for_next_page_id, next_page_id_for_file_len, Page, PageId, DB_HEADER_PAGE_ID,
+    FIRST_ALLOCATABLE_PAGE_ID, PAGE_SIZE,
+};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -106,36 +108,34 @@ impl FileManager {
     }
 
     fn initialize(&mut self) -> Result<()> {
-        if self.len()? == 0 {
-            self.write_header()?;
+        let file_len = self.len()?;
+        if file_len == 0 {
+            self.initialize_new_file()?;
         } else {
-            self.read_header()?;
+            self.load_existing_file(file_len)?;
         }
         Ok(())
     }
 
-    fn write_header(&mut self) -> Result<()> {
-        self.seek(SeekFrom::Start(0))?;
-        self.write_all(&[0; 64])?; // Fixed file header region.
-        self.next_page_id = 2; // Start page IDs from 2 (page 0 is header, page 1 is metadata)
+    fn initialize_new_file(&mut self) -> Result<()> {
+        self.set_len(file_len_for_next_page_id(FIRST_ALLOCATABLE_PAGE_ID))?;
+        self.next_page_id = FIRST_ALLOCATABLE_PAGE_ID;
+        self.free_list.replace(Vec::new());
         Ok(())
     }
 
-    fn read_header(&mut self) -> Result<()> {
-        let mut header = [0u8; 64];
-        self.seek(SeekFrom::Start(0))?;
-        self.read_exact(&mut header)?;
-
-        // Derive the next allocatable page from the number of page-sized regions after the
-        // 64-byte file header. Reserved pages 0 and 1 imply a minimum next page id of 2.
-        let file_size = self.len()?;
-        let page_regions = file_size.saturating_sub(64) / PAGE_SIZE as u64;
-        self.next_page_id = (page_regions as u32).max(2);
+    fn load_existing_file(&mut self, file_len: u64) -> Result<()> {
+        if file_len % PAGE_SIZE as u64 != 0 {
+            return Err(crate::error::HematiteError::StorageError(format!(
+                "Database file length {file_len} is not page aligned"
+            )));
+        }
+        self.next_page_id = next_page_id_for_file_len(file_len);
         Ok(())
     }
 
     pub fn read_page(&mut self, page_id: PageId) -> Result<Page> {
-        let offset = 64 + (page_id as u64 * PAGE_SIZE as u64);
+        let offset = Self::page_offset(page_id)?;
 
         let mut data = vec![0u8; PAGE_SIZE];
         self.seek(SeekFrom::Start(offset))?;
@@ -184,7 +184,7 @@ impl FileManager {
     }
 
     pub fn write_page(&mut self, page: &Page) -> Result<()> {
-        let offset = 64 + (page.id as u64 * PAGE_SIZE as u64);
+        let offset = Self::page_offset(page.id)?;
 
         self.seek(SeekFrom::Start(offset))?;
         self.write_all(&page.data)?;
@@ -251,8 +251,7 @@ impl FileManager {
 
     pub fn restore_file_len(&mut self, len: u64) -> Result<()> {
         self.set_len(len)?;
-        let page_regions = len.saturating_sub(64) / PAGE_SIZE as u64;
-        self.next_page_id = (page_regions as u32).max(2);
+        self.next_page_id = next_page_id_for_file_len(len);
         Ok(())
     }
 
@@ -267,17 +266,17 @@ impl FileManager {
 
     pub(crate) fn allocated_page_count(&self) -> usize {
         self.next_page_id
-            .saturating_sub(STORAGE_METADATA_PAGE_ID + 1) as usize
+            .saturating_sub(FIRST_ALLOCATABLE_PAGE_ID) as usize
     }
 
     pub(crate) fn trailing_free_page_count(&self) -> usize {
-        if self.next_page_id <= STORAGE_METADATA_PAGE_ID + 1 {
+        if self.next_page_id <= FIRST_ALLOCATABLE_PAGE_ID {
             return 0;
         }
 
         let mut count = 0usize;
         let mut candidate = self.next_page_id;
-        while candidate > STORAGE_METADATA_PAGE_ID + 1 {
+        while candidate > FIRST_ALLOCATABLE_PAGE_ID {
             let page_id = candidate - 1;
             if self.free_list.as_slice().contains(&page_id) {
                 count += 1;
@@ -315,11 +314,11 @@ impl FileManager {
     }
 
     fn compact_trailing_free_pages(&mut self) -> Result<()> {
-        let minimum_next_page_id = STORAGE_METADATA_PAGE_ID + 1;
+        let minimum_next_page_id = FIRST_ALLOCATABLE_PAGE_ID;
         self.free_list
             .compact_trailing_pages(&mut self.next_page_id, minimum_next_page_id);
         let target_next_page_id = self.next_page_id.max(minimum_next_page_id);
-        let target_len = 64 + target_next_page_id as u64 * PAGE_SIZE as u64;
+        let target_len = file_len_for_next_page_id(target_next_page_id);
         let current_len = self.len()?;
 
         if target_len < current_len {
@@ -327,6 +326,16 @@ impl FileManager {
         }
 
         Ok(())
+    }
+
+    fn page_offset(page_id: PageId) -> Result<u64> {
+        if page_id < DB_HEADER_PAGE_ID {
+            return Err(crate::error::HematiteError::StorageError(format!(
+                "Page ids are 1-based; page {} is invalid",
+                page_id
+            )));
+        }
+        Ok(page_id.saturating_sub(1) as u64 * PAGE_SIZE as u64)
     }
 
     fn len(&self) -> Result<u64> {

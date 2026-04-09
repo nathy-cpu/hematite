@@ -42,6 +42,7 @@ mod freelist_tests {
 }
 
 mod wal_tests {
+    use crate::storage::file_len_for_next_page_id;
     use crate::storage::wal::{VisibleWalState, WalFrame, WalRecord};
     use std::collections::HashMap;
 
@@ -49,7 +50,7 @@ mod wal_tests {
     fn test_wal_record_file_roundtrip() -> crate::error::Result<()> {
         let first = WalRecord {
             sequence: 1,
-            file_len: 64 + 3 * crate::storage::PAGE_SIZE as u64,
+            file_len: file_len_for_next_page_id(3),
             free_pages: vec![9, 12],
             checksums: vec![(2, 11), (4, 22)],
             frames: vec![WalFrame {
@@ -59,7 +60,7 @@ mod wal_tests {
         };
         let second = WalRecord {
             sequence: 2,
-            file_len: 64 + 4 * crate::storage::PAGE_SIZE as u64,
+            file_len: file_len_for_next_page_id(4),
             free_pages: vec![12],
             checksums: vec![(2, 33), (4, 44)],
             frames: vec![WalFrame {
@@ -78,7 +79,7 @@ mod wal_tests {
     fn test_wal_decode_ignores_truncated_tail_record() -> crate::error::Result<()> {
         let record = WalRecord {
             sequence: 1,
-            file_len: 64 + 2 * crate::storage::PAGE_SIZE as u64,
+            file_len: file_len_for_next_page_id(2),
             free_pages: vec![8],
             checksums: vec![(2, 99)],
             frames: vec![WalFrame {
@@ -90,7 +91,7 @@ mod wal_tests {
         let mut encoded = WalRecord::encode_file(&[record.clone()])?;
         let mut partial_tail = WalRecord::encode_file(&[WalRecord {
             sequence: 2,
-            file_len: 64 + 3 * crate::storage::PAGE_SIZE as u64,
+            file_len: file_len_for_next_page_id(3),
             free_pages: vec![],
             checksums: vec![(2, 100)],
             frames: vec![WalFrame {
@@ -110,7 +111,7 @@ mod wal_tests {
     fn test_wal_decode_rejects_record_checksum_mismatch() {
         let record = WalRecord {
             sequence: 1,
-            file_len: 64 + 2 * crate::storage::PAGE_SIZE as u64,
+            file_len: file_len_for_next_page_id(2),
             free_pages: vec![],
             checksums: vec![(2, 99)],
             frames: vec![WalFrame {
@@ -134,7 +135,7 @@ mod wal_tests {
 
         let first = WalRecord {
             sequence: 1,
-            file_len: 64 + 4 * crate::storage::PAGE_SIZE as u64,
+            file_len: file_len_for_next_page_id(4),
             free_pages: vec![],
             checksums: vec![(live_page_id, 11), (freed_page_id, 22)],
             frames: vec![
@@ -150,7 +151,7 @@ mod wal_tests {
         };
         let second = WalRecord {
             sequence: 2,
-            file_len: 64 + 4 * crate::storage::PAGE_SIZE as u64,
+            file_len: file_len_for_next_page_id(4),
             free_pages: vec![freed_page_id],
             checksums: vec![(live_page_id, 33)],
             frames: vec![WalFrame {
@@ -169,11 +170,15 @@ mod wal_tests {
 
     #[test]
     fn test_wal_visible_state_apply_record_rejects_non_increasing_sequences() {
-        let state = VisibleWalState::from_database_state(64, Vec::new(), HashMap::new());
+        let state = VisibleWalState::from_database_state(
+            file_len_for_next_page_id(3),
+            Vec::new(),
+            HashMap::new(),
+        );
         let err = state
             .apply_record(&WalRecord {
                 sequence: 0,
-                file_len: 64,
+                file_len: file_len_for_next_page_id(3),
                 free_pages: vec![],
                 checksums: vec![],
                 frames: vec![],
@@ -380,7 +385,7 @@ mod pager_tests {
         let journal = RollbackJournal::decode(&fs::read(&journal_path)?)?;
         assert_eq!(journal.state, JournalState::Active);
         assert_eq!(journal.page_records.len(), 0);
-        assert!(journal.original_file_len >= 64 + 3 * crate::storage::PAGE_SIZE as u64);
+        assert!(journal.original_file_len >= crate::storage::file_len_for_next_page_id(4));
 
         pager.rollback_transaction()?;
         Ok(())
@@ -908,7 +913,7 @@ mod pager_tests {
         wal_page[0] = 20;
         let wal_record = WalRecord {
             sequence: 1,
-            file_len: 64 + 3 * crate::storage::PAGE_SIZE as u64,
+            file_len: crate::storage::file_len_for_next_page_id(4),
             free_pages: vec![],
             checksums: vec![(page_id, checksum_for_test(&wal_page))],
             frames: vec![WalFrame {
@@ -947,7 +952,7 @@ mod pager_tests {
         first_wal_page[0] = 20;
         let first_record = WalRecord {
             sequence: 1,
-            file_len: 64 + 3 * crate::storage::PAGE_SIZE as u64,
+            file_len: crate::storage::file_len_for_next_page_id(4),
             free_pages: vec![],
             checksums: vec![(page_id, checksum_for_test(&first_wal_page))],
             frames: vec![WalFrame {
@@ -965,7 +970,7 @@ mod pager_tests {
         second_wal_page[0] = 30;
         let second_record = WalRecord {
             sequence: 2,
-            file_len: 64 + 3 * crate::storage::PAGE_SIZE as u64,
+            file_len: crate::storage::file_len_for_next_page_id(4),
             free_pages: vec![],
             checksums: vec![(page_id, checksum_for_test(&second_wal_page))],
             frames: vec![WalFrame {
@@ -1337,7 +1342,7 @@ mod pager_tests {
         wal_page[0] = 99;
         let wal_record = WalRecord {
             sequence: 1,
-            file_len: 64 + 3 * crate::storage::PAGE_SIZE as u64,
+            file_len: crate::storage::file_len_for_next_page_id(4),
             free_pages: vec![],
             checksums: vec![(page_id, checksum_for_test(&wal_page))],
             frames: vec![WalFrame {
@@ -1502,7 +1507,7 @@ mod mod_tests {
         assert_eq!(stats.trailing_free_page_count, 0);
         assert!(stats.allocated_page_count >= stats.live_table_page_count + stats.free_page_count);
         assert!(
-            stats.file_bytes >= 64 + (stats.allocated_page_count as u64 + 2) * PAGE_SIZE as u64
+            stats.file_bytes >= (stats.allocated_page_count as u64 + 2) * PAGE_SIZE as u64
         );
         assert!(stats.table_used_bytes > 0);
         assert!(stats.table_unused_bytes < stats.live_table_page_count * PAGE_SIZE);
@@ -1598,7 +1603,8 @@ mod mod_tests {
         assert!(
             message.contains("both live and free")
                 || message.contains("also on the freelist")
-                || message.contains("magic mismatch"),
+                || message.contains("magic mismatch")
+                || message.contains("kind mismatch"),
             "unexpected overlap message: {message}"
         );
 
@@ -1854,7 +1860,7 @@ mod mod_tests {
                 .read(true)
                 .write(true)
                 .open(test_db.path())?;
-            let offset = 64 + (corrupted_page_id as u64 * PAGE_SIZE as u64);
+            let offset = corrupted_page_id.saturating_sub(1) as u64 * PAGE_SIZE as u64;
             file.seek(SeekFrom::Start(offset))?;
             file.write_all(&[9])?;
             file.flush()?;
@@ -1886,7 +1892,7 @@ mod mod_tests {
                 .read(true)
                 .write(true)
                 .open(test_db.path())?;
-            let offset = 64 + (corrupted_page_id as u64 * PAGE_SIZE as u64);
+            let offset = corrupted_page_id.saturating_sub(1) as u64 * PAGE_SIZE as u64;
             file.seek(SeekFrom::Start(offset))?;
             file.write_all(&[9])?;
             file.flush()?;
@@ -2467,7 +2473,7 @@ mod randomized_pager_lifecycle_tests {
                 let page_id = storage.allocate_page()?;
                 let id = page_id;
 
-                assert!(id >= 2, "allocator returned reserved page {}", id);
+                assert!(id >= 3, "allocator returned reserved page {}", id);
                 assert!(
                     !live_pages.contains(&id),
                     "allocator returned an already-live page {}",
@@ -2674,7 +2680,7 @@ mod rowid_table_tests {
             .expect("non-empty payload should allocate overflow chain");
 
         let mut first_page = storage.read_page(first)?;
-        first_page.data[4..8].copy_from_slice(&first.to_le_bytes());
+        first_page.data[4..8].copy_from_slice(&first.to_be_bytes());
         storage.write_page(first_page)?;
 
         let err = validate_overflow_chain(&mut storage, Some(first), payload.len()).unwrap_err();
@@ -2691,11 +2697,11 @@ mod rowid_table_tests {
             .expect("non-empty payload should allocate overflow chain");
 
         let mut first_page = storage.read_page(first)?;
-        first_page.data[4..8].copy_from_slice(&INVALID_PAGE_ID.to_le_bytes());
+        first_page.data[4..8].copy_from_slice(&0u32.to_be_bytes());
         storage.write_page(first_page)?;
 
         let err = validate_overflow_chain(&mut storage, Some(first), payload.len()).unwrap_err();
-        assert!(err.to_string().contains("shorter"));
+        assert!(err.to_string().contains("shorter") || err.to_string().contains("ended before"));
         Ok(())
     }
 

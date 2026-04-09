@@ -35,10 +35,10 @@ overhaul:
 | Milestone | Goal | Status | Evidence | Next Step |
 |---|---|---|---|---|
 | `F0` Overhaul Reset | Explicitly reset the storage effort around a format rewrite instead of behavior-only cleanup | `Done` | The storage plan and board now state that the previous refactor was insufficient because it preserved the old format | Start treating file-format redesign as first-class work |
-| `F1` New Format Specification | Define the new main-file, B-tree page, overflow, rollback journal, and WAL formats before more code churn | `Not Started` | No committed format spec yet for the new storage generation | Write the format contract in detail |
-| `F2` Main File Layout Rewrite | Replace the current file prelude and custom reserved-page assumptions with the new database-file layout | `Not Started` | Current storage still uses the old 64-byte prelude plus page 0/page 1 scheme | Land the new main-file layout and header rules |
-| `F3` Slotted B-tree Pages | Replace contiguous serialized node pages with SQLite-like slotted pages, cell pointers, freeblocks, and fragments | `Not Started` | Current `BTreeNode` format is still the old custom contiguous layout | Implement new page encode/decode and page-local mutation paths |
-| `F4` Overflow Rewrite | Rebuild overflow storage around the new cell model and local-payload split rules | `Not Started` | Current overflow pages still follow the old custom format | Define payload split rules and new overflow pages |
+| `F1` New Format Specification | Define the new main-file, B-tree page, overflow, rollback journal, and WAL formats before more code churn | `Done` | `docs/storage-format-spec.md`, `src/storage/format.rs`, `src/storage/journal_v3.rs`, and `src/storage/wal_v3.rs` now define and test the v3 layout primitives | Keep the runtime cutover aligned with the spec |
+| `F2` Main File Layout Rewrite | Replace the current file prelude and custom reserved-page assumptions with the new database-file layout | `Done` | The live `FileManager`, WAL visibility math, rollback/WAL recovery, and catalog open-create flow now use a page-addressed main file with reserved pages `1` and `2`, and the old 64-byte prelude assumptions are removed from the active path | Carry the new layout assumptions into the remaining durable metadata cleanup work |
+| `F3` Slotted B-tree Pages | Replace contiguous serialized node pages with SQLite-like slotted pages, cell pointers, freeblocks, and fragments | `Done` | `src/btree/node.rs` now serializes and reads live tree pages through the slotted-page model and the library suite passes on that path | Build cursor/read-path optimizations on top of the new page format |
+| `F4` Overflow Rewrite | Rebuild overflow storage around the new cell model and local-payload split rules | `Done` | `src/storage/overflow.rs` now uses the v3 overflow page format, and large-value tree/storage tests pass on reopen, delete, and corruption cases | Remove any remaining assumptions that expect the old overflow bytes |
 | `F5` Real Page Cache | Turn the cache into a production pinned-page cache rather than an owned-page map with metadata | `Not Started` | Current cache metadata exists, but the hot path still revolves around owned `Page` values | Introduce pinned internal page objects and proper pin/unpin use |
 | `F6` Rollback Journal Rewrite | Rebuild rollback journaling against the new page format and page-state model | `Not Started` | Current rollback journal still reflects the old storage format and metadata model | Journal the new page images and new structural metadata correctly |
 | `F7` Sidecar Metadata Removal | Remove `.pager_checksums` and other sidecar-driven durable metadata from the hot path | `Not Started` | Current storage still persists checksum/freelist state through sidecars | Move durable metadata responsibility into the main file and journal/WAL protocols |
@@ -52,6 +52,10 @@ overhaul:
 Finished for the new overhaul:
 
 - `F0` Overhaul Reset
+- `F1` New Format Specification
+- `F2` Main File Layout Rewrite
+- `F3` Slotted B-tree Pages
+- `F4` Overflow Rewrite
 
 Finished as groundwork from the prior campaign:
 
@@ -61,7 +65,7 @@ Finished as groundwork from the prior campaign:
 
 Not finished:
 
-- everything format-defining or format-dependent
+- `F5` onward
 
 ## Important Interpretation
 

@@ -3,7 +3,7 @@ use crate::error::Result;
 use crate::storage::journal::{JournalRecord, JournalState, RollbackJournal};
 use crate::storage::pager::locking::checksum_persist_lock;
 use crate::storage::wal::{VisibleWalState, WalFrame, WalRecord};
-use crate::storage::{Page, PageId, PAGE_SIZE};
+use crate::storage::{file_len_for_next_page_id, Page, PageId, PAGE_SIZE};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -302,7 +302,7 @@ impl Pager {
             return Ok(());
         }
 
-        let page_end = 64 + ((page_id as u64 + 1) * PAGE_SIZE as u64);
+        let page_end = page_id as u64 * PAGE_SIZE as u64;
         if page_end > transaction.original_file_len {
             return Ok(());
         }
@@ -585,7 +585,7 @@ impl Pager {
 
         let record = WalRecord {
             sequence: next_sequence,
-            file_len: 64 + transaction.wal_next_page_id as u64 * PAGE_SIZE as u64,
+            file_len: file_len_for_next_page_id(transaction.wal_next_page_id),
             free_pages: transaction.wal_free_pages.clone(),
             checksums,
             frames,

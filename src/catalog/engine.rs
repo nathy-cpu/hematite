@@ -120,6 +120,7 @@ impl CatalogEngine {
     pub fn read_database_header(&self) -> Result<Option<DatabaseHeader>> {
         self.tree_store()
             .read_reserved_blob(ByteTreeStore::DB_HEADER_PAGE_ID)?
+            .filter(|page| !page.iter().all(|&byte| byte == 0))
             .map(|page| DatabaseHeader::deserialize(&page))
             .transpose()
     }

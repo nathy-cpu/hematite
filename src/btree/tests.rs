@@ -1165,11 +1165,12 @@ mod value_store_tests {
 
 mod tree_tests {
     use crate::btree::node::BTreeNode;
-    use crate::btree::node::{BTREE_PAGE_FORMAT_VERSION, BTREE_PAGE_HEADER_SIZE};
+    use crate::btree::node::BTREE_PAGE_HEADER_SIZE;
     use crate::btree::tree::BTreeManager;
     use crate::btree::{BTreeKey, BTreeValue, NodeType};
     use crate::error::Result;
-    use crate::storage::{Page, Pager, PAGE_SIZE};
+    use crate::storage::format::DATABASE_HEADER_SIZE;
+    use crate::storage::{Page, Pager};
 
     #[test]
     fn test_btree_key_comparison() {
@@ -1325,24 +1326,27 @@ mod tree_tests {
 
     #[test]
     fn test_btree_page_rejects_unsupported_version() -> Result<()> {
-        let page_id = 1;
+        let page_id = 2;
         let mut node = BTreeNode::new_leaf(page_id);
         node.keys.push(BTreeKey::new(vec![1, 2, 3]));
         node.values.push(BTreeValue::new(vec![7, 8, 9]));
 
         let mut page = Page::new(page_id);
         BTreeNode::to_page(&node, &mut page)?;
-        page.data[4] = BTREE_PAGE_FORMAT_VERSION.saturating_add(1);
+        page.data[0] = 0xFF;
 
         let err = BTreeNode::from_page_decoded(page).unwrap_err();
-        assert!(err.to_string().contains("Unsupported B-tree version"));
+        assert!(
+            err.to_string().contains("Unknown v3 page kind byte")
+                || err.to_string().contains("Unsupported B-tree page kind")
+        );
 
         Ok(())
     }
 
     #[test]
     fn test_btree_page_rejects_invalid_payload_length() -> Result<()> {
-        let page_id = 1;
+        let page_id = 2;
         let mut node = BTreeNode::new_leaf(page_id);
         node.keys.push(BTreeKey::new(vec![1, 2, 3]));
         node.values.push(BTreeValue::new(vec![7, 8, 9]));
@@ -1350,13 +1354,14 @@ mod tree_tests {
         let mut page = Page::new(page_id);
         BTreeNode::to_page(&node, &mut page)?;
 
-        // Corrupt payload_len to exceed page boundary.
-        page.data[14..18].copy_from_slice(&((PAGE_SIZE as u32) + 1).to_le_bytes());
+        // Corrupt cell-content start so the pointer area overlaps it.
+        page.data[5..7].copy_from_slice(&1u16.to_be_bytes());
         let err = BTreeNode::from_page_decoded(page).unwrap_err();
-        assert!(err.to_string().contains("Payload length"));
+        assert!(err.to_string().contains("pointer area overlaps cell content"));
 
         // Keep a guard that the header offset contract is stable.
-        assert_eq!(BTREE_PAGE_HEADER_SIZE, 18);
+        assert_eq!(BTREE_PAGE_HEADER_SIZE, 8);
+        assert_eq!(DATABASE_HEADER_SIZE, 100);
 
         Ok(())
     }

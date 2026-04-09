@@ -26,7 +26,10 @@
 //! their read scope begins.
 
 use crate::error::{HematiteError, Result};
-use crate::storage::{PageId, PAGE_SIZE};
+use crate::storage::{
+    file_len_for_next_page_id, next_page_id_for_file_len, PageId, DB_HEADER_PAGE_ID,
+    FIRST_ALLOCATABLE_PAGE_ID, PAGE_SIZE,
+};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -72,6 +75,12 @@ impl VisibleWalState {
         let visible_next_page_id = visible_next_page_id(record.file_len);
         let free_page_set = record.free_pages.iter().copied().collect::<HashSet<_>>();
 
+        if free_page_set.iter().any(|page_id| *page_id < DB_HEADER_PAGE_ID) {
+            return Err(HematiteError::StorageError(
+                "WAL free-page set contains invalid 0 page id".to_string(),
+            ));
+        }
+
         let mut page_overrides = self.page_overrides.clone();
         page_overrides.retain(|page_id, _| {
             *page_id < visible_next_page_id && !free_page_set.contains(page_id)
@@ -84,6 +93,11 @@ impl VisibleWalState {
                     frame.page_id,
                     frame.data.len()
                 )));
+            }
+            if frame.page_id < DB_HEADER_PAGE_ID {
+                return Err(HematiteError::StorageError(
+                    "WAL frame page ids must be 1-based".to_string(),
+                ));
             }
             if frame.page_id >= visible_next_page_id {
                 return Err(HematiteError::StorageError(format!(
@@ -114,7 +128,9 @@ impl VisibleWalState {
     }
 
     pub fn contains_page(&self, page_id: PageId) -> bool {
-        page_id < self.visible_next_page_id() && !self.is_page_free(page_id)
+        page_id >= DB_HEADER_PAGE_ID
+            && page_id < self.visible_next_page_id()
+            && !self.is_page_free(page_id)
     }
 
     pub fn is_page_free(&self, page_id: PageId) -> bool {
@@ -263,9 +279,13 @@ impl WalRecord {
         for record in records {
             visible_state = Some(match &visible_state {
                 Some(state) => state.apply_record(record).ok()?,
-                None => VisibleWalState::from_database_state(64, Vec::new(), HashMap::new())
-                    .apply_record(record)
-                    .ok()?,
+                None => VisibleWalState::from_database_state(
+                    file_len_for_next_page_id(FIRST_ALLOCATABLE_PAGE_ID),
+                    Vec::new(),
+                    HashMap::new(),
+                )
+                .apply_record(record)
+                .ok()?,
             });
         }
         visible_state
@@ -283,6 +303,11 @@ impl WalRecord {
 
             let mut seen_frames = HashSet::new();
             for frame in &record.frames {
+                if frame.page_id < DB_HEADER_PAGE_ID {
+                    return Err(HematiteError::StorageError(
+                        "WAL frame page ids must be 1-based".to_string(),
+                    ));
+                }
                 if !seen_frames.insert(frame.page_id) {
                     return Err(HematiteError::StorageError(format!(
                         "WAL record {} contains duplicate frame for page {}",
@@ -398,8 +423,7 @@ impl WalRecord {
 }
 
 fn visible_next_page_id(file_len: u64) -> PageId {
-    let page_regions = file_len.saturating_sub(64) / PAGE_SIZE as u64;
-    (page_regions as PageId).max(2)
+    next_page_id_for_file_len(file_len)
 }
 
 fn checksum_bytes(bytes: &[u8]) -> u32 {

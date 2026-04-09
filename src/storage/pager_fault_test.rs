@@ -1,6 +1,6 @@
 use crate::error::Result;
 use crate::storage::pager::{Pager, PagerState};
-use crate::storage::types::{Page, DB_HEADER_PAGE_ID};
+use crate::storage::types::{Page, DB_HEADER_PAGE_ID, FIRST_ALLOCATABLE_PAGE_ID};
 use crate::storage::wal::{WalFrame, WalRecord};
 use crate::storage::JournalMode;
 use crate::test_utils::TestDbFile;
@@ -47,7 +47,7 @@ fn test_pager_recovery_from_error_state_via_rollback() -> Result<()> {
     // Create initial DB
     {
         let mut pager = Pager::new(&test_db, 10)?;
-        let mut page = Page::new(2); // Some payload page
+        let mut page = Page::new(FIRST_ALLOCATABLE_PAGE_ID); // Some payload page
         page.data[0] = 1;
         pager.write_page(page)?;
         pager.flush()?;
@@ -56,7 +56,7 @@ fn test_pager_recovery_from_error_state_via_rollback() -> Result<()> {
     let mut pager = Pager::new(&test_db, 10)?;
     pager.begin_transaction()?;
 
-    let mut page = Page::new(2);
+    let mut page = Page::new(FIRST_ALLOCATABLE_PAGE_ID);
     page.data[0] = 2;
     pager.write_page(page)?;
 
@@ -78,7 +78,7 @@ fn test_pager_recovery_from_error_state_via_rollback() -> Result<()> {
     assert_eq!(pager.state(), PagerState::Open);
 
     // Should be able to read the original value now
-    let restored_page = pager.read_page(2)?;
+    let restored_page = pager.read_page(FIRST_ALLOCATABLE_PAGE_ID)?;
     assert_eq!(restored_page.data[0], 1);
 
     Ok(())
@@ -259,7 +259,7 @@ fn test_pager_reopen_ignores_truncated_wal_tail_after_committed_state() -> Resul
 
     let partial_tail = WalRecord::encode_file(&[WalRecord {
         sequence: 2,
-        file_len: 64 + 3 * crate::storage::PAGE_SIZE as u64,
+        file_len: crate::storage::file_len_for_next_page_id(page_id + 1),
         free_pages: vec![],
         checksums: vec![(page_id, 123)],
         frames: vec![WalFrame {

@@ -14,7 +14,7 @@
 //!
 //! Core invariants:
 //! - the in-memory schema is authoritative while a catalog operation is running;
-//! - `schema_root` always names the durable schema tree recorded in page 0;
+//! - `schema_root` always names the durable schema tree recorded in the reserved header page;
 //! - schema contents are written before the header is repointed at a new schema root;
 //! - transaction rollback restores both the schema snapshot and the engine snapshot.
 

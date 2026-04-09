@@ -1,16 +1,17 @@
 use super::Pager;
 use crate::error::Result;
-use crate::storage::{Page, PagerIntegrityReport, DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID};
+use crate::storage::{
+    next_page_id_for_file_len, Page, PagerIntegrityReport, DB_HEADER_PAGE_ID,
+    STORAGE_METADATA_PAGE_ID,
+};
 use std::collections::HashSet;
 
 impl Pager {
     pub fn validate_integrity(&mut self) -> Result<PagerIntegrityReport> {
         let (max_page_id_exclusive, logical_free_pages, logical_checksums, wal_overrides) =
             if let Some(state) = &self.latest_wal_state {
-                let page_regions =
-                    state.file_len.saturating_sub(64) / crate::storage::PAGE_SIZE as u64;
                 (
-                    (page_regions as u32).max(2),
+                    next_page_id_for_file_len(state.file_len),
                     state.free_pages.clone(),
                     state.page_checksums.clone(),
                     state.page_overrides.clone(),
