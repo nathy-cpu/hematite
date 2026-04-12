@@ -155,7 +155,7 @@ impl BTreeIndex {
 
         match node.node_type {
             NodeType::Leaf => {
-                let mut page = Page::from_bytes(shared.id, shared.data.clone())?;
+                let mut page = pager.take_page_for_write(shared.id)?;
 
                 if node.try_update_leaf_in_place(&mut page, &key, &value)? {
                     pager.write_page(page)?;
@@ -208,7 +208,7 @@ impl BTreeIndex {
                         && node.can_insert_key_child(&split_key)
                     {
                         node.insert_internal(split_key, split_page_id)?;
-                        let mut page = Page::from_bytes(shared.id, shared.data.clone())?;
+                        let mut page = pager.take_page_for_write(shared.id)?;
                         node.to_page(&mut page)?;
                         pager.write_page(page)?;
                         Ok(None)
@@ -300,7 +300,7 @@ impl BTreeIndex {
         if lazy_node.node_type == NodeType::Leaf {
             if let Some(index) = lazy_node.exact_key_index(key) {
                 let value = lazy_node.get_value_procedural(index)?;
-                let mut page = Page::from_bytes(shared.id, shared.data.clone())?;
+                let mut page = pager.take_page_for_write(shared.id)?;
                 lazy_node.try_remove_cell_in_place(&mut page, index)?;
                 pager.write_page(page)?;
                 return Ok(Some(value));

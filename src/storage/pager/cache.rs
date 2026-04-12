@@ -167,7 +167,11 @@ impl PageCache {
             .get(&page_id)
             .map(|entry| entry.meta.dirty)
             .unwrap_or(false);
-        let meta = &mut self.entries.get_mut(&page_id).expect("entry should exist").meta;
+        let meta = &mut self
+            .entries
+            .get_mut(&page_id)
+            .expect("entry should exist")
+            .meta;
         if !meta.dirty {
             meta.dirty_sequence = Some(self.next_dirty_sequence);
             self.next_dirty_sequence = self.next_dirty_sequence.saturating_add(1);
@@ -207,7 +211,10 @@ impl PageCache {
         let mut current = self.dirty_head;
         while let Some(page_id) = current {
             dirty.push(page_id);
-            current = self.entries.get(&page_id).and_then(|entry| entry.dirty_next);
+            current = self
+                .entries
+                .get(&page_id)
+                .and_then(|entry| entry.dirty_next);
         }
         dirty
     }
@@ -374,6 +381,23 @@ impl PageCache {
             },
         );
         self.attach_lru_front(page_id);
+    }
+
+    /// Return an owned `Page` ready for in-place mutation by callers.
+    /// This implements a simple copy-on-write helper at the cache level:
+    /// - ensures a cache entry exists for `page_id`;
+    /// - marks the cached entry as writeable;
+    /// - returns a cloned `Page` (caller can mutate and then call `put`/write back).
+    ///
+    /// Note: this does not attempt in-place mutation of the cached Arc; it hands the
+    /// caller an owned copy. Higher-level pager APIs can use this to avoid calling
+    /// `entry.page.as_ref().clone()` at call sites and centralize the copy behavior.
+    pub(crate) fn take_page_for_write(&mut self, page_id: PageId) -> Page {
+        self.ensure_entry(page_id);
+        let entry = self.entries.get_mut(&page_id).expect("entry should exist");
+        entry.meta.writeable = true;
+        // Clone the page bytes into an owned Page that the caller can mutate.
+        (*entry.page).clone()
     }
 
     fn attach_lru_front(&mut self, page_id: PageId) {

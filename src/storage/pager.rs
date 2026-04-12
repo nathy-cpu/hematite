@@ -321,6 +321,24 @@ impl Pager {
             .as_ref()
             .or(self.latest_wal_state.as_ref())
     }
+
+    /// Prepare a page for in-place mutation.
+    /// Captures original page image (for rollback journals) and returns an owned `Page`
+    /// that callers may mutate and then write back using `write_page`.
+    pub(crate) fn take_page_for_write(&mut self, page_id: PageId) -> Result<Page> {
+        // Ensure pager healthy.
+        self.check_error_state()?;
+
+        // Capture original page image so rollback journaling has baseline if needed.
+        // This mirrors the behavior in `write_page` which snapshots original before
+        // mutation. Doing it here avoids races where caller mutates without baseline.
+        self.snapshot_original_page(page_id)?;
+
+        // Ask cache for an owned Page ready for mutation (copy-on-write).
+        let page = self.cache.take_page_for_write(page_id);
+
+        Ok(page)
+    }
 }
 
 impl Drop for Pager {
