@@ -33,8 +33,8 @@
 //! That extra indirection is what keeps overflow handling generic instead of pushing it into the
 //! catalog or table code.
 
-use std::collections::HashSet;
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -114,7 +114,22 @@ impl ByteTreeStore {
         let mut pager = self.lock_storage()?;
         match pager.read_page_shared(page_id) {
             Ok(page) => Ok(Some(page.data.clone())),
-            Err(_) => Ok(None),
+            Err(err) => {
+                // Only map clearly "page missing / deallocated" conditions to Ok(None).
+                // For other errors (IO, checksum, corruption), propagate the error.
+                use crate::error::HematiteError;
+                match err {
+                    HematiteError::StorageError(ref msg)
+                        if msg.contains("not allocated")
+                            || msg.contains("is deallocated")
+                            || msg.contains("not allocated in the current WAL-visible state")
+                            || msg.contains("is deallocated in the active WAL transaction") =>
+                    {
+                        Ok(None)
+                    }
+                    other => Err(other),
+                }
+            }
         }
     }
 

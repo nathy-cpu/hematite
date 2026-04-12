@@ -14,6 +14,7 @@
 
 use crate::btree::cursor::BTreeCursor;
 use crate::btree::node::BTreeNode;
+#[cfg(test)]
 use crate::btree::node::SearchResult;
 use crate::btree::KeyValueCodec;
 use crate::btree::{BTreeKey, BTreeValue, NodeType};
@@ -114,7 +115,11 @@ impl BTreeIndex {
         let original_root_page_id = self.root_page_id;
 
         let storage_arc = self.storage.clone();
-        let mut pager = storage_arc.lock().map_err(|_| crate::error::HematiteError::InternalError("B-tree index storage mutex is poisoned".to_string()))?;
+        let mut pager = storage_arc.lock().map_err(|_| {
+            crate::error::HematiteError::InternalError(
+                "B-tree index storage mutex is poisoned".to_string(),
+            )
+        })?;
 
         let result = self.insert_recursive(&mut pager, self.root_page_id, key, value)?;
 
@@ -145,12 +150,19 @@ impl BTreeIndex {
         key: BTreeKey,
         value: BTreeValue,
     ) -> Result<Option<(BTreeKey, PageId)>> {
-        let mut page = pager.read_page(page_id)?;
-        let mut node = BTreeNode::from_page(page.clone())?;
+        let shared = pager.read_page_shared(page_id)?;
+        let mut node = BTreeNode::from_shared_page(shared.clone())?;
 
         match node.node_type {
             NodeType::Leaf => {
+                let mut page = Page::from_bytes(shared.id, shared.data.clone())?;
+
                 if node.try_update_leaf_in_place(&mut page, &key, &value)? {
+                    pager.write_page(page)?;
+                    return Ok(None);
+                }
+
+                if node.try_insert_leaf_in_place(&mut page, &key, &value)? {
                     pager.write_page(page)?;
                     return Ok(None);
                 }
@@ -165,9 +177,8 @@ impl BTreeIndex {
                         && node.can_insert_key_value(&key, &value)
                     {
                         node.insert_leaf(key, value)?;
-                        let mut write_page = Page::new(page_id);
-                        node.to_page(&mut write_page)?;
-                        pager.write_page(write_page)?;
+                        node.to_page(&mut page)?;
+                        pager.write_page(page)?;
                         return Ok(None);
                     }
 
@@ -175,18 +186,12 @@ impl BTreeIndex {
                     return Ok(Some((new_key, new_page_id)));
                 }
 
-                // If not an update, try in-place insert on the ORIGINAL page
-                // (Since we have the decoded vec, we can just check if we CAN do it by trying it on 'page')
-                if node.try_insert_leaf_in_place(&mut page, &key, &value)? {
-                    pager.write_page(page)?;
-                    return Ok(None);
-                }
-
-                if node.keys.len() < crate::btree::node::MAX_KEYS && node.can_insert_key_value(&key, &value) {
+                if node.keys.len() < crate::btree::node::MAX_KEYS
+                    && node.can_insert_key_value(&key, &value)
+                {
                     node.insert_leaf(key, value)?;
-                    let mut write_page = Page::new(page_id);
-                    node.to_page(&mut write_page)?;
-                    pager.write_page(write_page)?;
+                    node.to_page(&mut page)?;
+                    pager.write_page(page)?;
                     Ok(None)
                 } else {
                     let (new_key, new_page_id) = node.split_leaf(pager, key, value)?;
@@ -199,11 +204,13 @@ impl BTreeIndex {
 
                 if let Some((split_key, split_page_id)) = split_result {
                     node.decode()?; // Mutation needed
-                    if node.keys.len() < crate::btree::node::MAX_KEYS && node.can_insert_key_child(&split_key) {
+                    if node.keys.len() < crate::btree::node::MAX_KEYS
+                        && node.can_insert_key_child(&split_key)
+                    {
                         node.insert_internal(split_key, split_page_id)?;
-                        let mut write_page = Page::new(page_id);
-                        node.to_page(&mut write_page)?;
-                        pager.write_page(write_page)?;
+                        let mut page = Page::from_bytes(shared.id, shared.data.clone())?;
+                        node.to_page(&mut page)?;
+                        pager.write_page(page)?;
                         Ok(None)
                     } else {
                         let (new_key, new_page_id) =
@@ -217,7 +224,12 @@ impl BTreeIndex {
         }
     }
 
-    fn create_new_root(&mut self, pager: &mut Pager, key: BTreeKey, right_page_id: PageId) -> Result<()> {
+    fn create_new_root(
+        &mut self,
+        pager: &mut Pager,
+        key: BTreeKey,
+        right_page_id: PageId,
+    ) -> Result<()> {
         let left_child_page_id = pager.allocate_page()?;
         let root_snapshot = pager.read_page(self.root_page_id)?;
         let mut left_child_page = Page::new(left_child_page_id);
@@ -239,9 +251,13 @@ impl BTreeIndex {
         key: &BTreeKey,
     ) -> Result<(Option<BTreeValue>, TreeMutation)> {
         let original_root_page_id = self.root_page_id;
-        
+
         let storage_arc = self.storage.clone();
-        let mut pager = storage_arc.lock().map_err(|_| crate::error::HematiteError::InternalError("B-tree index storage mutex is poisoned".to_string()))?;
+        let mut pager = storage_arc.lock().map_err(|_| {
+            crate::error::HematiteError::InternalError(
+                "B-tree index storage mutex is poisoned".to_string(),
+            )
+        })?;
 
         let result = self.delete_recursive(&mut pager, self.root_page_id, key)?;
         if let Some(new_root) = self.check_root_underflow(&mut pager)? {
@@ -273,13 +289,18 @@ impl BTreeIndex {
         BTreeCursor::new(self.storage.clone(), self.root_page_id)
     }
 
-    fn delete_recursive(&mut self, pager: &mut Pager, page_id: PageId, key: &BTreeKey) -> Result<Option<BTreeValue>> {
-        let mut page = pager.read_page(page_id)?;
-
-        let mut lazy_node = BTreeNode::from_page(page.clone())?;
+    fn delete_recursive(
+        &mut self,
+        pager: &mut Pager,
+        page_id: PageId,
+        key: &BTreeKey,
+    ) -> Result<Option<BTreeValue>> {
+        let shared = pager.read_page_shared(page_id)?;
+        let mut lazy_node = BTreeNode::from_shared_page(shared.clone())?;
         if lazy_node.node_type == NodeType::Leaf {
             if let Some(index) = lazy_node.exact_key_index(key) {
                 let value = lazy_node.get_value_procedural(index)?;
+                let mut page = Page::from_bytes(shared.id, shared.data.clone())?;
                 lazy_node.try_remove_cell_in_place(&mut page, index)?;
                 pager.write_page(page)?;
                 return Ok(Some(value));
@@ -287,7 +308,7 @@ impl BTreeIndex {
             return Ok(None);
         }
 
-        let mut node = BTreeNode::from_page_decoded(page)?;
+        let mut node = BTreeNode::from_shared_page_decoded(shared)?;
 
         let result = match node.node_type {
             NodeType::Leaf => unreachable!(),
@@ -300,9 +321,9 @@ impl BTreeIndex {
                     self.rebalance_node(pager, &mut node, child_index)?;
                 }
 
-                let mut write_page = Page::new(page_id);
-                node.to_page(&mut write_page)?;
-                pager.write_page(write_page)?;
+                let mut page = Page::new(page_id);
+                node.to_page(&mut page)?;
+                pager.write_page(page)?;
                 deleted_value
             }
         };
@@ -311,9 +332,9 @@ impl BTreeIndex {
     }
 
     fn check_root_underflow(&mut self, pager: &mut Pager) -> Result<Option<PageId>> {
-        let page = pager.read_page(self.root_page_id)?;
+        let shared = pager.read_page_shared(self.root_page_id)?;
         // Underflow check needs decoded node to check lengths
-        let node = BTreeNode::from_page_decoded(page)?;
+        let node = BTreeNode::from_shared_page_decoded(shared)?;
 
         if node.keys.is_empty() && !node.children.is_empty() {
             let child_page_id = node.children[0];
@@ -329,12 +350,17 @@ impl BTreeIndex {
     }
 
     fn is_child_underflow(&mut self, pager: &mut Pager, child_page_id: PageId) -> Result<bool> {
-        let page = pager.read_page(child_page_id)?;
-        let node = BTreeNode::from_page_decoded(page)?;
+        let shared = pager.read_page_shared(child_page_id)?;
+        let node = BTreeNode::from_shared_page_decoded(shared)?;
         Ok(node.is_underflow())
     }
 
-    fn rebalance_node(&mut self, pager: &mut Pager, parent: &mut BTreeNode, child_index: usize) -> Result<()> {
+    fn rebalance_node(
+        &mut self,
+        pager: &mut Pager,
+        parent: &mut BTreeNode,
+        child_index: usize,
+    ) -> Result<()> {
         if child_index > 0 {
             let left_sibling_id = parent.children[child_index - 1];
             if self.try_borrow_from_left_sibling(pager, parent, child_index, left_sibling_id)? {

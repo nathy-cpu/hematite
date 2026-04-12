@@ -361,8 +361,7 @@ fn synthesize_v3_frames(
     if base_page.len() != PAGE_SIZE {
         base_page = vec![0; PAGE_SIZE];
     }
-    let metadata_page_bytes =
-        metadata_page::write_pager_metadata(&base_page, metadata_payload.as_bytes())?;
+    let metadata_page_bytes = metadata_page::write_pager_metadata(&base_page, &metadata_payload)?;
 
     let mut v3_frames = Vec::with_capacity(frames.len() + 1);
     let mut saw_metadata_page = false;
@@ -398,8 +397,7 @@ fn synthesize_v3_frames(
 
 fn parse_metadata_page(bytes: &[u8]) -> Option<PersistedPagerState> {
     let metadata_bytes = metadata_page::read_pager_metadata(bytes).ok()??;
-    let metadata_str = String::from_utf8(metadata_bytes).ok()?;
-    PersistedPagerState::decode(&metadata_str, 1).ok()
+    PersistedPagerState::decode_bytes(&metadata_bytes, 1).ok()
 }
 
 fn visible_next_page_id(file_len: u64) -> PageId {

@@ -16,10 +16,10 @@ use crate::btree::page_format::{
 use crate::btree::{BTreeKey, BTreeValue, NodeType, BTREE_ORDER};
 use crate::error::{HematiteError, Result};
 use crate::storage::format::{PageKind, DATABASE_HEADER_SIZE};
-use crate::storage::{Page, PageId, Pager, PAGE_SIZE};
-use std::sync::Arc;
 #[cfg(test)]
 use crate::storage::INVALID_PAGE_ID;
+use crate::storage::{Page, PageId, Pager, PAGE_SIZE};
+use std::sync::Arc;
 
 pub const MAX_KEY_SIZE: usize = 256;
 pub const MAX_VALUE_SIZE: usize = 1024;
@@ -145,7 +145,10 @@ impl BTreeNode {
         if !matches!(self.node_type, NodeType::Leaf) {
             return false;
         }
-        self.estimate_serialized_size() + leaf_cell_size(key, value) + 2 + page_header_offset(self.page_id)
+        self.estimate_serialized_size()
+            + leaf_cell_size(key, value)
+            + 2
+            + page_header_offset(self.page_id)
             <= PAGE_SIZE
     }
 
@@ -201,23 +204,18 @@ impl BTreeNode {
             .collect::<Result<Vec<_>>>()?;
 
         // Validate the cells before returning a lazy node.
-        let cell_ranges = node.cell_ranges()?;
+        // Use cell_range_for_index to avoid relying on a large offset-indexed table.
         match node.node_type {
             NodeType::Leaf => {
-                for &offset in &node.cell_offsets {
-                    let (start, end) = cell_ranges[offset as usize];
+                for (i, &offset) in node.cell_offsets.iter().enumerate() {
+                    let (start, end) = node.cell_range_for_index(i)?;
                     parse_leaf_cell(&page.data[start..end])?;
                 }
             }
             NodeType::Internal => {
-                for &offset in &node.cell_offsets {
-                    let (start, end) = cell_ranges[offset as usize];
+                for (i, &offset) in node.cell_offsets.iter().enumerate() {
+                    let (start, end) = node.cell_range_for_index(i)?;
                     parse_internal_cell(&page.data[start..end])?;
-                }
-                if header.rightmost_child.unwrap_or(0) == 0 {
-                    return Err(HematiteError::CorruptedData(
-                        "Internal node is missing its rightmost child".to_string(),
-                    ));
                 }
             }
         }
@@ -247,33 +245,32 @@ impl BTreeNode {
             .as_ref()
             .ok_or_else(|| HematiteError::CorruptedData("Missing raw page".to_string()))?;
         let header = BTreePageHeaderV3::parse(page, is_page_one(self.page_id))?;
-        let cell_ranges = self.cell_ranges()?;
-
-        self.keys.clear();
-        self.children.clear();
-        self.values.clear();
 
         match self.node_type {
             NodeType::Leaf => {
-                for &offset in &self.cell_offsets {
-                    let (start, end) = cell_ranges[offset as usize];
+                for (i, &offset) in self.cell_offsets.iter().enumerate() {
+                    let (start, end) = self.cell_range_for_index(i)?;
                     let (key, value) = parse_leaf_cell(&page.data[start..end])?;
                     self.keys.push(key);
                     self.values.push(value);
                 }
             }
             NodeType::Internal => {
-                for &offset in &self.cell_offsets {
-                    let (start, end) = cell_ranges[offset as usize];
+                for (i, &offset) in self.cell_offsets.iter().enumerate() {
+                    let (start, end) = self.cell_range_for_index(i)?;
                     let (left_child, key) = parse_internal_cell(&page.data[start..end])?;
                     self.children.push(left_child);
                     self.keys.push(key);
                 }
-                self.children.push(header.rightmost_child.unwrap_or(0));
+                let rightmost = header.rightmost_child.unwrap_or(0);
+                if rightmost == 0 {
+                    return Err(HematiteError::CorruptedData(
+                        "Internal node is missing its rightmost child".to_string(),
+                    ));
+                }
+                self.children.push(rightmost);
             }
         }
-
-        self.key_count = self.keys.len();
         self.is_decoded = true;
         Ok(())
     }
@@ -416,19 +413,15 @@ impl BTreeNode {
         for (index, cell) in cell_bytes.iter().enumerate().rev() {
             content_start -= cell.len();
             page.data[content_start..content_start + cell.len()].copy_from_slice(cell);
-            write_u16_be(&mut page.data, pointer_area_start + index * 2, content_start as u16);
+            write_u16_be(
+                &mut page.data,
+                pointer_area_start + index * 2,
+                content_start as u16,
+            );
         }
 
-        write_u16_be(
-            &mut page.data,
-            header_offset + 3,
-            self.keys.len() as u16,
-        );
-        write_u16_be(
-            &mut page.data,
-            header_offset + 5,
-            content_start as u16,
-        );
+        write_u16_be(&mut page.data, header_offset + 3, self.keys.len() as u16);
+        write_u16_be(&mut page.data, header_offset + 5, content_start as u16);
         page.data[header_offset + 7] = 0;
         if self.node_type == NodeType::Internal {
             write_u32_be(
@@ -541,11 +534,7 @@ impl BTreeNode {
 
     /// Try to remove a cell at `index` directly on the page bytes without
     /// a full decode + rebuild.  Returns `true` if successful.
-    pub fn try_remove_cell_in_place(
-        &mut self,
-        page: &mut Page,
-        index: usize,
-    ) -> Result<bool> {
+    pub fn try_remove_cell_in_place(&mut self, page: &mut Page, index: usize) -> Result<bool> {
         if index >= self.key_count {
             return Ok(false);
         }
@@ -587,11 +576,15 @@ impl BTreeNode {
 
     #[cfg(test)]
     fn search_internal(&self, key: &BTreeKey) -> SearchResult {
-        SearchResult::NotFound(self.get_child_procedural(self.upper_bound_index(key)).unwrap())
+        SearchResult::NotFound(
+            self.get_child_procedural(self.upper_bound_index(key))
+                .unwrap(),
+        )
     }
 
     pub fn find_child(&self, key: &BTreeKey) -> PageId {
-        self.get_child_procedural(self.upper_bound_index(key)).unwrap()
+        self.get_child_procedural(self.upper_bound_index(key))
+            .unwrap()
     }
 
     pub fn insert_leaf(&mut self, key: BTreeKey, value: BTreeValue) -> Result<()> {
@@ -941,44 +934,91 @@ impl BTreeNode {
     }
 
     fn cell_ranges(&self) -> Result<Vec<(usize, usize)>> {
+        // Avoid allocating a PAGE_SIZE-sized vector per-call. Build a compact vector
+        // with one (start,end) pair per cell in pointer-array order.
         let page = self.raw_page.as_ref().ok_or_else(|| {
             HematiteError::CorruptedData("Missing raw page for lazy node".to_string())
         })?;
+
         let mut starts = self
             .cell_offsets
             .iter()
             .map(|offset| *offset as usize)
             .collect::<Vec<_>>();
-        starts.sort_unstable();
-        starts.dedup();
-        if starts.len() != self.cell_offsets.len() {
+
+        // Validate duplicates via a sorted copy.
+        let mut sorted = starts.clone();
+        sorted.sort_unstable();
+        if sorted.windows(2).any(|w| w[0] == w[1]) {
             return Err(HematiteError::CorruptedData(
                 "Duplicate B-tree cell pointers".to_string(),
             ));
         }
 
-        let mut ranges = vec![(0usize, 0usize); PAGE_SIZE];
-        for (index, start) in starts.iter().enumerate() {
-            let end = starts.get(index + 1).copied().unwrap_or(PAGE_SIZE);
-            if *start >= end || end > PAGE_SIZE {
+        let mut ranges = Vec::with_capacity(starts.len());
+        for &start in starts.iter() {
+            // Find smallest offset greater than start to use as end.
+            let mut end = PAGE_SIZE;
+            for &o in starts.iter() {
+                if o > start && o < end {
+                    end = o;
+                }
+            }
+            if start >= end || end > PAGE_SIZE {
                 return Err(HematiteError::CorruptedData(
                     "B-tree cell pointer ordering is invalid".to_string(),
                 ));
             }
-            ranges[*start] = (*start, end);
+            ranges.push((start, end));
         }
-        let _ = page; // keeps the method tied to a real page for consistency checks above.
+
+        let _ = page; // preserve earlier consistency check tie-in
         Ok(ranges)
     }
 
-    fn cell_range_for_index(&self, index: usize) -> Result<(usize, usize)> {
-        if index >= self.cell_offsets.len() {
+    fn cell_range_for_index(&self, index_or_offset: usize) -> Result<(usize, usize)> {
+        // Accept either an index into `cell_offsets` (preferred) or a raw byte offset.
+        // If the caller passed a raw offset (>= cell_offsets.len()), map it to the
+        // corresponding pointer-array index. This keeps compatibility with callers that
+        // still used offset-based lookup.
+        if self.cell_offsets.is_empty() {
             return Err(HematiteError::StorageError(
                 "Index out of bounds".to_string(),
             ));
         }
-        let ranges = self.cell_ranges()?;
-        Ok(ranges[self.cell_offsets[index] as usize])
+
+        let idx = if index_or_offset < self.cell_offsets.len() {
+            index_or_offset
+        } else {
+            // Treat value as a byte offset. Find its index in the pointer array.
+            match self
+                .cell_offsets
+                .iter()
+                .position(|&off| off as usize == index_or_offset)
+            {
+                Some(p) => p,
+                None => {
+                    return Err(HematiteError::StorageError(
+                        "Index out of bounds".to_string(),
+                    ))
+                }
+            }
+        };
+
+        let start = self.cell_offsets[idx] as usize;
+        let mut end = PAGE_SIZE;
+        for &off in self.cell_offsets.iter() {
+            let o = off as usize;
+            if o > start && o < end {
+                end = o;
+            }
+        }
+        if start >= end || end > PAGE_SIZE {
+            return Err(HematiteError::CorruptedData(
+                "B-tree cell pointer ordering is invalid".to_string(),
+            ));
+        }
+        Ok((start, end))
     }
 }
 
@@ -1116,7 +1156,10 @@ fn parse_internal_cell(cell: &[u8]) -> Result<(PageId, BTreeKey)> {
             "Internal cell child pointer cannot reference reserved pages".to_string(),
         ));
     }
-    Ok((child, BTreeKey::new(cell[key_range.0..key_range.1].to_vec())))
+    Ok((
+        child,
+        BTreeKey::new(cell[key_range.0..key_range.1].to_vec()),
+    ))
 }
 
 fn cell_pointer_from_header(page: &Page, header: &BTreePageHeaderV3, index: usize) -> Result<u16> {
@@ -1127,7 +1170,10 @@ fn cell_pointer_from_header(page: &Page, header: &BTreePageHeaderV3, index: usiz
         )));
     }
     let offset = header.pointer_area_start() + index * 2;
-    Ok(u16::from_be_bytes([page.data[offset], page.data[offset + 1]]))
+    Ok(u16::from_be_bytes([
+        page.data[offset],
+        page.data[offset + 1],
+    ]))
 }
 
 fn write_u16_be(bytes: &mut [u8], offset: usize, value: u16) {

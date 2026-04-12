@@ -55,12 +55,7 @@ impl Pager {
     pub(super) fn load_persisted_state(&mut self) -> Result<()> {
         let page = self.file_manager.read_page(STORAGE_METADATA_PAGE_ID)?;
         if let Some(bytes) = metadata_page::read_pager_metadata(&page.data)? {
-            let contents = String::from_utf8(bytes).map_err(|_| {
-                crate::error::HematiteError::StorageError(
-                    "Invalid pager metadata encoding".to_string(),
-                )
-            })?;
-            return self.apply_persisted_state(&contents);
+            return self.apply_persisted_state(&bytes);
         }
 
         if let Some(db_path) = &self.database_identity {
@@ -71,7 +66,7 @@ impl Pager {
                 Err(err) => return Err(err.into()),
             };
             if let Some(contents) = contents {
-                self.apply_persisted_state(&contents)?;
+                self.apply_persisted_state(contents.as_bytes())?;
                 self.persist_checksums()?;
                 match fs::remove_file(&sidecar_path) {
                     Ok(()) => {}
@@ -88,8 +83,9 @@ impl Pager {
         Ok(())
     }
 
-    fn apply_persisted_state(&mut self, contents: &str) -> Result<()> {
-        let persisted = PersistedPagerState::decode(contents, Self::CHECKSUM_METADATA_VERSION)?;
+    fn apply_persisted_state(&mut self, contents: &[u8]) -> Result<()> {
+        let persisted =
+            PersistedPagerState::decode_bytes(contents, Self::CHECKSUM_METADATA_VERSION)?;
         self.journal_mode = persisted.journal_mode;
         self.file_manager.set_free_pages(persisted.free_pages);
         self.page_checksums = persisted.checksums;
@@ -154,7 +150,7 @@ impl Pager {
             .peek(STORAGE_METADATA_PAGE_ID)
             .cloned()
             .unwrap_or(self.file_manager.read_page(STORAGE_METADATA_PAGE_ID)?);
-        let encoded = metadata_page::write_pager_metadata(&existing_page.data, contents.as_bytes())?;
+        let encoded = metadata_page::write_pager_metadata(&existing_page.data, &contents)?;
         Page::from_bytes(STORAGE_METADATA_PAGE_ID, encoded)
     }
 

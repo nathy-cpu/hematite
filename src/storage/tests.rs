@@ -193,9 +193,13 @@ mod wal_tests {
 mod pager_tests {
     use crate::storage::journal::{JournalRecord, JournalState, RollbackJournal};
     use crate::storage::pager::Pager;
+    use crate::storage::pager_metadata::PersistedPagerState;
     use crate::storage::wal::{WalFrame, WalRecord};
-    use crate::storage::{metadata_page, JournalMode, Page, PAGE_SIZE, STORAGE_METADATA_PAGE_ID};
+    use crate::storage::{
+        metadata_page, JournalMode, Page, PAGE_SIZE, STORAGE_METADATA_PAGE_ID,
+    };
     use crate::test_utils::TestDbFile;
+    use std::collections::HashMap;
     use std::ffi::OsString;
     use std::fs;
     #[cfg(unix)]
@@ -810,10 +814,16 @@ mod pager_tests {
         pager.flush()?;
         drop(pager);
 
-        let invalid = metadata_page::write_pager_metadata(
-            &vec![0; PAGE_SIZE],
-            b"version=1\njournal_mode=bogus\nfree_count=0\nchecksum_count=0",
-        )?;
+        let mut invalid_payload = PersistedPagerState {
+            journal_mode: JournalMode::Rollback,
+            free_pages: vec![],
+            checksums: HashMap::new(),
+        }
+        .encode(1);
+        if invalid_payload.len() > 8 {
+            invalid_payload[8] = 9;
+        }
+        let invalid = metadata_page::write_pager_metadata(&vec![0; PAGE_SIZE], &invalid_payload)?;
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .open(test_db.path())?;
