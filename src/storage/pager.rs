@@ -191,10 +191,22 @@ pub struct Pager {
     journal_record_count: u32,
     /// Byte offset in the journal file where page records begin (after header + metadata).
     journal_header_len: u64,
+    /// Whether the current rollback journal contents must be synced before dirty pages can spill
+    /// or flush to the main database file.
+    journal_needs_sync: bool,
 }
 
 impl Pager {
     pub const CHECKSUM_METADATA_VERSION: u32 = 1;
+
+    fn cache_view_token(&self) -> u64 {
+        if self.journal_mode != JournalMode::Wal {
+            return 0;
+        }
+        self.current_wal_visible_state()
+            .map(|state| state.visible_sequence.saturating_add(1))
+            .unwrap_or(0)
+    }
 
     pub fn new<P: AsRef<Path>>(path: P, cache_capacity: usize) -> Result<Self> {
         let journal_path = Some(Self::journal_path(path.as_ref()));
@@ -222,6 +234,7 @@ impl Pager {
             journal_file: None,
             journal_record_count: 0,
             journal_header_len: 0,
+            journal_needs_sync: false,
         };
         pager.recover_if_needed()?;
         pager.load_persisted_state()?;
@@ -250,6 +263,7 @@ impl Pager {
             journal_file: None,
             journal_record_count: 0,
             journal_header_len: 0,
+            journal_needs_sync: false,
         })
     }
 

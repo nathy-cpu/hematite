@@ -15,11 +15,13 @@
 //! - descend again to the leftmost leaf of that subtree.
 //!
 //! The cursor reads nodes through the shared pager but exposes only logical key/value positions.
+use std::cell::OnceCell;
+use std::sync::{Arc, Mutex, MutexGuard};
+
 use crate::btree::node::BTreeNode;
 use crate::btree::{BTreeKey, BTreeValue, NodeType};
 use crate::error::{HematiteError, Result};
 use crate::storage::{PageId, Pager};
-use std::sync::{Arc, Mutex, MutexGuard};
 
 #[derive(Debug)]
 pub struct BTreeCursor {
@@ -27,8 +29,8 @@ pub struct BTreeCursor {
     stack: Vec<CursorFrame>,
     at_end: bool,
 
-    cached_key: Option<BTreeKey>,
-    cached_value: Option<BTreeValue>,
+    cached_key: OnceCell<BTreeKey>,
+    cached_value: OnceCell<BTreeValue>,
 
     #[cfg(test)]
     root_page_id: PageId,
@@ -47,8 +49,8 @@ impl BTreeCursor {
             storage,
             stack: Vec::new(),
             at_end: false,
-            cached_key: None,
-            cached_value: None,
+            cached_key: OnceCell::new(),
+            cached_value: OnceCell::new(),
             #[cfg(test)]
             root_page_id,
         };
@@ -63,23 +65,31 @@ impl BTreeCursor {
         })
     }
 
-    fn sync_cache(&mut self) {
-        self.cached_key = None;
-        self.cached_value = None;
-        if !self.is_valid() {
-            return;
-        }
+    fn invalidate_cache(&mut self) {
+        let _ = self.cached_key.take();
+        let _ = self.cached_value.take();
+    }
 
-        if let Some(frame) = self.stack.last() {
-            if frame.index < frame.node.key_count {
-                self.cached_key = frame.node.get_key_procedural(frame.index).ok();
-                if frame.node.node_type == NodeType::Leaf {
-                    self.cached_value = frame.node.get_value_procedural(frame.index).ok();
-                }
-            } else {
-                self.at_end = true;
-            }
+    pub(crate) fn key_view(&self) -> Option<&[u8]> {
+        if !self.is_valid() {
+            return None;
         }
+        let frame = self.stack.last()?;
+        if frame.index >= frame.node.key_count {
+            return None;
+        }
+        frame.node.get_key_view(frame.index).ok()
+    }
+
+    pub(crate) fn value_view(&self) -> Option<&[u8]> {
+        if !self.is_valid() {
+            return None;
+        }
+        let frame = self.stack.last()?;
+        if frame.node.node_type != NodeType::Leaf || frame.index >= frame.node.key_count {
+            return None;
+        }
+        frame.node.get_value_view(frame.index).ok()
     }
 
     pub fn is_valid(&self) -> bool {
@@ -87,34 +97,28 @@ impl BTreeCursor {
     }
 
     pub fn key(&self) -> Option<&BTreeKey> {
-        if !self.is_valid() {
-            return None;
-        }
-        self.cached_key.as_ref()
+        let key = self.key_view()?;
+        Some(self.cached_key.get_or_init(|| BTreeKey::new(key.to_vec())))
     }
 
     pub fn value(&self) -> Option<&BTreeValue> {
-        if !self.is_valid() {
-            return None;
-        }
-        self.cached_value.as_ref()
+        let value = self.value_view()?;
+        Some(self.cached_value.get_or_init(|| BTreeValue::new(value.to_vec())))
     }
 
     pub fn current(&self) -> Option<(&BTreeKey, &BTreeValue)> {
-        if !self.is_valid() {
-            return None;
-        }
-        if let (Some(k), Some(v)) = (self.cached_key.as_ref(), self.cached_value.as_ref()) {
-            Some((k, v))
-        } else {
-            None
-        }
+        Some((self.key()?, self.value()?))
     }
 
     #[cfg(test)]
     #[allow(dead_code)]
     pub fn save_position(&self) -> Option<BTreeKey> {
-        self.cached_key.clone()
+        self.key_view().map(|key| BTreeKey::new(key.to_vec()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cache_materialized(&self) -> (bool, bool) {
+        (self.cached_key.get().is_some(), self.cached_value.get().is_some())
     }
 
     #[cfg(test)]
@@ -125,7 +129,7 @@ impl BTreeCursor {
         } else {
             self.stack.clear();
             self.at_end = true;
-            self.sync_cache();
+            self.invalidate_cache();
             Ok(())
         }
     }
@@ -148,6 +152,25 @@ impl BTreeCursor {
         self.seek_to_key(root_page_id, key)
     }
 
+    pub fn seek_near(&mut self, key: &BTreeKey) -> Result<()> {
+        if let Some(frame) = self.stack.last_mut() {
+            if frame.node.node_type == NodeType::Leaf && frame.node.key_count > 0 {
+                let first = frame.node.get_key_view(0).ok();
+                let last = frame.node.get_key_view(frame.node.key_count - 1).ok();
+                if let (Some(first), Some(last)) = (first, last) {
+                    if key.as_bytes() >= first && key.as_bytes() <= last {
+                        let index = frame.node.lower_bound_index(key);
+                        frame.index = index;
+                        self.at_end = index >= frame.node.key_count;
+                        self.invalidate_cache();
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        self.seek(key)
+    }
+
     #[cfg(test)]
     pub fn last(&mut self) -> Result<()> {
         if self.stack.is_empty() {
@@ -167,7 +190,7 @@ impl BTreeCursor {
                 self.at_end = true;
             }
         }
-        self.sync_cache();
+        self.invalidate_cache();
         Ok(())
     }
 
@@ -181,7 +204,7 @@ impl BTreeCursor {
                 self.at_end = true;
             }
         }
-        self.sync_cache();
+        self.invalidate_cache();
         Ok(())
     }
 
@@ -222,7 +245,7 @@ impl BTreeCursor {
 
         self.stack = frames;
         self.at_end = at_end;
-        self.sync_cache();
+        self.invalidate_cache();
         Ok(())
     }
 
@@ -240,13 +263,13 @@ impl BTreeCursor {
 
         // Check if we're still within the current leaf
         if current_frame.index < current_frame.node.key_count {
-            self.sync_cache();
+            self.invalidate_cache();
             return Ok(());
         }
 
         // Need to move to next leaf
         self.move_to_next_leaf()?;
-        self.sync_cache();
+        self.invalidate_cache();
         Ok(())
     }
 
@@ -269,12 +292,12 @@ impl BTreeCursor {
 
         if current_frame.index > 0 {
             current_frame.index -= 1;
-            self.sync_cache();
+            self.invalidate_cache();
             return Ok(());
         }
 
         self.move_to_previous_leaf()?;
-        self.sync_cache();
+        self.invalidate_cache();
         Ok(())
     }
 

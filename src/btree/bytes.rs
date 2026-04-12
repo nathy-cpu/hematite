@@ -34,6 +34,7 @@
 //! catalog or table code.
 
 use std::collections::HashSet;
+use std::cell::RefCell;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -45,11 +46,14 @@ use crate::btree::tree::{
     collect_tree_page_ids, collect_tree_space_stats, reset_tree_pages, BTreeManager, TreeSpaceStats,
 };
 use crate::btree::value_store::{
-    free_stored_value_overflow, hydrate_stored_value, materialize_stored_value, StoredValueLayout,
+    free_stored_value_overflow, hydrate_stored_value, hydrate_stored_value_with_cache,
+    materialize_stored_value, StoredValueLayout,
 };
 use crate::btree::NodeType;
 use crate::error::{HematiteError, Result};
-use crate::storage::overflow::{collect_overflow_page_ids, validate_overflow_chain};
+use crate::storage::overflow::{
+    collect_overflow_page_ids, validate_overflow_chain, OverflowReadCache,
+};
 use crate::storage::{
     JournalMode, Page, PageId, Pager, PagerIntegrityReport, DB_HEADER_PAGE_ID, INVALID_PAGE_ID,
     PAGE_SIZE, STORAGE_METADATA_PAGE_ID,
@@ -374,6 +378,7 @@ impl ByteTree {
         Ok(ByteTreeCursor {
             storage: self.storage.clone(),
             inner: self.index.cursor()?,
+            overflow_cache: RefCell::new(OverflowReadCache::default()),
         })
     }
 }
@@ -459,6 +464,7 @@ fn validate_tree_overflow_pages(
 pub struct ByteTreeCursor {
     storage: Arc<Mutex<Pager>>,
     inner: BTreeCursor,
+    overflow_cache: RefCell<OverflowReadCache>,
 }
 
 impl ByteTreeCursor {
@@ -485,24 +491,30 @@ impl ByteTreeCursor {
     }
 
     pub fn key(&self) -> Option<&[u8]> {
-        self.inner.key().map(|key| key.as_bytes())
+        self.inner.key_view()
     }
 
     pub fn value(&self) -> Option<&[u8]> {
-        self.inner.value().map(|value| value.as_bytes())
+        self.inner.value_view()
     }
 
     pub fn current(&self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-        match self.inner.current() {
-            Some((key, value)) => {
+        match (self.inner.key_view(), self.inner.value_view()) {
+            (Some(key), Some(value)) => {
                 let mut storage = self.lock_storage()?;
+                let mut overflow_cache = self.overflow_cache.borrow_mut();
                 Ok(Some((
-                    key.as_bytes().to_vec(),
-                    hydrate_stored_value(&mut storage, value.as_bytes())?,
+                    key.to_vec(),
+                    hydrate_stored_value_with_cache(&mut storage, value, &mut overflow_cache)?,
                 )))
             }
-            None => Ok(None),
+            _ => Ok(None),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn overflow_cache_stats(&self) -> (usize, usize) {
+        self.overflow_cache.borrow().stats()
     }
 
     pub fn collect_all(&mut self) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {

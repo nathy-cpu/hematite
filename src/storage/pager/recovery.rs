@@ -101,8 +101,10 @@ impl Pager {
             return Ok(());
         }
 
-        self.cache.reset();
         self.load_persisted_state()?;
+        if self.journal_mode != JournalMode::Wal {
+            self.cache.reset();
+        }
         self.load_latest_wal_state()
     }
 
@@ -137,13 +139,10 @@ impl Pager {
             self.page_checksums.clone(),
             &metadata_page.data,
         )?;
-        if self.transaction.is_none() && self.wal_read_snapshot.is_none() {
-            self.cache.reset();
-        }
         Ok(())
     }
 
-    pub(super) fn persist_checksums(&mut self) -> Result<()> {
+    fn encoded_persisted_state_page(&mut self) -> Result<Page> {
         let contents = PersistedPagerState {
             journal_mode: self.journal_mode,
             free_pages: self.file_manager.free_pages().to_vec(),
@@ -156,7 +155,22 @@ impl Pager {
             .cloned()
             .unwrap_or(self.file_manager.read_page(STORAGE_METADATA_PAGE_ID)?);
         let encoded = metadata_page::write_pager_metadata(&existing_page.data, contents.as_bytes())?;
-        let page = Page::from_bytes(STORAGE_METADATA_PAGE_ID, encoded)?;
+        Page::from_bytes(STORAGE_METADATA_PAGE_ID, encoded)
+    }
+
+    pub(super) fn stage_persisted_state_page(&mut self) -> Result<()> {
+        let page = self.encoded_persisted_state_page()?;
+        self.snapshot_original_page(STORAGE_METADATA_PAGE_ID)?;
+        self.cache.put(page);
+        self.cache.mark_dirty(STORAGE_METADATA_PAGE_ID);
+        if self.active_rollback_transaction().is_some() {
+            self.cache.mark_need_sync(STORAGE_METADATA_PAGE_ID);
+        }
+        Ok(())
+    }
+
+    pub(super) fn persist_checksums(&mut self) -> Result<()> {
+        let page = self.encoded_persisted_state_page()?;
         self.file_manager.write_page(&page)?;
         self.file_manager.flush()?;
         self.cache.put(page);
@@ -214,6 +228,8 @@ impl Pager {
             record
         };
         self.cache.mark_journaled(page_id);
+        self.cache.mark_need_sync(page_id);
+        self.journal_needs_sync = true;
         self.append_rollback_journal_record(&record)?;
         Ok(())
     }
@@ -267,11 +283,11 @@ impl Pager {
             .truncate(true)
             .open(path)?;
         file.write_all(&bytes)?;
-        file.sync_all()?;
 
         self.journal_file = Some(file);
         self.journal_record_count = 0;
         self.journal_header_len = header_len;
+        self.journal_needs_sync = true;
 
         Ok(())
     }
@@ -296,11 +312,25 @@ impl Pager {
         file.seek(SeekFrom::Start(32))?;
         file.write_all(&self.journal_record_count.to_be_bytes())?;
 
-        file.sync_all()?;
-
         // Seek back to end for the next append.
         file.seek(SeekFrom::End(0))?;
 
+        Ok(())
+    }
+
+    pub(super) fn sync_rollback_journal(&mut self) -> Result<()> {
+        if !self.journal_needs_sync {
+            return Ok(());
+        }
+        let Some(file) = &mut self.journal_file else {
+            self.journal_needs_sync = false;
+            return Ok(());
+        };
+        file.sync_all()?;
+        for page_id in self.cache.dirty_page_ids() {
+            self.cache.clear_need_sync(page_id);
+        }
+        self.journal_needs_sync = false;
         Ok(())
     }
 
@@ -348,6 +378,7 @@ impl Pager {
                 file.sync_all()?;
 
                 self.journal_record_count = new_record_count;
+                self.journal_needs_sync = false;
             }
             Ok(())
         } else {
@@ -361,6 +392,7 @@ impl Pager {
         self.journal_file = None;
         self.journal_record_count = 0;
         self.journal_header_len = 0;
+        self.journal_needs_sync = false;
 
         let Some(path) = &self.journal_path else {
             return Ok(());
@@ -508,10 +540,11 @@ impl Pager {
             )?;
         }
         self.load_latest_wal_state()?;
+        let committed_view_token = self.cache_view_token();
         for page_id in self.cache.dirty_page_ids() {
             self.cache.clear_dirty(page_id);
+            self.cache.set_view_token(page_id, committed_view_token);
         }
-        self.cache.reset();
         Ok(())
     }
 }

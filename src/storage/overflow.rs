@@ -5,8 +5,8 @@
 
 use crate::error::{HematiteError, Result};
 use crate::storage::overflow_v3::{
-    decode_overflow_chain, encode_overflow_chain, split_payload_into_overflow_chunks,
-    V3OverflowPage, V3_OVERFLOW_PAYLOAD_CAPACITY,
+    encode_overflow_chain, split_payload_into_overflow_chunks, V3OverflowPage,
+    V3_OVERFLOW_PAYLOAD_CAPACITY,
 };
 use crate::storage::{PageId, Pager};
 use std::collections::HashSet;
@@ -17,6 +17,52 @@ pub const OVERFLOW_CHUNK_CAPACITY: usize = V3_OVERFLOW_PAYLOAD_CAPACITY;
 pub struct OverflowChainReport {
     pub page_count: usize,
     pub payload_len: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct OverflowReadCache {
+    first_page: Option<PageId>,
+    expected_len: usize,
+    page_ids: Vec<PageId>,
+    #[cfg(test)]
+    hits: usize,
+    #[cfg(test)]
+    misses: usize,
+}
+
+impl OverflowReadCache {
+    fn clear(&mut self) {
+        self.first_page = None;
+        self.expected_len = 0;
+        self.page_ids.clear();
+    }
+
+    fn cached_page_ids(&mut self, first_page: Option<PageId>, expected_len: usize) -> Option<&[PageId]> {
+        if self.first_page == first_page && self.expected_len == expected_len {
+            #[cfg(test)]
+            {
+                self.hits = self.hits.saturating_add(1);
+            }
+            Some(&self.page_ids)
+        } else {
+            None
+        }
+    }
+
+    fn store(&mut self, first_page: Option<PageId>, expected_len: usize, page_ids: Vec<PageId>) {
+        self.first_page = first_page;
+        self.expected_len = expected_len;
+        self.page_ids = page_ids;
+        #[cfg(test)]
+        {
+            self.misses = self.misses.saturating_add(1);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stats(&self) -> (usize, usize) {
+        (self.hits, self.misses)
+    }
 }
 
 pub fn write_overflow_chain(storage: &mut Pager, payload: &[u8]) -> Result<Option<PageId>> {
@@ -42,8 +88,8 @@ pub fn read_overflow_chain(
     first_page: Option<PageId>,
     expected_len: usize,
 ) -> Result<Vec<u8>> {
-    let pages = load_overflow_pages(storage, first_page, expected_len)?;
-    decode_overflow_chain(&pages, expected_len)
+    let mut cache = OverflowReadCache::default();
+    read_overflow_chain_cached_with_cache(storage, first_page, expected_len, &mut cache)
 }
 
 pub fn free_overflow_chain(storage: &mut Pager, first_page: Option<PageId>) -> Result<()> {
@@ -140,39 +186,50 @@ pub fn collect_overflow_page_ids(
     Ok(ids)
 }
 
-fn load_overflow_pages(
+pub(crate) fn read_overflow_chain_cached_with_cache(
     storage: &mut Pager,
     first_page: Option<PageId>,
     expected_len: usize,
-) -> Result<Vec<crate::storage::Page>> {
-    let mut pages = Vec::new();
-    let mut current = match first_page {
-        Some(page_id) => page_id,
-        None => return Ok(pages),
+    cache: &mut OverflowReadCache,
+) -> Result<Vec<u8>> {
+    if expected_len == 0 {
+        cache.clear();
+        return Ok(Vec::new());
+    }
+
+    let page_ids = if let Some(page_ids) = cache.cached_page_ids(first_page, expected_len) {
+        page_ids.to_vec()
+    } else {
+        let page_ids = collect_overflow_page_ids(storage, first_page)?;
+        cache.store(first_page, expected_len, page_ids.clone());
+        page_ids
     };
-    let mut visited = HashSet::new();
-    let mut remaining = expected_len;
 
-    while current != 0 && remaining > 0 {
-        if !visited.insert(current) {
-            return Err(HematiteError::CorruptedData(
-                "Overflow chain cycle detected".to_string(),
-            ));
+    let expected_page_count =
+        (expected_len + V3_OVERFLOW_PAYLOAD_CAPACITY - 1) / V3_OVERFLOW_PAYLOAD_CAPACITY;
+    if page_ids.len() != expected_page_count {
+        return Err(HematiteError::StorageError(format!(
+            "v3 overflow chain expected {} pages but received {}",
+            expected_page_count,
+            page_ids.len()
+        )));
+    }
+
+    let mut payload = Vec::with_capacity(expected_len);
+    for (index, page_id) in page_ids.iter().copied().enumerate() {
+        let page = storage.read_page_shared(page_id)?;
+        let remaining = expected_len - payload.len();
+        let expected_chunk_len = remaining.min(V3_OVERFLOW_PAYLOAD_CAPACITY);
+        let decoded = V3OverflowPage::decode(page.as_ref(), expected_chunk_len)?;
+        let expected_next_page_id = page_ids.get(index + 1).copied().unwrap_or(0);
+        if decoded.next_page_id != expected_next_page_id {
+            return Err(HematiteError::StorageError(format!(
+                "v3 overflow page {} points to {} but expected {}",
+                page_id, decoded.next_page_id, expected_next_page_id
+            )));
         }
-
-        let page = storage.read_page(current)?;
-        let expected_chunk_len = remaining.min(OVERFLOW_CHUNK_CAPACITY);
-        let decoded = V3OverflowPage::decode(&page, expected_chunk_len)?;
-        remaining = remaining.saturating_sub(decoded.payload_chunk.len());
-        current = decoded.next_page_id;
-        pages.push(page);
+        payload.extend_from_slice(&decoded.payload_chunk);
     }
 
-    if remaining > 0 {
-        return Err(HematiteError::CorruptedData(
-            "Overflow chain ended before expected payload length".to_string(),
-        ));
-    }
-
-    Ok(pages)
+    Ok(payload)
 }

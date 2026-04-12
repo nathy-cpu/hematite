@@ -10,6 +10,7 @@ impl Pager {
     }
 
     pub(super) fn commit_rollback_transaction(&mut self) -> Result<()> {
+        self.sync_rollback_journal()?;
         self.flush()?;
         self.mark_rollback_journal_committed()?;
         self.transition_state(PagerState::WriterFinished)?;

@@ -1040,6 +1040,73 @@ mod pager_tests {
     }
 
     #[test]
+    fn test_pager_wal_reader_keeps_cache_between_identical_read_scopes(
+    ) -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_wal_reader_keeps_cache_between_scopes");
+
+        let page_id = {
+            let mut pager = Pager::new(test_db.path(), 8)?;
+            pager.set_journal_mode(JournalMode::Wal)?;
+            pager.begin_transaction()?;
+            let page_id = pager.allocate_page()?;
+            let mut page = Page::new(page_id);
+            page.data[0] = 55;
+            pager.write_page(page)?;
+            pager.commit_transaction()?;
+            page_id
+        };
+
+        let mut reader = Pager::new(test_db.path(), 8)?;
+        reader.set_journal_mode(JournalMode::Wal)?;
+
+        reader.begin_read()?;
+        assert_eq!(reader.read_page(page_id)?.data[0], 55);
+        reader.end_read()?;
+
+        let retained_entries = reader.cached_page_count();
+        assert!(retained_entries > 0);
+
+        reader.begin_read()?;
+        assert_eq!(reader.cached_page_count(), retained_entries);
+        assert_eq!(reader.read_page(page_id)?.data[0], 55);
+        reader.end_read()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_wal_reader_reloads_page_after_sequence_advance_without_cache_reset(
+    ) -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_wal_reader_reloads_after_sequence_advance");
+
+        let mut writer = Pager::new(test_db.path(), 8)?;
+        writer.set_journal_mode(JournalMode::Wal)?;
+        writer.begin_transaction()?;
+        let page_id = writer.allocate_page()?;
+        let mut page = Page::new(page_id);
+        page.data[0] = 10;
+        writer.write_page(page)?;
+        writer.commit_transaction()?;
+
+        let mut reader = Pager::new(test_db.path(), 8)?;
+        reader.set_journal_mode(JournalMode::Wal)?;
+        reader.begin_read()?;
+        assert_eq!(reader.read_page(page_id)?.data[0], 10);
+        reader.end_read()?;
+        assert!(reader.cached_page_count() > 0);
+
+        writer.begin_transaction()?;
+        let mut updated = writer.read_page(page_id)?;
+        updated.data[0] = 99;
+        writer.write_page(updated)?;
+        writer.commit_transaction()?;
+
+        reader.begin_read()?;
+        assert_eq!(reader.read_page(page_id)?.data[0], 99);
+        reader.end_read()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_pager_wal_commit_persists_committed_state_for_reopen() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_pager_wal_commit_persists");
         let wal_path = std::path::PathBuf::from(format!("{}.wal", test_db.path()));

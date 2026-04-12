@@ -10,7 +10,7 @@
 //! old contiguous key/value section format.
 
 use crate::btree::page_format::{
-    self, insert_cell as pf_insert_cell, remove_cell as pf_remove_cell,
+    insert_cell as pf_insert_cell, remove_cell as pf_remove_cell,
     total_free_space as pf_total_free_space, BTreePageHeaderV3,
 };
 use crate::btree::{BTreeKey, BTreeValue, NodeType, BTREE_ORDER};
@@ -493,8 +493,13 @@ impl BTreeNode {
         value: &BTreeValue,
     ) -> Result<bool> {
         if self.node_type != NodeType::Leaf {
+            return Ok(false); // Only supported for leaf nodes currently
+        }
+
+        if self.key_count >= MAX_KEYS {
             return Ok(false);
         }
+
         Self::validate_key_size(key)?;
         Self::validate_value_size(value)?;
 

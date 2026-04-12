@@ -338,8 +338,7 @@ pub(crate) fn remove_cell(page: &mut Page, is_page_one: bool, index: usize) -> R
     page.data
         .copy_within(removal_offset + 2..pointer_end, removal_offset);
     // Zero out the vacated trailing pointer slot.
-    page.data[pointer_end - 2] = 0;
-    page.data[pointer_end - 1] = 0;
+    write_u16_be(&mut page.data, pointer_end - 2, 0);
 
     // Update cell count.
     write_u16_be(
@@ -348,11 +347,7 @@ pub(crate) fn remove_cell(page: &mut Page, is_page_one: bool, index: usize) -> R
         header.cell_count - 1,
     );
 
-    // Add the freed cell body to the freeblock chain.
-    if cell_size >= MIN_FREEBLOCK_SIZE {
-        add_to_freeblock_chain(&mut page.data, header.header_offset, cell_offset, cell_size);
-    } else if cell_size > 0 {
-        // Too small for a freeblock — add to fragment count.
+    if cell_size < MIN_FREEBLOCK_SIZE {
         let frag_byte = header.header_offset + OFFSET_FRAGMENTED_FREE_BYTES;
         let old_frags = page.data[frag_byte] as usize;
         let new_frags = (old_frags + cell_size).min(255);
@@ -398,29 +393,48 @@ fn add_to_freeblock_chain(data: &mut [u8], header_offset: usize, offset: usize, 
     write_u16_be(data, prev_ptr_offset, offset as u16);
 }
 
-/// Compute the size of a cell body at `cell_offset` by finding the boundary
-/// of the next closest cell or the end of the page.
 fn compute_cell_size(page: &Page, header: &BTreePageHeaderV3, cell_offset: usize) -> Result<usize> {
-    // Collect all cell start offsets and sort them.
-    let pointer_start = header.pointer_area_start();
-    let cell_count = header.cell_count as usize;
-    let mut starts: Vec<usize> = (0..cell_count)
-        .map(|i| read_u16_be(&page.data, pointer_start + i * 2) as usize)
-        .collect();
-    starts.sort_unstable();
+    if cell_offset >= PAGE_SIZE {
+        return Err(HematiteError::CorruptedData(
+            "Cell offset out of bounds".to_string(),
+        ));
+    }
 
-    // Find our cell in the sorted list.
-    if let Some(pos) = starts.iter().position(|&s| s == cell_offset) {
-        let end = if pos + 1 < starts.len() {
-            starts[pos + 1]
-        } else {
-            PAGE_SIZE
-        };
-        Ok(end - cell_offset)
-    } else {
-        Err(HematiteError::CorruptedData(
-            "Cell offset not found in pointer array".to_string(),
-        ))
+    match header.kind {
+        PageKind::LeafTable => {
+            if cell_offset + 4 > PAGE_SIZE {
+                return Err(HematiteError::CorruptedData(
+                    "Leaf cell header truncated".to_string(),
+                ));
+            }
+            let key_len = u16::from_be_bytes([page.data[cell_offset], page.data[cell_offset + 1]]) as usize;
+            let value_len = u16::from_be_bytes([page.data[cell_offset + 2], page.data[cell_offset + 3]]) as usize;
+            let total = 4 + key_len + value_len;
+            if cell_offset + total > PAGE_SIZE {
+                return Err(HematiteError::CorruptedData(
+                    "Leaf cell content exceeds page bounds".to_string(),
+                ));
+            }
+            Ok(total)
+        }
+        PageKind::InteriorTable => {
+            if cell_offset + 6 > PAGE_SIZE {
+                return Err(HematiteError::CorruptedData(
+                    "Internal cell header truncated".to_string(),
+                ));
+            }
+            let key_len = u16::from_be_bytes([page.data[cell_offset + 4], page.data[cell_offset + 5]]) as usize;
+            let total = 6 + key_len;
+            if cell_offset + total > PAGE_SIZE {
+                return Err(HematiteError::CorruptedData(
+                    "Internal cell key exceeds page bounds".to_string(),
+                ));
+            }
+            Ok(total)
+        }
+        _ => Err(HematiteError::CorruptedData(
+            "Unsupported page kind for exact cell sizing".to_string(),
+        )),
     }
 }
 
@@ -431,30 +445,12 @@ pub(crate) fn defragment_page(page: &mut Page, is_page_one: bool) -> Result<()> 
     let cell_count = header.cell_count as usize;
     let pointer_start = header.pointer_area_start();
 
-    // Collect (pointer_index, cell_offset) pairs, then sort by offset
-    // so we can determine cell sizes from adjacent offsets.
-    let mut indexed_offsets: Vec<(usize, usize)> = (0..cell_count)
-        .map(|i| {
-            let offset = read_u16_be(&page.data, pointer_start + i * 2) as usize;
-            (i, offset)
-        })
-        .collect();
-    indexed_offsets.sort_by_key(|&(_, offset)| offset);
-
-    // Extract cell bodies.
+    // Extract cell bodies by exact size computed independently
     let mut cells: Vec<(usize, Vec<u8>)> = Vec::with_capacity(cell_count);
-    for (idx_in_sorted, &(ptr_index, start)) in indexed_offsets.iter().enumerate() {
-        let end = if idx_in_sorted + 1 < indexed_offsets.len() {
-            indexed_offsets[idx_in_sorted + 1].1
-        } else {
-            PAGE_SIZE
-        };
-        if start >= end || end > PAGE_SIZE {
-            return Err(HematiteError::CorruptedData(
-                "v3 b-tree cell pointer ordering is invalid during defragment".to_string(),
-            ));
-        }
-        cells.push((ptr_index, page.data[start..end].to_vec()));
+    for i in 0..cell_count {
+        let offset = read_u16_be(&page.data, pointer_start + i * 2) as usize;
+        let size = compute_cell_size(page, &header, offset)?;
+        cells.push((i, page.data[offset..offset + size].to_vec()));
     }
 
     // Clear the cell content area.
@@ -577,13 +573,22 @@ mod tests {
         assert!(first_ptr > second_ptr);
     }
 
+    fn dummy_cell(len: usize) -> Vec<u8> {
+        assert!(len >= 4);
+        let mut buf = vec![1; len];
+        let val_len = (len - 4) as u16;
+        buf[0..2].copy_from_slice(&0u16.to_be_bytes());
+        buf[2..4].copy_from_slice(&val_len.to_be_bytes());
+        buf
+    }
+
     #[test]
     fn remove_cell_defragments_page() {
-        let mut page = Page::new(2);
+        let mut page = Page::new(1);
         initialize_btree_page(&mut page, PageKind::LeafTable, false).unwrap();
-        insert_cell(&mut page, false, 0, &[1u8; 8]).unwrap();
-        insert_cell(&mut page, false, 1, &[2u8; 6]).unwrap();
-        insert_cell(&mut page, false, 2, &[3u8; 4]).unwrap();
+        insert_cell(&mut page, false, 0, &dummy_cell(8)).unwrap();
+        insert_cell(&mut page, false, 1, &dummy_cell(6)).unwrap();
+        insert_cell(&mut page, false, 2, &dummy_cell(4)).unwrap();
 
         remove_cell(&mut page, false, 1).unwrap();
 
@@ -597,8 +602,8 @@ mod tests {
     fn explicit_defragmentation_keeps_cell_count_stable() {
         let mut page = Page::new(2);
         initialize_btree_page(&mut page, PageKind::LeafTable, false).unwrap();
-        insert_cell(&mut page, false, 0, &[1u8; 7]).unwrap();
-        insert_cell(&mut page, false, 1, &[2u8; 9]).unwrap();
+        insert_cell(&mut page, false, 0, &dummy_cell(7)).unwrap();
+        insert_cell(&mut page, false, 1, &dummy_cell(9)).unwrap();
 
         defragment_page(&mut page, false).unwrap();
 

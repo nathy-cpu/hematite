@@ -19,7 +19,6 @@ impl Pager {
                 return Ok(());
             }
             let snapshot = self.snapshot_wal_visible_state()?;
-            self.cache.reset();
             if let Err(err) = self.register_wal_reader_sequence(snapshot.visible_sequence) {
                 let _ = self.leave_reader_scope();
                 return Err(err);
@@ -36,9 +35,6 @@ impl Pager {
         if matches!(self.lock_mode, PagerLockMode::Shared { depth: 1 }) {
             if let Some(snapshot) = &self.wal_read_snapshot {
                 self.unregister_wal_reader_sequence(snapshot.visible_sequence)?;
-            }
-            if self.journal_mode == JournalMode::Wal {
-                self.cache.reset();
             }
         }
         self.wal_read_snapshot = None;

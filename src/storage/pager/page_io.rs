@@ -11,7 +11,8 @@ impl Pager {
 
     pub(crate) fn read_page_shared(&mut self, page_id: PageId) -> Result<Arc<Page>> {
         self.check_error_state()?;
-        if let Some(page) = self.cache.get(page_id) {
+        let view_token = self.cache_view_token();
+        if let Some(page) = self.cache.get_for_view(page_id, view_token) {
             return Ok(page);
         }
 
@@ -38,7 +39,7 @@ impl Pager {
                     && page_id < transaction.wal_next_page_id
                 {
                     let page = Arc::new(Page::new(page_id));
-                    self.cache.put_shared(page.clone());
+                    self.cache.put_shared_with_view(page.clone(), view_token);
                     return Ok(page);
                 }
             }
@@ -62,13 +63,13 @@ impl Pager {
                         )));
                     }
                 }
-                self.cache.put_shared(page.clone());
+                self.cache.put_shared_with_view(page.clone(), view_token);
                 return Ok(page);
             }
             let visible_next_page_id = state.visible_next_page_id();
             if page_id >= self.file_manager.next_page_id() && page_id < visible_next_page_id {
                 let page = Arc::new(Page::new(page_id));
-                self.cache.put_shared(page.clone());
+                self.cache.put_shared_with_view(page.clone(), view_token);
                 return Ok(page);
             }
         }
@@ -87,7 +88,7 @@ impl Pager {
                 )));
             }
         }
-        self.cache.put_shared(page.clone());
+        self.cache.put_shared_with_view(page.clone(), view_token);
         Ok(page)
     }
 
@@ -119,6 +120,9 @@ impl Pager {
     /// captured in the rollback journal are eligible — so crash-recovery
     /// invariants are preserved.
     fn spill_pages(&mut self) -> Result<()> {
+        if self.active_rollback_transaction().is_some() {
+            self.sync_rollback_journal()?;
+        }
         let candidates = self.cache.spillable_candidates();
         for page_id in candidates {
             // Skip metadata page — it must be written last during flush.
@@ -144,6 +148,11 @@ impl Pager {
             return Err(crate::error::HematiteError::StorageError(
                 "Cannot flush pager pages directly during an active WAL transaction".to_string(),
             ));
+        }
+
+        self.stage_persisted_state_page()?;
+        if self.active_rollback_transaction().is_some() {
+            self.sync_rollback_journal()?;
         }
 
         let dirty_ids = self.cache.dirty_page_ids();
@@ -175,10 +184,6 @@ impl Pager {
             self.cache.clear_dirty(STORAGE_METADATA_PAGE_ID);
         }
         if let Err(e) = self.file_manager.flush() {
-            self.enter_error_state();
-            return Err(e);
-        }
-        if let Err(e) = self.persist_checksums() {
             self.enter_error_state();
             return Err(e);
         }

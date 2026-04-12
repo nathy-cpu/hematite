@@ -1,5 +1,5 @@
 use crate::storage::{Page, PageId};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Default)]
@@ -11,19 +11,28 @@ pub(crate) struct CachedPageMeta {
     pub(crate) need_sync: bool,
     pub(crate) dont_write: bool,
     pub(crate) dirty_sequence: Option<u64>,
+    pub(crate) view_token: u64,
 }
 
 #[derive(Debug, Clone)]
 struct CachedPageEntry {
     page: Arc<Page>,
     meta: CachedPageMeta,
+    lru_prev: Option<PageId>,
+    lru_next: Option<PageId>,
+    dirty_prev: Option<PageId>,
+    dirty_next: Option<PageId>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct PageCache {
     capacity: usize,
     entries: HashMap<PageId, CachedPageEntry>,
-    lru_order: VecDeque<PageId>,
+    lru_head: Option<PageId>,
+    lru_tail: Option<PageId>,
+    dirty_head: Option<PageId>,
+    dirty_tail: Option<PageId>,
+    dirty_len: usize,
     next_dirty_sequence: u64,
 }
 
@@ -32,7 +41,11 @@ impl PageCache {
         Self {
             capacity,
             entries: HashMap::new(),
-            lru_order: VecDeque::new(),
+            lru_head: None,
+            lru_tail: None,
+            dirty_head: None,
+            dirty_tail: None,
+            dirty_len: 0,
             next_dirty_sequence: 0,
         }
     }
@@ -42,12 +55,64 @@ impl PageCache {
         self.capacity
     }
 
+    #[allow(dead_code)]
     pub(crate) fn get(&mut self, page_id: PageId) -> Option<Arc<Page>> {
-        let page = self.entries.get(&page_id).map(|entry| entry.page.clone());
+        self.get_for_view(page_id, 0)
+    }
+
+    pub(crate) fn get_for_view(&mut self, page_id: PageId, view_token: u64) -> Option<Arc<Page>> {
+        let page = self.entries.get(&page_id).and_then(|entry| {
+            if entry.meta.dirty || entry.meta.writeable || entry.meta.view_token == view_token {
+                Some(entry.page.clone())
+            } else {
+                None
+            }
+        });
         if page.is_some() {
             self.touch(page_id);
         }
         page
+    }
+
+    pub(crate) fn put(&mut self, page: Page) {
+        self.put_with_view(page, 0);
+    }
+
+    pub(crate) fn put_with_view(&mut self, page: Page, view_token: u64) {
+        self.put_shared_with_view(Arc::new(page), view_token);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn put_shared(&mut self, page: Arc<Page>) {
+        self.put_shared_with_view(page, 0);
+    }
+
+    pub(crate) fn put_shared_with_view(&mut self, page: Arc<Page>, view_token: u64) {
+        let page_id = page.id;
+        if !self.entries.contains_key(&page_id) {
+            self.evict_if_needed(Some(page_id));
+            self.entries.insert(
+                page_id,
+                CachedPageEntry {
+                    page,
+                    meta: CachedPageMeta {
+                        view_token,
+                        ..CachedPageMeta::default()
+                    },
+                    lru_prev: None,
+                    lru_next: None,
+                    dirty_prev: None,
+                    dirty_next: None,
+                },
+            );
+            self.attach_lru_front(page_id);
+            return;
+        }
+        if let Some(entry) = self.entries.get_mut(&page_id) {
+            entry.page = page;
+            entry.meta.view_token = view_token;
+        }
+        self.touch(page_id);
     }
 
     pub(crate) fn peek(&self, page_id: PageId) -> Option<&Page> {
@@ -71,51 +136,58 @@ impl PageCache {
             .unwrap_or(0)
     }
 
-    pub(crate) fn put(&mut self, page: Page) {
-        self.put_shared(Arc::new(page));
-    }
-
-    pub(crate) fn put_shared(&mut self, page: Arc<Page>) {
-        let page_id = page.id;
-        self.evict_if_needed(Some(page_id));
-        let meta = self
-            .entries
-            .remove(&page_id)
-            .map(|entry| entry.meta)
-            .unwrap_or_default();
-        self.entries.insert(page_id, CachedPageEntry { page, meta });
-        self.touch(page_id);
+    #[cfg(test)]
+    pub(crate) fn entry_count(&self) -> usize {
+        self.entries.len()
     }
 
     pub(crate) fn remove(&mut self, page_id: PageId) {
+        if !self.entries.contains_key(&page_id) {
+            return;
+        }
+        self.detach_lru(page_id);
+        self.detach_dirty(page_id);
         self.entries.remove(&page_id);
-        self.lru_order.retain(|&id| id != page_id);
     }
 
     pub(crate) fn reset(&mut self) {
         self.entries.clear();
-        self.lru_order.clear();
+        self.lru_head = None;
+        self.lru_tail = None;
+        self.dirty_head = None;
+        self.dirty_tail = None;
+        self.dirty_len = 0;
         self.next_dirty_sequence = 0;
     }
 
     pub(crate) fn mark_dirty(&mut self, page_id: PageId) {
-        let meta = &mut self
+        self.ensure_entry(page_id);
+        let was_dirty = self
             .entries
-            .entry(page_id)
-            .or_insert_with(|| CachedPageEntry {
-                page: Arc::new(Page::new(page_id)),
-                meta: CachedPageMeta::default(),
-            })
-            .meta;
+            .get(&page_id)
+            .map(|entry| entry.meta.dirty)
+            .unwrap_or(false);
+        let meta = &mut self.entries.get_mut(&page_id).expect("entry should exist").meta;
         if !meta.dirty {
             meta.dirty_sequence = Some(self.next_dirty_sequence);
             self.next_dirty_sequence = self.next_dirty_sequence.saturating_add(1);
         }
         meta.dirty = true;
         meta.writeable = true;
+        if !was_dirty {
+            self.attach_dirty_tail(page_id);
+        }
     }
 
     pub(crate) fn clear_dirty(&mut self, page_id: PageId) {
+        let was_dirty = self
+            .entries
+            .get(&page_id)
+            .map(|entry| entry.meta.dirty)
+            .unwrap_or(false);
+        if was_dirty {
+            self.detach_dirty(page_id);
+        }
         if let Some(meta) = self.entries.get_mut(&page_id).map(|entry| &mut entry.meta) {
             meta.dirty = false;
             meta.writeable = false;
@@ -131,35 +203,25 @@ impl PageCache {
     }
 
     pub(crate) fn dirty_page_ids(&self) -> Vec<PageId> {
-        let mut dirty = self
-            .entries
-            .iter()
-            .filter_map(|(page_id, entry)| {
-                entry
-                    .meta
-                    .dirty
-                    .then_some((*page_id, entry.meta.dirty_sequence.unwrap_or(u64::MAX)))
-            })
-            .collect::<Vec<_>>();
-        dirty.sort_by_key(|(_, sequence)| *sequence);
-        dirty.into_iter().map(|(page_id, _)| page_id).collect()
+        let mut dirty = Vec::with_capacity(self.dirty_len);
+        let mut current = self.dirty_head;
+        while let Some(page_id) = current {
+            dirty.push(page_id);
+            current = self.entries.get(&page_id).and_then(|entry| entry.dirty_next);
+        }
+        dirty
     }
 
     pub(crate) fn dirty_count(&self) -> usize {
-        self.entries
-            .values()
-            .filter(|entry| entry.meta.dirty)
-            .count()
+        self.dirty_len
     }
 
     #[allow(dead_code)]
     pub(crate) fn pin(&mut self, page_id: PageId) {
+        self.ensure_entry(page_id);
         self.entries
-            .entry(page_id)
-            .or_insert_with(|| CachedPageEntry {
-                page: Arc::new(Page::new(page_id)),
-                meta: CachedPageMeta::default(),
-            })
+            .get_mut(&page_id)
+            .expect("entry should exist")
             .meta
             .manual_pin_count += 1;
     }
@@ -173,43 +235,52 @@ impl PageCache {
 
     #[allow(dead_code)]
     pub(crate) fn mark_journaled(&mut self, page_id: PageId) {
+        self.ensure_entry(page_id);
         self.entries
-            .entry(page_id)
-            .or_insert_with(|| CachedPageEntry {
-                page: Arc::new(Page::new(page_id)),
-                meta: CachedPageMeta::default(),
-            })
+            .get_mut(&page_id)
+            .expect("entry should exist")
             .meta
             .journaled = true;
     }
 
     #[allow(dead_code)]
     pub(crate) fn mark_need_sync(&mut self, page_id: PageId) {
+        self.ensure_entry(page_id);
         self.entries
-            .entry(page_id)
-            .or_insert_with(|| CachedPageEntry {
-                page: Arc::new(Page::new(page_id)),
-                meta: CachedPageMeta::default(),
-            })
+            .get_mut(&page_id)
+            .expect("entry should exist")
             .meta
             .need_sync = true;
     }
 
+    pub(crate) fn clear_need_sync(&mut self, page_id: PageId) {
+        if let Some(entry) = self.entries.get_mut(&page_id) {
+            entry.meta.need_sync = false;
+        }
+    }
+
+    pub(crate) fn set_view_token(&mut self, page_id: PageId, view_token: u64) {
+        if let Some(entry) = self.entries.get_mut(&page_id) {
+            entry.meta.view_token = view_token;
+        }
+    }
+
     #[allow(dead_code)]
     pub(crate) fn set_dont_write(&mut self, page_id: PageId, dont_write: bool) {
+        self.ensure_entry(page_id);
         self.entries
-            .entry(page_id)
-            .or_insert_with(|| CachedPageEntry {
-                page: Arc::new(Page::new(page_id)),
-                meta: CachedPageMeta::default(),
-            })
+            .get_mut(&page_id)
+            .expect("entry should exist")
             .meta
             .dont_write = dont_write;
     }
 
     fn touch(&mut self, page_id: PageId) {
-        self.lru_order.retain(|&id| id != page_id);
-        self.lru_order.push_front(page_id);
+        if self.lru_head == Some(page_id) || !self.entries.contains_key(&page_id) {
+            return;
+        }
+        self.detach_lru(page_id);
+        self.attach_lru_front(page_id);
     }
 
     fn evict_if_needed(&mut self, incoming_page_id: Option<PageId>) {
@@ -225,12 +296,14 @@ impl PageCache {
         }
 
         while self.entries.len() >= self.capacity {
-            let candidate = self.lru_order.iter().rev().copied().find(|page_id| {
-                self.entries
-                    .get(page_id)
-                    .map(|entry| !entry.meta.dirty && Self::entry_pin_count(entry) == 0)
-                    .unwrap_or(true)
-            });
+            let mut candidate = self.lru_tail;
+            while let Some(page_id) = candidate {
+                let entry = self.entries.get(&page_id).expect("lru entry should exist");
+                if !entry.meta.dirty && Self::entry_pin_count(entry) == 0 {
+                    break;
+                }
+                candidate = entry.lru_prev;
+            }
 
             let Some(page_id) = candidate else {
                 // If every cached page is pinned or dirty, prefer temporarily exceeding the target
@@ -246,23 +319,21 @@ impl PageCache {
     /// and do not require a journal sync — making them safe to spill (write through)
     /// to the database file to reclaim cache space.
     pub(crate) fn spillable_candidates(&self) -> Vec<PageId> {
-        self.lru_order
-            .iter()
-            .rev()
-            .copied()
-            .filter(|page_id| {
-                self.entries
-                    .get(page_id)
-                    .map(|entry| {
-                        entry.meta.dirty
-                            && entry.meta.journaled
-                            && !entry.meta.need_sync
-                            && !entry.meta.dont_write
-                            && Self::entry_pin_count(entry) == 0
-                    })
-                    .unwrap_or(false)
-            })
-            .collect()
+        let mut candidates = Vec::new();
+        let mut current = self.lru_tail;
+        while let Some(page_id) = current {
+            let entry = self.entries.get(&page_id).expect("lru entry should exist");
+            if entry.meta.dirty
+                && entry.meta.journaled
+                && !entry.meta.need_sync
+                && !entry.meta.dont_write
+                && Self::entry_pin_count(entry) == 0
+            {
+                candidates.push(page_id);
+            }
+            current = entry.lru_prev;
+        }
+        candidates
     }
 
     /// Returns true if the cache is over capacity and has no clean pages to evict.
@@ -270,19 +341,131 @@ impl PageCache {
         if self.entries.len() < self.capacity {
             return false;
         }
-        // Check if there are any clean, unpinned pages we can evict first.
-        let has_clean_evictable = self.lru_order.iter().rev().any(|page_id| {
-            self.entries
-                .get(page_id)
-                .map(|entry| !entry.meta.dirty && Self::entry_pin_count(entry) == 0)
-                .unwrap_or(false)
-        });
-        !has_clean_evictable
+        let mut current = self.lru_tail;
+        while let Some(page_id) = current {
+            let entry = self.entries.get(&page_id).expect("lru entry should exist");
+            if !entry.meta.dirty && Self::entry_pin_count(entry) == 0 {
+                return false;
+            }
+            current = entry.lru_prev;
+        }
+        true
     }
 
     fn entry_pin_count(entry: &CachedPageEntry) -> usize {
         let shared_pin_count = Arc::strong_count(&entry.page).saturating_sub(1);
         entry.meta.manual_pin_count + shared_pin_count
+    }
+
+    fn ensure_entry(&mut self, page_id: PageId) {
+        if self.entries.contains_key(&page_id) {
+            return;
+        }
+        self.evict_if_needed(Some(page_id));
+        self.entries.insert(
+            page_id,
+            CachedPageEntry {
+                page: Arc::new(Page::new(page_id)),
+                meta: CachedPageMeta::default(),
+                lru_prev: None,
+                lru_next: None,
+                dirty_prev: None,
+                dirty_next: None,
+            },
+        );
+        self.attach_lru_front(page_id);
+    }
+
+    fn attach_lru_front(&mut self, page_id: PageId) {
+        let old_head = self.lru_head;
+        if let Some(entry) = self.entries.get_mut(&page_id) {
+            entry.lru_prev = None;
+            entry.lru_next = old_head;
+        }
+        if let Some(old_head_id) = old_head {
+            if let Some(entry) = self.entries.get_mut(&old_head_id) {
+                entry.lru_prev = Some(page_id);
+            }
+        } else {
+            self.lru_tail = Some(page_id);
+        }
+        self.lru_head = Some(page_id);
+    }
+
+    fn detach_lru(&mut self, page_id: PageId) {
+        let (prev, next) = match self.entries.get(&page_id) {
+            Some(entry) => (entry.lru_prev, entry.lru_next),
+            None => return,
+        };
+        match prev {
+            Some(prev_id) => {
+                if let Some(entry) = self.entries.get_mut(&prev_id) {
+                    entry.lru_next = next;
+                }
+            }
+            None => self.lru_head = next,
+        }
+        match next {
+            Some(next_id) => {
+                if let Some(entry) = self.entries.get_mut(&next_id) {
+                    entry.lru_prev = prev;
+                }
+            }
+            None => self.lru_tail = prev,
+        }
+        if let Some(entry) = self.entries.get_mut(&page_id) {
+            entry.lru_prev = None;
+            entry.lru_next = None;
+        }
+    }
+
+    fn attach_dirty_tail(&mut self, page_id: PageId) {
+        let old_tail = self.dirty_tail;
+        if let Some(entry) = self.entries.get_mut(&page_id) {
+            entry.dirty_prev = old_tail;
+            entry.dirty_next = None;
+        }
+        match old_tail {
+            Some(old_tail_id) => {
+                if let Some(entry) = self.entries.get_mut(&old_tail_id) {
+                    entry.dirty_next = Some(page_id);
+                }
+            }
+            None => self.dirty_head = Some(page_id),
+        }
+        self.dirty_tail = Some(page_id);
+        self.dirty_len = self.dirty_len.saturating_add(1);
+    }
+
+    fn detach_dirty(&mut self, page_id: PageId) {
+        let (prev, next, was_dirty) = match self.entries.get(&page_id) {
+            Some(entry) => (entry.dirty_prev, entry.dirty_next, entry.meta.dirty),
+            None => return,
+        };
+        if !was_dirty {
+            return;
+        }
+        match prev {
+            Some(prev_id) => {
+                if let Some(entry) = self.entries.get_mut(&prev_id) {
+                    entry.dirty_next = next;
+                }
+            }
+            None => self.dirty_head = next,
+        }
+        match next {
+            Some(next_id) => {
+                if let Some(entry) = self.entries.get_mut(&next_id) {
+                    entry.dirty_prev = prev;
+                }
+            }
+            None => self.dirty_tail = prev,
+        }
+        if let Some(entry) = self.entries.get_mut(&page_id) {
+            entry.dirty_prev = None;
+            entry.dirty_next = None;
+        }
+        self.dirty_len = self.dirty_len.saturating_sub(1);
     }
 }
 
@@ -358,6 +541,22 @@ mod tests {
     }
 
     #[test]
+    fn cache_hits_do_not_reorder_dirty_writeback_order() {
+        let mut cache = PageCache::new(4);
+        cache.put(Page::new(1));
+        cache.put(Page::new(2));
+        cache.put(Page::new(3));
+
+        cache.mark_dirty(1);
+        cache.mark_dirty(2);
+        assert!(cache.get(1).is_some());
+        assert!(cache.get(2).is_some());
+        assert!(cache.get(1).is_some());
+
+        assert_eq!(cache.dirty_page_ids(), vec![1, 2]);
+    }
+
+    #[test]
     fn peek_does_not_update_lru_order() {
         let mut cache = PageCache::new(2);
         cache.put(Page::new(1));
@@ -404,5 +603,20 @@ mod tests {
         assert!(!meta.dont_write);
         assert!(meta.dirty_sequence.is_none());
         assert_eq!(cache.pin_count(1), 0);
+    }
+
+    #[test]
+    fn view_tokens_filter_stale_read_hits_without_resetting_entries() {
+        let mut cache = PageCache::new(2);
+        let mut page = Page::new(1);
+        page.data[0] = 7;
+        cache.put_with_view(page, 11);
+
+        assert!(cache.get_for_view(1, 11).is_some());
+        assert!(cache.get_for_view(1, 12).is_none());
+
+        cache.set_view_token(1, 12);
+        let page = cache.get_for_view(1, 12).expect("page should be visible");
+        assert_eq!(page.data[0], 7);
     }
 }

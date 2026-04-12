@@ -18,7 +18,10 @@
 //! layers to manage overflow pages themselves.
 
 use crate::error::{HematiteError, Result};
-use crate::storage::overflow::{free_overflow_chain, read_overflow_chain, write_overflow_chain};
+use crate::storage::overflow::{
+    free_overflow_chain, read_overflow_chain_cached_with_cache, write_overflow_chain,
+    OverflowReadCache,
+};
 use crate::storage::{Pager, INVALID_PAGE_ID};
 
 use super::node::MAX_VALUE_SIZE;
@@ -188,8 +191,17 @@ pub fn materialize_stored_value(storage: &mut Pager, logical_value: &[u8]) -> Re
 }
 
 pub fn hydrate_stored_value(storage: &mut Pager, stored_value: &[u8]) -> Result<Vec<u8>> {
+    let mut overflow_cache = OverflowReadCache::default();
+    hydrate_stored_value_with_cache(storage, stored_value, &mut overflow_cache)
+}
+
+pub(crate) fn hydrate_stored_value_with_cache(
+    storage: &mut Pager,
+    stored_value: &[u8],
+    overflow_cache: &mut OverflowReadCache,
+) -> Result<Vec<u8>> {
     let layout = StoredValueLayout::decode(stored_value)?;
-    let overflow_payload = read_overflow_chain(
+    let overflow_payload = read_overflow_chain_cached_with_cache(
         storage,
         if layout.overflow_first_page == INVALID_PAGE_ID {
             None
@@ -197,6 +209,7 @@ pub fn hydrate_stored_value(storage: &mut Pager, stored_value: &[u8]) -> Result<
             Some(layout.overflow_first_page)
         },
         layout.overflow_len(),
+        overflow_cache,
     )?;
 
     let mut value = layout.local_payload;

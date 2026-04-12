@@ -204,6 +204,55 @@ mod mod_tests {
     }
 
     #[test]
+    fn test_btree_cursor_materializes_key_and_value_lazily() -> Result<()> {
+        let path = tmp_db();
+        let storage = new_storage(&path)?;
+        let mut btree = BTreeIndex::new_with_init(storage)?;
+
+        btree.insert(BTreeKey::new(b"alpha".to_vec()), BTreeValue::new(b"one".to_vec()))?;
+        btree.insert(BTreeKey::new(b"beta".to_vec()), BTreeValue::new(b"two".to_vec()))?;
+
+        let mut cursor = btree.cursor()?;
+        assert_eq!(cursor.cache_materialized(), (false, false));
+
+        assert_eq!(cursor.key().map(|key| key.as_bytes()), Some(b"alpha".as_slice()));
+        assert_eq!(cursor.cache_materialized(), (true, false));
+
+        assert_eq!(cursor.value().map(|value| value.as_bytes()), Some(b"one".as_slice()));
+        assert_eq!(cursor.cache_materialized(), (true, true));
+
+        cursor.next()?;
+        assert_eq!(cursor.cache_materialized(), (false, false));
+        assert_eq!(cursor.current().map(|(key, value)| (key.as_bytes(), value.as_bytes())), Some((b"beta".as_slice(), b"two".as_slice())));
+        assert_eq!(cursor.cache_materialized(), (true, true));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_byte_tree_cursor_reuses_overflow_cache_for_repeated_current_reads() -> Result<()> {
+        let path = tmp_db();
+        let storage = new_storage(&path)?;
+        let trees = ByteTreeStore::new(storage);
+        let root_page_id = trees.create_tree()?;
+        let mut tree = trees.open_tree(root_page_id)?;
+
+        let large_value = vec![0x51; crate::storage::PAGE_SIZE * 2];
+        tree.insert(b"blob", &large_value)?;
+
+        let cursor = tree.cursor()?;
+        assert_eq!(cursor.overflow_cache_stats(), (0, 0));
+
+        assert_eq!(cursor.current()?, Some((b"blob".to_vec(), large_value.clone())));
+        assert_eq!(cursor.overflow_cache_stats(), (0, 1));
+
+        assert_eq!(cursor.current()?, Some((b"blob".to_vec(), large_value)));
+        assert_eq!(cursor.overflow_cache_stats(), (1, 1));
+
+        Ok(())
+    }
+
+    #[test]
     fn test_byte_tree_keeps_root_page_stable_across_splits() -> Result<()> {
         let path = tmp_db();
         let storage = new_storage(&path)?;
@@ -496,7 +545,11 @@ mod mod_tests {
         assert!(trees.validate_tree(root_page_id)?);
         let mut reopened = trees.open_tree(root_page_id)?;
         for (key, value) in expected {
-            assert_eq!(reopened.get(&key.to_be_bytes())?, Some(value));
+            let res = reopened.get(&key.to_be_bytes())?;
+            if res != Some(value.clone()) {
+                println!("FAIL on key {}. res is {:?}", key, res);
+                assert_eq!(res, Some(value));
+            }
         }
 
         Ok(())

@@ -6,6 +6,10 @@ impl Pager {
         self.cache.dirty_count()
     }
 
+    pub(crate) fn cached_page_count(&self) -> usize {
+        self.cache.entry_count()
+    }
+
     pub(crate) fn wal_snapshot_sequence(&self) -> Option<u64> {
         self.wal_read_snapshot
             .as_ref()
