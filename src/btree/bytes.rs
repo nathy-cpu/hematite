@@ -180,6 +180,17 @@ impl ByteTreeStore {
         self.lock_storage()?.restore_snapshot(snapshot.pager)
     }
 
+    fn run_atomically<T>(&self, operation: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
+        let snapshot = self.snapshot()?;
+        match operation(self) {
+            Ok(result) => Ok(result),
+            Err(err) => {
+                self.restore_snapshot(snapshot)?;
+                Err(err)
+            }
+        }
+    }
+
     pub fn begin_read(&self) -> Result<()> {
         self.lock_storage()?.begin_read()
     }
@@ -239,12 +250,14 @@ impl ByteTreeStore {
     }
 
     pub fn delete_tree(&self, root_page_id: PageId) -> Result<()> {
-        {
-            let mut pager = self.lock_storage()?;
-            free_tree_overflow(&mut pager, root_page_id)?;
-        }
-        let mut manager = BTreeManager::from_shared_storage(self.storage.clone());
-        manager.delete_tree(root_page_id)
+        self.run_atomically(|store| {
+            {
+                let mut pager = store.lock_storage()?;
+                free_tree_overflow(&mut pager, root_page_id)?;
+            }
+            let mut manager = BTreeManager::from_shared_storage(store.storage.clone());
+            manager.delete_tree(root_page_id)
+        })
     }
 
     pub fn validate_tree(&self, root_page_id: PageId) -> Result<bool> {
@@ -272,9 +285,11 @@ impl ByteTreeStore {
     }
 
     pub fn reset_tree(&self, root_page_id: PageId) -> Result<()> {
-        let mut pager = self.lock_storage()?;
-        free_tree_overflow(&mut pager, root_page_id)?;
-        reset_tree_pages(&mut pager, root_page_id)
+        self.run_atomically(|store| {
+            let mut pager = store.lock_storage()?;
+            free_tree_overflow(&mut pager, root_page_id)?;
+            reset_tree_pages(&mut pager, root_page_id)
+        })
     }
 
     pub fn collect_page_ids(&self, root_page_id: PageId) -> Result<Vec<PageId>> {
@@ -302,15 +317,28 @@ impl ByteTree {
         })
     }
 
-    fn snapshot_storage(&self) -> Result<crate::storage::pager::PagerSnapshot> {
-        self.lock_storage()?.snapshot()
+    fn snapshot_storage(&self) -> Result<ByteTreeStoreSnapshot> {
+        Ok(ByteTreeStoreSnapshot {
+            pager: self.lock_storage()?.snapshot()?,
+        })
     }
 
-    fn restore_storage_snapshot(
-        &self,
-        snapshot: crate::storage::pager::PagerSnapshot,
-    ) -> Result<()> {
-        self.lock_storage()?.restore_snapshot(snapshot)
+    fn restore_storage_snapshot(&self, snapshot: ByteTreeStoreSnapshot) -> Result<()> {
+        self.lock_storage()?.restore_snapshot(snapshot.pager)
+    }
+
+    fn run_atomically<T>(
+        &mut self,
+        operation: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        let snapshot = self.snapshot_storage()?;
+        match operation(self) {
+            Ok(result) => Ok(result),
+            Err(err) => {
+                self.restore_storage_snapshot(snapshot)?;
+                Err(err)
+            }
+        }
     }
 
     pub fn root_page_id(&self) -> PageId {
@@ -332,32 +360,24 @@ impl ByteTree {
     }
 
     pub fn insert_with_mutation(&mut self, key: &[u8], value: &[u8]) -> Result<TreeMutation> {
-        let snapshot = self.snapshot_storage()?;
-        let result = (|| {
-            let existing_stored_value = self.index.search_typed::<RawBytesCodec>(&key.to_vec())?;
+        let encoded_key = key.to_vec();
+        self.run_atomically(|tree| {
+            let existing_stored_value = tree.index.search_typed::<RawBytesCodec>(&encoded_key)?;
             let stored_value = {
-                let mut storage = self.lock_storage()?;
+                let mut storage = tree.lock_storage()?;
                 materialize_stored_value(&mut storage, value)?
             };
-            let mutation = self
+            let mutation = tree
                 .index
-                .insert_typed_with_mutation::<RawBytesCodec>(&key.to_vec(), &stored_value)?;
+                .insert_typed_with_mutation::<RawBytesCodec>(&encoded_key, &stored_value)?;
 
             if let Some(existing_stored_value) = existing_stored_value {
-                let mut storage = self.lock_storage()?;
+                let mut storage = tree.lock_storage()?;
                 free_stored_value_overflow(&mut storage, &existing_stored_value)?;
             }
 
             Ok(mutation)
-        })();
-
-        match result {
-            Ok(mutation) => Ok(mutation),
-            Err(err) => {
-                self.restore_storage_snapshot(snapshot)?;
-                Err(err)
-            }
-        }
+        })
     }
 
     pub fn delete(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
@@ -365,14 +385,14 @@ impl ByteTree {
     }
 
     pub fn delete_with_mutation(&mut self, key: &[u8]) -> Result<(Option<Vec<u8>>, TreeMutation)> {
-        let snapshot = self.snapshot_storage()?;
-        let result = (|| {
-            let (stored_value, mutation) = self
+        let encoded_key = key.to_vec();
+        self.run_atomically(|tree| {
+            let (stored_value, mutation) = tree
                 .index
-                .delete_typed_with_mutation::<RawBytesCodec>(&key.to_vec())?;
+                .delete_typed_with_mutation::<RawBytesCodec>(&encoded_key)?;
             let logical_value = match stored_value {
                 Some(stored_value) => {
-                    let mut storage = self.lock_storage()?;
+                    let mut storage = tree.lock_storage()?;
                     let logical_value = hydrate_stored_value(&mut storage, &stored_value)?;
                     free_stored_value_overflow(&mut storage, &stored_value)?;
                     Some(logical_value)
@@ -380,15 +400,7 @@ impl ByteTree {
                 None => None,
             };
             Ok((logical_value, mutation))
-        })();
-
-        match result {
-            Ok(outcome) => Ok(outcome),
-            Err(err) => {
-                self.restore_storage_snapshot(snapshot)?;
-                Err(err)
-            }
-        }
+        })
     }
 
     pub fn entry(&mut self, key: &[u8]) -> Result<Option<(Vec<u8>, Vec<u8>)>> {

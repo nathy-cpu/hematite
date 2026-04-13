@@ -85,6 +85,41 @@ fn test_pager_recovery_from_error_state_via_rollback() -> Result<()> {
 }
 
 #[test]
+fn test_pager_restore_snapshot_clears_error_state_after_spill_failure() -> Result<()> {
+    let test_db = TestDbFile::new("pager_fault_restore_snapshot_error_state");
+    let mut pager = Pager::new(&test_db, 1)?;
+    let page_id = pager.allocate_page()?;
+
+    let mut initial = Page::new(page_id);
+    initial.data[0] = 1;
+    pager.write_page(initial)?;
+    pager.flush()?;
+
+    pager.begin_transaction()?;
+    let snapshot = pager.snapshot()?;
+
+    let mut updated = pager.read_page(page_id)?;
+    updated.data[0] = 2;
+
+    pager.inject_io_failure_after(0);
+    let err = pager.write_page(updated).unwrap_err();
+    assert!(err.to_string().contains("Injected IO error"));
+    assert_eq!(pager.state(), PagerState::Error);
+
+    pager.restore_snapshot(snapshot)?;
+    assert!(matches!(
+        pager.state(),
+        PagerState::WriterLocked | PagerState::WriterCacheMod
+    ));
+    assert_eq!(pager.read_page(page_id)?.data[0], 1);
+
+    pager.rollback_transaction()?;
+    assert_eq!(pager.state(), PagerState::Open);
+
+    Ok(())
+}
+
+#[test]
 fn test_pager_state_tracks_reader_scope() -> Result<()> {
     let test_db = TestDbFile::new("pager_state_reader_scope");
     let mut pager = Pager::new(&test_db, 10)?;

@@ -1,4 +1,4 @@
-use super::{PageCache, Pager, PagerTransaction, RollbackSavepoint};
+use super::{PageCache, Pager, PagerState, PagerTransaction, RollbackSavepoint};
 use crate::error::Result;
 use crate::storage::{file_manager::FileManagerSnapshot, Page, PageId};
 use std::collections::HashMap;
@@ -10,6 +10,7 @@ pub(crate) enum PagerSnapshot {
         cache: PageCache,
         page_checksums: HashMap<PageId, u32>,
         transaction: Option<PagerTransaction>,
+        state: PagerState,
     },
     RollbackSavepoint {
         id: u64,
@@ -21,6 +22,7 @@ impl PagerSnapshot {
         if let Self::Full {
             ref mut cache,
             ref mut transaction,
+            ref mut state,
             ..
         } = self
         {
@@ -28,6 +30,7 @@ impl PagerSnapshot {
                 cache.clear_dirty(page_id);
             }
             *transaction = None;
+            *state = PagerState::Open;
         }
         self
     }
@@ -69,7 +72,6 @@ impl Pager {
                 file_manager,
                 page_checksums,
                 dirty_pages,
-                transaction_page_record_count: transaction.page_records.len(),
                 page_records: Vec::new(),
                 captured_page_ids: dirty_page_ids,
             }
@@ -125,15 +127,12 @@ impl Pager {
             )
         })?;
         transaction.savepoints.truncate(position + 1);
-        transaction
-            .page_records
-            .truncate(savepoint.transaction_page_record_count);
-        transaction.journaled_pages = transaction
-            .page_records
-            .iter()
-            .map(|record| record.page_id)
-            .collect();
         self.sync_rollback_journal_from_transaction()?;
+        self.state = if self.cache.dirty_page_ids().is_empty() {
+            PagerState::WriterLocked
+        } else {
+            PagerState::WriterCacheMod
+        };
         Ok(())
     }
 
@@ -151,6 +150,7 @@ impl Pager {
             cache: self.cache.clone(),
             page_checksums: self.page_checksums.clone(),
             transaction: self.transaction.clone(),
+            state: self.state,
         })
     }
 
@@ -161,12 +161,14 @@ impl Pager {
                 cache,
                 page_checksums,
                 transaction,
+                state,
             } => {
                 self.file_manager.restore_snapshot(file_manager)?;
                 self.cache = cache;
                 self.page_checksums = page_checksums;
                 self.transaction = transaction;
                 self.sync_rollback_journal_from_transaction()?;
+                self.state = state;
                 Ok(())
             }
             PagerSnapshot::RollbackSavepoint { id } => self.restore_rollback_savepoint(id),

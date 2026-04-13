@@ -405,6 +405,41 @@ mod mod_tests {
     }
 
     #[test]
+    fn test_byte_tree_failed_large_delete_restores_previous_value_and_overflow_state(
+    ) -> Result<()> {
+        let path = tmp_db();
+        let trees = ByteTreeStore::new(Pager::new(path.path(), 1)?);
+        let root_page_id = trees.create_tree()?;
+        let mut tree = trees.open_tree(root_page_id)?;
+        let large_value = vec![0x63; crate::storage::PAGE_SIZE * 2];
+
+        tree.insert(b"blob", &large_value)?;
+        trees.flush()?;
+        let baseline_allocated = trees.allocated_page_count()?;
+        let baseline_free_pages = trees.free_page_ids()?;
+
+        trees.begin_transaction()?;
+        trees
+            .shared_storage()
+            .write()
+            .unwrap()
+            .inject_io_failure_after(0);
+
+        let err = tree.delete(b"blob").unwrap_err();
+        assert!(err.to_string().contains("Injected IO error"));
+        assert_eq!(tree.get(b"blob")?, Some(large_value));
+        assert_eq!(trees.allocated_page_count()?, baseline_allocated);
+        assert_eq!(trees.free_page_ids()?, baseline_free_pages);
+        assert!(trees.transaction_active()?);
+
+        trees.rollback_transaction()?;
+        assert!(trees.validate_tree(root_page_id)?);
+        assert!(trees.validate_tree_overflow(root_page_id).is_ok());
+
+        Ok(())
+    }
+
+    #[test]
     fn test_byte_tree_delete_reclaims_overflow_pages() -> Result<()> {
         let path = tmp_db();
         let storage = new_storage(&path)?;
@@ -459,6 +494,43 @@ mod mod_tests {
 
         let reused_page_id = shared.write().unwrap().allocate_page()?;
         assert!(overflow_ids.contains(&reused_page_id));
+        Ok(())
+    }
+
+    #[test]
+    fn test_byte_tree_failed_reset_restores_previous_value_and_overflow_state() -> Result<()> {
+        let path = tmp_db();
+        let trees = ByteTreeStore::new(Pager::new(path.path(), 1)?);
+        let root_page_id = trees.create_tree()?;
+        let mut tree = trees.open_tree(root_page_id)?;
+        let large_value = vec![0x47; crate::storage::PAGE_SIZE * 2];
+
+        tree.insert(b"blob", &large_value)?;
+        trees.flush()?;
+        let baseline_allocated = trees.allocated_page_count()?;
+        let baseline_free_pages = trees.free_page_ids()?;
+
+        trees.begin_transaction()?;
+
+        trees
+            .shared_storage()
+            .write()
+            .unwrap()
+            .inject_io_failure_after(0);
+
+        let err = trees.reset_tree(root_page_id).unwrap_err();
+        assert!(err.to_string().contains("Injected IO error"));
+        assert!(trees.transaction_active()?);
+
+        assert_eq!(tree.get(b"blob")?, Some(large_value));
+
+        trees.rollback_transaction()?;
+
+        assert_eq!(trees.allocated_page_count()?, baseline_allocated);
+        assert_eq!(trees.free_page_ids()?, baseline_free_pages);
+        assert!(trees.validate_tree(root_page_id)?);
+        assert!(trees.validate_tree_overflow(root_page_id).is_ok());
+
         Ok(())
     }
 

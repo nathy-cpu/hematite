@@ -36,7 +36,6 @@ impl Pager {
                     file_manager: self.file_manager.snapshot()?,
                     page_checksums: self.page_checksums.clone(),
                     dirty_pages: Vec::new(),
-                    transaction_page_record_count: 0,
                     page_records: Vec::new(),
                     captured_page_ids: HashSet::new(),
                 };

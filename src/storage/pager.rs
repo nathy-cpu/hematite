@@ -138,7 +138,6 @@ struct RollbackSavepoint {
     file_manager: FileManagerSnapshot,
     page_checksums: HashMap<PageId, u32>,
     dirty_pages: Vec<Page>,
-    transaction_page_record_count: usize,
     page_records: Vec<JournalRecord>,
     captured_page_ids: HashSet<PageId>,
 }

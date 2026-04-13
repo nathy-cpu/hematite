@@ -541,7 +541,8 @@ mod pager_tests {
     }
 
     #[test]
-    fn test_pager_restore_snapshot_rewrites_active_rollback_journal() -> crate::error::Result<()> {
+    fn test_pager_restore_snapshot_keeps_rollback_records_needed_for_later_rollback(
+    ) -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_pager_restore_snapshot_rewrites_journal");
         let journal_path = std::path::PathBuf::from(format!("{}.journal", test_db.path()));
 
@@ -576,8 +577,9 @@ mod pager_tests {
         pager.restore_snapshot(snapshot)?;
 
         let rewritten_journal = RollbackJournal::decode(&fs::read(&journal_path)?)?;
-        assert_eq!(rewritten_journal.page_records.len(), 1);
+        assert_eq!(rewritten_journal.page_records.len(), 2);
         assert_eq!(rewritten_journal.page_records[0].page_id, first_page_id);
+        assert_eq!(rewritten_journal.page_records[1].page_id, second_page_id);
 
         pager.rollback_transaction()?;
         assert_eq!(pager.read_page(first_page_id)?.data[0], 10);
