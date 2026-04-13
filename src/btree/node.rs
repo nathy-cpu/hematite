@@ -19,6 +19,7 @@ use crate::storage::format::{PageKind, DATABASE_HEADER_SIZE};
 #[cfg(test)]
 use crate::storage::INVALID_PAGE_ID;
 use crate::storage::{Page, PageId, Pager, PAGE_SIZE};
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -45,6 +46,7 @@ pub struct BTreeNode {
     pub raw_page: Option<Arc<Page>>,
     pub is_decoded: bool,
     pub cell_offsets: Vec<u16>,
+    pub cell_ranges_cache: RefCell<Option<Vec<(usize, usize)>>>,
 }
 
 impl BTreeNode {
@@ -60,6 +62,7 @@ impl BTreeNode {
             raw_page: None,
             is_decoded: true,
             cell_offsets: Vec::new(),
+            cell_ranges_cache: RefCell::new(None),
         }
     }
 
@@ -75,6 +78,7 @@ impl BTreeNode {
             raw_page: None,
             is_decoded: true,
             cell_offsets: Vec::new(),
+            cell_ranges_cache: RefCell::new(None),
         }
     }
 
@@ -199,9 +203,14 @@ impl BTreeNode {
         node.payload_len = PAGE_SIZE.saturating_sub(header.cell_content_start as usize);
         node.raw_page = Some(page.clone());
         node.is_decoded = false;
-        node.cell_offsets = (0..header.cell_count as usize)
-            .map(|index| cell_pointer_from_header(&page, &header, index))
-            .collect::<Result<Vec<_>>>()?;
+        // Build cell_offsets without intermediate iterator allocation.
+        let mut offsets = Vec::with_capacity(header.cell_count as usize);
+        for index in 0..header.cell_count as usize {
+            offsets.push(cell_pointer_from_header(&page, &header, index)?);
+        }
+        node.cell_offsets = offsets;
+        // Invalidate cached cell ranges because offsets changed.
+        *node.cell_ranges_cache.borrow_mut() = None;
 
         // Validate the cells before returning a lazy node.
         // Use cell_range_for_index to avoid relying on a large offset-indexed table.
@@ -383,23 +392,23 @@ impl BTreeNode {
         };
         let pointer_area_start = header_offset + header_size;
 
-        let mut cell_bytes = Vec::with_capacity(self.keys.len());
+        // Compute total bytes required for all cells without allocating a Vec per-cell.
+        let mut total_cell_bytes: usize = 0;
         for index in 0..self.keys.len() {
-            let bytes = match self.node_type {
+            let cell_len = match self.node_type {
                 NodeType::Leaf => {
                     Self::validate_key_size(&self.keys[index])?;
                     Self::validate_value_size(&self.values[index])?;
-                    encode_leaf_cell(&self.keys[index], &self.values[index])
+                    4 + self.keys[index].data.len() + self.values[index].data.len()
                 }
                 NodeType::Internal => {
                     Self::validate_key_size(&self.keys[index])?;
-                    encode_internal_cell(self.children[index], &self.keys[index])?
+                    6 + self.keys[index].data.len()
                 }
             };
-            cell_bytes.push(bytes);
+            total_cell_bytes += cell_len;
         }
 
-        let total_cell_bytes = cell_bytes.iter().map(Vec::len).sum::<usize>();
         let total_size =
             page_header_offset(page.id) + header_size + self.keys.len() * 2 + total_cell_bytes;
         if total_size > PAGE_SIZE {
@@ -409,10 +418,52 @@ impl BTreeNode {
             )));
         }
 
+        // Fill cells directly into the page buffer from the end backwards to avoid
+        // allocating per-cell Vec<u8>. For each cell, compute its length and write
+        // header + key (+ value) bytes straight into the page.data slice.
         let mut content_start = PAGE_SIZE;
-        for (index, cell) in cell_bytes.iter().enumerate().rev() {
-            content_start -= cell.len();
-            page.data[content_start..content_start + cell.len()].copy_from_slice(cell);
+        for index in (0..self.keys.len()).rev() {
+            let cell_len = match self.node_type {
+                NodeType::Leaf => 4 + self.keys[index].data.len() + self.values[index].data.len(),
+                NodeType::Internal => 6 + self.keys[index].data.len(),
+            };
+
+            content_start -= cell_len;
+            let dest_start = content_start;
+            let mut offs = 0usize;
+
+            match self.node_type {
+                NodeType::Leaf => {
+                    // 2 bytes key len, 2 bytes value len, then key bytes, then value bytes
+                    let key_len = self.keys[index].data.len() as u16;
+                    let val_len = self.values[index].data.len() as u16;
+                    dest_copy_u16_be(&mut page.data, dest_start + offs, key_len);
+                    offs += 2;
+                    dest_copy_u16_be(&mut page.data, dest_start + offs, val_len);
+                    offs += 2;
+                    let key_bytes = &self.keys[index].data;
+                    page.data[dest_start + offs..dest_start + offs + key_bytes.len()]
+                        .copy_from_slice(key_bytes);
+                    offs += key_bytes.len();
+                    let val_bytes = &self.values[index].data;
+                    page.data[dest_start + offs..dest_start + offs + val_bytes.len()]
+                        .copy_from_slice(val_bytes);
+                }
+                NodeType::Internal => {
+                    // 4 bytes left child, 2 bytes key len, then key bytes
+                    let child = self.children[index];
+                    dest_copy_u32_be(&mut page.data, dest_start + offs, child);
+                    offs += 4;
+                    let key_len = self.keys[index].data.len() as u16;
+                    dest_copy_u16_be(&mut page.data, dest_start + offs, key_len);
+                    offs += 2;
+                    let key_bytes = &self.keys[index].data;
+                    page.data[dest_start + offs..dest_start + offs + key_bytes.len()]
+                        .copy_from_slice(key_bytes);
+                }
+            }
+
+            // Write cell pointer into pointer array.
             write_u16_be(
                 &mut page.data,
                 pointer_area_start + index * 2,
@@ -420,6 +471,7 @@ impl BTreeNode {
             );
         }
 
+        // Write header fields.
         write_u16_be(&mut page.data, header_offset + 3, self.keys.len() as u16);
         write_u16_be(&mut page.data, header_offset + 5, content_start as u16);
         page.data[header_offset + 7] = 0;
@@ -522,9 +574,14 @@ impl BTreeNode {
         self.is_decoded = false;
         let header = BTreePageHeaderV3::parse(page, is_p1)?;
         self.key_count = header.cell_count as usize;
-        self.cell_offsets = (0..header.cell_count as usize)
-            .map(|i| cell_pointer_from_header(page, &header, i))
-            .collect::<Result<Vec<_>>>()?;
+        // Rebuild cell_offsets without intermediate iterator/collect allocation.
+        let mut offsets = Vec::with_capacity(header.cell_count as usize);
+        for i in 0..header.cell_count as usize {
+            offsets.push(cell_pointer_from_header(page, &header, i)?);
+        }
+        self.cell_offsets = offsets;
+        // Invalidate cached cell ranges because offsets changed.
+        *self.cell_ranges_cache.borrow_mut() = None;
         self.payload_len = PAGE_SIZE.saturating_sub(header.cell_content_start as usize);
         self.keys.clear();
         self.values.clear();
@@ -547,9 +604,14 @@ impl BTreeNode {
         self.is_decoded = false;
         let header = BTreePageHeaderV3::parse(page, is_p1)?;
         self.key_count = header.cell_count as usize;
-        self.cell_offsets = (0..header.cell_count as usize)
-            .map(|i| cell_pointer_from_header(page, &header, i))
-            .collect::<Result<Vec<_>>>()?;
+        // Refresh cell_offsets from page header without intermediate iterator allocation.
+        let mut offsets = Vec::with_capacity(header.cell_count as usize);
+        for i in 0..header.cell_count as usize {
+            offsets.push(cell_pointer_from_header(page, &header, i)?);
+        }
+        self.cell_offsets = offsets;
+        // Invalidate cached cell ranges because offsets changed.
+        *self.cell_ranges_cache.borrow_mut() = None;
         self.payload_len = PAGE_SIZE.saturating_sub(header.cell_content_start as usize);
         self.keys.clear();
         self.values.clear();
@@ -656,8 +718,8 @@ impl BTreeNode {
         };
 
         // Move right-side keys/values into the new node using VecDeque drain.
-        let mut right_keys: VecDeque<BTreeKey> = self.keys.drain(split_pos..).collect();
-        let mut right_values: VecDeque<BTreeValue> = self.values.drain(split_pos..).collect();
+        let right_keys: VecDeque<BTreeKey> = self.keys.drain(split_pos..).collect();
+        let right_values: VecDeque<BTreeValue> = self.values.drain(split_pos..).collect();
         new_node.keys = right_keys;
         new_node.values = right_values;
         new_node.key_count = new_node.keys.len();
@@ -706,8 +768,8 @@ impl BTreeNode {
         };
         let split_key = self.keys.get(split_pos).cloned().expect("split key");
         // Drain the ranges for keys and children into the new node.
-        let mut right_keys: VecDeque<BTreeKey> = self.keys.drain((split_pos + 1)..).collect();
-        let mut right_children: VecDeque<PageId> = self.children.drain((split_pos + 1)..).collect();
+        let right_keys: VecDeque<BTreeKey> = self.keys.drain((split_pos + 1)..).collect();
+        let right_children: VecDeque<PageId> = self.children.drain((split_pos + 1)..).collect();
         new_node.keys = right_keys;
         new_node.children = right_children;
         // Remove the separator key from the left node (was at split_pos)
@@ -944,6 +1006,11 @@ impl BTreeNode {
     }
 
     fn cell_ranges(&self) -> Result<Vec<(usize, usize)>> {
+        // Return cached ranges if present to avoid per-call recomputation.
+        if let Some(cached) = self.cell_ranges_cache.borrow().as_ref() {
+            return Ok(cached.clone());
+        }
+
         // Avoid allocating a PAGE_SIZE-sized vector per-call. Build a compact vector
         // with one (start,end) pair per cell in pointer-array order.
         let page = self.raw_page.as_ref().ok_or_else(|| {
@@ -998,6 +1065,8 @@ impl BTreeNode {
         }
 
         let _ = page; // preserve earlier consistency check tie-in
+                      // Cache the computed ranges for future calls.
+        *self.cell_ranges_cache.borrow_mut() = Some(ranges.clone());
         Ok(ranges)
     }
 
@@ -1207,6 +1276,17 @@ fn write_u16_be(bytes: &mut [u8], offset: usize, value: u16) {
 
 fn write_u32_be(bytes: &mut [u8], offset: usize, value: u32) {
     bytes[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
+}
+
+// Helpers that write directly into a destination slice starting at `offset`.
+// These are thin wrappers used by `to_page()` to avoid allocating temporary
+// buffers and to make intent explicit.
+fn dest_copy_u16_be(dest: &mut [u8], offset: usize, value: u16) {
+    dest[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
+}
+
+fn dest_copy_u32_be(dest: &mut [u8], offset: usize, value: u32) {
+    dest[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
 }
 
 #[cfg(test)]
