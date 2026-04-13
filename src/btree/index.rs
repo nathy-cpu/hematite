@@ -44,14 +44,6 @@ impl BTreeIndex {
         })
     }
 
-    fn lock_storage_read(&self) -> Result<std::sync::RwLockReadGuard<'_, Pager>> {
-        self.storage.read().map_err(|_| {
-            crate::error::HematiteError::InternalError(
-                "B-tree index storage lock is poisoned".to_string(),
-            )
-        })
-    }
-
     fn min_keys_for(node_type: NodeType) -> usize {
         match node_type {
             NodeType::Leaf => node::MAX_KEYS / 2,
@@ -79,7 +71,7 @@ impl BTreeIndex {
             let page = storage.read_page_shared(current_page_id)?;
             let node = BTreeNode::from_shared_page(page)?;
 
-            match node.search(key) {
+            match node.search(key)? {
                 SearchResult::Found(value) => return Ok(Some(value)),
                 SearchResult::NotFound(child_page_id) => match node.node_type {
                     NodeType::Leaf => return Ok(None),
@@ -101,13 +93,13 @@ impl BTreeIndex {
 
             match node.node_type {
                 NodeType::Leaf => {
-                    if let Some(index) = node.exact_key_index(&key) {
+                    if let Some(index) = node.exact_key_index(&key)? {
                         return Ok(Some(C::decode_value(node.get_value_view(index)?)?));
                     }
                     return Ok(None);
                 }
                 NodeType::Internal => {
-                    current_page_id = node.find_child(&key);
+                    current_page_id = node.find_child(&key)?;
                 }
             }
         }
@@ -210,7 +202,7 @@ impl BTreeIndex {
                 }
             }
             NodeType::Internal => {
-                let child_page_id = node.find_child(&key);
+                let child_page_id = node.find_child(&key)?;
                 let split_result = self.insert_recursive(pager, child_page_id, key, value)?;
 
                 if let Some((split_key, split_page_id)) = split_result {
@@ -314,7 +306,7 @@ impl BTreeIndex {
         let shared = pager.read_page_shared(page_id)?;
         let mut lazy_node = BTreeNode::from_shared_page(shared.clone())?;
         if lazy_node.node_type == NodeType::Leaf {
-            if let Some(index) = lazy_node.exact_key_index(key) {
+            if let Some(index) = lazy_node.exact_key_index(key)? {
                 let value = lazy_node.get_value_procedural(index)?;
                 let mut page = pager.take_page_for_write(shared.id)?;
                 lazy_node.try_remove_cell_in_place(&mut page, index)?;
@@ -329,7 +321,7 @@ impl BTreeIndex {
         let result = match node.node_type {
             NodeType::Leaf => unreachable!(),
             NodeType::Internal => {
-                let child_index = node.find_child_index(key);
+                let child_index = node.find_child_index(key)?;
                 let child_page_id = node.children[child_index];
 
                 let deleted_value = self.delete_recursive(pager, child_page_id, key)?;

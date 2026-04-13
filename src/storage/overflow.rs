@@ -83,15 +83,6 @@ pub fn write_overflow_chain(storage: &mut Pager, payload: &[u8]) -> Result<Optio
     Ok(page_ids.first().copied())
 }
 
-pub fn read_overflow_chain(
-    storage: &mut Pager,
-    first_page: Option<PageId>,
-    expected_len: usize,
-) -> Result<Vec<u8>> {
-    let mut cache = OverflowReadCache::default();
-    read_overflow_chain_cached_with_cache(storage, first_page, expected_len, &mut cache)
-}
-
 pub fn free_overflow_chain(storage: &mut Pager, first_page: Option<PageId>) -> Result<()> {
     let page_ids = collect_overflow_page_ids(storage, first_page)?;
     for page_id in page_ids {
@@ -205,8 +196,7 @@ pub(crate) fn read_overflow_chain_cached_with_cache(
         page_ids
     };
 
-    let expected_page_count =
-        (expected_len + V3_OVERFLOW_PAYLOAD_CAPACITY - 1) / V3_OVERFLOW_PAYLOAD_CAPACITY;
+    let expected_page_count = expected_len.div_ceil(V3_OVERFLOW_PAYLOAD_CAPACITY);
     if page_ids.len() != expected_page_count {
         return Err(HematiteError::StorageError(format!(
             "v3 overflow chain expected {} pages but received {}",

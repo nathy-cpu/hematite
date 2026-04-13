@@ -50,10 +50,9 @@ fn parse_sections(page: &[u8]) -> Result<MetadataSections<'_>> {
         return parse_container_sections(page);
     }
 
-    Ok(MetadataSections {
-        pager: None,
-        catalog: parse_legacy_catalog_section(page),
-    })
+    Err(HematiteError::StorageError(
+        "Legacy reserved metadata layout is unsupported".to_string(),
+    ))
 }
 
 fn parse_container_sections(page: &[u8]) -> Result<MetadataSections<'_>> {
@@ -83,19 +82,6 @@ fn parse_container_sections(page: &[u8]) -> Result<MetadataSections<'_>> {
         (catalog_len > 0).then_some(&page[catalog_start..catalog_start + catalog_len]);
 
     Ok(MetadataSections { pager, catalog })
-}
-
-fn parse_legacy_catalog_section(page: &[u8]) -> Option<&[u8]> {
-    if page.len() < 4 || (page.len() >= 9 && &page[0..4] == b"BTRE") {
-        return None;
-    }
-
-    let catalog_len = u32::from_le_bytes(page[0..4].try_into().unwrap()) as usize;
-    if catalog_len == 0 || catalog_len + 4 > PAGE_SIZE {
-        return None;
-    }
-
-    Some(&page[4..4 + catalog_len])
 }
 
 fn encode_sections(pager: Option<&[u8]>, catalog: Option<&[u8]>) -> Result<Vec<u8>> {
@@ -150,25 +136,30 @@ mod tests {
     }
 
     #[test]
-    fn metadata_page_migrates_legacy_catalog_payload() {
+    fn metadata_page_rejects_legacy_catalog_payload() {
         let payload = b"version=1\ntable_count=0";
         let mut legacy_page = vec![0; PAGE_SIZE];
         legacy_page[0..4].copy_from_slice(&(payload.len() as u32).to_le_bytes());
         legacy_page[4..4 + payload.len()].copy_from_slice(payload);
 
-        let page = write_pager_metadata(&legacy_page, b"version=1\nfree_count=0\nchecksum_count=0")
-            .unwrap();
-
-        assert_eq!(read_catalog_metadata(&page).unwrap().unwrap(), payload);
-        assert!(read_pager_metadata(&page).unwrap().is_some());
+        let err = write_pager_metadata(&legacy_page, b"pager=yes").unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Legacy reserved metadata layout is unsupported"));
     }
 
     #[test]
-    fn metadata_page_treats_btree_root_bytes_as_empty_metadata() {
+    fn metadata_page_rejects_btree_root_bytes_as_legacy_metadata() {
         let mut page = vec![0; PAGE_SIZE];
         page[0..4].copy_from_slice(b"BTRE");
 
-        assert!(read_catalog_metadata(&page).unwrap().is_none());
-        assert!(read_pager_metadata(&page).unwrap().is_none());
+        let err = read_catalog_metadata(&page).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Legacy reserved metadata layout is unsupported"));
+        let err = read_pager_metadata(&page).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Legacy reserved metadata layout is unsupported"));
     }
 }

@@ -209,25 +209,7 @@ impl BTreeNode {
             offsets.push(cell_pointer_from_header(&page, &header, index)?);
         }
         node.cell_offsets = offsets;
-        // Invalidate cached cell ranges because offsets changed.
-        *node.cell_ranges_cache.borrow_mut() = None;
-
-        // Validate the cells before returning a lazy node.
-        // Use cell_range_for_index to avoid relying on a large offset-indexed table.
-        match node.node_type {
-            NodeType::Leaf => {
-                for (i, &_offset) in node.cell_offsets.iter().enumerate() {
-                    let (start, end) = node.cell_range_for_index(i)?;
-                    parse_leaf_cell(&page.data[start..end])?;
-                }
-            }
-            NodeType::Internal => {
-                for (i, &_offset) in node.cell_offsets.iter().enumerate() {
-                    let (start, end) = node.cell_range_for_index(i)?;
-                    parse_internal_cell(&page.data[start..end])?;
-                }
-            }
-        }
+        *node.cell_ranges_cache.borrow_mut() = Some(compute_cell_ranges(&node.cell_offsets)?);
 
         Ok(node)
     }
@@ -284,6 +266,30 @@ impl BTreeNode {
         Ok(())
     }
 
+    pub(crate) fn validate_cell_layouts(&self) -> Result<()> {
+        let page = self.raw_page.as_ref().ok_or_else(|| {
+            HematiteError::CorruptedData("Missing raw page for lazy node".to_string())
+        })?;
+
+        match self.node_type {
+            NodeType::Leaf => {
+                for index in 0..self.key_count {
+                    let (start, end) = self.cell_range_for_index(index)?;
+                    parse_leaf_cell(&page.data[start..end])?;
+                }
+            }
+            NodeType::Internal => {
+                for index in 0..self.key_count {
+                    let (start, end) = self.cell_range_for_index(index)?;
+                    parse_internal_cell(&page.data[start..end])?;
+                }
+                let _ = self.get_child_procedural(self.key_count)?;
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn get_key_view(&self, target_index: usize) -> Result<&[u8]> {
         if target_index >= self.key_count {
             return Err(HematiteError::StorageError(
@@ -306,11 +312,6 @@ impl BTreeNode {
         Ok(&page.data[start + key_range.0..start + key_range.1])
     }
 
-    pub fn get_key_procedural(&self, target_index: usize) -> Result<BTreeKey> {
-        self.get_key_view(target_index)
-            .map(|v| BTreeKey::new(v.to_vec()))
-    }
-
     pub fn get_child_procedural(&self, target_index: usize) -> Result<PageId> {
         if self.node_type != NodeType::Internal || target_index > self.key_count {
             return Err(HematiteError::StorageError(
@@ -327,7 +328,17 @@ impl BTreeNode {
         })?;
         if target_index == self.key_count {
             let header = BTreePageHeaderV3::parse(page, is_page_one(self.page_id))?;
-            return Ok(header.rightmost_child.unwrap_or(0));
+            let rightmost = header.rightmost_child.ok_or_else(|| {
+                HematiteError::CorruptedData(
+                    "Internal node is missing its rightmost child".to_string(),
+                )
+            })?;
+            if rightmost <= 1 {
+                return Err(HematiteError::CorruptedData(
+                    "Internal node rightmost child cannot reference reserved pages".to_string(),
+                ));
+            }
+            return Ok(rightmost);
         }
         let (start, end) = self.cell_range_for_index(target_index)?;
         let (child, _) = parse_internal_cell(&page.data[start..end])?;
@@ -549,7 +560,7 @@ impl BTreeNode {
         Self::validate_value_size(value)?;
 
         // Check for duplicate key — updates must go through the normal path.
-        if self.exact_key_index(key).is_some() {
+        if self.exact_key_index(key)?.is_some() {
             return Ok(false);
         }
 
@@ -564,7 +575,7 @@ impl BTreeNode {
         }
 
         // Find insertion position via binary search on the lazy node.
-        let pos = self.lower_bound_index(key);
+        let pos = self.lower_bound_index(key)?;
 
         // Use the page_format insert_cell to do the work.
         pf_insert_cell(page, is_p1, pos, &cell_bytes)?;
@@ -620,7 +631,7 @@ impl BTreeNode {
     }
 
     #[cfg(test)]
-    pub fn search(&self, key: &BTreeKey) -> SearchResult {
+    pub fn search(&self, key: &BTreeKey) -> Result<SearchResult> {
         match self.node_type {
             NodeType::Leaf => self.search_leaf(key),
             NodeType::Internal => self.search_internal(key),
@@ -628,25 +639,23 @@ impl BTreeNode {
     }
 
     #[cfg(test)]
-    fn search_leaf(&self, key: &BTreeKey) -> SearchResult {
-        if let Some(index) = self.exact_key_index(key) {
-            SearchResult::Found(self.get_value_procedural(index).unwrap())
+    fn search_leaf(&self, key: &BTreeKey) -> Result<SearchResult> {
+        if let Some(index) = self.exact_key_index(key)? {
+            Ok(SearchResult::Found(self.get_value_procedural(index)?))
         } else {
-            SearchResult::NotFound(INVALID_PAGE_ID)
+            Ok(SearchResult::NotFound(INVALID_PAGE_ID))
         }
     }
 
     #[cfg(test)]
-    fn search_internal(&self, key: &BTreeKey) -> SearchResult {
-        SearchResult::NotFound(
-            self.get_child_procedural(self.upper_bound_index(key))
-                .unwrap(),
-        )
+    fn search_internal(&self, key: &BTreeKey) -> Result<SearchResult> {
+        Ok(SearchResult::NotFound(
+            self.get_child_procedural(self.upper_bound_index(key)?)?,
+        ))
     }
 
-    pub fn find_child(&self, key: &BTreeKey) -> PageId {
-        self.get_child_procedural(self.upper_bound_index(key))
-            .unwrap()
+    pub fn find_child(&self, key: &BTreeKey) -> Result<PageId> {
+        self.get_child_procedural(self.upper_bound_index(key)?)
     }
 
     pub fn insert_leaf(&mut self, key: BTreeKey, value: BTreeValue) -> Result<()> {
@@ -796,8 +805,8 @@ impl BTreeNode {
         let mut best_pos = len / 2;
         let mut best_score = usize::MAX;
         let mut best_min = 0usize;
-        for pos in 1..len {
-            let left = prefix[pos];
+        for (pos, left) in prefix.iter().enumerate().take(len).skip(1) {
+            let left = *left;
             let right = total - left;
             let score = left.abs_diff(right);
             let min_side = left.min(right);
@@ -839,53 +848,35 @@ impl BTreeNode {
         best_pos
     }
 
-    pub fn delete_from_leaf(&mut self, key: &BTreeKey) -> Result<Option<BTreeValue>> {
-        self.decode()?;
-        if self.node_type != NodeType::Leaf {
-            return Err(HematiteError::StorageError("Not a leaf node".to_string()));
-        }
-        for (i, k) in self.keys.iter().enumerate() {
-            if k == key {
-                let value = self.values.remove(i).ok_or_else(|| {
-                    HematiteError::StorageError("Missing value at index".to_string())
-                })?;
-                self.keys.remove(i);
-                self.key_count = self.keys.len();
-                return Ok(Some(value));
-            }
-        }
-        Ok(None)
-    }
-
-    pub fn find_child_index(&self, key: &BTreeKey) -> usize {
+    pub fn find_child_index(&self, key: &BTreeKey) -> Result<usize> {
         self.upper_bound_index(key)
     }
 
-    pub fn lower_bound_index(&self, key: &BTreeKey) -> usize {
+    pub fn lower_bound_index(&self, key: &BTreeKey) -> Result<usize> {
         let mut left = 0;
         let mut right = self.key_count;
         while left < right {
             let mid = (left + right) / 2;
-            let mid_key_bytes = self.get_key_view(mid).unwrap();
+            let mid_key_bytes = self.get_key_view(mid)?;
             if mid_key_bytes < key.as_bytes() {
                 left = mid + 1;
             } else {
                 right = mid;
             }
         }
-        left
+        Ok(left)
     }
 
-    pub fn exact_key_index(&self, key: &BTreeKey) -> Option<usize> {
-        let index = self.lower_bound_index(key);
-        if index < self.key_count && self.get_key_view(index).unwrap() == key.as_bytes() {
-            Some(index)
+    pub fn exact_key_index(&self, key: &BTreeKey) -> Result<Option<usize>> {
+        let index = self.lower_bound_index(key)?;
+        if index < self.key_count && self.get_key_view(index)? == key.as_bytes() {
+            Ok(Some(index))
         } else {
-            None
+            Ok(None)
         }
     }
 
-    pub fn upper_bound_index(&self, key: &BTreeKey) -> usize {
+    pub fn upper_bound_index(&self, key: &BTreeKey) -> Result<usize> {
         if self.is_decoded {
             let mut left = 0;
             let mut right = self.keys.len();
@@ -897,21 +888,21 @@ impl BTreeNode {
                     right = mid;
                 }
             }
-            return left;
+            return Ok(left);
         }
 
         let mut left = 0;
         let mut right = self.key_count;
         while left < right {
             let mid = (left + right) / 2;
-            let mid_key_bytes = self.get_key_view(mid).unwrap();
+            let mid_key_bytes = self.get_key_view(mid)?;
             if mid_key_bytes <= key.as_bytes() {
                 left = mid + 1;
             } else {
                 right = mid;
             }
         }
-        left
+        Ok(left)
     }
 
     pub fn can_merge_with(&self, other: &BTreeNode) -> bool {
@@ -1005,76 +996,7 @@ impl BTreeNode {
         }
     }
 
-    fn cell_ranges(&self) -> Result<Vec<(usize, usize)>> {
-        // Return cached ranges if present to avoid per-call recomputation.
-        if let Some(cached) = self.cell_ranges_cache.borrow().as_ref() {
-            return Ok(cached.clone());
-        }
-
-        // Avoid allocating a PAGE_SIZE-sized vector per-call. Build a compact vector
-        // with one (start,end) pair per cell in pointer-array order.
-        let page = self.raw_page.as_ref().ok_or_else(|| {
-            HematiteError::CorruptedData("Missing raw page for lazy node".to_string())
-        })?;
-
-        // Preserve pointer-array order but compute ends efficiently.
-        let starts = self
-            .cell_offsets
-            .iter()
-            .map(|offset| *offset as usize)
-            .collect::<Vec<_>>();
-
-        // Validate duplicates via a sorted copy.
-        let mut sorted = starts.clone();
-        sorted.sort_unstable();
-        if sorted.windows(2).any(|w| w[0] == w[1]) {
-            return Err(HematiteError::CorruptedData(
-                "Duplicate B-tree cell pointers".to_string(),
-            ));
-        }
-
-        // Build a map from start -> end using the sorted order.
-        use std::collections::HashMap;
-        let mut end_for_start: HashMap<usize, usize> = HashMap::with_capacity(sorted.len());
-        for i in 0..sorted.len() {
-            let start = sorted[i];
-            let end = if i + 1 < sorted.len() {
-                sorted[i + 1]
-            } else {
-                PAGE_SIZE
-            };
-            if start >= end || end > PAGE_SIZE {
-                return Err(HematiteError::CorruptedData(
-                    "B-tree cell pointer ordering is invalid".to_string(),
-                ));
-            }
-            end_for_start.insert(start, end);
-        }
-
-        // Now produce ranges in pointer-array order by looking up computed ends.
-        let mut ranges = Vec::with_capacity(starts.len());
-        for start in starts.into_iter() {
-            match end_for_start.get(&start) {
-                Some(&end) => ranges.push((start, end)),
-                None => {
-                    return Err(HematiteError::CorruptedData(
-                        "B-tree cell pointer ordering is invalid".to_string(),
-                    ))
-                }
-            }
-        }
-
-        let _ = page; // preserve earlier consistency check tie-in
-                      // Cache the computed ranges for future calls.
-        *self.cell_ranges_cache.borrow_mut() = Some(ranges.clone());
-        Ok(ranges)
-    }
-
     fn cell_range_for_index(&self, index_or_offset: usize) -> Result<(usize, usize)> {
-        // Accept either an index into `cell_offsets` (preferred) or a raw byte offset.
-        // If the caller passed a raw offset (>= cell_offsets.len()), map it to the
-        // corresponding pointer-array index. This keeps compatibility with callers that
-        // still used offset-based lookup.
         if self.cell_offsets.is_empty() {
             return Err(HematiteError::StorageError(
                 "Index out of bounds".to_string(),
@@ -1099,21 +1021,47 @@ impl BTreeNode {
             }
         };
 
-        let start = self.cell_offsets[idx] as usize;
-        let mut end = PAGE_SIZE;
-        for &off in self.cell_offsets.iter() {
-            let o = off as usize;
-            if o > start && o < end {
-                end = o;
-            }
+        if self.cell_ranges_cache.borrow().is_none() {
+            *self.cell_ranges_cache.borrow_mut() = Some(compute_cell_ranges(&self.cell_offsets)?);
         }
+        self.cell_ranges_cache
+            .borrow()
+            .as_ref()
+            .and_then(|ranges| ranges.get(idx).copied())
+            .ok_or_else(|| HematiteError::StorageError("Index out of bounds".to_string()))
+    }
+}
+
+fn compute_cell_ranges(cell_offsets: &[u16]) -> Result<Vec<(usize, usize)>> {
+    let mut indexed_offsets = cell_offsets
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, offset)| (offset as usize, index))
+        .collect::<Vec<_>>();
+    indexed_offsets.sort_unstable_by_key(|(offset, _)| *offset);
+
+    if indexed_offsets.windows(2).any(|window| window[0].0 == window[1].0) {
+        return Err(HematiteError::CorruptedData(
+            "Duplicate B-tree cell pointers".to_string(),
+        ));
+    }
+
+    let mut ranges = vec![(0usize, 0usize); cell_offsets.len()];
+    for (sorted_index, (start, original_index)) in indexed_offsets.iter().copied().enumerate() {
+        let end = indexed_offsets
+            .get(sorted_index + 1)
+            .map(|(next_start, _)| *next_start)
+            .unwrap_or(PAGE_SIZE);
         if start >= end || end > PAGE_SIZE {
             return Err(HematiteError::CorruptedData(
                 "B-tree cell pointer ordering is invalid".to_string(),
             ));
         }
-        Ok((start, end))
+        ranges[original_index] = (start, end);
     }
+
+    Ok(ranges)
 }
 
 fn page_header_offset(page_id: PageId) -> usize {
@@ -1167,19 +1115,6 @@ fn encode_leaf_cell(key: &BTreeKey, value: &BTreeValue) -> Vec<u8> {
     bytes.extend_from_slice(&key.data);
     bytes.extend_from_slice(&value.data);
     bytes
-}
-
-fn encode_internal_cell(left_child: PageId, key: &BTreeKey) -> Result<Vec<u8>> {
-    if left_child <= 1 {
-        return Err(HematiteError::StorageError(
-            "Internal node child ids cannot reference reserved pages".to_string(),
-        ));
-    }
-    let mut bytes = Vec::with_capacity(6 + key.data.len());
-    bytes.extend_from_slice(&left_child.to_be_bytes());
-    bytes.extend_from_slice(&(key.data.len() as u16).to_be_bytes());
-    bytes.extend_from_slice(&key.data);
-    Ok(bytes)
 }
 
 fn leaf_cell_size(key: &BTreeKey, value: &BTreeValue) -> usize {

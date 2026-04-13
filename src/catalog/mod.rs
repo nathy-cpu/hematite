@@ -19,7 +19,6 @@ pub(crate) mod index_store;
 pub(crate) mod integrity;
 pub mod object;
 pub mod record;
-pub mod row_id;
 pub(crate) mod runtime_metadata;
 pub mod schema;
 pub(crate) mod schema_store;

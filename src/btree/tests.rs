@@ -19,7 +19,7 @@ mod mod_tests {
     }
 
     fn new_storage(db: &TestDbFile) -> Result<Pager> {
-        Pager::new(db.path().to_string(), 100)
+        Pager::new(db.path(), 100)
     }
 
     #[derive(Debug, Clone)]
@@ -343,6 +343,63 @@ mod mod_tests {
 
         let cursor = tree.cursor()?;
         assert_eq!(cursor.current()?, Some((b"blob".to_vec(), large_value)));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_byte_tree_failed_large_insert_restores_snapshot_and_reclaims_overflow_pages(
+    ) -> Result<()> {
+        let trees = ByteTreeStore::new(Pager::new_in_memory(100)?);
+        let root_page_id = trees.create_tree()?;
+        let mut tree = trees.open_tree(root_page_id)?;
+        let large_value = vec![0x77; crate::storage::PAGE_SIZE * 2];
+        let baseline_allocated = trees.allocated_page_count()?;
+        let baseline_free_pages = trees.free_page_ids()?;
+
+        trees
+            .shared_storage()
+            .write()
+            .unwrap()
+            .inject_io_failure_after(1);
+
+        let err = tree.insert(b"blob", &large_value).unwrap_err();
+        assert!(err.to_string().contains("Injected IO error"));
+        assert_eq!(tree.get(b"blob")?, None);
+        assert_eq!(trees.allocated_page_count()?, baseline_allocated);
+        assert_eq!(trees.free_page_ids()?, baseline_free_pages);
+        assert!(trees.validate_tree(root_page_id)?);
+        assert!(trees.validate_tree_overflow(root_page_id).is_ok());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_byte_tree_failed_large_update_restores_previous_value_and_overflow_state(
+    ) -> Result<()> {
+        let trees = ByteTreeStore::new(Pager::new_in_memory(100)?);
+        let root_page_id = trees.create_tree()?;
+        let mut tree = trees.open_tree(root_page_id)?;
+        let original_value = vec![0x31; crate::storage::PAGE_SIZE * 2];
+        let replacement_value = vec![0x52; crate::storage::PAGE_SIZE * 2];
+
+        tree.insert(b"blob", &original_value)?;
+        let baseline_allocated = trees.allocated_page_count()?;
+        let baseline_free_pages = trees.free_page_ids()?;
+
+        trees
+            .shared_storage()
+            .write()
+            .unwrap()
+            .inject_io_failure_after(1);
+
+        let err = tree.insert(b"blob", &replacement_value).unwrap_err();
+        assert!(err.to_string().contains("Injected IO error"));
+        assert_eq!(tree.get(b"blob")?, Some(original_value));
+        assert_eq!(trees.allocated_page_count()?, baseline_allocated);
+        assert_eq!(trees.free_page_ids()?, baseline_free_pages);
+        assert!(trees.validate_tree(root_page_id)?);
+        assert!(trees.validate_tree_overflow(root_page_id).is_ok());
 
         Ok(())
     }
@@ -1237,6 +1294,7 @@ mod value_store_tests {
 }
 
 mod tree_tests {
+    use crate::btree::bytes::ByteTreeStore;
     use crate::btree::node::BTreeNode;
     use crate::btree::node::BTREE_PAGE_HEADER_SIZE;
     use crate::btree::tree::BTreeManager;
@@ -1321,7 +1379,7 @@ mod tree_tests {
         assert_eq!(lazy.get_value_view(1)?, &[10, 11, 12]);
         assert!(!lazy.is_decoded);
 
-        match lazy.search(&BTreeKey::new(vec![4, 5, 6])) {
+        match lazy.search(&BTreeKey::new(vec![4, 5, 6]))? {
             crate::btree::node::SearchResult::Found(value) => {
                 assert_eq!(value.data, vec![10, 11, 12]);
             }
@@ -1330,6 +1388,110 @@ mod tree_tests {
             }
         }
         assert!(!lazy.is_decoded);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_btree_lazy_search_reports_duplicate_cell_offsets_as_corruption() -> Result<()> {
+        let page_id = 2;
+        let mut node = BTreeNode::new_leaf(page_id);
+        node.keys.push_back(BTreeKey::new(vec![1]));
+        node.values.push_back(BTreeValue::new(vec![10]));
+        node.keys.push_back(BTreeKey::new(vec![2]));
+        node.values.push_back(BTreeValue::new(vec![20]));
+
+        let mut page = Page::new(page_id);
+        BTreeNode::to_page(&node, &mut page)?;
+
+        let mut lazy = BTreeNode::from_page(page)?;
+        lazy.cell_offsets[1] = lazy.cell_offsets[0];
+        *lazy.cell_ranges_cache.borrow_mut() = None;
+
+        let err = lazy.search(&BTreeKey::new(vec![2])).unwrap_err();
+        assert!(matches!(err, crate::error::HematiteError::CorruptedData(_)));
+        assert!(!lazy.is_decoded);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_btree_lazy_internal_navigation_reports_missing_rightmost_child() -> Result<()> {
+        let page_id = 2;
+        let mut node = BTreeNode::new_internal(page_id);
+        node.keys.push_back(BTreeKey::new(vec![5]));
+        node.children.push_back(3);
+        node.children.push_back(4);
+
+        let mut page = Page::new(page_id);
+        BTreeNode::to_page(&node, &mut page)?;
+        page.data[8..12].copy_from_slice(&0u32.to_be_bytes());
+
+        let lazy = BTreeNode::from_page(page)?;
+        let err = lazy.find_child(&BTreeKey::new(vec![9])).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::HematiteError::CorruptedData(message)
+                if message.contains("rightmost child")
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_btree_lazy_open_skips_unread_internal_child_validation_until_needed() -> Result<()> {
+        let page_id = 2;
+        let mut node = BTreeNode::new_internal(page_id);
+        node.keys.push_back(BTreeKey::new(vec![10]));
+        node.keys.push_back(BTreeKey::new(vec![20]));
+        node.children.push_back(3);
+        node.children.push_back(4);
+        node.children.push_back(5);
+
+        let mut page = Page::new(page_id);
+        BTreeNode::to_page(&node, &mut page)?;
+
+        let probe = BTreeNode::from_page(page.clone())?;
+        let second_offset = probe.cell_offsets[1] as usize;
+        page.data[second_offset..second_offset + 4].copy_from_slice(&1u32.to_be_bytes());
+
+        let lazy = BTreeNode::from_page(page)?;
+        assert_eq!(lazy.find_child(&BTreeKey::new(vec![5]))?, 3);
+
+        let err = lazy.validate_cell_layouts().unwrap_err();
+        assert!(matches!(err, crate::error::HematiteError::CorruptedData(_)));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_byte_tree_corrupted_root_returns_errors_for_lookup_seek_and_scan() -> Result<()> {
+        let trees = ByteTreeStore::new(Pager::new_in_memory(100)?);
+        let root_page_id = trees.create_tree()?;
+        let mut tree = trees.open_tree(root_page_id)?;
+        tree.insert(b"alpha", b"one")?;
+        tree.insert(b"beta", b"two")?;
+
+        let mut cursor = tree.cursor()?;
+        let shared = trees.shared_storage();
+        let mut pager = shared.write().unwrap();
+        let mut page = pager.read_page(root_page_id)?;
+        let first_pointer = [page.data[8], page.data[9]];
+        page.data[10..12].copy_from_slice(&first_pointer);
+        pager.write_page(page)?;
+        drop(pager);
+
+        let lookup_err = tree.get(b"beta").unwrap_err();
+        assert!(matches!(
+            lookup_err,
+            crate::error::HematiteError::CorruptedData(_)
+        ));
+
+        let seek_err = cursor.seek(b"beta").unwrap_err();
+        assert!(matches!(seek_err, crate::error::HematiteError::CorruptedData(_)));
+
+        let scan_err = cursor.first().unwrap_err();
+        assert!(matches!(scan_err, crate::error::HematiteError::CorruptedData(_)));
 
         Ok(())
     }

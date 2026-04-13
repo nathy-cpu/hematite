@@ -302,6 +302,17 @@ impl ByteTree {
         })
     }
 
+    fn snapshot_storage(&self) -> Result<crate::storage::pager::PagerSnapshot> {
+        self.lock_storage()?.snapshot()
+    }
+
+    fn restore_storage_snapshot(
+        &self,
+        snapshot: crate::storage::pager::PagerSnapshot,
+    ) -> Result<()> {
+        self.lock_storage()?.restore_snapshot(snapshot)
+    }
+
     pub fn root_page_id(&self) -> PageId {
         self.index.root_page_id()
     }
@@ -321,21 +332,32 @@ impl ByteTree {
     }
 
     pub fn insert_with_mutation(&mut self, key: &[u8], value: &[u8]) -> Result<TreeMutation> {
-        let existing_stored_value = self.index.search_typed::<RawBytesCodec>(&key.to_vec())?;
-        let stored_value = {
-            let mut storage = self.lock_storage()?;
-            materialize_stored_value(&mut storage, value)?
-        };
-        let mutation = self
-            .index
-            .insert_typed_with_mutation::<RawBytesCodec>(&key.to_vec(), &stored_value)?;
+        let snapshot = self.snapshot_storage()?;
+        let result = (|| {
+            let existing_stored_value = self.index.search_typed::<RawBytesCodec>(&key.to_vec())?;
+            let stored_value = {
+                let mut storage = self.lock_storage()?;
+                materialize_stored_value(&mut storage, value)?
+            };
+            let mutation = self
+                .index
+                .insert_typed_with_mutation::<RawBytesCodec>(&key.to_vec(), &stored_value)?;
 
-        if let Some(existing_stored_value) = existing_stored_value {
-            let mut storage = self.lock_storage()?;
-            free_stored_value_overflow(&mut storage, &existing_stored_value)?;
+            if let Some(existing_stored_value) = existing_stored_value {
+                let mut storage = self.lock_storage()?;
+                free_stored_value_overflow(&mut storage, &existing_stored_value)?;
+            }
+
+            Ok(mutation)
+        })();
+
+        match result {
+            Ok(mutation) => Ok(mutation),
+            Err(err) => {
+                self.restore_storage_snapshot(snapshot)?;
+                Err(err)
+            }
         }
-
-        Ok(mutation)
     }
 
     pub fn delete(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
@@ -343,19 +365,30 @@ impl ByteTree {
     }
 
     pub fn delete_with_mutation(&mut self, key: &[u8]) -> Result<(Option<Vec<u8>>, TreeMutation)> {
-        let (stored_value, mutation) = self
-            .index
-            .delete_typed_with_mutation::<RawBytesCodec>(&key.to_vec())?;
-        let logical_value = match stored_value {
-            Some(stored_value) => {
-                let mut storage = self.lock_storage()?;
-                let logical_value = hydrate_stored_value(&mut storage, &stored_value)?;
-                free_stored_value_overflow(&mut storage, &stored_value)?;
-                Some(logical_value)
+        let snapshot = self.snapshot_storage()?;
+        let result = (|| {
+            let (stored_value, mutation) = self
+                .index
+                .delete_typed_with_mutation::<RawBytesCodec>(&key.to_vec())?;
+            let logical_value = match stored_value {
+                Some(stored_value) => {
+                    let mut storage = self.lock_storage()?;
+                    let logical_value = hydrate_stored_value(&mut storage, &stored_value)?;
+                    free_stored_value_overflow(&mut storage, &stored_value)?;
+                    Some(logical_value)
+                }
+                None => None,
+            };
+            Ok((logical_value, mutation))
+        })();
+
+        match result {
+            Ok(outcome) => Ok(outcome),
+            Err(err) => {
+                self.restore_storage_snapshot(snapshot)?;
+                Err(err)
             }
-            None => None,
-        };
-        Ok((logical_value, mutation))
+        }
     }
 
     pub fn entry(&mut self, key: &[u8]) -> Result<Option<(Vec<u8>, Vec<u8>)>> {

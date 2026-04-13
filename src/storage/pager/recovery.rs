@@ -60,20 +60,15 @@ impl Pager {
 
         if let Some(db_path) = &self.database_identity {
             let sidecar_path = Self::legacy_checksum_store_path(db_path);
-            let contents = match fs::read_to_string(&sidecar_path) {
-                Ok(contents) => Some(contents),
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-                Err(err) => return Err(err.into()),
-            };
-            if let Some(contents) = contents {
-                self.apply_persisted_state(contents.as_bytes())?;
-                self.persist_checksums()?;
-                match fs::remove_file(&sidecar_path) {
-                    Ok(()) => {}
-                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(err) => return Err(err.into()),
+            match fs::metadata(&sidecar_path) {
+                Ok(_) => {
+                    return Err(crate::error::HematiteError::StorageError(format!(
+                        "Legacy pager checksum sidecar '{}' is unsupported",
+                        sidecar_path.display()
+                    )));
                 }
-                return Ok(());
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err.into()),
             }
         }
 

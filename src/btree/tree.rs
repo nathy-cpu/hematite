@@ -118,6 +118,7 @@ impl BTreeManager {
 
         let page = self.lock_storage()?.read_page_shared(page_id)?;
         let node = BTreeNode::from_shared_page(page)?;
+        node.validate_cell_layouts()?;
 
         for i in 1..node.key_count {
             if node.get_key_view(i - 1)? >= node.get_key_view(i)? {

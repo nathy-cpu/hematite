@@ -96,11 +96,13 @@ impl BTreeCursor {
         !self.at_end && !self.stack.is_empty()
     }
 
+    #[cfg(test)]
     pub fn key(&self) -> Option<&BTreeKey> {
         let key = self.key_view()?;
         Some(self.cached_key.get_or_init(|| BTreeKey::new(key.to_vec())))
     }
 
+    #[cfg(test)]
     pub fn value(&self) -> Option<&BTreeValue> {
         let value = self.value_view()?;
         Some(
@@ -109,6 +111,7 @@ impl BTreeCursor {
         )
     }
 
+    #[cfg(test)]
     pub fn current(&self) -> Option<(&BTreeKey, &BTreeValue)> {
         Some((self.key()?, self.value()?))
     }
@@ -156,25 +159,6 @@ impl BTreeCursor {
 
         let root_page_id = self.stack[0].page_id;
         self.seek_to_key(root_page_id, key)
-    }
-
-    pub fn seek_near(&mut self, key: &BTreeKey) -> Result<()> {
-        if let Some(frame) = self.stack.last_mut() {
-            if frame.node.node_type == NodeType::Leaf && frame.node.key_count > 0 {
-                let first = frame.node.get_key_view(0).ok();
-                let last = frame.node.get_key_view(frame.node.key_count - 1).ok();
-                if let (Some(first), Some(last)) = (first, last) {
-                    if key.as_bytes() >= first && key.as_bytes() <= last {
-                        let index = frame.node.lower_bound_index(key);
-                        frame.index = index;
-                        self.at_end = index >= frame.node.key_count;
-                        self.invalidate_cache();
-                        return Ok(());
-                    }
-                }
-            }
-        }
-        self.seek(key)
     }
 
     #[cfg(test)]
@@ -225,7 +209,7 @@ impl BTreeCursor {
 
                 match node.node_type {
                     NodeType::Leaf => {
-                        let index = node.lower_bound_index(key);
+                        let index = node.lower_bound_index(key)?;
                         let frame = CursorFrame {
                             page_id: current_page_id,
                             node,
@@ -236,7 +220,7 @@ impl BTreeCursor {
                         break reached_end;
                     }
                     NodeType::Internal => {
-                        let child_index = node.upper_bound_index(key);
+                        let child_index = node.upper_bound_index(key)?;
                         let next_child = node.get_child_procedural(child_index)?;
                         frames.push(CursorFrame {
                             page_id: current_page_id,

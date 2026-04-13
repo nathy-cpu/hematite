@@ -4,10 +4,12 @@
 //! `JournalState`, but their on-disk encoding is now delegated to `journal_v3.rs`.
 
 use crate::error::Result;
-use crate::storage::journal_v3::{
-    V3JournalHeader, V3JournalRecord, V3JournalState, V3RollbackJournal,
-};
-use crate::storage::{file_len_for_next_page_id, next_page_id_for_file_len, PageId};
+#[cfg(test)]
+use crate::storage::journal_v3::{V3JournalHeader, V3JournalRecord};
+use crate::storage::journal_v3::{V3JournalState, V3RollbackJournal};
+use crate::storage::{file_len_for_next_page_id, PageId};
+#[cfg(test)]
+use crate::storage::next_page_id_for_file_len;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JournalState {
@@ -16,6 +18,7 @@ pub enum JournalState {
 }
 
 impl JournalState {
+    #[cfg(test)]
     fn into_v3(self) -> V3JournalState {
         match self {
             Self::Active => V3JournalState::Active,
@@ -47,15 +50,17 @@ pub struct RollbackJournal {
 }
 
 impl RollbackJournal {
+    #[cfg(test)]
     pub fn encode(&self) -> Result<Vec<u8>> {
-        self.into_v3().encode()
+        self.to_v3().encode()
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         Ok(Self::from_v3(V3RollbackJournal::decode(bytes)?))
     }
 
-    fn into_v3(&self) -> V3RollbackJournal {
+    #[cfg(test)]
+    fn to_v3(&self) -> V3RollbackJournal {
         V3RollbackJournal {
             header: V3JournalHeader {
                 state: self.state.into_v3(),

@@ -839,9 +839,9 @@ mod pager_tests {
     }
 
     #[test]
-    fn test_pager_legacy_sidecar_metadata_is_migrated_to_reserved_page(
+    fn test_pager_open_rejects_legacy_checksum_sidecar(
     ) -> crate::error::Result<()> {
-        let test_db = TestDbFile::new("_test_pager_legacy_sidecar_metadata_migrates");
+        let test_db = TestDbFile::new("_test_pager_legacy_sidecar_metadata_rejected");
         let mut pager = Pager::new(test_db.path(), 8)?;
         let page_id = pager.allocate_page()?;
         let mut page = Page::new(page_id);
@@ -869,10 +869,38 @@ mod pager_tests {
             ),
         )?;
 
-        let mut reopened = Pager::new(test_db.path(), 8)?;
-        assert_eq!(reopened.journal_mode(), JournalMode::Wal);
-        assert_eq!(reopened.read_page(page_id)?.data[0], 42);
-        assert!(!checksum_path.exists());
+        let err = Pager::new(test_db.path(), 8).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Legacy pager checksum sidecar"));
+        assert!(checksum_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_open_rejects_legacy_reserved_metadata_layout() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_legacy_reserved_metadata_layout");
+        let pager = Pager::new(test_db.path(), 8)?;
+        drop(pager);
+
+        let payload = b"version=1\ntable_count=0";
+        let mut legacy_page = vec![0; PAGE_SIZE];
+        legacy_page[0..4].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+        legacy_page[4..4 + payload.len()].copy_from_slice(payload);
+
+        let mut db_file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(test_db.path())?;
+        db_file.seek(SeekFrom::Start(
+            STORAGE_METADATA_PAGE_ID as u64 * PAGE_SIZE as u64,
+        ))?;
+        db_file.write_all(&legacy_page)?;
+        db_file.sync_all()?;
+
+        let err = Pager::new(test_db.path(), 8).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Legacy reserved metadata layout is unsupported"));
         Ok(())
     }
 
@@ -1946,10 +1974,12 @@ mod mod_tests {
         let test_db = TestDbFile::new("_test_storage_metadata_unsupported_version");
         let mut pager = crate::storage::pager::Pager::new(test_db.path(), 8)?;
 
-        let payload = b"version=2\n";
+        let payload = crate::storage::metadata_page::write_catalog_metadata(
+            &vec![0; PAGE_SIZE],
+            b"version=2\n",
+        )?;
         let mut page = Page::new(STORAGE_METADATA_PAGE_ID);
-        page.data[0..4].copy_from_slice(&(payload.len() as u32).to_le_bytes());
-        page.data[4..4 + payload.len()].copy_from_slice(payload);
+        page.data.copy_from_slice(&payload);
         pager.write_page(page)?;
         pager.flush()?;
         drop(pager);
@@ -2694,226 +2724,6 @@ mod randomized_pager_lifecycle_tests {
         live_row_ids.sort_unstable();
         assert_eq!(actual_row_ids, live_row_ids);
         assert!(reopened.validate_integrity().is_ok());
-
-        Ok(())
-    }
-}
-
-mod rowid_table_tests {
-    use crate::catalog::row_id::{
-        decode_stored_row_record, encode_stored_row_record, free_row_record_overflow,
-        hydrate_row_record_cell, materialize_row_record_cell, RowidInternalCell, RowidLeafCell,
-        RowidLeafCellLayout, ROWID_LEAF_FIXED_HEADER_SIZE,
-    };
-    use crate::storage::overflow::{
-        collect_overflow_page_ids, free_overflow_chain, read_overflow_chain,
-        validate_overflow_chain, write_overflow_chain,
-    };
-    use crate::storage::Pager;
-    use crate::storage::INVALID_PAGE_ID;
-
-    #[test]
-    fn test_rowid_leaf_cell_roundtrip() -> crate::error::Result<()> {
-        let cell = RowidLeafCell {
-            rowid: 42,
-            payload: vec![1, 2, 3, 4, 5],
-        };
-
-        let encoded = cell.encode();
-        let decoded = RowidLeafCell::decode(&encoded)?;
-        assert_eq!(decoded, cell);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_rowid_leaf_cell_rejects_length_mismatch() {
-        let bad = vec![0u8; RowidLeafCell::HEADER_SIZE + 3];
-        assert!(RowidLeafCell::decode(&bad).is_err());
-    }
-
-    #[test]
-    fn test_rowid_internal_cell_roundtrip() -> crate::error::Result<()> {
-        let cell = RowidInternalCell {
-            separator_rowid: 144,
-            child_page_id: 99,
-        };
-        let encoded = cell.encode();
-        let decoded = RowidInternalCell::decode(&encoded)?;
-        assert_eq!(decoded, cell);
-        Ok(())
-    }
-
-    #[test]
-    fn test_rowid_internal_cell_rejects_wrong_size() {
-        assert!(RowidInternalCell::decode(&[0u8; 11]).is_err());
-    }
-
-    #[test]
-    fn test_rowid_fixed_leaf_cell_roundtrip() -> crate::error::Result<()> {
-        let cell = RowidLeafCellLayout {
-            rowid: 77,
-            total_payload_len: 1000,
-            local_payload: vec![9, 8, 7, 6, 5],
-            overflow_first_page: 120,
-        };
-        let encoded = cell.encode()?;
-        assert_eq!(
-            encoded.len(),
-            ROWID_LEAF_FIXED_HEADER_SIZE + cell.local_payload.len()
-        );
-        let decoded = RowidLeafCellLayout::decode(&encoded)?;
-        assert_eq!(decoded, cell);
-        Ok(())
-    }
-
-    #[test]
-    fn test_local_payload_accounting_clamps_to_limit() {
-        assert_eq!(RowidLeafCellLayout::local_payload_len_for(100, 64), 64);
-        assert_eq!(RowidLeafCellLayout::local_payload_len_for(40, 64), 40);
-    }
-
-    #[test]
-    fn test_overflow_chain_roundtrip_and_free() -> crate::error::Result<()> {
-        let test_db = crate::test_utils::TestDbFile::new("_test_rowid_overflow_chain");
-        let mut storage = Pager::new(test_db.path(), 100)?;
-
-        let payload = vec![0xAB; crate::storage::PAGE_SIZE * 2 + 57];
-        let first = write_overflow_chain(&mut storage, &payload)?;
-        assert!(first.is_some());
-
-        let read_back = read_overflow_chain(&mut storage, first, payload.len())?;
-        assert_eq!(read_back, payload);
-        let report = validate_overflow_chain(&mut storage, first, payload.len())?;
-        assert!(report.page_count >= 3);
-        assert!(report.payload_len >= payload.len());
-
-        free_overflow_chain(&mut storage, first)?;
-        let reused = storage.allocate_page()?;
-        assert_eq!(Some(reused), first);
-        Ok(())
-    }
-
-    #[test]
-    fn test_overflow_chain_validation_detects_cycle() -> crate::error::Result<()> {
-        let test_db = crate::test_utils::TestDbFile::new("_test_rowid_overflow_cycle");
-        let mut storage = Pager::new(test_db.path(), 100)?;
-        let payload = vec![0x44; crate::storage::PAGE_SIZE + 5];
-        let first = write_overflow_chain(&mut storage, &payload)?
-            .expect("non-empty payload should allocate overflow chain");
-
-        let mut first_page = storage.read_page(first)?;
-        first_page.data[4..8].copy_from_slice(&first.to_be_bytes());
-        storage.write_page(first_page)?;
-
-        let err = validate_overflow_chain(&mut storage, Some(first), payload.len()).unwrap_err();
-        assert!(err.to_string().contains("cycle"));
-        Ok(())
-    }
-
-    #[test]
-    fn test_overflow_chain_validation_detects_truncation() -> crate::error::Result<()> {
-        let test_db = crate::test_utils::TestDbFile::new("_test_rowid_overflow_truncation");
-        let mut storage = Pager::new(test_db.path(), 100)?;
-        let payload = vec![0x55; crate::storage::PAGE_SIZE + 50];
-        let first = write_overflow_chain(&mut storage, &payload)?
-            .expect("non-empty payload should allocate overflow chain");
-
-        let mut first_page = storage.read_page(first)?;
-        first_page.data[4..8].copy_from_slice(&0u32.to_be_bytes());
-        storage.write_page(first_page)?;
-
-        let err = validate_overflow_chain(&mut storage, Some(first), payload.len()).unwrap_err();
-        assert!(err.to_string().contains("shorter") || err.to_string().contains("ended before"));
-        Ok(())
-    }
-
-    #[test]
-    fn test_rowid_record_encode_decode_with_local_split() -> crate::error::Result<()> {
-        let row = crate::catalog::StoredRow {
-            row_id: 501,
-            values: vec![
-                crate::catalog::Value::Integer(9),
-                crate::catalog::Value::Text("x".repeat(300)),
-                crate::catalog::Value::Boolean(true),
-            ],
-        };
-
-        let encoded = encode_stored_row_record(&row, 64)?;
-        assert_eq!(encoded.cell.rowid, row.row_id);
-        assert_eq!(encoded.cell.local_payload.len(), 64);
-        assert!(!encoded.overflow_payload.is_empty());
-
-        let mut full_payload = encoded.cell.local_payload.clone();
-        full_payload.extend_from_slice(&encoded.overflow_payload);
-        let decoded = decode_stored_row_record(row.row_id, &full_payload)?;
-        assert_eq!(decoded, row);
-        Ok(())
-    }
-
-    #[test]
-    fn test_large_row_overflow_reopen_and_reuse() -> crate::error::Result<()> {
-        let test_db = crate::test_utils::TestDbFile::new("_test_rowid_large_row_reopen_reuse");
-
-        let cell_page_id = {
-            let mut storage = Pager::new(test_db.path(), 100)?;
-            let row = crate::catalog::StoredRow {
-                row_id: 9001,
-                values: vec![
-                    crate::catalog::Value::Integer(123),
-                    crate::catalog::Value::Text("payload".repeat(1500)),
-                    crate::catalog::Value::Boolean(false),
-                ],
-            };
-
-            let cell_bytes = materialize_row_record_cell(&row, 64, |payload| {
-                write_overflow_chain(&mut storage, payload)
-            })?;
-            let cell = RowidLeafCellLayout::decode(&cell_bytes)?;
-            let overflow_ids = collect_overflow_page_ids(
-                &mut storage,
-                if cell.overflow_first_page == INVALID_PAGE_ID {
-                    None
-                } else {
-                    Some(cell.overflow_first_page)
-                },
-            )?;
-            assert!(!overflow_ids.is_empty());
-
-            let cell_page_id = storage.allocate_page()?;
-            let mut page = crate::storage::Page::new(cell_page_id);
-            page.data[0..4].copy_from_slice(&(cell_bytes.len() as u32).to_le_bytes());
-            page.data[4..4 + cell_bytes.len()].copy_from_slice(&cell_bytes);
-            storage.write_page(page)?;
-            storage.flush()?;
-            cell_page_id
-        };
-
-        let mut reopened = Pager::new(test_db.path(), 100)?;
-        let page = reopened.read_page(cell_page_id)?;
-        let size =
-            u32::from_le_bytes([page.data[0], page.data[1], page.data[2], page.data[3]]) as usize;
-        let cell_bytes = page.data[4..4 + size].to_vec();
-        let restored = hydrate_row_record_cell(&cell_bytes, |first, len| {
-            read_overflow_chain(&mut reopened, first, len)
-        })?;
-        assert_eq!(restored.row_id, 9001);
-        assert_eq!(restored.values[0], crate::catalog::Value::Integer(123));
-
-        let cell = RowidLeafCellLayout::decode(&cell_bytes)?;
-        let overflow_ids = collect_overflow_page_ids(
-            &mut reopened,
-            if cell.overflow_first_page == INVALID_PAGE_ID {
-                None
-            } else {
-                Some(cell.overflow_first_page)
-            },
-        )?;
-        free_row_record_overflow(&cell_bytes, |first| {
-            free_overflow_chain(&mut reopened, first)
-        })?;
-        let reused = reopened.allocate_page()?;
-        assert!(overflow_ids.contains(&reused));
 
         Ok(())
     }
