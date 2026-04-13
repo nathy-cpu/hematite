@@ -5,7 +5,7 @@
 //! still relying on the generic tree implementation underneath.
 
 use std::marker::PhantomData;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 use crate::btree::bytes::{ByteTree, ByteTreeCursor, ByteTreeStore};
 use crate::btree::{KeyValueCodec, TreeSpaceStats};
@@ -30,7 +30,7 @@ impl<C> TypedTreeStore<C> {
         Self::new(ByteTreeStore::new(storage))
     }
 
-    pub fn from_shared_storage(storage: Arc<Mutex<Pager>>) -> Self {
+    pub fn from_shared_storage(storage: Arc<RwLock<Pager>>) -> Self {
         Self::new(ByteTreeStore::from_shared_storage(storage))
     }
 

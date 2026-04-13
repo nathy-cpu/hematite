@@ -12,7 +12,7 @@ mod mod_tests {
     use crate::storage::Pager;
     use crate::test_utils::TestDbFile;
     use std::collections::BTreeMap;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, RwLock};
 
     fn tmp_db() -> TestDbFile {
         TestDbFile::new("_test_btree")
@@ -209,21 +209,38 @@ mod mod_tests {
         let storage = new_storage(&path)?;
         let mut btree = BTreeIndex::new_with_init(storage)?;
 
-        btree.insert(BTreeKey::new(b"alpha".to_vec()), BTreeValue::new(b"one".to_vec()))?;
-        btree.insert(BTreeKey::new(b"beta".to_vec()), BTreeValue::new(b"two".to_vec()))?;
+        btree.insert(
+            BTreeKey::new(b"alpha".to_vec()),
+            BTreeValue::new(b"one".to_vec()),
+        )?;
+        btree.insert(
+            BTreeKey::new(b"beta".to_vec()),
+            BTreeValue::new(b"two".to_vec()),
+        )?;
 
         let mut cursor = btree.cursor()?;
         assert_eq!(cursor.cache_materialized(), (false, false));
 
-        assert_eq!(cursor.key().map(|key| key.as_bytes()), Some(b"alpha".as_slice()));
+        assert_eq!(
+            cursor.key().map(|key| key.as_bytes()),
+            Some(b"alpha".as_slice())
+        );
         assert_eq!(cursor.cache_materialized(), (true, false));
 
-        assert_eq!(cursor.value().map(|value| value.as_bytes()), Some(b"one".as_slice()));
+        assert_eq!(
+            cursor.value().map(|value| value.as_bytes()),
+            Some(b"one".as_slice())
+        );
         assert_eq!(cursor.cache_materialized(), (true, true));
 
         cursor.next()?;
         assert_eq!(cursor.cache_materialized(), (false, false));
-        assert_eq!(cursor.current().map(|(key, value)| (key.as_bytes(), value.as_bytes())), Some((b"beta".as_slice(), b"two".as_slice())));
+        assert_eq!(
+            cursor
+                .current()
+                .map(|(key, value)| (key.as_bytes(), value.as_bytes())),
+            Some((b"beta".as_slice(), b"two".as_slice()))
+        );
         assert_eq!(cursor.cache_materialized(), (true, true));
 
         Ok(())
@@ -243,7 +260,10 @@ mod mod_tests {
         let cursor = tree.cursor()?;
         assert_eq!(cursor.overflow_cache_stats(), (0, 0));
 
-        assert_eq!(cursor.current()?, Some((b"blob".to_vec(), large_value.clone())));
+        assert_eq!(
+            cursor.current()?,
+            Some((b"blob".to_vec(), large_value.clone()))
+        );
         assert_eq!(cursor.overflow_cache_stats(), (0, 1));
 
         assert_eq!(cursor.current()?, Some((b"blob".to_vec(), large_value)));
@@ -345,13 +365,13 @@ mod mod_tests {
             .expect("stored value should exist");
         let layout = StoredValueLayout::decode(&stored_value)?;
         let overflow_ids = {
-            let mut pager = shared.lock().unwrap();
+            let mut pager = shared.write().unwrap();
             collect_overflow_page_ids(&mut pager, Some(layout.overflow_first_page))?
         };
 
         assert_eq!(tree.delete(b"blob")?, Some(large_value));
 
-        let reused_page_id = shared.lock().unwrap().allocate_page()?;
+        let reused_page_id = shared.write().unwrap().allocate_page()?;
         assert!(overflow_ids.contains(&reused_page_id));
         Ok(())
     }
@@ -374,13 +394,13 @@ mod mod_tests {
             .expect("stored value should exist");
         let layout = StoredValueLayout::decode(&stored_value)?;
         let overflow_ids = {
-            let mut pager = shared.lock().unwrap();
+            let mut pager = shared.write().unwrap();
             collect_overflow_page_ids(&mut pager, Some(layout.overflow_first_page))?
         };
 
         trees.reset_tree(root_page_id)?;
 
-        let reused_page_id = shared.lock().unwrap().allocate_page()?;
+        let reused_page_id = shared.write().unwrap().allocate_page()?;
         assert!(overflow_ids.contains(&reused_page_id));
         Ok(())
     }
@@ -402,7 +422,7 @@ mod mod_tests {
             .search_typed::<RawBytesCodec>(&b"blob".to_vec())?
             .expect("stored value should exist");
         let layout = StoredValueLayout::decode(&stored_value)?;
-        let mut pager = shared.lock().unwrap();
+        let mut pager = shared.write().unwrap();
         let mut overflow_page = pager.read_page(layout.overflow_first_page)?;
         overflow_page.data[4..8].copy_from_slice(&layout.overflow_first_page.to_le_bytes());
         pager.write_page(overflow_page)?;
@@ -430,7 +450,7 @@ mod mod_tests {
             .search_typed::<RawBytesCodec>(&b"blob".to_vec())?
             .expect("stored value should exist");
         let layout = StoredValueLayout::decode(&stored_value)?;
-        let mut pager = shared.lock().unwrap();
+        let mut pager = shared.write().unwrap();
         let mut overflow_page = pager.read_page(layout.overflow_first_page)?;
         overflow_page.data[4..8].copy_from_slice(&crate::storage::INVALID_PAGE_ID.to_le_bytes());
         pager.write_page(overflow_page)?;
@@ -1100,7 +1120,7 @@ mod mod_tests {
     #[test]
     fn test_randomized_insert_delete_reopen_integrity() -> Result<()> {
         let path = tmp_db();
-        let mut shared = Arc::new(Mutex::new(new_storage(&path)?));
+        let mut shared = Arc::new(RwLock::new(new_storage(&path)?));
         let mut manager = BTreeManager::from_shared_storage(shared.clone());
         let mut root_page_id = manager.create_tree()?;
         let mut btree = manager.open_tree(root_page_id)?;
@@ -1134,12 +1154,12 @@ mod mod_tests {
 
             root_page_id = btree.root_page_id();
             if step % 150 == 0 {
-                shared.lock().unwrap().flush()?;
+                shared.write().unwrap().flush()?;
                 drop(btree);
                 drop(manager);
                 drop(shared);
 
-                shared = Arc::new(Mutex::new(new_storage(&path)?));
+                shared = Arc::new(RwLock::new(new_storage(&path)?));
                 manager = BTreeManager::from_shared_storage(shared.clone());
                 btree = manager.open_tree(root_page_id)?;
 
@@ -1255,10 +1275,10 @@ mod tree_tests {
         let page_id = 1;
         let mut node = BTreeNode::new_leaf(page_id);
 
-        node.keys.push(BTreeKey::new(vec![1, 2, 3]));
-        node.keys.push(BTreeKey::new(vec![4, 5, 6]));
-        node.values.push(BTreeValue::new(vec![7, 8, 9]));
-        node.values.push(BTreeValue::new(vec![10, 11, 12]));
+        node.keys.push_back(BTreeKey::new(vec![1, 2, 3]));
+        node.keys.push_back(BTreeKey::new(vec![4, 5, 6]));
+        node.values.push_back(BTreeValue::new(vec![7, 8, 9]));
+        node.values.push_back(BTreeValue::new(vec![10, 11, 12]));
 
         let mut page = Page::new(page_id);
         BTreeNode::to_page(&node, &mut page)?;
@@ -1283,10 +1303,10 @@ mod tree_tests {
     fn test_btree_lazy_page_views_do_not_force_decode() -> Result<()> {
         let page_id = 1;
         let mut node = BTreeNode::new_leaf(page_id);
-        node.keys.push(BTreeKey::new(vec![1, 2, 3]));
-        node.keys.push(BTreeKey::new(vec![4, 5, 6]));
-        node.values.push(BTreeValue::new(vec![7, 8, 9]));
-        node.values.push(BTreeValue::new(vec![10, 11, 12]));
+        node.keys.push_back(BTreeKey::new(vec![1, 2, 3]));
+        node.keys.push_back(BTreeKey::new(vec![4, 5, 6]));
+        node.values.push_back(BTreeValue::new(vec![7, 8, 9]));
+        node.values.push_back(BTreeValue::new(vec![10, 11, 12]));
 
         let mut page = Page::new(page_id);
         BTreeNode::to_page(&node, &mut page)?;
@@ -1319,8 +1339,8 @@ mod tree_tests {
         let page_id = 1;
         let key = BTreeKey::new(vec![1, 2, 3]);
         let mut node = BTreeNode::new_leaf(page_id);
-        node.keys.push(key.clone());
-        node.values.push(BTreeValue::new(vec![7, 8, 9]));
+        node.keys.push_back(key.clone());
+        node.values.push_back(BTreeValue::new(vec![7, 8, 9]));
 
         let mut page = Page::new(page_id);
         BTreeNode::to_page(&node, &mut page)?;
@@ -1346,9 +1366,9 @@ mod tree_tests {
 
         let mut node = BTreeNode::new_leaf(page_id);
         for i in 0u32..3u32 {
-            node.keys.push(BTreeKey::new(i.to_be_bytes().to_vec()));
+            node.keys.push_back(BTreeKey::new(i.to_be_bytes().to_vec()));
             node.values
-                .push(BTreeValue::new(format!("v{i}").into_bytes()));
+                .push_back(BTreeValue::new(format!("v{i}").into_bytes()));
         }
 
         let mut page = Page::new(page_id);
@@ -1381,8 +1401,8 @@ mod tree_tests {
     fn test_btree_page_rejects_unsupported_version() -> Result<()> {
         let page_id = 2;
         let mut node = BTreeNode::new_leaf(page_id);
-        node.keys.push(BTreeKey::new(vec![1, 2, 3]));
-        node.values.push(BTreeValue::new(vec![7, 8, 9]));
+        node.keys.push_back(BTreeKey::new(vec![1, 2, 3]));
+        node.values.push_back(BTreeValue::new(vec![7, 8, 9]));
 
         let mut page = Page::new(page_id);
         BTreeNode::to_page(&node, &mut page)?;
@@ -1401,8 +1421,8 @@ mod tree_tests {
     fn test_btree_page_rejects_invalid_payload_length() -> Result<()> {
         let page_id = 2;
         let mut node = BTreeNode::new_leaf(page_id);
-        node.keys.push(BTreeKey::new(vec![1, 2, 3]));
-        node.values.push(BTreeValue::new(vec![7, 8, 9]));
+        node.keys.push_back(BTreeKey::new(vec![1, 2, 3]));
+        node.values.push_back(BTreeValue::new(vec![7, 8, 9]));
 
         let mut page = Page::new(page_id);
         BTreeNode::to_page(&node, &mut page)?;
@@ -1410,7 +1430,9 @@ mod tree_tests {
         // Corrupt cell-content start so the pointer area overlaps it.
         page.data[5..7].copy_from_slice(&1u16.to_be_bytes());
         let err = BTreeNode::from_page_decoded(page).unwrap_err();
-        assert!(err.to_string().contains("pointer area overlaps cell content"));
+        assert!(err
+            .to_string()
+            .contains("pointer area overlaps cell content"));
 
         // Keep a guard that the header offset contract is stable.
         assert_eq!(BTREE_PAGE_HEADER_SIZE, 8);
@@ -1429,12 +1451,14 @@ mod tree_tests {
         let mut right = BTreeNode::new_leaf(right_page);
 
         for i in 0u32..10u32 {
-            left.keys.push(BTreeKey::new(i.to_le_bytes().to_vec()));
-            left.values.push(BTreeValue::new(vec![1u8; 200]));
+            left.keys.push_back(BTreeKey::new(i.to_le_bytes().to_vec()));
+            left.values.push_back(BTreeValue::new(vec![1u8; 200]));
         }
         for i in 10u32..20u32 {
-            right.keys.push(BTreeKey::new(i.to_le_bytes().to_vec()));
-            right.values.push(BTreeValue::new(vec![2u8; 200]));
+            right
+                .keys
+                .push_back(BTreeKey::new(i.to_le_bytes().to_vec()));
+            right.values.push_back(BTreeValue::new(vec![2u8; 200]));
         }
 
         let err = left.merge_leaf(&mut right, &mut storage).unwrap_err();
@@ -1452,10 +1476,10 @@ mod tree_tests {
         let mut left = BTreeNode::new_leaf(left_page);
         let mut right = BTreeNode::new_leaf(right_page);
 
-        left.keys.push(BTreeKey::new(vec![1]));
-        left.values.push(BTreeValue::new(vec![11]));
-        right.keys.push(BTreeKey::new(vec![2]));
-        right.values.push(BTreeValue::new(vec![22]));
+        left.keys.push_back(BTreeKey::new(vec![1]));
+        left.values.push_back(BTreeValue::new(vec![11]));
+        right.keys.push_back(BTreeKey::new(vec![2]));
+        right.values.push_back(BTreeValue::new(vec![22]));
 
         left.merge_leaf(&mut right, &mut storage)?;
         assert_eq!(left.keys.len(), 2);
@@ -1475,10 +1499,10 @@ mod tree_tests {
         let root = storage.allocate_page()?;
 
         let mut leaf = BTreeNode::new_leaf(root);
-        leaf.keys.push(BTreeKey::new(vec![2]));
-        leaf.values.push(BTreeValue::new(vec![20]));
-        leaf.keys.push(BTreeKey::new(vec![1]));
-        leaf.values.push(BTreeValue::new(vec![10]));
+        leaf.keys.push_back(BTreeKey::new(vec![2]));
+        leaf.values.push_back(BTreeValue::new(vec![20]));
+        leaf.keys.push_back(BTreeKey::new(vec![1]));
+        leaf.values.push_back(BTreeValue::new(vec![10]));
 
         let mut page = Page::new(root);
         leaf.to_page(&mut page)?;
@@ -1504,26 +1528,26 @@ mod tree_tests {
         let right_right_leaf_page = storage.allocate_page()?;
 
         let mut left_leaf = BTreeNode::new_leaf(left_leaf_page);
-        left_leaf.keys.push(BTreeKey::new(vec![1]));
-        left_leaf.values.push(BTreeValue::new(vec![11]));
+        left_leaf.keys.push_back(BTreeKey::new(vec![1]));
+        left_leaf.values.push_back(BTreeValue::new(vec![11]));
 
         let mut right_left_leaf = BTreeNode::new_leaf(right_left_leaf_page);
-        right_left_leaf.keys.push(BTreeKey::new(vec![6]));
-        right_left_leaf.values.push(BTreeValue::new(vec![66]));
+        right_left_leaf.keys.push_back(BTreeKey::new(vec![6]));
+        right_left_leaf.values.push_back(BTreeValue::new(vec![66]));
 
         let mut right_right_leaf = BTreeNode::new_leaf(right_right_leaf_page);
-        right_right_leaf.keys.push(BTreeKey::new(vec![9]));
-        right_right_leaf.values.push(BTreeValue::new(vec![99]));
+        right_right_leaf.keys.push_back(BTreeKey::new(vec![9]));
+        right_right_leaf.values.push_back(BTreeValue::new(vec![99]));
 
         let mut right_internal = BTreeNode::new_internal(right_internal_page);
-        right_internal.keys.push(BTreeKey::new(vec![8]));
-        right_internal.children.push(right_left_leaf_page);
-        right_internal.children.push(right_right_leaf_page);
+        right_internal.keys.push_back(BTreeKey::new(vec![8]));
+        right_internal.children.push_back(right_left_leaf_page);
+        right_internal.children.push_back(right_right_leaf_page);
 
         let mut root_node = BTreeNode::new_internal(root);
-        root_node.keys.push(BTreeKey::new(vec![5]));
-        root_node.children.push(left_leaf_page);
-        root_node.children.push(right_internal_page);
+        root_node.keys.push_back(BTreeKey::new(vec![5]));
+        root_node.children.push_back(left_leaf_page);
+        root_node.children.push_back(right_internal_page);
 
         let mut root_page = Page::new(root);
         root_node.to_page(&mut root_page)?;

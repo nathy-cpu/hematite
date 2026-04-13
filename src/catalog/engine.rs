@@ -224,8 +224,8 @@ not available yet.",
     #[cfg(test)]
     pub(crate) fn read_page(&self, page_id: PageId) -> Result<crate::storage::Page> {
         let storage = self.tree_store().shared_storage();
-        let mut pager = storage.lock().map_err(|_| {
-            HematiteError::InternalError("Catalog engine pager mutex is poisoned".to_string())
+        let mut pager = storage.write().map_err(|_| {
+            HematiteError::InternalError("Catalog engine pager lock is poisoned".to_string())
         })?;
         pager.read_page(page_id)
     }
@@ -233,8 +233,8 @@ not available yet.",
     #[cfg(test)]
     pub(crate) fn write_page(&self, page: crate::storage::Page) -> Result<()> {
         let storage = self.tree_store().shared_storage();
-        let mut pager = storage.lock().map_err(|_| {
-            HematiteError::InternalError("Catalog engine pager mutex is poisoned".to_string())
+        let mut pager = storage.write().map_err(|_| {
+            HematiteError::InternalError("Catalog engine pager lock is poisoned".to_string())
         })?;
         pager.write_page(page)
     }
@@ -243,9 +243,9 @@ not available yet.",
     pub(crate) fn allocate_page(&self) -> Result<PageId> {
         let storage = self.tree_store().shared_storage();
         let page_id = storage
-            .lock()
+            .write()
             .map_err(|_| {
-                HematiteError::InternalError("Catalog engine pager mutex is poisoned".to_string())
+                HematiteError::InternalError("Catalog engine pager lock is poisoned".to_string())
             })?
             .allocate_page()?;
         if Self::is_reserved_page(page_id) {
@@ -262,8 +262,8 @@ not available yet.",
             ));
         }
         let storage = self.tree_store().shared_storage();
-        let mut pager = storage.lock().map_err(|_| {
-            HematiteError::InternalError("Catalog engine pager mutex is poisoned".to_string())
+        let mut pager = storage.write().map_err(|_| {
+            HematiteError::InternalError("Catalog engine pager lock is poisoned".to_string())
         })?;
         pager.deallocate_page(page_id)
     }
@@ -274,8 +274,8 @@ not available yet.",
         callback: impl FnOnce(&mut crate::storage::Pager) -> Result<T>,
     ) -> Result<T> {
         let storage = self.tree_store().shared_storage();
-        let mut pager = storage.lock().map_err(|_| {
-            HematiteError::InternalError("Catalog engine pager mutex is poisoned".to_string())
+        let mut pager = storage.write().map_err(|_| {
+            HematiteError::InternalError("Catalog engine pager lock is poisoned".to_string())
         })?;
         callback(&mut pager)
     }

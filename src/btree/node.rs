@@ -19,6 +19,7 @@ use crate::storage::format::{PageKind, DATABASE_HEADER_SIZE};
 #[cfg(test)]
 use crate::storage::INVALID_PAGE_ID;
 use crate::storage::{Page, PageId, Pager, PAGE_SIZE};
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 pub const MAX_KEY_SIZE: usize = 256;
@@ -35,9 +36,9 @@ const INTERIOR_HEADER_SIZE: usize = 12;
 pub struct BTreeNode {
     pub page_id: PageId,
     pub node_type: NodeType,
-    pub keys: Vec<BTreeKey>,
-    pub children: Vec<PageId>,
-    pub values: Vec<BTreeValue>,
+    pub keys: VecDeque<BTreeKey>,
+    pub children: VecDeque<PageId>,
+    pub values: VecDeque<BTreeValue>,
 
     pub key_count: usize,
     pub payload_len: usize,
@@ -51,9 +52,9 @@ impl BTreeNode {
         Self {
             page_id,
             node_type: NodeType::Internal,
-            keys: Vec::new(),
-            children: Vec::new(),
-            values: Vec::new(),
+            keys: VecDeque::new(),
+            children: VecDeque::new(),
+            values: VecDeque::new(),
             key_count: 0,
             payload_len: 0,
             raw_page: None,
@@ -66,9 +67,9 @@ impl BTreeNode {
         Self {
             page_id,
             node_type: NodeType::Leaf,
-            keys: Vec::new(),
-            children: Vec::new(),
-            values: Vec::new(),
+            keys: VecDeque::new(),
+            children: VecDeque::new(),
+            values: VecDeque::new(),
             key_count: 0,
             payload_len: 0,
             raw_page: None,
@@ -125,14 +126,13 @@ impl BTreeNode {
             NodeType::Leaf => LEAF_HEADER_SIZE,
             NodeType::Internal => INTERIOR_HEADER_SIZE,
         };
-        let cell_body_bytes = (0..self.key_count)
-            .map(|index| {
-                let (start, end) = self.cell_range_for_index(index)?;
-                Ok(end - start)
-            })
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .sum::<usize>();
+
+        // Sum cell body bytes without allocating an intermediate Vec.
+        let mut cell_body_bytes = 0usize;
+        for index in 0..self.key_count {
+            let (start, end) = self.cell_range_for_index(index)?;
+            cell_body_bytes += end - start;
+        }
 
         Ok(header_size + self.key_count * 2 + cell_body_bytes)
     }
@@ -207,13 +207,13 @@ impl BTreeNode {
         // Use cell_range_for_index to avoid relying on a large offset-indexed table.
         match node.node_type {
             NodeType::Leaf => {
-                for (i, &offset) in node.cell_offsets.iter().enumerate() {
+                for (i, &_offset) in node.cell_offsets.iter().enumerate() {
                     let (start, end) = node.cell_range_for_index(i)?;
                     parse_leaf_cell(&page.data[start..end])?;
                 }
             }
             NodeType::Internal => {
-                for (i, &offset) in node.cell_offsets.iter().enumerate() {
+                for (i, &_offset) in node.cell_offsets.iter().enumerate() {
                     let (start, end) = node.cell_range_for_index(i)?;
                     parse_internal_cell(&page.data[start..end])?;
                 }
@@ -248,19 +248,19 @@ impl BTreeNode {
 
         match self.node_type {
             NodeType::Leaf => {
-                for (i, &offset) in self.cell_offsets.iter().enumerate() {
+                for (i, &_offset) in self.cell_offsets.iter().enumerate() {
                     let (start, end) = self.cell_range_for_index(i)?;
                     let (key, value) = parse_leaf_cell(&page.data[start..end])?;
-                    self.keys.push(key);
-                    self.values.push(value);
+                    self.keys.push_back(key);
+                    self.values.push_back(value);
                 }
             }
             NodeType::Internal => {
-                for (i, &offset) in self.cell_offsets.iter().enumerate() {
+                for (i, &_offset) in self.cell_offsets.iter().enumerate() {
                     let (start, end) = self.cell_range_for_index(i)?;
                     let (left_child, key) = parse_internal_cell(&page.data[start..end])?;
-                    self.children.push(left_child);
-                    self.keys.push(key);
+                    self.children.push_back(left_child);
+                    self.keys.push_back(key);
                 }
                 let rightmost = header.rightmost_child.unwrap_or(0);
                 if rightmost == 0 {
@@ -268,7 +268,7 @@ impl BTreeNode {
                         "Internal node is missing its rightmost child".to_string(),
                     ));
                 }
-                self.children.push(rightmost);
+                self.children.push_back(rightmost);
             }
         }
         self.is_decoded = true;
@@ -427,7 +427,7 @@ impl BTreeNode {
             write_u32_be(
                 &mut page.data,
                 header_offset + 8,
-                *self.children.last().ok_or_else(|| {
+                self.children.back().copied().ok_or_else(|| {
                     HematiteError::StorageError(
                         "Internal node is missing its rightmost child".to_string(),
                     )
@@ -655,8 +655,11 @@ impl BTreeNode {
             self.best_leaf_split_pos()
         };
 
-        new_node.keys = self.keys.split_off(split_pos);
-        new_node.values = self.values.split_off(split_pos);
+        // Move right-side keys/values into the new node using VecDeque drain.
+        let mut right_keys: VecDeque<BTreeKey> = self.keys.drain(split_pos..).collect();
+        let mut right_values: VecDeque<BTreeValue> = self.values.drain(split_pos..).collect();
+        new_node.keys = right_keys;
+        new_node.values = right_values;
         new_node.key_count = new_node.keys.len();
         self.key_count = self.keys.len();
         let split_key = new_node.keys[0].clone();
@@ -701,10 +704,15 @@ impl BTreeNode {
         } else {
             self.best_internal_split_pos()
         };
-        let split_key = self.keys[split_pos].clone();
-        new_node.keys = self.keys.split_off(split_pos + 1);
-        new_node.children = self.children.split_off(split_pos + 1);
-        self.keys.pop();
+        let split_key = self.keys.get(split_pos).cloned().expect("split key");
+        // Drain the ranges for keys and children into the new node.
+        let mut right_keys: VecDeque<BTreeKey> = self.keys.drain((split_pos + 1)..).collect();
+        let mut right_children: VecDeque<PageId> = self.children.drain((split_pos + 1)..).collect();
+        new_node.keys = right_keys;
+        new_node.children = right_children;
+        // Remove the separator key from the left node (was at split_pos)
+        // For VecDeque remove the element at split_pos.
+        let _ = self.keys.remove(split_pos);
         self.key_count = self.keys.len();
         new_node.key_count = new_node.keys.len();
 
@@ -776,7 +784,9 @@ impl BTreeNode {
         }
         for (i, k) in self.keys.iter().enumerate() {
             if k == key {
-                let value = self.values.remove(i);
+                let value = self.values.remove(i).ok_or_else(|| {
+                    HematiteError::StorageError("Missing value at index".to_string())
+                })?;
                 self.keys.remove(i);
                 self.key_count = self.keys.len();
                 return Ok(Some(value));
@@ -873,7 +883,7 @@ impl BTreeNode {
         let mut other = other.clone();
         merged.decode().ok();
         other.decode().ok();
-        merged.keys.push(separator_key.clone());
+        merged.keys.push_back(separator_key.clone());
         merged.keys.extend(other.keys);
         merged.children.extend(other.children);
         merged.key_count = merged.keys.len();
@@ -918,7 +928,7 @@ impl BTreeNode {
                 "Nodes cannot be merged".to_string(),
             ));
         }
-        self.keys.push(separator_key);
+        self.keys.push_back(separator_key);
         self.keys.append(&mut other.keys);
         self.children.append(&mut other.children);
         self.key_count = self.keys.len();
@@ -940,7 +950,8 @@ impl BTreeNode {
             HematiteError::CorruptedData("Missing raw page for lazy node".to_string())
         })?;
 
-        let mut starts = self
+        // Preserve pointer-array order but compute ends efficiently.
+        let starts = self
             .cell_offsets
             .iter()
             .map(|offset| *offset as usize)
@@ -955,21 +966,35 @@ impl BTreeNode {
             ));
         }
 
-        let mut ranges = Vec::with_capacity(starts.len());
-        for &start in starts.iter() {
-            // Find smallest offset greater than start to use as end.
-            let mut end = PAGE_SIZE;
-            for &o in starts.iter() {
-                if o > start && o < end {
-                    end = o;
-                }
-            }
+        // Build a map from start -> end using the sorted order.
+        use std::collections::HashMap;
+        let mut end_for_start: HashMap<usize, usize> = HashMap::with_capacity(sorted.len());
+        for i in 0..sorted.len() {
+            let start = sorted[i];
+            let end = if i + 1 < sorted.len() {
+                sorted[i + 1]
+            } else {
+                PAGE_SIZE
+            };
             if start >= end || end > PAGE_SIZE {
                 return Err(HematiteError::CorruptedData(
                     "B-tree cell pointer ordering is invalid".to_string(),
                 ));
             }
-            ranges.push((start, end));
+            end_for_start.insert(start, end);
+        }
+
+        // Now produce ranges in pointer-array order by looking up computed ends.
+        let mut ranges = Vec::with_capacity(starts.len());
+        for start in starts.into_iter() {
+            match end_for_start.get(&start) {
+                Some(&end) => ranges.push((start, end)),
+                None => {
+                    return Err(HematiteError::CorruptedData(
+                        "B-tree cell pointer ordering is invalid".to_string(),
+                    ))
+                }
+            }
         }
 
         let _ = page; // preserve earlier consistency check tie-in

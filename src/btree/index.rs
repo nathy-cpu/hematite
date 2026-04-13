@@ -20,7 +20,7 @@ use crate::btree::KeyValueCodec;
 use crate::btree::{BTreeKey, BTreeValue, NodeType};
 use crate::error::{HematiteError, Result};
 use crate::storage::{Page, PageId, Pager};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 use super::node;
 
@@ -31,15 +31,23 @@ pub struct TreeMutation {
 }
 
 pub struct BTreeIndex {
-    storage: Arc<Mutex<Pager>>,
+    storage: Arc<RwLock<Pager>>,
     root_page_id: PageId,
 }
 
 impl BTreeIndex {
-    fn lock_storage(&self) -> Result<std::sync::MutexGuard<'_, Pager>> {
-        self.storage.lock().map_err(|_| {
+    fn lock_storage(&self) -> Result<std::sync::RwLockWriteGuard<'_, Pager>> {
+        self.storage.write().map_err(|_| {
             crate::error::HematiteError::InternalError(
-                "B-tree index storage mutex is poisoned".to_string(),
+                "B-tree index storage lock is poisoned".to_string(),
+            )
+        })
+    }
+
+    fn lock_storage_read(&self) -> Result<std::sync::RwLockReadGuard<'_, Pager>> {
+        self.storage.read().map_err(|_| {
+            crate::error::HematiteError::InternalError(
+                "B-tree index storage lock is poisoned".to_string(),
             )
         })
     }
@@ -51,7 +59,7 @@ impl BTreeIndex {
         }
     }
 
-    pub fn from_shared_storage(storage: Arc<Mutex<Pager>>, root_page_id: PageId) -> Self {
+    pub fn from_shared_storage(storage: Arc<RwLock<Pager>>, root_page_id: PageId) -> Self {
         Self {
             storage,
             root_page_id,
@@ -114,10 +122,13 @@ impl BTreeIndex {
         BTreeNode::validate_value_size(&value)?;
         let original_root_page_id = self.root_page_id;
 
-        let storage_arc = self.storage.clone();
-        let mut pager = storage_arc.lock().map_err(|_| {
+        // Clone the Arc so we don't hold an immutable borrow of `self` while
+        // acquiring the pager write guard. This avoids borrow conflicts when
+        // `self` needs to be mutated later in this method.
+        let storage_arc = Arc::clone(&self.storage);
+        let mut pager = storage_arc.write().map_err(|_| {
             crate::error::HematiteError::InternalError(
-                "B-tree index storage mutex is poisoned".to_string(),
+                "B-tree index storage lock is poisoned".to_string(),
             )
         })?;
 
@@ -237,9 +248,9 @@ impl BTreeIndex {
         pager.write_page(left_child_page)?;
 
         let mut new_root = BTreeNode::new_internal(self.root_page_id);
-        new_root.keys.push(key);
-        new_root.children.push(left_child_page_id);
-        new_root.children.push(right_page_id);
+        new_root.keys.push_back(key);
+        new_root.children.push_back(left_child_page_id);
+        new_root.children.push_back(right_page_id);
 
         let mut root_page = Page::new(self.root_page_id);
         BTreeNode::to_page(&new_root, &mut root_page)?;
@@ -252,10 +263,13 @@ impl BTreeIndex {
     ) -> Result<(Option<BTreeValue>, TreeMutation)> {
         let original_root_page_id = self.root_page_id;
 
-        let storage_arc = self.storage.clone();
-        let mut pager = storage_arc.lock().map_err(|_| {
+        // Clone the Arc so we don't hold an immutable borrow of `self` while
+        // acquiring the pager write guard. This avoids borrow conflicts when
+        // `self` needs to be mutated later in this method.
+        let storage_arc = Arc::clone(&self.storage);
+        let mut pager = storage_arc.write().map_err(|_| {
             crate::error::HematiteError::InternalError(
-                "B-tree index storage mutex is poisoned".to_string(),
+                "B-tree index storage lock is poisoned".to_string(),
             )
         })?;
 
@@ -286,7 +300,9 @@ impl BTreeIndex {
     }
 
     pub fn cursor(&self) -> Result<BTreeCursor> {
-        BTreeCursor::new(self.storage.clone(), self.root_page_id)
+        // Pass RwLock-backed storage through explicitly using Arc::clone to match the
+        // updated cursor signature that accepts `Arc<RwLock<Pager>>`.
+        BTreeCursor::new(Arc::clone(&self.storage), self.root_page_id)
     }
 
     fn delete_recursive(
@@ -411,27 +427,27 @@ impl BTreeIndex {
 
         match child_node.node_type {
             NodeType::Leaf => {
-                let key = left_sibling.keys.pop().ok_or_else(|| {
+                let key = left_sibling.keys.pop_back().ok_or_else(|| {
                     HematiteError::StorageError("Left leaf sibling missing key".to_string())
                 })?;
-                let value = left_sibling.values.pop().ok_or_else(|| {
+                let value = left_sibling.values.pop_back().ok_or_else(|| {
                     HematiteError::StorageError("Left leaf sibling missing value".to_string())
                 })?;
-                child_node.keys.insert(0, key);
-                child_node.values.insert(0, value);
+                child_node.keys.push_front(key);
+                child_node.values.push_front(value);
                 parent.keys[child_index - 1] = child_node.keys[0].clone();
             }
             NodeType::Internal => {
-                let rotate_up_key = left_sibling.keys.pop().ok_or_else(|| {
+                let rotate_up_key = left_sibling.keys.pop_back().ok_or_else(|| {
                     HematiteError::StorageError("Left internal sibling missing key".to_string())
                 })?;
-                let rotate_child = left_sibling.children.pop().ok_or_else(|| {
+                let rotate_child = left_sibling.children.pop_back().ok_or_else(|| {
                     HematiteError::StorageError("Left internal sibling missing child".to_string())
                 })?;
                 let parent_separator = parent.keys[child_index - 1].clone();
 
-                child_node.keys.insert(0, parent_separator);
-                child_node.children.insert(0, rotate_child);
+                child_node.keys.push_front(parent_separator);
+                child_node.children.push_front(rotate_child);
                 parent.keys[child_index - 1] = rotate_up_key;
             }
         }
@@ -473,12 +489,16 @@ impl BTreeIndex {
 
         match child_node.node_type {
             NodeType::Leaf => {
-                let key = right_sibling.keys.remove(0);
-                let value = right_sibling.values.remove(0);
-                child_node.keys.push(key);
-                child_node.values.push(value);
+                let key = right_sibling.keys.pop_front().ok_or_else(|| {
+                    HematiteError::StorageError("Right leaf sibling missing key".to_string())
+                })?;
+                let value = right_sibling.values.pop_front().ok_or_else(|| {
+                    HematiteError::StorageError("Right leaf sibling missing value".to_string())
+                })?;
+                child_node.keys.push_back(key);
+                child_node.values.push_back(value);
 
-                let new_separator = right_sibling.keys.first().ok_or_else(|| {
+                let new_separator = right_sibling.keys.front().ok_or_else(|| {
                     HematiteError::StorageError(
                         "Right leaf sibling became empty after borrow".to_string(),
                     )
@@ -487,11 +507,15 @@ impl BTreeIndex {
             }
             NodeType::Internal => {
                 let parent_separator = parent.keys[child_index].clone();
-                let rotate_child = right_sibling.children.remove(0);
-                let rotate_up_key = right_sibling.keys.remove(0);
+                let rotate_child = right_sibling.children.pop_front().ok_or_else(|| {
+                    HematiteError::StorageError("Right internal sibling missing child".to_string())
+                })?;
+                let rotate_up_key = right_sibling.keys.pop_front().ok_or_else(|| {
+                    HematiteError::StorageError("Right internal sibling missing key".to_string())
+                })?;
 
-                child_node.keys.push(parent_separator);
-                child_node.children.push(rotate_child);
+                child_node.keys.push_back(parent_separator);
+                child_node.children.push_back(rotate_child);
                 parent.keys[child_index] = rotate_up_key;
             }
         }
@@ -618,12 +642,12 @@ impl BTreeIndex {
 #[cfg(test)]
 impl BTreeIndex {
     pub fn new_with_init(storage: Pager) -> Result<Self> {
-        let storage_arc = Arc::new(Mutex::new(storage));
+        let storage_arc = Arc::new(RwLock::new(storage));
         let root_page_id = storage_arc
-            .lock()
+            .write()
             .map_err(|_| {
                 crate::error::HematiteError::InternalError(
-                    "B-tree index storage mutex is poisoned".to_string(),
+                    "B-tree index storage lock is poisoned".to_string(),
                 )
             })?
             .allocate_page()?;
@@ -632,10 +656,10 @@ impl BTreeIndex {
         let mut root_page = Page::new(root_page_id);
         root_node.to_page(&mut root_page)?;
         storage_arc
-            .lock()
+            .write()
             .map_err(|_| {
                 crate::error::HematiteError::InternalError(
-                    "B-tree index storage mutex is poisoned".to_string(),
+                    "B-tree index storage lock is poisoned".to_string(),
                 )
             })?
             .write_page(root_page)?;

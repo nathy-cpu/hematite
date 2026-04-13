@@ -36,7 +36,7 @@
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, RwLock, RwLockWriteGuard};
 
 use crate::btree::codec::RawBytesCodec;
 use crate::btree::cursor::BTreeCursor;
@@ -61,7 +61,7 @@ use crate::storage::{
 
 #[derive(Debug, Clone)]
 pub struct ByteTreeStore {
-    storage: Arc<Mutex<Pager>>,
+    storage: Arc<RwLock<Pager>>,
 }
 
 #[derive(Debug, Clone)]
@@ -82,9 +82,9 @@ impl ByteTreeStore {
     pub const DB_HEADER_PAGE_ID: PageId = DB_HEADER_PAGE_ID;
     pub const RESERVED_METADATA_PAGE_ID: PageId = STORAGE_METADATA_PAGE_ID;
 
-    fn lock_storage(&self) -> Result<MutexGuard<'_, Pager>> {
-        self.storage.lock().map_err(|_| {
-            HematiteError::InternalError("ByteTreeStore storage mutex is poisoned".to_string())
+    fn lock_storage(&self) -> Result<RwLockWriteGuard<'_, Pager>> {
+        self.storage.write().map_err(|_| {
+            HematiteError::InternalError("ByteTreeStore storage lock is poisoned".to_string())
         })
     }
 
@@ -98,15 +98,15 @@ impl ByteTreeStore {
 
     pub fn new(storage: Pager) -> Self {
         Self {
-            storage: Arc::new(Mutex::new(storage)),
+            storage: Arc::new(RwLock::new(storage)),
         }
     }
 
-    pub fn from_shared_storage(storage: Arc<Mutex<Pager>>) -> Self {
+    pub fn from_shared_storage(storage: Arc<RwLock<Pager>>) -> Self {
         Self { storage }
     }
 
-    pub fn shared_storage(&self) -> Arc<Mutex<Pager>> {
+    pub fn shared_storage(&self) -> Arc<RwLock<Pager>> {
         self.storage.clone()
     }
 
@@ -291,14 +291,14 @@ impl ByteTreeStore {
 }
 
 pub struct ByteTree {
-    storage: Arc<Mutex<Pager>>,
+    storage: Arc<RwLock<Pager>>,
     index: BTreeIndex,
 }
 
 impl ByteTree {
-    fn lock_storage(&self) -> Result<MutexGuard<'_, Pager>> {
-        self.storage.lock().map_err(|_| {
-            HematiteError::InternalError("ByteTree storage mutex is poisoned".to_string())
+    fn lock_storage(&self) -> Result<RwLockWriteGuard<'_, Pager>> {
+        self.storage.write().map_err(|_| {
+            HematiteError::InternalError("ByteTree storage lock is poisoned".to_string())
         })
     }
 
@@ -477,15 +477,15 @@ fn validate_tree_overflow_pages(
 }
 
 pub struct ByteTreeCursor {
-    storage: Arc<Mutex<Pager>>,
+    storage: Arc<RwLock<Pager>>,
     inner: BTreeCursor,
     overflow_cache: RefCell<OverflowReadCache>,
 }
 
 impl ByteTreeCursor {
-    fn lock_storage(&self) -> Result<MutexGuard<'_, Pager>> {
-        self.storage.lock().map_err(|_| {
-            HematiteError::InternalError("ByteTreeCursor storage mutex is poisoned".to_string())
+    fn lock_storage(&self) -> Result<RwLockWriteGuard<'_, Pager>> {
+        self.storage.write().map_err(|_| {
+            HematiteError::InternalError("ByteTreeCursor storage lock is poisoned".to_string())
         })
     }
 

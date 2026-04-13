@@ -16,7 +16,7 @@
 //!
 //! The cursor reads nodes through the shared pager but exposes only logical key/value positions.
 use std::cell::OnceCell;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, RwLock, RwLockWriteGuard};
 
 use crate::btree::node::BTreeNode;
 use crate::btree::{BTreeKey, BTreeValue, NodeType};
@@ -25,7 +25,7 @@ use crate::storage::{PageId, Pager};
 
 #[derive(Debug)]
 pub struct BTreeCursor {
-    storage: Arc<Mutex<Pager>>,
+    storage: Arc<RwLock<Pager>>,
     stack: Vec<CursorFrame>,
     at_end: bool,
 
@@ -44,7 +44,7 @@ struct CursorFrame {
 }
 
 impl BTreeCursor {
-    pub fn new(storage: Arc<Mutex<Pager>>, root_page_id: PageId) -> Result<Self> {
+    pub fn new(storage: Arc<RwLock<Pager>>, root_page_id: PageId) -> Result<Self> {
         let mut cursor = Self {
             storage,
             stack: Vec::new(),
@@ -59,9 +59,9 @@ impl BTreeCursor {
         Ok(cursor)
     }
 
-    fn lock_storage(&self) -> Result<MutexGuard<'_, Pager>> {
-        self.storage.lock().map_err(|_| {
-            HematiteError::InternalError("B-tree cursor storage mutex is poisoned".to_string())
+    fn lock_storage(&self) -> Result<RwLockWriteGuard<'_, Pager>> {
+        self.storage.write().map_err(|_| {
+            HematiteError::InternalError("B-tree cursor storage lock is poisoned".to_string())
         })
     }
 
@@ -103,7 +103,10 @@ impl BTreeCursor {
 
     pub fn value(&self) -> Option<&BTreeValue> {
         let value = self.value_view()?;
-        Some(self.cached_value.get_or_init(|| BTreeValue::new(value.to_vec())))
+        Some(
+            self.cached_value
+                .get_or_init(|| BTreeValue::new(value.to_vec())),
+        )
     }
 
     pub fn current(&self) -> Option<(&BTreeKey, &BTreeValue)> {
@@ -118,7 +121,10 @@ impl BTreeCursor {
 
     #[cfg(test)]
     pub(crate) fn cache_materialized(&self) -> (bool, bool) {
-        (self.cached_key.get().is_some(), self.cached_value.get().is_some())
+        (
+            self.cached_key.get().is_some(),
+            self.cached_value.get().is_some(),
+        )
     }
 
     #[cfg(test)]

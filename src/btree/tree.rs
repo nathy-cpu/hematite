@@ -20,27 +20,27 @@ use crate::storage::{
     Page, PageId, Pager, DB_HEADER_PAGE_ID, INVALID_PAGE_ID, STORAGE_METADATA_PAGE_ID,
 };
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, RwLock, RwLockWriteGuard};
 
 pub struct BTreeManager {
-    storage: Arc<Mutex<Pager>>,
+    storage: Arc<RwLock<Pager>>,
 }
 
 impl BTreeManager {
-    fn lock_storage(&self) -> Result<MutexGuard<'_, Pager>> {
-        self.storage.lock().map_err(|_| {
-            HematiteError::InternalError("B-tree manager storage mutex is poisoned".to_string())
+    fn lock_storage(&self) -> Result<RwLockWriteGuard<'_, Pager>> {
+        self.storage.write().map_err(|_| {
+            HematiteError::InternalError("B-tree manager storage lock is poisoned".to_string())
         })
     }
 
     #[cfg(test)]
     pub fn new(storage: Pager) -> Self {
         Self {
-            storage: Arc::new(Mutex::new(storage)),
+            storage: Arc::new(RwLock::new(storage)),
         }
     }
 
-    pub fn from_shared_storage(storage: Arc<Mutex<Pager>>) -> Self {
+    pub fn from_shared_storage(storage: Arc<RwLock<Pager>>) -> Self {
         Self { storage }
     }
 
