@@ -103,6 +103,16 @@ impl Catalog {
         self.schema_dirty = schema_dirty;
     }
 
+    fn rollback_failed_atomic_operation(
+        &mut self,
+        schema: Schema,
+        schema_root: u32,
+        schema_dirty: bool,
+    ) -> Result<()> {
+        self.restore_state(schema, schema_root, schema_dirty);
+        self.engine.rollback_transaction()
+    }
+
     fn run_atomically<T>(&mut self, operation: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         let schema = self.schema.clone();
         let schema_root = self.schema_root;
@@ -125,14 +135,12 @@ impl Catalog {
                 Ok(result) => match self.commit_transaction() {
                     Ok(()) => Ok(result),
                     Err(err) => {
-                        self.restore_state(schema, schema_root, schema_dirty);
-                        self.engine.rollback_transaction()?;
+                        self.rollback_failed_atomic_operation(schema, schema_root, schema_dirty)?;
                         Err(err)
                     }
                 },
                 Err(err) => {
-                    self.restore_state(schema, schema_root, schema_dirty);
-                    self.engine.rollback_transaction()?;
+                    self.rollback_failed_atomic_operation(schema, schema_root, schema_dirty)?;
                     Err(err)
                 }
             }

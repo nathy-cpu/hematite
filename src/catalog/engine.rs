@@ -354,6 +354,14 @@ not available yet.",
         self.table_metadata = table_metadata;
     }
 
+    fn rollback_failed_atomic_operation(
+        &mut self,
+        table_metadata: HashMap<String, TableRuntimeMetadata>,
+    ) -> Result<()> {
+        self.restore_runtime_metadata(table_metadata);
+        self.rollback_transaction()
+    }
+
     fn run_atomically<T>(&mut self, operation: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         let table_metadata = self.table_metadata.clone();
         let transaction_active = self.transaction_active()?;
@@ -373,14 +381,12 @@ not available yet.",
                 Ok(result) => match self.commit_transaction() {
                     Ok(()) => Ok(result),
                     Err(err) => {
-                        self.restore_runtime_metadata(table_metadata);
-                        self.rollback_transaction()?;
+                        self.rollback_failed_atomic_operation(table_metadata)?;
                         Err(err)
                     }
                 },
                 Err(err) => {
-                    self.restore_runtime_metadata(table_metadata);
-                    self.rollback_transaction()?;
+                    self.rollback_failed_atomic_operation(table_metadata)?;
                     Err(err)
                 }
             }
