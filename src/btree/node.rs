@@ -1041,7 +1041,10 @@ fn compute_cell_ranges(cell_offsets: &[u16]) -> Result<Vec<(usize, usize)>> {
         .collect::<Vec<_>>();
     indexed_offsets.sort_unstable_by_key(|(offset, _)| *offset);
 
-    if indexed_offsets.windows(2).any(|window| window[0].0 == window[1].0) {
+    if indexed_offsets
+        .windows(2)
+        .any(|window| window[0].0 == window[1].0)
+    {
         return Err(HematiteError::CorruptedData(
             "Duplicate B-tree cell pointers".to_string(),
         ));

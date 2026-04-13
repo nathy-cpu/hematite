@@ -97,26 +97,79 @@ impl Catalog {
         Ok(())
     }
 
+    fn restore_state(&mut self, schema: Schema, schema_root: u32, schema_dirty: bool) {
+        self.schema = schema;
+        self.schema_root = schema_root;
+        self.schema_dirty = schema_dirty;
+    }
+
+    fn run_atomically<T>(&mut self, operation: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        let schema = self.schema.clone();
+        let schema_root = self.schema_root;
+        let schema_dirty = self.schema_dirty;
+        let transaction_active = self.engine.transaction_active()?;
+
+        if transaction_active {
+            let engine_snapshot = self.engine.snapshot()?;
+            match operation(self) {
+                Ok(result) => Ok(result),
+                Err(err) => {
+                    self.restore_state(schema, schema_root, schema_dirty);
+                    self.engine.restore_snapshot(engine_snapshot)?;
+                    Err(err)
+                }
+            }
+        } else {
+            self.engine.begin_transaction()?;
+            match operation(self) {
+                Ok(result) => match self.commit_transaction() {
+                    Ok(()) => Ok(result),
+                    Err(err) => {
+                        self.restore_state(schema, schema_root, schema_dirty);
+                        self.engine.rollback_transaction()?;
+                        Err(err)
+                    }
+                },
+                Err(err) => {
+                    self.restore_state(schema, schema_root, schema_dirty);
+                    self.engine.rollback_transaction()?;
+                    Err(err)
+                }
+            }
+        }
+    }
+
+    fn run_schema_mutation<T>(
+        &mut self,
+        operation: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        self.run_atomically(|catalog| {
+            let result = operation(catalog)?;
+            catalog.schema_dirty = true;
+            catalog.save_schema_to_btree()?;
+            Ok(result)
+        })
+    }
+
     fn get_next_table_id(&mut self) -> Result<TableId> {
         self.engine.allocate_table_id()
     }
 
     pub fn create_table(&mut self, name: &str, columns: Vec<Column>) -> Result<TableId> {
-        if self.schema.get_table_by_name(name).is_some() {
-            return Err(crate::error::HematiteError::StorageError(format!(
-                "Table '{}' already exists",
-                name
-            )));
-        }
+        self.run_schema_mutation(|catalog| {
+            if catalog.schema.get_table_by_name(name).is_some() {
+                return Err(crate::error::HematiteError::StorageError(format!(
+                    "Table '{}' already exists",
+                    name
+                )));
+            }
 
-        let table_id = self.get_next_table_id()?;
-        let table = Table::new(table_id, name.to_string(), columns, 0u32)?;
+            let table_id = catalog.get_next_table_id()?;
+            let table = Table::new(table_id, name.to_string(), columns, 0u32)?;
 
-        self.schema.insert_table(table.clone())?;
-        self.schema_dirty = true;
-        self.save_schema_to_btree()?;
-
-        Ok(table_id)
+            catalog.schema.insert_table(table)?;
+            Ok(table_id)
+        })
     }
 
     pub fn create_table_with_roots(
@@ -126,22 +179,21 @@ impl Catalog {
         table_root_page_id: u32,
         primary_key_root_page_id: u32,
     ) -> Result<TableId> {
-        if self.schema.get_table_by_name(name).is_some() {
-            return Err(crate::error::HematiteError::StorageError(format!(
-                "Table '{}' already exists",
-                name
-            )));
-        }
+        self.run_schema_mutation(|catalog| {
+            if catalog.schema.get_table_by_name(name).is_some() {
+                return Err(crate::error::HematiteError::StorageError(format!(
+                    "Table '{}' already exists",
+                    name
+                )));
+            }
 
-        let table_id = self.get_next_table_id()?;
-        let mut table = Table::new(table_id, name.to_string(), columns, table_root_page_id)?;
-        table.primary_key_index_root_page_id = primary_key_root_page_id;
+            let table_id = catalog.get_next_table_id()?;
+            let mut table = Table::new(table_id, name.to_string(), columns, table_root_page_id)?;
+            table.primary_key_index_root_page_id = primary_key_root_page_id;
 
-        self.schema.insert_table(table)?;
-        self.schema_dirty = true;
-        self.save_schema_to_btree()?;
-
-        Ok(table_id)
+            catalog.schema.insert_table(table)?;
+            Ok(table_id)
+        })
     }
 
     pub fn get_table(&self, table_id: TableId) -> Result<Option<Table>> {
@@ -153,42 +205,33 @@ impl Catalog {
     }
 
     pub fn drop_table(&mut self, table_id: TableId) -> Result<()> {
-        let table = self.schema.get_table(table_id).cloned();
-        if table.is_none() {
-            return Err(crate::error::HematiteError::StorageError(
-                "Table not found".to_string(),
-            ));
-        }
-        let table = table.unwrap();
-        if let Some(view_name) = self.first_view_dependency_on(&table.name, None) {
-            return Err(crate::error::HematiteError::ParseError(format!(
-                "Cannot drop table '{}' because view '{}' depends on it",
-                table.name, view_name
-            )));
-        }
-        self.schema.drop_table(table_id)?;
-        self.schema_dirty = true;
-        self.save_schema_to_btree()?;
-
-        Ok(())
+        self.run_schema_mutation(|catalog| {
+            let table = catalog.schema.get_table(table_id).cloned().ok_or_else(|| {
+                crate::error::HematiteError::StorageError("Table not found".to_string())
+            })?;
+            if let Some(view_name) = catalog.first_view_dependency_on(&table.name, None) {
+                return Err(crate::error::HematiteError::ParseError(format!(
+                    "Cannot drop table '{}' because view '{}' depends on it",
+                    table.name, view_name
+                )));
+            }
+            catalog.schema.drop_table(table_id)?;
+            Ok(())
+        })
     }
 
     pub fn rename_table(&mut self, old_name: &str, new_name: &str) -> Result<()> {
-        let table = self.schema.get_table_by_name(old_name).ok_or_else(|| {
-            crate::error::HematiteError::StorageError(format!("Table '{}' not found", old_name))
-        })?;
+        self.run_schema_mutation(|catalog| {
+            let table = catalog.schema.get_table_by_name(old_name).ok_or_else(|| {
+                crate::error::HematiteError::StorageError(format!("Table '{}' not found", old_name))
+            })?;
 
-        self.schema.rename_table(table.id, new_name.to_string())?;
-        self.schema_dirty = true;
-        self.save_schema_to_btree()?;
-        Ok(())
+            catalog.schema.rename_table(table.id, new_name.to_string())
+        })
     }
 
     pub fn add_column(&mut self, table_id: TableId, column: Column) -> Result<()> {
-        self.schema.add_column(table_id, column)?;
-        self.schema_dirty = true;
-        self.save_schema_to_btree()?;
-        Ok(())
+        self.run_schema_mutation(|catalog| catalog.schema.add_column(table_id, column))
     }
 
     pub fn rename_column(
@@ -197,17 +240,13 @@ impl Catalog {
         old_name: &str,
         new_name: String,
     ) -> Result<()> {
-        self.schema.rename_column(table_id, old_name, new_name)?;
-        self.schema_dirty = true;
-        self.save_schema_to_btree()?;
-        Ok(())
+        self.run_schema_mutation(|catalog| {
+            catalog.schema.rename_column(table_id, old_name, new_name)
+        })
     }
 
     pub fn drop_column(&mut self, table_id: TableId, column_name: &str) -> Result<usize> {
-        let dropped_index = self.schema.drop_column(table_id, column_name)?;
-        self.schema_dirty = true;
-        self.save_schema_to_btree()?;
-        Ok(dropped_index)
+        self.run_schema_mutation(|catalog| catalog.schema.drop_column(table_id, column_name))
     }
 
     pub fn set_column_default(
@@ -216,11 +255,11 @@ impl Catalog {
         column_name: &str,
         default_value: Option<crate::catalog::Value>,
     ) -> Result<()> {
-        self.schema
-            .set_column_default(table_id, column_name, default_value)?;
-        self.schema_dirty = true;
-        self.save_schema_to_btree()?;
-        Ok(())
+        self.run_schema_mutation(|catalog| {
+            catalog
+                .schema
+                .set_column_default(table_id, column_name, default_value)
+        })
     }
 
     pub fn set_column_nullable(
@@ -229,11 +268,11 @@ impl Catalog {
         column_name: &str,
         nullable: bool,
     ) -> Result<()> {
-        self.schema
-            .set_column_nullable(table_id, column_name, nullable)?;
-        self.schema_dirty = true;
-        self.save_schema_to_btree()?;
-        Ok(())
+        self.run_schema_mutation(|catalog| {
+            catalog
+                .schema
+                .set_column_nullable(table_id, column_name, nullable)
+        })
     }
 
     pub fn add_check_constraint(
@@ -241,10 +280,9 @@ impl Catalog {
         table_id: TableId,
         constraint: CheckConstraint,
     ) -> Result<()> {
-        self.schema.add_check_constraint(table_id, constraint)?;
-        self.schema_dirty = true;
-        self.save_schema_to_btree()?;
-        Ok(())
+        self.run_schema_mutation(|catalog| {
+            catalog.schema.add_check_constraint(table_id, constraint)
+        })
     }
 
     pub fn add_foreign_key(
@@ -252,10 +290,7 @@ impl Catalog {
         table_id: TableId,
         constraint: ForeignKeyConstraint,
     ) -> Result<()> {
-        self.schema.add_foreign_key(table_id, constraint)?;
-        self.schema_dirty = true;
-        self.save_schema_to_btree()?;
-        Ok(())
+        self.run_schema_mutation(|catalog| catalog.schema.add_foreign_key(table_id, constraint))
     }
 
     pub fn list_tables(&self) -> Result<Vec<(TableId, String)>> {
@@ -263,40 +298,39 @@ impl Catalog {
     }
 
     pub fn create_view(&mut self, view: View) -> Result<()> {
-        if view
-            .dependencies
-            .iter()
-            .any(|dependency| dependency.eq_ignore_ascii_case(&view.name))
-        {
-            return Err(crate::error::HematiteError::ParseError(format!(
-                "View '{}' cannot depend on itself",
-                view.name
-            )));
-        }
-        for dependency in &view.dependencies {
-            if self.view_depends_on(dependency, &view.name) {
+        self.run_schema_mutation(|catalog| {
+            if view
+                .dependencies
+                .iter()
+                .any(|dependency| dependency.eq_ignore_ascii_case(&view.name))
+            {
                 return Err(crate::error::HematiteError::ParseError(format!(
-                    "Creating view '{}' would introduce a recursive view cycle through '{}'",
-                    view.name, dependency
+                    "View '{}' cannot depend on itself",
+                    view.name
                 )));
             }
-        }
-        self.schema.create_view(view)?;
-        self.schema_dirty = true;
-        self.save_schema_to_btree()
+            for dependency in &view.dependencies {
+                if catalog.view_depends_on(dependency, &view.name) {
+                    return Err(crate::error::HematiteError::ParseError(format!(
+                        "Creating view '{}' would introduce a recursive view cycle through '{}'",
+                        view.name, dependency
+                    )));
+                }
+            }
+            catalog.schema.create_view(view)
+        })
     }
 
     pub fn drop_view(&mut self, name: &str) -> Result<View> {
-        if let Some(view_name) = self.first_view_dependency_on(name, Some(name)) {
-            return Err(crate::error::HematiteError::ParseError(format!(
-                "Cannot drop view '{}' because view '{}' depends on it",
-                name, view_name
-            )));
-        }
-        let view = self.schema.drop_view(name)?;
-        self.schema_dirty = true;
-        self.save_schema_to_btree()?;
-        Ok(view)
+        self.run_schema_mutation(|catalog| {
+            if let Some(view_name) = catalog.first_view_dependency_on(name, Some(name)) {
+                return Err(crate::error::HematiteError::ParseError(format!(
+                    "Cannot drop view '{}' because view '{}' depends on it",
+                    name, view_name
+                )));
+            }
+            catalog.schema.drop_view(name)
+        })
     }
 
     pub fn get_view(&self, name: &str) -> Result<Option<View>> {
@@ -308,16 +342,11 @@ impl Catalog {
     }
 
     pub fn create_trigger(&mut self, trigger: Trigger) -> Result<()> {
-        self.schema.create_trigger(trigger)?;
-        self.schema_dirty = true;
-        self.save_schema_to_btree()
+        self.run_schema_mutation(|catalog| catalog.schema.create_trigger(trigger))
     }
 
     pub fn drop_trigger(&mut self, name: &str) -> Result<Trigger> {
-        let trigger = self.schema.drop_trigger(name)?;
-        self.schema_dirty = true;
-        self.save_schema_to_btree()?;
-        Ok(trigger)
+        self.run_schema_mutation(|catalog| catalog.schema.drop_trigger(name))
     }
 
     pub fn get_trigger(&self, name: &str) -> Result<Option<Trigger>> {
@@ -333,12 +362,11 @@ impl Catalog {
         table_id: TableId,
         constraint_name: &str,
     ) -> Result<NamedConstraintKind> {
-        let kind = self
-            .schema
-            .drop_named_constraint(table_id, constraint_name)?;
-        self.schema_dirty = true;
-        self.save_schema_to_btree()?;
-        Ok(kind)
+        self.run_schema_mutation(|catalog| {
+            catalog
+                .schema
+                .drop_named_constraint(table_id, constraint_name)
+        })
     }
 
     pub fn get_schema(&self) -> &Schema {
@@ -498,31 +526,33 @@ impl Catalog {
     }
 
     pub fn replace_schema(&mut self, schema: Schema) -> Result<()> {
-        self.schema = schema;
-        self.schema_dirty = true;
-        self.save_schema_to_btree()?;
-        self.engine.set_next_table_id(self.schema.next_table_id())
+        self.run_atomically(|catalog| {
+            catalog.schema = schema;
+            catalog.schema_dirty = true;
+            catalog.save_schema_to_btree()?;
+            catalog
+                .engine
+                .set_next_table_id(catalog.schema.next_table_id())
+        })
     }
 
     pub fn set_table_root_page(&mut self, table_id: TableId, root_page: u32) -> Result<()> {
-        if self.schema.get_table(table_id).is_none() {
-            return Err(crate::error::HematiteError::StorageError(format!(
-                "Table ID {} not found",
-                table_id.as_u32()
-            )));
-        }
+        self.run_schema_mutation(|catalog| {
+            if catalog.schema.get_table(table_id).is_none() {
+                return Err(crate::error::HematiteError::StorageError(format!(
+                    "Table ID {} not found",
+                    table_id.as_u32()
+                )));
+            }
 
-        if root_page <= 1 {
-            return Err(crate::error::HematiteError::StorageError(
-                "Root pages 0 and 1 are reserved".to_string(),
-            ));
-        }
+            if root_page <= 1 {
+                return Err(crate::error::HematiteError::StorageError(
+                    "Root pages 0 and 1 are reserved".to_string(),
+                ));
+            }
 
-        self.schema.set_table_root_page(table_id, root_page)?;
-        self.schema_dirty = true;
-        self.save_schema_to_btree()?;
-
-        Ok(())
+            catalog.schema.set_table_root_page(table_id, root_page)
+        })
     }
 
     pub fn get_table_root_page(&self, table_id: TableId) -> Result<Option<u32>> {
@@ -538,11 +568,7 @@ impl Catalog {
     }
 
     pub fn add_secondary_index(&mut self, table_id: TableId, index: SecondaryIndex) -> Result<()> {
-        self.schema.add_secondary_index(table_id, index)?;
-        self.schema_dirty = true;
-        self.save_schema_to_btree()?;
-
-        Ok(())
+        self.run_schema_mutation(|catalog| catalog.schema.add_secondary_index(table_id, index))
     }
 
     pub fn set_table_primary_key_root_page(
@@ -550,18 +576,17 @@ impl Catalog {
         table_id: TableId,
         root_page_id: u32,
     ) -> Result<()> {
-        if root_page_id <= 1 {
-            return Err(crate::error::HematiteError::StorageError(
-                "Root pages 0 and 1 are reserved".to_string(),
-            ));
-        }
+        self.run_schema_mutation(|catalog| {
+            if root_page_id <= 1 {
+                return Err(crate::error::HematiteError::StorageError(
+                    "Root pages 0 and 1 are reserved".to_string(),
+                ));
+            }
 
-        self.schema
-            .set_table_primary_key_root_page(table_id, root_page_id)?;
-        self.schema_dirty = true;
-        self.save_schema_to_btree()?;
-
-        Ok(())
+            catalog
+                .schema
+                .set_table_primary_key_root_page(table_id, root_page_id)
+        })
     }
 
     pub fn set_table_storage_roots(
@@ -570,21 +595,19 @@ impl Catalog {
         table_root_page_id: u32,
         primary_key_root_page_id: u32,
     ) -> Result<()> {
-        if table_root_page_id <= 1 || primary_key_root_page_id <= 1 {
-            return Err(crate::error::HematiteError::StorageError(
-                "Root pages 0 and 1 are reserved".to_string(),
-            ));
-        }
+        self.run_schema_mutation(|catalog| {
+            if table_root_page_id <= 1 || primary_key_root_page_id <= 1 {
+                return Err(crate::error::HematiteError::StorageError(
+                    "Root pages 0 and 1 are reserved".to_string(),
+                ));
+            }
 
-        self.schema.set_table_storage_roots(
-            table_id,
-            table_root_page_id,
-            primary_key_root_page_id,
-        )?;
-        self.schema_dirty = true;
-        self.save_schema_to_btree()?;
-
-        Ok(())
+            catalog.schema.set_table_storage_roots(
+                table_id,
+                table_root_page_id,
+                primary_key_root_page_id,
+            )
+        })
     }
 
     pub fn validate_schema(&self) -> Result<()> {
@@ -715,22 +738,20 @@ impl Catalog {
         columns: Vec<Column>,
         root_page: u32,
     ) -> Result<TableId> {
-        if self.schema.get_table_by_name(name).is_some() {
-            return Err(crate::error::HematiteError::StorageError(format!(
-                "Table '{}' already exists",
-                name
-            )));
-        }
+        self.run_schema_mutation(|catalog| {
+            if catalog.schema.get_table_by_name(name).is_some() {
+                return Err(crate::error::HematiteError::StorageError(format!(
+                    "Table '{}' already exists",
+                    name
+                )));
+            }
 
-        let table_id = self.get_next_table_id()?;
+            let table_id = catalog.get_next_table_id()?;
+            let table = Table::new(table_id, name.to_string(), columns, root_page)?;
 
-        let table = Table::new(table_id, name.to_string(), columns, root_page)?;
-
-        self.schema.insert_table(table.clone())?;
-        self.schema_dirty = true;
-        self.save_schema_to_btree()?;
-
-        Ok(table_id)
+            catalog.schema.insert_table(table)?;
+            Ok(table_id)
+        })
     }
 
     pub fn get_table_columns(&self, table_id: TableId) -> Result<Option<Vec<Column>>> {

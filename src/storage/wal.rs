@@ -168,8 +168,8 @@ pub(crate) fn load_visible_state_from_path_with_base<P: AsRef<Path>>(
         .map(Vec::as_slice)
         .unwrap_or(baseline_metadata_page);
 
-    let persisted = parse_metadata_page(metadata_page_bytes)
-        .unwrap_or_else(|| PersistedPagerState {
+    let persisted =
+        parse_metadata_page(metadata_page_bytes).unwrap_or_else(|| PersistedPagerState {
             journal_mode: JournalMode::Wal,
             free_pages: baseline_free_pages,
             checksums: baseline_checksums,
@@ -177,9 +177,8 @@ pub(crate) fn load_visible_state_from_path_with_base<P: AsRef<Path>>(
 
     let visible_next_page_id = next_page_id_for_file_len(file_len);
     let free_page_set = persisted.free_pages.iter().copied().collect::<HashSet<_>>();
-    page_overrides_btree.retain(|page_id, _| {
-        *page_id < visible_next_page_id && !free_page_set.contains(page_id)
-    });
+    page_overrides_btree
+        .retain(|page_id, _| *page_id < visible_next_page_id && !free_page_set.contains(page_id));
 
     Ok(Some(VisibleWalState {
         visible_sequence: latest_sequence,

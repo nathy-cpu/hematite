@@ -37,7 +37,11 @@ impl OverflowReadCache {
         self.page_ids.clear();
     }
 
-    fn cached_page_ids(&mut self, first_page: Option<PageId>, expected_len: usize) -> Option<&[PageId]> {
+    fn cached_page_ids(
+        &mut self,
+        first_page: Option<PageId>,
+        expected_len: usize,
+    ) -> Option<&[PageId]> {
         if self.first_page == first_page && self.expected_len == expected_len {
             #[cfg(test)]
             {

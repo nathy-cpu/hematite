@@ -7,9 +7,9 @@ use crate::error::Result;
 #[cfg(test)]
 use crate::storage::journal_v3::{V3JournalHeader, V3JournalRecord};
 use crate::storage::journal_v3::{V3JournalState, V3RollbackJournal};
-use crate::storage::{file_len_for_next_page_id, PageId};
 #[cfg(test)]
 use crate::storage::next_page_id_for_file_len;
+use crate::storage::{file_len_for_next_page_id, PageId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JournalState {
@@ -83,7 +83,9 @@ impl RollbackJournal {
     fn from_v3(journal: V3RollbackJournal) -> Self {
         Self {
             state: JournalState::from_v3(journal.header.state),
-            original_file_len: file_len_for_next_page_id(journal.header.original_database_page_count),
+            original_file_len: file_len_for_next_page_id(
+                journal.header.original_database_page_count,
+            ),
             original_free_pages: journal.original_free_pages,
             original_checksums: journal.original_checksums,
             page_records: journal

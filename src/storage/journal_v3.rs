@@ -300,8 +300,7 @@ pub(crate) type V3JournalStateAlias = V3JournalState;
 #[cfg(test)]
 mod tests {
     use super::{
-        V3JournalHeader, V3JournalRecord, V3JournalState, V3RollbackJournal,
-        V3_JOURNAL_HEADER_SIZE,
+        V3JournalHeader, V3JournalRecord, V3JournalState, V3RollbackJournal, V3_JOURNAL_HEADER_SIZE,
     };
     use crate::storage::PAGE_SIZE;
 

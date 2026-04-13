@@ -66,9 +66,9 @@ fn parse_container_sections(page: &[u8]) -> Result<MetadataSections<'_>> {
 
     let pager_len = u32::from_le_bytes(page[8..12].try_into().unwrap()) as usize;
     let catalog_len = u32::from_le_bytes(page[12..16].try_into().unwrap()) as usize;
-    let payload_len = pager_len
-        .checked_add(catalog_len)
-        .ok_or_else(|| HematiteError::StorageError("Reserved metadata page lengths overflow".to_string()))?;
+    let payload_len = pager_len.checked_add(catalog_len).ok_or_else(|| {
+        HematiteError::StorageError("Reserved metadata page lengths overflow".to_string())
+    })?;
 
     if HEADER_LEN + payload_len > PAGE_SIZE {
         return Err(HematiteError::StorageError(
@@ -78,8 +78,7 @@ fn parse_container_sections(page: &[u8]) -> Result<MetadataSections<'_>> {
 
     let pager = (pager_len > 0).then_some(&page[HEADER_LEN..HEADER_LEN + pager_len]);
     let catalog_start = HEADER_LEN + pager_len;
-    let catalog =
-        (catalog_len > 0).then_some(&page[catalog_start..catalog_start + catalog_len]);
+    let catalog = (catalog_len > 0).then_some(&page[catalog_start..catalog_start + catalog_len]);
 
     Ok(MetadataSections { pager, catalog })
 }
@@ -87,9 +86,9 @@ fn parse_container_sections(page: &[u8]) -> Result<MetadataSections<'_>> {
 fn encode_sections(pager: Option<&[u8]>, catalog: Option<&[u8]>) -> Result<Vec<u8>> {
     let pager_len = pager.map_or(0, <[u8]>::len);
     let catalog_len = catalog.map_or(0, <[u8]>::len);
-    let payload_len = pager_len
-        .checked_add(catalog_len)
-        .ok_or_else(|| HematiteError::StorageError("Reserved metadata page lengths overflow".to_string()))?;
+    let payload_len = pager_len.checked_add(catalog_len).ok_or_else(|| {
+        HematiteError::StorageError("Reserved metadata page lengths overflow".to_string())
+    })?;
 
     if HEADER_LEN + payload_len > PAGE_SIZE {
         return Err(HematiteError::StorageError(

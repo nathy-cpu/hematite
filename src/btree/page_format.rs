@@ -84,7 +84,11 @@ impl BTreePageHeaderV3 {
     }
 }
 
-pub(crate) fn initialize_btree_page(page: &mut Page, kind: PageKind, is_page_one: bool) -> Result<()> {
+pub(crate) fn initialize_btree_page(
+    page: &mut Page,
+    kind: PageKind,
+    is_page_one: bool,
+) -> Result<()> {
     let header_offset = header_offset(is_page_one);
     let header_size = page_header_size(kind)?;
     if header_offset + header_size > PAGE_SIZE {
@@ -117,7 +121,11 @@ pub(crate) fn initialize_btree_page(page: &mut Page, kind: PageKind, is_page_one
     page.data[header_offset + OFFSET_PAGE_KIND] = kind as u8;
     write_u16_be(&mut page.data, header_offset + OFFSET_FIRST_FREEBLOCK, 0);
     write_u16_be(&mut page.data, header_offset + OFFSET_CELL_COUNT, 0);
-    write_u16_be(&mut page.data, header_offset + OFFSET_CELL_CONTENT_START, PAGE_SIZE as u16);
+    write_u16_be(
+        &mut page.data,
+        header_offset + OFFSET_CELL_CONTENT_START,
+        PAGE_SIZE as u16,
+    );
     page.data[header_offset + OFFSET_FRAGMENTED_FREE_BYTES] = 0;
     if kind.is_interior() {
         write_u32_be(&mut page.data, header_offset + OFFSET_RIGHTMOST_CHILD, 0);
@@ -133,7 +141,10 @@ pub(crate) fn cell_pointer(page: &Page, is_page_one: bool, index: usize) -> Resu
             index, header.cell_count
         )));
     }
-    Ok(read_u16_be(&page.data, header.pointer_area_start() + index * 2))
+    Ok(read_u16_be(
+        &page.data,
+        header.pointer_area_start() + index * 2,
+    ))
 }
 
 pub(crate) fn set_rightmost_child(page: &mut Page, is_page_one: bool, child: u32) -> Result<()> {
@@ -185,11 +196,7 @@ pub(crate) fn total_free_space(page: &Page, is_page_one: bool) -> Result<usize> 
 
 /// Try to allocate `needed` bytes from the freeblock chain.
 /// Returns the offset of the allocated space, or `None` if no suitable freeblock exists.
-fn allocate_from_freeblocks(
-    data: &mut [u8],
-    header_offset: usize,
-    needed: usize,
-) -> Option<usize> {
+fn allocate_from_freeblocks(data: &mut [u8], header_offset: usize, needed: usize) -> Option<usize> {
     // Walk the freeblock chain looking for a block >= needed.
     let mut prev_ptr_offset = header_offset + OFFSET_FIRST_FREEBLOCK;
     let mut fb_offset = read_u16_be(data, prev_ptr_offset) as usize;
@@ -323,10 +330,7 @@ pub(crate) fn remove_cell(page: &mut Page, is_page_one: bool, index: usize) -> R
     }
 
     // Read the cell pointer to know where the cell body lives.
-    let cell_offset = read_u16_be(
-        &page.data,
-        header.pointer_area_start() + index * 2,
-    ) as usize;
+    let cell_offset = read_u16_be(&page.data, header.pointer_area_start() + index * 2) as usize;
 
     // Determine the cell size by finding the next cell boundary.
     let cell_size = compute_cell_size(page, &header, cell_offset)?;
@@ -407,8 +411,11 @@ fn compute_cell_size(page: &Page, header: &BTreePageHeaderV3, cell_offset: usize
                     "Leaf cell header truncated".to_string(),
                 ));
             }
-            let key_len = u16::from_be_bytes([page.data[cell_offset], page.data[cell_offset + 1]]) as usize;
-            let value_len = u16::from_be_bytes([page.data[cell_offset + 2], page.data[cell_offset + 3]]) as usize;
+            let key_len =
+                u16::from_be_bytes([page.data[cell_offset], page.data[cell_offset + 1]]) as usize;
+            let value_len =
+                u16::from_be_bytes([page.data[cell_offset + 2], page.data[cell_offset + 3]])
+                    as usize;
             let total = 4 + key_len + value_len;
             if cell_offset + total > PAGE_SIZE {
                 return Err(HematiteError::CorruptedData(
@@ -423,7 +430,9 @@ fn compute_cell_size(page: &Page, header: &BTreePageHeaderV3, cell_offset: usize
                     "Internal cell header truncated".to_string(),
                 ));
             }
-            let key_len = u16::from_be_bytes([page.data[cell_offset + 4], page.data[cell_offset + 5]]) as usize;
+            let key_len =
+                u16::from_be_bytes([page.data[cell_offset + 4], page.data[cell_offset + 5]])
+                    as usize;
             let total = 6 + key_len;
             if cell_offset + total > PAGE_SIZE {
                 return Err(HematiteError::CorruptedData(
@@ -482,8 +491,7 @@ pub(crate) fn defragment_page(page: &mut Page, is_page_one: bool) -> Result<()> 
         0,
     );
     page.data[header.header_offset + OFFSET_FRAGMENTED_FREE_BYTES] = 0;
-    Ok(()
-    )
+    Ok(())
 }
 
 fn header_offset(is_page_one: bool) -> usize {

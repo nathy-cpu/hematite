@@ -25,14 +25,14 @@
 //! logic in tests and in the real database.
 
 use crate::error::Result;
-use crate::storage::free_list::FreeList;
 use crate::storage::format::{
     bootstrap_database_page_one, detect_format_generation, DatabaseHeaderV3, FormatGeneration,
     PageKind,
 };
+use crate::storage::free_list::FreeList;
 use crate::storage::{
-    file_len_for_next_page_id, next_page_id_for_file_len, Page, PageId,
-    FIRST_ALLOCATABLE_PAGE_ID, PAGE_SIZE,
+    file_len_for_next_page_id, next_page_id_for_file_len, Page, PageId, FIRST_ALLOCATABLE_PAGE_ID,
+    PAGE_SIZE,
 };
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -265,8 +265,7 @@ impl FileManager {
     }
 
     pub(crate) fn allocated_page_count(&self) -> usize {
-        self.next_page_id
-            .saturating_sub(FIRST_ALLOCATABLE_PAGE_ID) as usize
+        self.next_page_id.saturating_sub(FIRST_ALLOCATABLE_PAGE_ID) as usize
     }
 
     pub(crate) fn trailing_free_page_count(&self) -> usize {

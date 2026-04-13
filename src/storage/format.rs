@@ -260,7 +260,10 @@ pub(crate) fn bootstrap_database_page_one(
     header: &DatabaseHeaderV3,
     root_page_kind: PageKind,
 ) -> Result<[u8; PAGE_SIZE]> {
-    if !matches!(root_page_kind, PageKind::LeafTable | PageKind::InteriorTable) {
+    if !matches!(
+        root_page_kind,
+        PageKind::LeafTable | PageKind::InteriorTable
+    ) {
         return Err(HematiteError::StorageError(format!(
             "Unsupported page-one root kind {:?}",
             root_page_kind
@@ -375,7 +378,11 @@ fn initialize_btree_page_header(
     bytes[offset + OFFSET_PAGE_KIND] = kind as u8;
     write_u16_be(bytes, offset + OFFSET_FIRST_FREEBLOCK, 0);
     write_u16_be(bytes, offset + OFFSET_CELL_COUNT, 0);
-    write_u16_be(bytes, offset + OFFSET_CELL_CONTENT_START, cell_content_start);
+    write_u16_be(
+        bytes,
+        offset + OFFSET_CELL_CONTENT_START,
+        cell_content_start,
+    );
     bytes[offset + OFFSET_FRAGMENTED_FREE_BYTES] = 0;
     if matches!(kind, PageKind::InteriorTable | PageKind::InteriorIndex) {
         write_u32_be(bytes, offset + OFFSET_RIGHTMOST_CHILD, 0);
@@ -472,7 +479,16 @@ mod tests {
 
     #[test]
     fn varint_roundtrip_examples() {
-        for value in [0, 1, 127, 128, 255, 16_384, u32::MAX as u64, u64::from(u32::MAX) + 1] {
+        for value in [
+            0,
+            1,
+            127,
+            128,
+            255,
+            16_384,
+            u32::MAX as u64,
+            u64::from(u32::MAX) + 1,
+        ] {
             let encoded = encode_varint(value);
             let (decoded, used) = decode_varint(&encoded).unwrap();
             assert_eq!(decoded, value);

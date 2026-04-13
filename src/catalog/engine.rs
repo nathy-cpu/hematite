@@ -350,6 +350,43 @@ not available yet.",
         self.tree_store.restore_snapshot(snapshot.tree_store)
     }
 
+    fn restore_runtime_metadata(&mut self, table_metadata: HashMap<String, TableRuntimeMetadata>) {
+        self.table_metadata = table_metadata;
+    }
+
+    fn run_atomically<T>(&mut self, operation: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        let table_metadata = self.table_metadata.clone();
+        let transaction_active = self.transaction_active()?;
+
+        if transaction_active {
+            let snapshot = self.snapshot()?;
+            match operation(self) {
+                Ok(result) => Ok(result),
+                Err(err) => {
+                    self.restore_snapshot(snapshot)?;
+                    Err(err)
+                }
+            }
+        } else {
+            self.begin_transaction()?;
+            match operation(self) {
+                Ok(result) => match self.commit_transaction() {
+                    Ok(()) => Ok(result),
+                    Err(err) => {
+                        self.restore_runtime_metadata(table_metadata);
+                        self.rollback_transaction()?;
+                        Err(err)
+                    }
+                },
+                Err(err) => {
+                    self.restore_runtime_metadata(table_metadata);
+                    self.rollback_transaction()?;
+                    Err(err)
+                }
+            }
+        }
+    }
+
     pub(crate) fn create_empty_btree(&self) -> Result<PageId> {
         self.tree_store().create_tree()
     }
@@ -496,31 +533,33 @@ not available yet.",
     }
 
     pub fn create_table(&mut self, table_name: &str) -> Result<PageId> {
-        table_store::create_table(self, table_name)
+        self.run_atomically(|engine| table_store::create_table(engine, table_name))
     }
 
     pub fn insert_into_table(&mut self, table_name: &str, row: Vec<Value>) -> Result<u64> {
-        table_store::insert_into_table(self, table_name, row)
+        self.run_atomically(|engine| table_store::insert_into_table(engine, table_name, row))
     }
 
     pub fn replace_table_rows(&mut self, table_name: &str, rows: Vec<StoredRow>) -> Result<()> {
-        table_store::replace_table_rows(self, table_name, rows)
+        self.run_atomically(|engine| table_store::replace_table_rows(engine, table_name, rows))
     }
 
     pub fn insert_row_with_rowid(&mut self, table_name: &str, row: StoredRow) -> Result<()> {
-        table_store::insert_row_with_rowid(self, table_name, row)
+        self.run_atomically(|engine| table_store::insert_row_with_rowid(engine, table_name, row))
     }
 
     pub fn delete_from_table_by_rowid(&mut self, table_name: &str, rowid: u64) -> Result<bool> {
-        table_store::delete_from_table_by_rowid(self, table_name, rowid)
+        self.run_atomically(|engine| {
+            table_store::delete_from_table_by_rowid(engine, table_name, rowid)
+        })
     }
 
     pub fn drop_table(&mut self, table_name: &str) -> Result<()> {
-        table_store::drop_table(self, table_name)
+        self.run_atomically(|engine| table_store::drop_table(engine, table_name))
     }
 
     pub fn drop_table_with_indexes(&mut self, table: &Table) -> Result<()> {
-        index_store::drop_table_with_indexes(self, table)
+        self.run_atomically(|engine| index_store::drop_table_with_indexes(engine, table))
     }
 
     pub fn open_table_cursor(&mut self, table_name: &str) -> Result<TableCursor> {
@@ -560,7 +599,7 @@ not available yet.",
     }
 
     pub fn register_primary_key_row(&mut self, table: &Table, row: StoredRow) -> Result<()> {
-        index_store::register_primary_key_row(self, table, row)
+        self.run_atomically(|engine| index_store::register_primary_key_row(engine, table, row))
     }
 
     pub fn lookup_rows_by_secondary_index(
@@ -582,23 +621,23 @@ not available yet.",
     }
 
     pub fn register_secondary_index_row(&mut self, table: &Table, row: StoredRow) -> Result<()> {
-        index_store::register_secondary_index_row(self, table, row)
+        self.run_atomically(|engine| index_store::register_secondary_index_row(engine, table, row))
     }
 
     pub fn rebuild_primary_key_index(&mut self, table: &Table, rows: &[StoredRow]) -> Result<()> {
-        index_store::rebuild_primary_key_index(self, table, rows)
+        self.run_atomically(|engine| index_store::rebuild_primary_key_index(engine, table, rows))
     }
 
     pub fn rebuild_secondary_indexes(&mut self, table: &Table, rows: &[StoredRow]) -> Result<()> {
-        index_store::rebuild_secondary_indexes(self, table, rows)
+        self.run_atomically(|engine| index_store::rebuild_secondary_indexes(engine, table, rows))
     }
 
     pub fn delete_primary_key_row(&mut self, table: &Table, row: &StoredRow) -> Result<bool> {
-        index_store::delete_primary_key_row(self, table, row)
+        self.run_atomically(|engine| index_store::delete_primary_key_row(engine, table, row))
     }
 
     pub fn delete_secondary_index_row(&mut self, table: &Table, row: &StoredRow) -> Result<()> {
-        index_store::delete_secondary_index_row(self, table, row)
+        self.run_atomically(|engine| index_store::delete_secondary_index_row(engine, table, row))
     }
 
     pub fn encode_primary_key(&self, key_values: &[Value]) -> Result<Vec<u8>> {

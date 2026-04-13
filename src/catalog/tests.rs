@@ -1453,6 +1453,63 @@ mod catalog_new_tests {
     }
 
     #[test]
+    fn test_catalog_failed_create_table_restores_live_and_durable_schema() -> Result<()> {
+        let test_db = TestDbFile::new("_test_catalog_failed_create_table_restores_schema");
+
+        {
+            let mut catalog = Catalog::open_or_create(test_db.path())?;
+            catalog.create_table(
+                "users",
+                vec![
+                    Column::new(ColumnId::new(1), "id".to_string(), DataType::Int)
+                        .primary_key(true),
+                    Column::new(ColumnId::new(2), "name".to_string(), DataType::Text),
+                ],
+            )?;
+
+            let expected_next_table_id = catalog.peek_next_table_id()?;
+            catalog.with_engine(|engine| {
+                engine.with_pager(|pager| {
+                    pager.inject_io_failure_after(0);
+                    Ok(())
+                })
+            })?;
+
+            let err = catalog
+                .create_table(
+                    "posts",
+                    vec![
+                        Column::new(ColumnId::new(1), "id".to_string(), DataType::Int)
+                            .primary_key(true),
+                        Column::new(ColumnId::new(2), "title".to_string(), DataType::Text),
+                    ],
+                )
+                .unwrap_err();
+            assert!(err.to_string().contains("Injected IO error"));
+
+            assert!(catalog.get_table_by_name("users")?.is_some());
+            assert!(catalog.get_table_by_name("posts")?.is_none());
+            assert_eq!(catalog.peek_next_table_id()?, expected_next_table_id);
+        }
+
+        let mut reopened = Catalog::open_or_create(test_db.path())?;
+        assert!(reopened.get_table_by_name("users")?.is_some());
+        assert!(reopened.get_table_by_name("posts")?.is_none());
+
+        let expected_next_table_id = reopened.peek_next_table_id()?;
+        let posts_id = reopened.create_table(
+            "posts",
+            vec![
+                Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true),
+                Column::new(ColumnId::new(2), "title".to_string(), DataType::Text),
+            ],
+        )?;
+        assert_eq!(posts_id, expected_next_table_id);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_table_secondary_index_metadata_roundtrip() -> Result<()> {
         let mut table = crate::catalog::Table::new(
             TableId::new(1),

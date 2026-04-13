@@ -8,7 +8,7 @@ use crate::storage::wal::{
     WalFrame,
 };
 use crate::storage::{
-    metadata_page, next_page_id_for_file_len, Page, PageId, STORAGE_METADATA_PAGE_ID, PAGE_SIZE,
+    metadata_page, next_page_id_for_file_len, Page, PageId, PAGE_SIZE, STORAGE_METADATA_PAGE_ID,
 };
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -225,7 +225,6 @@ impl Pager {
         Ok(())
     }
 
-
     /// Write the journal header and metadata section once at transaction begin.
     /// Keeps the file handle open for incremental record appending.
     pub(super) fn initialize_rollback_journal(&mut self) -> Result<()> {
@@ -253,9 +252,8 @@ impl Pager {
             ..V3JournalHeader::default()
         };
 
-        let mut bytes = Vec::with_capacity(
-            36 + original_free_pages.len() * 4 + original_checksums.len() * 8,
-        );
+        let mut bytes =
+            Vec::with_capacity(36 + original_free_pages.len() * 4 + original_checksums.len() * 8);
         bytes.extend_from_slice(&header.encode());
         for page_id in &original_free_pages {
             bytes.extend_from_slice(&page_id.to_be_bytes());
@@ -359,8 +357,7 @@ impl Pager {
 
             if let Some(file) = &mut self.journal_file {
                 let record_size = (8 + PAGE_SIZE) as u64;
-                let new_file_len =
-                    self.journal_header_len + new_record_count as u64 * record_size;
+                let new_file_len = self.journal_header_len + new_record_count as u64 * record_size;
                 file.set_len(new_file_len)?;
 
                 // Update record_count at offset 32.
@@ -490,7 +487,10 @@ impl Pager {
                     "Pager transaction is not active".to_string(),
                 )
             })?;
-            (transaction.wal_next_page_id, transaction.wal_free_pages.clone())
+            (
+                transaction.wal_next_page_id,
+                transaction.wal_free_pages.clone(),
+            )
         };
         let next_sequence = self
             .latest_wal_state

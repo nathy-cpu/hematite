@@ -375,8 +375,8 @@ mod mod_tests {
     }
 
     #[test]
-    fn test_byte_tree_failed_large_update_restores_previous_value_and_overflow_state(
-    ) -> Result<()> {
+    fn test_byte_tree_failed_large_update_restores_previous_value_and_overflow_state() -> Result<()>
+    {
         let trees = ByteTreeStore::new(Pager::new_in_memory(100)?);
         let root_page_id = trees.create_tree()?;
         let mut tree = trees.open_tree(root_page_id)?;
@@ -405,8 +405,8 @@ mod mod_tests {
     }
 
     #[test]
-    fn test_byte_tree_failed_large_delete_restores_previous_value_and_overflow_state(
-    ) -> Result<()> {
+    fn test_byte_tree_failed_large_delete_restores_previous_value_and_overflow_state() -> Result<()>
+    {
         let path = tmp_db();
         let trees = ByteTreeStore::new(Pager::new(path.path(), 1)?);
         let root_page_id = trees.create_tree()?;
@@ -1560,10 +1560,16 @@ mod tree_tests {
         ));
 
         let seek_err = cursor.seek(b"beta").unwrap_err();
-        assert!(matches!(seek_err, crate::error::HematiteError::CorruptedData(_)));
+        assert!(matches!(
+            seek_err,
+            crate::error::HematiteError::CorruptedData(_)
+        ));
 
         let scan_err = cursor.first().unwrap_err();
-        assert!(matches!(scan_err, crate::error::HematiteError::CorruptedData(_)));
+        assert!(matches!(
+            scan_err,
+            crate::error::HematiteError::CorruptedData(_)
+        ));
 
         Ok(())
     }

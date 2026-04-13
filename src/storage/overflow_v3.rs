@@ -41,8 +41,7 @@ impl V3OverflowPage {
         if expected_chunk_len > V3_OVERFLOW_PAYLOAD_CAPACITY {
             return Err(HematiteError::StorageError(format!(
                 "v3 overflow expected chunk length {} exceeds capacity {}",
-                expected_chunk_len,
-                V3_OVERFLOW_PAYLOAD_CAPACITY
+                expected_chunk_len, V3_OVERFLOW_PAYLOAD_CAPACITY
             )));
         }
 

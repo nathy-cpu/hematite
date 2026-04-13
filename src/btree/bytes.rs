@@ -327,10 +327,7 @@ impl ByteTree {
         self.lock_storage()?.restore_snapshot(snapshot.pager)
     }
 
-    fn run_atomically<T>(
-        &mut self,
-        operation: impl FnOnce(&mut Self) -> Result<T>,
-    ) -> Result<T> {
+    fn run_atomically<T>(&mut self, operation: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         let snapshot = self.snapshot_storage()?;
         match operation(self) {
             Ok(result) => Ok(result),

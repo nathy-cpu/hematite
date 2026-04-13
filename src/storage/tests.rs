@@ -195,9 +195,7 @@ mod pager_tests {
     use crate::storage::pager::Pager;
     use crate::storage::pager_metadata::PersistedPagerState;
     use crate::storage::wal::{WalFrame, WalRecord};
-    use crate::storage::{
-        metadata_page, JournalMode, Page, PAGE_SIZE, STORAGE_METADATA_PAGE_ID,
-    };
+    use crate::storage::{metadata_page, JournalMode, Page, PAGE_SIZE, STORAGE_METADATA_PAGE_ID};
     use crate::test_utils::TestDbFile;
     use std::collections::HashMap;
     use std::ffi::OsString;
@@ -841,8 +839,7 @@ mod pager_tests {
     }
 
     #[test]
-    fn test_pager_open_rejects_legacy_checksum_sidecar(
-    ) -> crate::error::Result<()> {
+    fn test_pager_open_rejects_legacy_checksum_sidecar() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_pager_legacy_sidecar_metadata_rejected");
         let mut pager = Pager::new(test_db.path(), 8)?;
         let page_id = pager.allocate_page()?;
@@ -872,9 +869,7 @@ mod pager_tests {
         )?;
 
         let err = Pager::new(test_db.path(), 8).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("Legacy pager checksum sidecar"));
+        assert!(err.to_string().contains("Legacy pager checksum sidecar"));
         assert!(checksum_path.exists());
         Ok(())
     }
@@ -1080,8 +1075,8 @@ mod pager_tests {
     }
 
     #[test]
-    fn test_pager_wal_reader_keeps_cache_between_identical_read_scopes(
-    ) -> crate::error::Result<()> {
+    fn test_pager_wal_reader_keeps_cache_between_identical_read_scopes() -> crate::error::Result<()>
+    {
         let test_db = TestDbFile::new("_test_pager_wal_reader_keeps_cache_between_scopes");
 
         let page_id = {
@@ -1659,9 +1654,7 @@ mod mod_tests {
         assert_eq!(stats.fragmented_free_page_count, 1);
         assert_eq!(stats.trailing_free_page_count, 0);
         assert!(stats.allocated_page_count >= stats.live_table_page_count + stats.free_page_count);
-        assert!(
-            stats.file_bytes >= (stats.allocated_page_count as u64 + 2) * PAGE_SIZE as u64
-        );
+        assert!(stats.file_bytes >= (stats.allocated_page_count as u64 + 2) * PAGE_SIZE as u64);
         assert!(stats.table_used_bytes > 0);
         assert!(stats.table_unused_bytes < stats.live_table_page_count * PAGE_SIZE);
 
@@ -1922,6 +1915,42 @@ mod mod_tests {
 
         let reused = storage.allocate_page()?;
         assert!(overflow_ids.contains(&reused) || reused == root_page_id);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_failed_drop_table_restores_runtime_metadata_and_rows() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_storage_failed_drop_table_restores_state");
+
+        {
+            let mut storage = CatalogEngine::new(test_db.path())?;
+            storage.create_table("docs")?;
+            let row_id =
+                storage.insert_into_table("docs", vec![Value::Text("keep".to_string())])?;
+            assert_eq!(row_id, 1);
+
+            storage.with_pager(|pager| {
+                pager.inject_io_failure_after(0);
+                Ok(())
+            })?;
+
+            let err = storage.drop_table("docs").unwrap_err();
+            assert!(err.to_string().contains("Injected IO error"));
+
+            assert_eq!(storage.get_storage_stats()?.table_count, 1);
+            assert_eq!(
+                storage.read_from_table("docs")?,
+                vec![vec![Value::Text("keep".to_string())]]
+            );
+        }
+
+        let mut reopened = CatalogEngine::new(test_db.path())?;
+        assert_eq!(reopened.get_storage_stats()?.table_count, 1);
+        assert_eq!(
+            reopened.read_from_table("docs")?,
+            vec![vec![Value::Text("keep".to_string())]]
+        );
 
         Ok(())
     }
@@ -2388,6 +2417,100 @@ mod mod_tests {
         assert_eq!(secondary.len(), 1);
         assert_eq!(secondary[0].row_id, row_id);
         reopened.validate_table_indexes(&table)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_failed_secondary_index_registration_restores_previous_indexes(
+    ) -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_failed_secondary_index_registration_restores_state");
+        let mut storage = crate::catalog::CatalogEngine::new(test_db.path())?;
+        let root_page_id = storage.create_table("users")?;
+
+        let mut table = crate::catalog::Table::new(
+            crate::catalog::TableId::new(1),
+            "users".to_string(),
+            vec![
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(1),
+                    "id".to_string(),
+                    crate::catalog::DataType::Int,
+                )
+                .primary_key(true),
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(2),
+                    "email".to_string(),
+                    crate::catalog::DataType::Text,
+                ),
+                crate::catalog::Column::new(
+                    crate::catalog::ColumnId::new(3),
+                    "username".to_string(),
+                    crate::catalog::DataType::Text,
+                ),
+            ],
+            root_page_id,
+        )?;
+        table.add_secondary_index(crate::catalog::SecondaryIndex {
+            name: "idx_users_email".to_string(),
+            column_indices: vec![1],
+            root_page_id: storage.create_empty_btree()?.into(),
+            unique: false,
+        })?;
+        table.add_secondary_index(crate::catalog::SecondaryIndex {
+            name: "idx_users_username_unique".to_string(),
+            column_indices: vec![2],
+            root_page_id: storage.create_empty_btree()?.into(),
+            unique: true,
+        })?;
+
+        let existing_row_id = storage.insert_into_table(
+            "users",
+            vec![
+                Value::Integer(1),
+                Value::Text("alice@example.com".to_string()),
+                Value::Text("alice".to_string()),
+            ],
+        )?;
+        let existing_row = crate::catalog::StoredRow {
+            row_id: existing_row_id,
+            values: vec![
+                Value::Integer(1),
+                Value::Text("alice@example.com".to_string()),
+                Value::Text("alice".to_string()),
+            ],
+        };
+        storage.register_secondary_index_row(&table, existing_row)?;
+
+        let conflicting_row = crate::catalog::StoredRow {
+            row_id: 99,
+            values: vec![
+                Value::Integer(2),
+                Value::Text("shadow@example.com".to_string()),
+                Value::Text("alice".to_string()),
+            ],
+        };
+
+        let err = storage
+            .register_secondary_index_row(&table, conflicting_row)
+            .unwrap_err();
+        assert!(err.to_string().contains("UNIQUE index"));
+
+        assert!(storage
+            .lookup_secondary_index_rowids(
+                &table,
+                "idx_users_email",
+                &[Value::Text("shadow@example.com".to_string())],
+            )?
+            .is_empty());
+        assert_eq!(
+            storage.lookup_secondary_index_rowids(
+                &table,
+                "idx_users_username_unique",
+                &[Value::Text("alice".to_string())],
+            )?,
+            vec![existing_row_id]
+        );
+
         Ok(())
     }
 
