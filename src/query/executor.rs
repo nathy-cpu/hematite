@@ -39,7 +39,10 @@ use crate::query::validation::{
 };
 use crate::query::QueryPlanner;
 use std::cmp::Ordering;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::hash::Hasher;
+use std::sync::Arc;
 
 impl QueryPlan {
     pub fn into_executor(self) -> Box<dyn QueryExecutor> {
@@ -77,7 +80,7 @@ pub struct SelectExecutor {
     pub statement: SelectStatement,
     pub access_path: SelectAccessPath,
     outer_scopes: Vec<CorrelatedScope>,
-    materialized_ctes: HashMap<String, QueryResult>,
+    materialized_ctes: HashMap<String, Arc<QueryResult>>,
 }
 
 #[derive(Debug, Clone)]
@@ -128,7 +131,7 @@ struct CorrelatedScope {
     row: Vec<Value>,
 }
 
-type SubqueryCache = HashMap<usize, QueryResult>;
+type SubqueryCache = HashMap<String, QueryResult>;
 
 fn evaluate_case_expression<FBool, FExpr>(
     branches: &[CaseWhenClause],
@@ -637,31 +640,52 @@ impl SelectExecutor {
     }
 
     fn like_matches(pattern: &str, text: &str) -> bool {
-        fn matches(pattern: &[char], text: &[char]) -> bool {
-            if pattern.is_empty() {
-                return text.is_empty();
+        // Iterative wildcard matcher for '%' (any sequence) and '_' (single char).
+        // This uses character iteration and a simple backtracking state for '%' occurrences.
+        let pchars: Vec<char> = pattern.chars().collect();
+        let tchars: Vec<char> = text.chars().collect();
+        let (mut pi, mut ti) = (0usize, 0usize);
+        let mut star_pi: Option<usize> = None;
+        let mut star_ti: usize = 0;
+
+        while ti < tchars.len() {
+            if pi < pchars.len() && pchars[pi] == '%' {
+                // Remember the position of '%' and advance pattern pointer
+                star_pi = Some(pi);
+                pi += 1;
+                // record text position where '%' started to match
+                star_ti = ti;
+                continue;
             }
 
-            match pattern[0] {
-                '%' => {
-                    if matches(&pattern[1..], text) {
-                        return true;
-                    }
-                    for index in 0..text.len() {
-                        if matches(&pattern[1..], &text[index + 1..]) {
-                            return true;
-                        }
-                    }
-                    false
-                }
-                '_' => !text.is_empty() && matches(&pattern[1..], &text[1..]),
-                ch => !text.is_empty() && text[0] == ch && matches(&pattern[1..], &text[1..]),
+            if pi < pchars.len() && (pchars[pi] == '_' || pchars[pi] == tchars[ti]) {
+                // Single-character match or exact char match
+                pi += 1;
+                ti += 1;
+                continue;
             }
+
+            // Mismatch: if we previously saw a '%', backtrack and let '%' consume one more char
+            if let Some(sp) = star_pi {
+                // Move pattern pointer to just after the last '%'
+                pi = sp + 1;
+                // Let '%' consume one more character
+                star_ti += 1;
+                ti = star_ti;
+                continue;
+            }
+
+            // No wildcard to absorb mismatch -> fail
+            return false;
         }
 
-        let pattern_chars: Vec<char> = pattern.chars().collect();
-        let text_chars: Vec<char> = text.chars().collect();
-        matches(&pattern_chars, &text_chars)
+        // Skip trailing '%' in pattern
+        while pi < pchars.len() && pchars[pi] == '%' {
+            pi += 1;
+        }
+
+        // If we've consumed the whole pattern, it's a match.
+        pi == pchars.len()
     }
 
     fn logical_and(&self, left: Option<bool>, right: Option<bool>) -> Option<bool> {
@@ -974,13 +998,16 @@ impl SelectExecutor {
             return self.execute_subquery(ctx, subquery, current_sources, current_row);
         }
 
-        let key = subquery as *const SelectStatement as usize;
+        // Use a deterministic canonical SQL string as the cache key for subqueries.
+        // This avoids pointer-based keys which miss across AST clones and
+        // is significantly cheaper than Debug-formatting the full AST.
+        let key = subquery.to_sql();
         if let Some(result) = cache.get(&key) {
             return Ok(result.clone());
         }
 
         let result = self.execute_subquery(ctx, subquery, None, None)?;
-        cache.insert(key, result.clone());
+        cache.insert(key.clone(), result.clone());
         Ok(result)
     }
 
@@ -1410,7 +1437,7 @@ impl SelectExecutor {
             NamedSourceKind::Cte(cte) => {
                 let key = Self::cte_key(table_name);
                 if let Some(result) = self.materialized_ctes.get(&key) {
-                    result.rows.clone()
+                    result.as_ref().rows.clone()
                 } else {
                     self.materialize_cte(ctx, &cte)?.rows
                 }
@@ -1426,7 +1453,7 @@ impl SelectExecutor {
     ) -> Result<QueryResult> {
         let key = Self::cte_key(&cte.name);
         if let Some(result) = self.materialized_ctes.get(&key) {
-            return Ok(result.clone());
+            return Ok(result.as_ref().clone());
         }
 
         let result = if cte.recursive {
@@ -1434,7 +1461,8 @@ impl SelectExecutor {
         } else {
             self.execute_subquery(ctx, &cte.query, None, None)?
         };
-        self.materialized_ctes.insert(key, result.clone());
+        // Store a shared Arc-wrapped result to make reuse cheap across clones.
+        self.materialized_ctes.insert(key, Arc::new(result.clone()));
         Ok(result)
     }
 
@@ -1479,11 +1507,11 @@ impl SelectExecutor {
         for _ in 0..MAX_RECURSIVE_CTE_ITERATIONS {
             self.materialized_ctes.insert(
                 key.clone(),
-                QueryResult {
+                Arc::new(QueryResult {
                     affected_rows: delta.len(),
                     columns: columns.clone(),
                     rows: delta.clone(),
-                },
+                }),
             );
 
             let mut recursive_executor =
@@ -1519,11 +1547,11 @@ impl SelectExecutor {
 
         self.materialized_ctes.insert(
             key,
-            QueryResult {
+            Arc::new(QueryResult {
                 affected_rows: rows.len(),
                 columns: columns.clone(),
                 rows: rows.clone(),
-            },
+            }),
         );
 
         if !converged {
@@ -1720,23 +1748,38 @@ impl SelectExecutor {
         let mut subquery_cache = SubqueryCache::new();
 
         if !self.statement.order_by.is_empty() {
+            // Precompute the mapping from ORDER BY items to flat column indices and their
+            // text comparison contexts so the comparator doesn't recompute on every comparison.
+            let mut order_meta: Vec<(Option<usize>, Option<TextComparisonContext>, SortDirection)> =
+                Vec::with_capacity(self.statement.order_by.len());
+            for item in &self.statement.order_by {
+                let index = match self.resolve_column_index(&sources, &item.column) {
+                    Ok(opt) => opt,
+                    Err(_) => None,
+                };
+                let text_ctx = self
+                    .text_comparison_context_for_expression(
+                        &sources,
+                        &Expression::Column(item.column.clone()),
+                    )
+                    .ok()
+                    .flatten();
+                order_meta.push((index, text_ctx, item.direction));
+            }
+
             filtered_rows.sort_by(|left, right| {
-                for item in &self.statement.order_by {
-                    let Ok(Some(index)) = self.resolve_column_index(&sources, &item.column) else {
+                for (meta_index, meta_text_ctx, meta_dir) in &order_meta {
+                    let Some(index) = *meta_index else {
                         continue;
                     };
 
-                    let text_context = self
-                        .text_comparison_context_for_expression(
-                            &sources,
-                            &Expression::Column(item.column.clone()),
-                        )
-                        .ok()
-                        .flatten();
-                    let ordering =
-                        self.compare_sort_values(&left[index], &right[index], text_context);
+                    let ordering = self.compare_sort_values(
+                        &left[index],
+                        &right[index],
+                        meta_text_ctx.clone(),
+                    );
                     if ordering != Ordering::Equal {
-                        return match item.direction {
+                        return match meta_dir {
                             SortDirection::Asc => ordering,
                             SortDirection::Desc => ordering.reverse(),
                         };
@@ -2209,9 +2252,16 @@ impl SelectExecutor {
             return;
         }
 
+        // Precompute output indices for the ORDER BY columns to avoid repeated lookups.
+        let mut order_indices: Vec<Option<usize>> =
+            Vec::with_capacity(self.statement.order_by.len());
+        for item in &self.statement.order_by {
+            order_indices.push(self.result_column_index(output_columns, &item.column));
+        }
+
         rows.sort_by(|left, right| {
-            for item in &self.statement.order_by {
-                let Some(index) = self.result_column_index(output_columns, &item.column) else {
+            for (i, item) in self.statement.order_by.iter().enumerate() {
+                let Some(index) = order_indices.get(i).and_then(|v| *v) else {
                     continue;
                 };
 
@@ -2909,7 +2959,10 @@ impl SelectExecutor {
             return Ok(vec![filtered_rows.to_vec()]);
         }
 
-        let mut keyed_groups: Vec<(Vec<Value>, Vec<Vec<Value>>)> = Vec::new();
+        // Use a hash-map keyed by a 64-bit hash of the group key vector to
+        // avoid O(n^2) behavior when many groups are present. Collisions are
+        // resolved by comparing full keys within each bucket.
+        let mut keyed_groups_map: HashMap<u64, Vec<(Vec<Value>, Vec<Vec<Value>>)>> = HashMap::new();
         for row in filtered_rows {
             let key = self
                 .statement
@@ -2918,17 +2971,28 @@ impl SelectExecutor {
                 .map(|expr| self.evaluate_expression(ctx, cache, sources, expr, row))
                 .collect::<Result<Vec<_>>>()?;
 
-            if let Some((_, rows)) = keyed_groups
+            let h = hash_row(&key);
+            let bucket = keyed_groups_map.entry(h).or_default();
+            if let Some((_, rows)) = bucket
                 .iter_mut()
                 .find(|(existing_key, _)| *existing_key == key)
             {
                 rows.push(row.clone());
             } else {
-                keyed_groups.push((key, vec![row.clone()]));
+                bucket.push((key, vec![row.clone()]));
             }
         }
 
-        Ok(keyed_groups.into_iter().map(|(_, rows)| rows).collect())
+        // Flatten buckets into result preserving first-seen group ordering as
+        // best-effort by iterating buckets and their entries.
+        let mut result = Vec::new();
+        for bucket in keyed_groups_map.into_values() {
+            for (_key, rows) in bucket {
+                result.push(rows);
+            }
+        }
+
+        Ok(result)
     }
 
     fn apply_having_clause(
@@ -5666,14 +5730,118 @@ fn apply_distinct_if_needed(distinct: bool, rows: &mut Vec<Vec<Value>>) {
     if !distinct {
         return;
     }
-
+    // Preserve first-seen ordering while avoiding O(n^2) behavior of Vec::contains.
+    // Use a 64-bit hash to partition rows into buckets and then compare within
+    // a bucket to handle collisions. This avoids allocating strings for each
+    // unique row while remaining stable and correct.
+    let mut seen: HashMap<u64, Vec<Vec<Value>>> = HashMap::new();
     let mut distinct_rows = Vec::new();
     for row in rows.drain(..) {
-        if !distinct_rows.contains(&row) {
+        let key = hash_row(&row);
+        let bucket = seen.entry(key).or_default();
+        if !bucket.iter().any(|r| r == &row) {
+            // store a clone in the bucket for future collision checks, and
+            // move the original into the output preserving order.
+            bucket.push(row.clone());
             distinct_rows.push(row);
         }
     }
     *rows = distinct_rows;
+}
+
+fn hash_row(row: &[Value]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for v in row {
+        hash_value(v, &mut hasher);
+    }
+    hasher.finish()
+}
+
+fn hash_value<H: Hasher>(v: &Value, hasher: &mut H) {
+    match v {
+        Value::Integer(i) => {
+            hasher.write(&[0u8]);
+            hasher.write(&i.to_le_bytes());
+        }
+        Value::BigInt(i) => {
+            hasher.write(&[1u8]);
+            hasher.write(&i.to_le_bytes());
+        }
+        Value::Int128(i) => {
+            hasher.write(&[2u8]);
+            hasher.write(&i.to_le_bytes());
+        }
+        Value::UInteger(u) => {
+            hasher.write(&[3u8]);
+            hasher.write(&u.to_le_bytes());
+        }
+        Value::UBigInt(u) => {
+            hasher.write(&[4u8]);
+            hasher.write(&u.to_le_bytes());
+        }
+        Value::UInt128(u) => {
+            hasher.write(&[5u8]);
+            hasher.write(&u.to_le_bytes());
+        }
+        Value::Text(s) => {
+            hasher.write(&[6u8]);
+            hasher.write(s.as_bytes());
+        }
+        Value::Enum(s) => {
+            hasher.write(&[7u8]);
+            hasher.write(s.as_bytes());
+        }
+        Value::Boolean(b) => {
+            hasher.write(&[8u8]);
+            hasher.write(&[if *b { 1u8 } else { 0u8 }]);
+        }
+        Value::Float32(f) => {
+            hasher.write(&[9u8]);
+            hasher.write(&f.to_bits().to_le_bytes());
+        }
+        Value::Float(f) => {
+            hasher.write(&[10u8]);
+            hasher.write(&f.to_bits().to_le_bytes());
+        }
+        Value::Decimal(d) => {
+            hasher.write(&[11u8]);
+            // DecimalValue -> string fallback for stable representation
+            hasher.write(d.to_string().as_bytes());
+        }
+        Value::Blob(b) => {
+            hasher.write(&[12u8]);
+            hasher.write(&((b.len() as u64).to_le_bytes()));
+            hasher.write(b);
+        }
+        Value::Date(dt) => {
+            hasher.write(&[13u8]);
+            hasher.write(&dt.days_since_epoch().to_le_bytes());
+        }
+        Value::Time(t) => {
+            hasher.write(&[14u8]);
+            hasher.write(&t.seconds_since_midnight().to_le_bytes());
+        }
+        Value::DateTime(dt) => {
+            hasher.write(&[15u8]);
+            hasher.write(&dt.seconds_since_epoch().to_le_bytes());
+        }
+        Value::TimeWithTimeZone(tz) => {
+            hasher.write(&[16u8]);
+            hasher.write(&tz.seconds_since_midnight().to_le_bytes());
+            hasher.write(&tz.offset_minutes().to_le_bytes());
+        }
+        Value::IntervalYearMonth(iv) => {
+            hasher.write(&[17u8]);
+            hasher.write(&iv.total_months().to_le_bytes());
+        }
+        Value::IntervalDaySecond(iv) => {
+            hasher.write(&[18u8]);
+            hasher.write(&iv.total_seconds().to_le_bytes());
+        }
+        Value::Null => {
+            hasher.write(&[19u8]);
+        }
+    }
 }
 
 fn deduplicate_rows(mut rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
