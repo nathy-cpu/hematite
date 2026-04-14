@@ -10,7 +10,9 @@ pub(crate) fn extract_literal_equalities(
 ) -> Option<HashMap<String, Value>> {
     let mut equalities = HashMap::new();
     for condition in &where_clause.conditions {
-        collect_literal_equalities(condition, &mut equalities)?;
+        if !collect_literal_equalities(condition, &mut equalities) {
+            return None;
+        }
     }
     Some(equalities)
 }
@@ -18,7 +20,7 @@ pub(crate) fn extract_literal_equalities(
 fn collect_literal_equalities(
     condition: &Condition,
     equalities: &mut HashMap<String, Value>,
-) -> Option<()> {
+) -> bool {
     match condition {
         Condition::Comparison {
             left,
@@ -34,14 +36,14 @@ fn collect_literal_equalities(
                     SelectStatement::column_reference_name(column_name),
                     lower_literal_value(value),
                 ),
-                _ => return None,
+                _ => return true,
             };
 
             match equalities.get(column_name) {
-                Some(existing) if existing != &value => None,
+                Some(existing) if existing != &value => false,
                 _ => {
                     equalities.insert(column_name.to_string(), value);
-                    Some(())
+                    true
                 }
             }
         }
@@ -49,10 +51,10 @@ fn collect_literal_equalities(
             left,
             operator: LogicalOperator::And,
             right,
-        } => {
-            collect_literal_equalities(left, equalities)?;
-            collect_literal_equalities(right, equalities)
-        }
-        _ => None,
+        } => collect_literal_equalities(left, equalities)
+            && collect_literal_equalities(right, equalities),
+        // OR/NOT and non-equality predicates are not contradictions; they simply do
+        // not contribute guaranteed equality constraints for access-path selection.
+        _ => true,
     }
 }

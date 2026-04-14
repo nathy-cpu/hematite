@@ -32,8 +32,12 @@ impl QueryPlanner {
     pub fn plan(&self, statement: Statement) -> Result<QueryPlan> {
         // Validate statement against catalog
         validate_statement(&statement, &self.catalog)?;
+        
+        // Logical optimization
+        let optimizer = QueryOptimizer::new(self.catalog.clone());
+        let optimized_stmt = optimizer.optimize_statement(statement)?;
 
-        let plan = match statement {
+        let plan = match optimized_stmt {
             Statement::Begin
             | Statement::Commit
             | Statement::Rollback
@@ -84,8 +88,7 @@ impl QueryPlanner {
             Statement::DropIndex(drop_index) => self.plan_drop_index(drop_index),
         }?;
 
-        let optimizer = QueryOptimizer::new(self.catalog.clone());
-        optimizer.optimize(plan)
+        Ok(plan)
     }
 
     fn plan_select(&self, statement: SelectStatement) -> Result<QueryPlan> {
@@ -105,7 +108,6 @@ impl QueryPlanner {
             },
             estimated_cost,
             select_analysis: Some(analysis),
-            optimizations: None,
         })
     }
 
@@ -126,7 +128,6 @@ impl QueryPlanner {
             program: ExecutionProgram::Insert { statement },
             estimated_cost,
             select_analysis: None,
-            optimizations: None,
         })
     }
 
@@ -171,7 +172,6 @@ impl QueryPlanner {
             },
             estimated_cost,
             select_analysis: None,
-            optimizations: None,
         })
     }
 
@@ -206,7 +206,6 @@ impl QueryPlanner {
             },
             estimated_cost,
             select_analysis: None,
-            optimizations: None,
         })
     }
 
@@ -247,7 +246,6 @@ impl QueryPlanner {
             program,
             estimated_cost: 1.0,
             select_analysis: None,
-            optimizations: None,
         }
     }
 

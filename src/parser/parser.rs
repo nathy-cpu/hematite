@@ -45,8 +45,8 @@ impl Parser {
 
         let token = self.peek_token()?;
 
-        if let Token::Identifier(name) = &token {
-            if let Some(keyword) = uppercase_keyword_match(name, &TOP_LEVEL_KEYWORDS) {
+        if let Token::Identifier(name) = token {
+            if let Some(keyword) = uppercase_keyword_match(name.as_str(), &TOP_LEVEL_KEYWORDS) {
                 return Err(HematiteError::ParseError(format!(
                     "Keyword '{}' must be capitalized as '{}'",
                     name, keyword
@@ -91,9 +91,9 @@ impl Parser {
 
     fn parse_rollback(&mut self) -> Result<Statement> {
         self.consume_token(&Token::Rollback)?;
-        if matches!(self.peek_token(), Ok(Token::To)) {
+        if matches!(self.peek_token(), Ok(&Token::To)) {
             self.consume_token(&Token::To)?;
-            if matches!(self.peek_token(), Ok(Token::Savepoint)) {
+            if matches!(self.peek_token(), Ok(&Token::Savepoint)) {
                 self.consume_token(&Token::Savepoint)?;
             }
             let name = self.parse_identifier()?;
@@ -113,7 +113,7 @@ impl Parser {
 
     fn parse_release_savepoint(&mut self) -> Result<Statement> {
         self.consume_token(&Token::Release)?;
-        if matches!(self.peek_token(), Ok(Token::Savepoint)) {
+        if matches!(self.peek_token(), Ok(&Token::Savepoint)) {
             self.consume_token(&Token::Savepoint)?;
         }
         let name = self.parse_identifier()?;
@@ -158,7 +158,7 @@ impl Parser {
             }
             Token::Indexes => {
                 self.consume_token(&Token::Indexes)?;
-                let table = if matches!(self.peek_token(), Ok(Token::From)) {
+                let table = if matches!(self.peek_token(), Ok(&Token::From)) {
                     self.consume_token(&Token::From)?;
                     Some(self.parse_identifier()?)
                 } else {
@@ -169,7 +169,7 @@ impl Parser {
             }
             Token::Triggers => {
                 self.consume_token(&Token::Triggers)?;
-                let table = if matches!(self.peek_token(), Ok(Token::From)) {
+                let table = if matches!(self.peek_token(), Ok(&Token::From)) {
                     self.consume_token(&Token::From)?;
                     Some(self.parse_identifier()?)
                 } else {
@@ -211,7 +211,7 @@ impl Parser {
         expect_semicolon: bool,
         allow_into: bool,
     ) -> Result<(SelectStatement, Option<String>)> {
-        let with_clause = if matches!(self.peek_token(), Ok(Token::With)) {
+        let with_clause = if matches!(self.peek_token(), Ok(&Token::With)) {
             self.parse_with_clause()?
         } else {
             Vec::new()
@@ -229,7 +229,7 @@ impl Parser {
         allow_into: bool,
     ) -> Result<(SelectStatement, Option<String>)> {
         self.consume_token(&Token::Select)?;
-        let distinct = if matches!(self.peek_token(), Ok(Token::Distinct)) {
+        let distinct = if matches!(self.peek_token(), Ok(&Token::Distinct)) {
             self.consume_token(&Token::Distinct)?;
             true
         } else {
@@ -238,7 +238,7 @@ impl Parser {
 
         let (columns, column_aliases) = self.parse_select_columns()?;
 
-        let into_table = if allow_into && matches!(self.peek_token(), Ok(Token::Into)) {
+        let into_table = if allow_into && matches!(self.peek_token(), Ok(&Token::Into)) {
             self.consume_token(&Token::Into)?;
             Some(self.parse_identifier()?)
         } else {
@@ -249,31 +249,31 @@ impl Parser {
 
         let from = self.parse_from_clause()?;
 
-        let where_clause = if self.peek_token()? == Token::Where {
+        let where_clause = if self.peek_token()? == &Token::Where {
             Some(self.parse_where_clause()?)
         } else {
             None
         };
 
-        let group_by = if matches!(self.peek_token(), Ok(Token::Group)) {
+        let group_by = if matches!(self.peek_token(), Ok(&Token::Group)) {
             self.parse_group_by_clause()?
         } else {
             Vec::new()
         };
 
-        let having_clause = if matches!(self.peek_token(), Ok(Token::Having)) {
+        let having_clause = if matches!(self.peek_token(), Ok(&Token::Having)) {
             Some(self.parse_having_clause()?)
         } else {
             None
         };
 
-        let order_by = if matches!(self.peek_token(), Ok(Token::Order)) {
+        let order_by = if matches!(self.peek_token(), Ok(&Token::Order)) {
             self.parse_order_by_clause()?
         } else {
             Vec::new()
         };
 
-        let (limit, limit_offset) = if matches!(self.peek_token(), Ok(Token::Limit)) {
+        let (limit, limit_offset) = if matches!(self.peek_token(), Ok(&Token::Limit)) {
             self.parse_limit_clause()?
         } else {
             (None, None)
@@ -281,7 +281,7 @@ impl Parser {
 
         let offset = if limit_offset.is_some() {
             limit_offset
-        } else if matches!(self.peek_token(), Ok(Token::Offset)) {
+        } else if matches!(self.peek_token(), Ok(&Token::Offset)) {
             Some(self.parse_offset_clause()?)
         } else {
             None
@@ -294,7 +294,7 @@ impl Parser {
             let operator = match self.peek_token()? {
                 Token::Union => {
                     self.consume_token(&Token::Union)?;
-                    if matches!(self.peek_token(), Ok(Token::All)) {
+                    if matches!(self.peek_token(), Ok(&Token::All)) {
                         self.consume_token(&Token::All)?;
                         SetOperator::UnionAll
                     } else {
@@ -350,7 +350,7 @@ impl Parser {
 
     fn parse_with_clause(&mut self) -> Result<Vec<CommonTableExpression>> {
         self.consume_token(&Token::With)?;
-        let recursive = if matches!(self.peek_token(), Ok(Token::Recursive)) {
+        let recursive = if matches!(self.peek_token(), Ok(&Token::Recursive)) {
             self.consume_token(&Token::Recursive)?;
             true
         } else {
@@ -370,7 +370,7 @@ impl Parser {
                 query: Box::new(query),
             });
 
-            if matches!(self.peek_token(), Ok(Token::Comma)) {
+            if matches!(self.peek_token(), Ok(&Token::Comma)) {
                 self.consume_token(&Token::Comma)?;
                 continue;
             }
@@ -387,7 +387,7 @@ impl Parser {
 
         let token = self.peek_token()?;
 
-        if token == Token::Asterisk {
+        if token == &Token::Asterisk {
             self.consume_token(&Token::Asterisk)?;
             columns.push(SelectItem::Wildcard);
             aliases.push(None);
@@ -396,7 +396,7 @@ impl Parser {
                 columns.push(self.parse_select_item()?);
                 aliases.push(self.parse_optional_alias()?);
 
-                if self.peek_token()? == Token::Comma {
+                if self.peek_token()? == &Token::Comma {
                     self.consume_token(&Token::Comma)?;
                     continue;
                 } else {
@@ -413,7 +413,7 @@ impl Parser {
         match token {
             Token::Count | Token::Sum | Token::Avg | Token::Min | Token::Max => {
                 let expr = self.parse_aggregate_expression()?;
-                if matches!(self.peek_token(), Ok(Token::Over)) {
+                if matches!(self.peek_token(), Ok(&Token::Over)) {
                     self.parse_window_select_item(expr)
                 } else {
                     self.aggregate_expression_to_select_item(expr)
@@ -486,7 +486,7 @@ impl Parser {
         };
 
         self.consume_token(&Token::LeftParen)?;
-        if function == AggregateFunction::Count && matches!(self.peek_token(), Ok(Token::Asterisk))
+        if function == AggregateFunction::Count && matches!(self.peek_token(), Ok(&Token::Asterisk))
         {
             self.consume_token(&Token::Asterisk)?;
             self.consume_token(&Token::RightParen)?;
@@ -551,13 +551,13 @@ impl Parser {
     fn parse_window_item(&mut self, function: WindowFunction) -> Result<SelectItem> {
         self.consume_token(&Token::Over)?;
         self.consume_token(&Token::LeftParen)?;
-        let partition_by = if matches!(self.peek_token(), Ok(Token::Partition)) {
+        let partition_by = if matches!(self.peek_token(), Ok(&Token::Partition)) {
             self.consume_token(&Token::Partition)?;
             self.consume_token(&Token::By)?;
             let mut exprs = Vec::new();
             loop {
                 exprs.push(self.parse_expression()?);
-                if matches!(self.peek_token(), Ok(Token::Comma)) {
+                if matches!(self.peek_token(), Ok(&Token::Comma)) {
                     self.consume_token(&Token::Comma)?;
                     continue;
                 }
@@ -567,7 +567,7 @@ impl Parser {
         } else {
             Vec::new()
         };
-        let order_by = if matches!(self.peek_token(), Ok(Token::Order)) {
+        let order_by = if matches!(self.peek_token(), Ok(&Token::Order)) {
             self.parse_order_by_clause()?
         } else {
             Vec::new()
@@ -644,7 +644,7 @@ impl Parser {
                 }
                 Token::Left => {
                     self.consume_token(&Token::Left)?;
-                    if matches!(self.peek_token(), Ok(Token::Outer)) {
+                    if matches!(self.peek_token(), Ok(&Token::Outer)) {
                         self.consume_token(&Token::Outer)?;
                     }
                     self.consume_token(&Token::Join)?;
@@ -659,7 +659,7 @@ impl Parser {
                 }
                 Token::Right => {
                     self.consume_token(&Token::Right)?;
-                    if matches!(self.peek_token(), Ok(Token::Outer)) {
+                    if matches!(self.peek_token(), Ok(&Token::Outer)) {
                         self.consume_token(&Token::Outer)?;
                     }
                     self.consume_token(&Token::Join)?;
@@ -674,7 +674,7 @@ impl Parser {
                 }
                 Token::Full => {
                     self.consume_token(&Token::Full)?;
-                    if matches!(self.peek_token(), Ok(Token::Outer)) {
+                    if matches!(self.peek_token(), Ok(&Token::Outer)) {
                         self.consume_token(&Token::Outer)?;
                     }
                     self.consume_token(&Token::Join)?;
@@ -723,7 +723,7 @@ impl Parser {
 
             items.push(OrderByItem { column, direction });
 
-            if matches!(self.peek_token(), Ok(Token::Comma)) {
+            if matches!(self.peek_token(), Ok(&Token::Comma)) {
                 self.consume_token(&Token::Comma)?;
                 continue;
             }
@@ -741,7 +741,7 @@ impl Parser {
         let mut items = Vec::new();
         loop {
             items.push(self.parse_expression()?);
-            if matches!(self.peek_token(), Ok(Token::Comma)) {
+            if matches!(self.peek_token(), Ok(&Token::Comma)) {
                 self.consume_token(&Token::Comma)?;
                 continue;
             }
@@ -759,7 +759,7 @@ impl Parser {
     fn parse_limit_clause(&mut self) -> Result<(Option<usize>, Option<usize>)> {
         self.consume_token(&Token::Limit)?;
         let first = self.parse_non_negative_integer_clause("LIMIT")?;
-        if matches!(self.peek_token(), Ok(Token::Comma)) {
+        if matches!(self.peek_token(), Ok(&Token::Comma)) {
             self.consume_token(&Token::Comma)?;
             let second = self.parse_non_negative_integer_clause("LIMIT")?;
             Ok((Some(second), Some(first)))
@@ -776,8 +776,8 @@ impl Parser {
     fn parse_non_negative_integer_clause(&mut self, clause_name: &str) -> Result<usize> {
         match self.peek_token()? {
             Token::NumberLiteral(value) => {
-                let parsed = parse_non_negative_integer_literal(&value, clause_name)?;
-                self.consume_token(&Token::NumberLiteral(value))?;
+                let parsed = parse_non_negative_integer_literal(value, clause_name)?;
+                self.advance();
                 Ok(parsed)
             }
             token => Err(HematiteError::ParseError(format!(
@@ -794,7 +794,7 @@ impl Parser {
     fn parse_or_condition(&mut self) -> Result<Condition> {
         let mut condition = self.parse_and_condition()?;
 
-        while matches!(self.peek_token(), Ok(Token::Or)) {
+        while matches!(self.peek_token(), Ok(&Token::Or)) {
             self.consume_token(&Token::Or)?;
             let right = self.parse_and_condition()?;
             condition = Condition::Logical {
@@ -810,7 +810,7 @@ impl Parser {
     fn parse_and_condition(&mut self) -> Result<Condition> {
         let mut condition = self.parse_primary_condition()?;
 
-        while matches!(self.peek_token(), Ok(Token::And)) {
+        while matches!(self.peek_token(), Ok(&Token::And)) {
             self.consume_token(&Token::And)?;
             let right = self.parse_primary_condition()?;
             condition = Condition::Logical {
@@ -824,21 +824,21 @@ impl Parser {
     }
 
     fn parse_primary_condition(&mut self) -> Result<Condition> {
-        if self.peek_token()? == Token::Not {
+        if self.peek_token()? == &Token::Not {
             self.consume_token(&Token::Not)?;
-            if self.peek_token()? == Token::Exists {
+            if self.peek_token()? == &Token::Exists {
                 self.consume_token(&Token::Exists)?;
                 return self.parse_exists_condition(true);
             }
             return Ok(Condition::Not(Box::new(self.parse_primary_condition()?)));
         }
 
-        if self.peek_token()? == Token::Exists {
+        if self.peek_token()? == &Token::Exists {
             self.consume_token(&Token::Exists)?;
             return self.parse_exists_condition(false);
         }
 
-        if self.peek_token()? == Token::LeftParen {
+        if self.peek_token()? == &Token::LeftParen {
             self.consume_token(&Token::LeftParen)?;
             let condition = self.parse_or_condition()?;
             self.consume_token(&Token::RightParen)?;
@@ -851,17 +851,17 @@ impl Parser {
     fn parse_condition(&mut self) -> Result<Condition> {
         let left = self.parse_value_expression()?;
 
-        if matches!(self.peek_token(), Ok(Token::Not)) {
+        if matches!(self.peek_token(), Ok(&Token::Not)) {
             self.consume_token(&Token::Not)?;
-            if matches!(self.peek_token(), Ok(Token::In)) {
+            if matches!(self.peek_token(), Ok(&Token::In)) {
                 self.consume_token(&Token::In)?;
                 return self.parse_in_list_condition(left, true);
             }
-            if matches!(self.peek_token(), Ok(Token::Like)) {
+            if matches!(self.peek_token(), Ok(&Token::Like)) {
                 self.consume_token(&Token::Like)?;
                 return self.parse_like_condition(left, true);
             }
-            if matches!(self.peek_token(), Ok(Token::Between)) {
+            if matches!(self.peek_token(), Ok(&Token::Between)) {
                 self.consume_token(&Token::Between)?;
                 return self.parse_between_condition(left, true);
             }
@@ -870,24 +870,24 @@ impl Parser {
             ));
         }
 
-        if matches!(self.peek_token(), Ok(Token::In)) {
+        if matches!(self.peek_token(), Ok(&Token::In)) {
             self.consume_token(&Token::In)?;
             return self.parse_in_list_condition(left, false);
         }
 
-        if matches!(self.peek_token(), Ok(Token::Between)) {
+        if matches!(self.peek_token(), Ok(&Token::Between)) {
             self.consume_token(&Token::Between)?;
             return self.parse_between_condition(left, false);
         }
 
-        if matches!(self.peek_token(), Ok(Token::Like)) {
+        if matches!(self.peek_token(), Ok(&Token::Like)) {
             self.consume_token(&Token::Like)?;
             return self.parse_like_condition(left, false);
         }
 
-        if matches!(self.peek_token(), Ok(Token::Is)) {
+        if matches!(self.peek_token(), Ok(&Token::Is)) {
             self.consume_token(&Token::Is)?;
-            let is_not = if matches!(self.peek_token(), Ok(Token::Not)) {
+            let is_not = if matches!(self.peek_token(), Ok(&Token::Not)) {
                 self.consume_token(&Token::Not)?;
                 true
             } else {
@@ -910,7 +910,7 @@ impl Parser {
 
     fn parse_in_list_condition(&mut self, expr: Expression, is_not: bool) -> Result<Condition> {
         self.consume_token(&Token::LeftParen)?;
-        if matches!(self.peek_token(), Ok(Token::Select | Token::With)) {
+        if matches!(self.peek_token(), Ok(&Token::Select | Token::With)) {
             let subquery = self.parse_query_statement(false, false)?.0;
             self.consume_token(&Token::RightParen)?;
             return Ok(Condition::InSubquery {
@@ -924,7 +924,7 @@ impl Parser {
 
         loop {
             values.push(self.parse_expression()?);
-            if matches!(self.peek_token(), Ok(Token::Comma)) {
+            if matches!(self.peek_token(), Ok(&Token::Comma)) {
                 self.consume_token(&Token::Comma)?;
                 continue;
             }
@@ -983,7 +983,7 @@ impl Parser {
     fn parse_or_expression(&mut self) -> Result<Expression> {
         let mut expr = self.parse_and_expression()?;
 
-        while matches!(self.peek_token(), Ok(Token::Or)) {
+        while matches!(self.peek_token(), Ok(&Token::Or)) {
             self.consume_token(&Token::Or)?;
             let right = self.parse_and_expression()?;
             expr = Expression::Logical {
@@ -999,7 +999,7 @@ impl Parser {
     fn parse_and_expression(&mut self) -> Result<Expression> {
         let mut expr = self.parse_not_expression()?;
 
-        while matches!(self.peek_token(), Ok(Token::And)) {
+        while matches!(self.peek_token(), Ok(&Token::And)) {
             self.consume_token(&Token::And)?;
             let right = self.parse_not_expression()?;
             expr = Expression::Logical {
@@ -1013,7 +1013,7 @@ impl Parser {
     }
 
     fn parse_not_expression(&mut self) -> Result<Expression> {
-        if matches!(self.peek_token(), Ok(Token::Not)) {
+        if matches!(self.peek_token(), Ok(&Token::Not)) {
             self.consume_token(&Token::Not)?;
             return Ok(Expression::UnaryNot(Box::new(self.parse_not_expression()?)));
         }
@@ -1022,24 +1022,24 @@ impl Parser {
     }
 
     fn parse_predicate_expression(&mut self) -> Result<Expression> {
-        if matches!(self.peek_token(), Ok(Token::Exists)) {
+        if matches!(self.peek_token(), Ok(&Token::Exists)) {
             self.consume_token(&Token::Exists)?;
             return self.parse_exists_expression(false);
         }
 
         let left = self.parse_value_expression()?;
 
-        if matches!(self.peek_token(), Ok(Token::Not)) {
+        if matches!(self.peek_token(), Ok(&Token::Not)) {
             self.consume_token(&Token::Not)?;
-            if matches!(self.peek_token(), Ok(Token::In)) {
+            if matches!(self.peek_token(), Ok(&Token::In)) {
                 self.consume_token(&Token::In)?;
                 return self.parse_in_list_expression(left, true);
             }
-            if matches!(self.peek_token(), Ok(Token::Like)) {
+            if matches!(self.peek_token(), Ok(&Token::Like)) {
                 self.consume_token(&Token::Like)?;
                 return self.parse_like_expression(left, true);
             }
-            if matches!(self.peek_token(), Ok(Token::Between)) {
+            if matches!(self.peek_token(), Ok(&Token::Between)) {
                 self.consume_token(&Token::Between)?;
                 return self.parse_between_expression(left, true);
             }
@@ -1048,24 +1048,24 @@ impl Parser {
             ));
         }
 
-        if matches!(self.peek_token(), Ok(Token::In)) {
+        if matches!(self.peek_token(), Ok(&Token::In)) {
             self.consume_token(&Token::In)?;
             return self.parse_in_list_expression(left, false);
         }
 
-        if matches!(self.peek_token(), Ok(Token::Between)) {
+        if matches!(self.peek_token(), Ok(&Token::Between)) {
             self.consume_token(&Token::Between)?;
             return self.parse_between_expression(left, false);
         }
 
-        if matches!(self.peek_token(), Ok(Token::Like)) {
+        if matches!(self.peek_token(), Ok(&Token::Like)) {
             self.consume_token(&Token::Like)?;
             return self.parse_like_expression(left, false);
         }
 
-        if matches!(self.peek_token(), Ok(Token::Is)) {
+        if matches!(self.peek_token(), Ok(&Token::Is)) {
             self.consume_token(&Token::Is)?;
-            let is_not = if matches!(self.peek_token(), Ok(Token::Not)) {
+            let is_not = if matches!(self.peek_token(), Ok(&Token::Not)) {
                 self.consume_token(&Token::Not)?;
                 true
             } else {
@@ -1097,7 +1097,7 @@ impl Parser {
 
     fn parse_in_list_expression(&mut self, expr: Expression, is_not: bool) -> Result<Expression> {
         self.consume_token(&Token::LeftParen)?;
-        if matches!(self.peek_token(), Ok(Token::Select | Token::With)) {
+        if matches!(self.peek_token(), Ok(&Token::Select | Token::With)) {
             let subquery = self.parse_query_statement(false, false)?.0;
             self.consume_token(&Token::RightParen)?;
             return Ok(Expression::InSubquery {
@@ -1111,7 +1111,7 @@ impl Parser {
 
         loop {
             values.push(self.parse_expression()?);
-            if matches!(self.peek_token(), Ok(Token::Comma)) {
+            if matches!(self.peek_token(), Ok(&Token::Comma)) {
                 self.consume_token(&Token::Comma)?;
                 continue;
             }
@@ -1222,7 +1222,7 @@ impl Parser {
     }
 
     fn parse_unary_expression(&mut self) -> Result<Expression> {
-        if matches!(self.peek_token(), Ok(Token::Minus)) {
+        if matches!(self.peek_token(), Ok(&Token::Minus)) {
             self.consume_token(&Token::Minus)?;
             return Ok(Expression::UnaryMinus(Box::new(
                 self.parse_unary_expression()?,
@@ -1254,37 +1254,41 @@ impl Parser {
             }
             Token::Identifier(_) => Ok(Expression::Column(self.parse_identifier_reference()?)),
             Token::StringLiteral(value) => {
-                self.consume_token(&Token::StringLiteral(value.clone()))?;
-                Ok(Expression::Literal(LiteralValue::Text(value)))
+                let value_clone = value.clone();
+                self.advance();
+                Ok(Expression::Literal(LiteralValue::Text(value_clone)))
             }
             Token::BlobLiteral(value) => {
-                self.consume_token(&Token::BlobLiteral(value.clone()))?;
-                Ok(Expression::Literal(LiteralValue::Blob(value)))
+                let value_clone = value.clone();
+                self.advance();
+                Ok(Expression::Literal(LiteralValue::Blob(value_clone)))
             }
             Token::NumberLiteral(value) => {
-                self.consume_token(&Token::NumberLiteral(value.clone()))?;
-                if value.contains('.') {
+                let value_clone = value.clone();
+                self.advance();
+                if value_clone.contains('.') {
                     Ok(Expression::Literal(LiteralValue::Float(
-                        normalize_float_literal(&value),
+                        normalize_float_literal(&value_clone),
                     )))
                 } else {
                     Ok(Expression::Literal(LiteralValue::Integer(
-                        value.parse::<i128>().map_err(|_| {
+                        value_clone.parse::<i128>().map_err(|_| {
                             HematiteError::ParseError(format!(
                                 "Invalid integer literal '{}'",
-                                value
+                                value_clone
                             ))
                         })?,
                     )))
                 }
             }
             Token::BooleanLiteral(value) => {
-                self.consume_token(&Token::BooleanLiteral(value.clone()))?;
-                Ok(Expression::Literal(LiteralValue::Boolean(value)))
+                let value_clone = value.clone();
+                self.advance();
+                Ok(Expression::Literal(LiteralValue::Boolean(value_clone)))
             }
             Token::NullLiteral | Token::Null => {
                 // `NULL` appears both as a constraint keyword and as an expression literal.
-                if token == Token::NullLiteral {
+                if token == &Token::NullLiteral {
                     self.consume_token(&Token::NullLiteral)?;
                 } else {
                     self.consume_token(&Token::Null)?;
@@ -1299,7 +1303,7 @@ impl Parser {
             }
             Token::LeftParen => {
                 self.consume_token(&Token::LeftParen)?;
-                if matches!(self.peek_token(), Ok(Token::Select | Token::With)) {
+                if matches!(self.peek_token(), Ok(&Token::Select | Token::With)) {
                     let subquery = self.parse_query_statement(false, false)?.0;
                     self.consume_token(&Token::RightParen)?;
                     return Ok(Expression::ScalarSubquery(Box::new(subquery)));
@@ -1319,8 +1323,9 @@ impl Parser {
         self.consume_token(&Token::Interval)?;
         let value = match self.peek_token()? {
             Token::StringLiteral(value) => {
-                self.consume_token(&Token::StringLiteral(value.clone()))?;
-                value
+                let value_clone = value.clone();
+                self.advance();
+                value_clone
             }
             token => {
                 return Err(HematiteError::ParseError(format!(
@@ -1351,7 +1356,7 @@ impl Parser {
         self.consume_token(&Token::Case)?;
         let mut branches = Vec::new();
 
-        while matches!(self.peek_token(), Ok(Token::When)) {
+        while matches!(self.peek_token(), Ok(&Token::When)) {
             self.consume_token(&Token::When)?;
             let condition = self.parse_expression()?;
             self.consume_token(&Token::Then)?;
@@ -1365,7 +1370,7 @@ impl Parser {
             ));
         }
 
-        let else_expr = if matches!(self.peek_token(), Ok(Token::Else)) {
+        let else_expr = if matches!(self.peek_token(), Ok(&Token::Else)) {
             self.consume_token(&Token::Else)?;
             Some(Box::new(self.parse_expression()?))
         } else {
@@ -1400,10 +1405,10 @@ impl Parser {
         self.consume_token(&Token::LeftParen)?;
 
         let mut args = Vec::new();
-        if !matches!(self.peek_token(), Ok(Token::RightParen)) {
+        if !matches!(self.peek_token(), Ok(&Token::RightParen)) {
             loop {
                 args.push(self.parse_expression()?);
-                if matches!(self.peek_token(), Ok(Token::Comma)) {
+                if matches!(self.peek_token(), Ok(&Token::Comma)) {
                     self.consume_token(&Token::Comma)?;
                     continue;
                 }
@@ -1446,24 +1451,36 @@ impl Parser {
     }
 
     fn parse_comparison_operator(&mut self) -> Result<ComparisonOperator> {
-        let token = self.peek_token()?;
-        let operator = match token {
-            Token::Equal => ComparisonOperator::Equal,
-            Token::NotEqual => ComparisonOperator::NotEqual,
-            Token::LessThan => ComparisonOperator::LessThan,
-            Token::LessThanOrEqual => ComparisonOperator::LessThanOrEqual,
-            Token::GreaterThan => ComparisonOperator::GreaterThan,
-            Token::GreaterThanOrEqual => ComparisonOperator::GreaterThanOrEqual,
-            _ => {
-                return Err(HematiteError::ParseError(format!(
-                    "Expected comparison operator, found: {:?}",
-                    token
-                )))
+        match self.peek_token()? {
+            Token::Equal => {
+                self.consume_token(&Token::Equal)?;
+                Ok(ComparisonOperator::Equal)
             }
-        };
-
-        self.consume_token(&token)?;
-        Ok(operator)
+            Token::NotEqual => {
+                self.consume_token(&Token::NotEqual)?;
+                Ok(ComparisonOperator::NotEqual)
+            }
+            Token::LessThan => {
+                self.consume_token(&Token::LessThan)?;
+                Ok(ComparisonOperator::LessThan)
+            }
+            Token::LessThanOrEqual => {
+                self.consume_token(&Token::LessThanOrEqual)?;
+                Ok(ComparisonOperator::LessThanOrEqual)
+            }
+            Token::GreaterThan => {
+                self.consume_token(&Token::GreaterThan)?;
+                Ok(ComparisonOperator::GreaterThan)
+            }
+            Token::GreaterThanOrEqual => {
+                self.consume_token(&Token::GreaterThanOrEqual)?;
+                Ok(ComparisonOperator::GreaterThanOrEqual)
+            }
+            token => Err(HematiteError::ParseError(format!(
+                "Expected comparison operator, found: {:?}",
+                token
+            ))),
+        }
     }
 
     fn parse_insert(&mut self) -> Result<Statement> {
@@ -1516,7 +1533,7 @@ impl Parser {
             }
         };
 
-        let on_duplicate = if matches!(self.peek_token(), Ok(Token::On)) {
+        let on_duplicate = if matches!(self.peek_token(), Ok(&Token::On)) {
             self.consume_token(&Token::On)?;
             self.consume_token(&Token::Duplicate)?;
             self.consume_token(&Token::Key)?;
@@ -1547,7 +1564,7 @@ impl Parser {
         self.consume_token(&Token::Set)?;
         let assignments = self.parse_update_assignments()?;
 
-        let where_clause = if matches!(self.peek_token(), Ok(Token::Where)) {
+        let where_clause = if matches!(self.peek_token(), Ok(&Token::Where)) {
             Some(self.parse_where_clause()?)
         } else {
             None
@@ -1591,7 +1608,7 @@ impl Parser {
             }
         };
 
-        let where_clause = if matches!(self.peek_token(), Ok(Token::Where)) {
+        let where_clause = if matches!(self.peek_token(), Ok(&Token::Where)) {
             Some(self.parse_where_clause()?)
         } else {
             None
@@ -1637,7 +1654,7 @@ impl Parser {
 
     fn parse_create(&mut self) -> Result<Statement> {
         self.consume_token(&Token::Create)?;
-        let unique = if matches!(self.peek_token(), Ok(Token::Unique)) {
+        let unique = if matches!(self.peek_token(), Ok(&Token::Unique)) {
             self.consume_token(&Token::Unique)?;
             true
         } else {
@@ -1728,7 +1745,7 @@ impl Parser {
                 }))
             }
             Token::Index | Token::Key => {
-                if matches!(self.peek_token(), Ok(Token::Index)) {
+                if matches!(self.peek_token(), Ok(&Token::Index)) {
                     self.consume_token(&Token::Index)?;
                 } else {
                     self.consume_token(&Token::Key)?;
@@ -1826,7 +1843,7 @@ impl Parser {
         match self.peek_token()? {
             Token::Rename => {
                 self.consume_token(&Token::Rename)?;
-                let operation = if matches!(self.peek_token(), Ok(Token::Column)) {
+                let operation = if matches!(self.peek_token(), Ok(&Token::Column)) {
                     self.consume_token(&Token::Column)?;
                     let old_name = self.parse_identifier()?;
                     self.consume_token(&Token::To)?;
@@ -1887,7 +1904,7 @@ impl Parser {
             }
             Token::Alter => {
                 self.consume_token(&Token::Alter)?;
-                if matches!(self.peek_token(), Ok(Token::Column)) {
+                if matches!(self.peek_token(), Ok(&Token::Column)) {
                     self.consume_token(&Token::Column)?;
                 }
                 let column_name = self.parse_identifier()?;
@@ -1957,8 +1974,9 @@ impl Parser {
         let token = self.peek_token()?;
         match token {
             Token::Identifier(name) => {
-                self.consume_token(&Token::Identifier(name.clone()))?;
-                Ok(name)
+                let name_clone = name.clone();
+                self.advance();
+                Ok(name_clone)
             }
             _ => Err(HematiteError::ParseError(format!(
                 "Expected identifier, found: {:?}",
@@ -1969,7 +1987,7 @@ impl Parser {
 
     fn parse_identifier_reference(&mut self) -> Result<String> {
         let first = self.parse_identifier()?;
-        if matches!(self.peek_token(), Ok(Token::Dot)) {
+        if matches!(self.peek_token(), Ok(&Token::Dot)) {
             self.consume_token(&Token::Dot)?;
             let second = self.parse_identifier()?;
             Ok(format!("{}.{}", first, second))
@@ -1990,7 +2008,7 @@ impl Parser {
     }
 
     fn parse_if_not_exists_clause(&mut self) -> Result<bool> {
-        if matches!(self.peek_token(), Ok(Token::If)) {
+        if matches!(self.peek_token(), Ok(&Token::If)) {
             self.consume_token(&Token::If)?;
             self.consume_token(&Token::Not)?;
             self.consume_token(&Token::Exists)?;
@@ -2000,7 +2018,7 @@ impl Parser {
     }
 
     fn parse_if_exists_clause(&mut self) -> Result<bool> {
-        if matches!(self.peek_token(), Ok(Token::If)) {
+        if matches!(self.peek_token(), Ok(&Token::If)) {
             self.consume_token(&Token::If)?;
             self.consume_token(&Token::Exists)?;
             return Ok(true);
@@ -2023,7 +2041,8 @@ impl Parser {
     fn consume_identifier_keyword(&mut self, keyword: &str) -> Result<()> {
         match self.peek_token()? {
             Token::Identifier(name) if name == keyword => {
-                self.consume_token(&Token::Identifier(name.clone()))
+                self.advance();
+                Ok(())
             }
             Token::Identifier(name) if name.eq_ignore_ascii_case(keyword) => {
                 Err(HematiteError::ParseError(format!(
@@ -2039,7 +2058,7 @@ impl Parser {
     }
 
     fn consume_optional_equals(&mut self) -> Result<()> {
-        if matches!(self.peek_token(), Ok(Token::Equal)) {
+        if matches!(self.peek_token(), Ok(&Token::Equal)) {
             self.consume_token(&Token::Equal)?;
         }
         Ok(())
@@ -2052,7 +2071,7 @@ impl Parser {
         self.consume_identifier_keyword("USING")?;
         match self.peek_token()? {
             Token::Identifier(name) if name == "BTREE" || name == "HASH" => {
-                self.consume_token(&Token::Identifier(name.clone()))?;
+                self.advance();
                 Ok(())
             }
             token => Err(HematiteError::ParseError(format!(
@@ -2071,14 +2090,14 @@ impl Parser {
                 continue;
             }
 
-            if matches!(self.peek_token(), Ok(Token::AutoIncrement)) {
+            if matches!(self.peek_token(), Ok(&Token::AutoIncrement)) {
                 self.consume_token(&Token::AutoIncrement)?;
                 self.consume_optional_equals()?;
                 self.consume_positive_integer_literal("AUTO_INCREMENT")?;
                 continue;
             }
 
-            if matches!(self.peek_token(), Ok(Token::Default)) {
+            if matches!(self.peek_token(), Ok(&Token::Default)) {
                 self.consume_token(&Token::Default)?;
                 if self.peek_identifier_keyword("CHARSET") {
                     self.consume_identifier_keyword("CHARSET")?;
@@ -2093,7 +2112,7 @@ impl Parser {
                     self.parse_identifier()?;
                     continue;
                 }
-                if let Some(message) = capitalization_hint_for_token(&self.peek_token()?) {
+                if let Some(message) = capitalization_hint_for_token(self.peek_token()?) {
                     return Err(HematiteError::ParseError(message));
                 }
                 return Err(HematiteError::ParseError(
@@ -2136,8 +2155,9 @@ impl Parser {
             let token = self.peek_token()?;
             match token {
                 Token::Identifier(name) => {
-                    self.consume_token(&Token::Identifier(name.clone()))?;
-                    columns.push(name);
+                    let name_clone = name.clone();
+                    self.advance();
+                    columns.push(name_clone);
                 }
                 _ => {
                     return Err(HematiteError::ParseError(format!(
@@ -2147,7 +2167,7 @@ impl Parser {
                 }
             }
 
-            if self.peek_token()? == Token::Comma {
+            if self.peek_token()? == &Token::Comma {
                 self.consume_token(&Token::Comma)?;
                 continue;
             } else {
@@ -2167,7 +2187,7 @@ impl Parser {
             let value = self.parse_expression()?;
             assignments.push(UpdateAssignment { column, value });
 
-            if matches!(self.peek_token(), Ok(Token::Comma)) {
+            if matches!(self.peek_token(), Ok(&Token::Comma)) {
                 self.consume_token(&Token::Comma)?;
                 continue;
             }
@@ -2188,7 +2208,7 @@ impl Parser {
             loop {
                 values.push(self.parse_expression()?);
 
-                if self.peek_token()? == Token::Comma {
+                if self.peek_token()? == &Token::Comma {
                     self.consume_token(&Token::Comma)?;
                     continue;
                 } else {
@@ -2199,7 +2219,7 @@ impl Parser {
             self.consume_token(&Token::RightParen)?;
             value_lists.push(values);
 
-            if self.peek_token()? == Token::Comma {
+            if self.peek_token()? == &Token::Comma {
                 self.consume_token(&Token::Comma)?;
                 continue;
             } else {
@@ -2230,7 +2250,7 @@ impl Parser {
                 }
             }
 
-            if self.peek_token()? == Token::Comma {
+            if self.peek_token()? == &Token::Comma {
                 self.consume_token(&Token::Comma)?;
                 continue;
             } else {
@@ -2276,7 +2296,7 @@ impl Parser {
                 }
                 Token::Not => {
                     self.consume_token(&Token::Not)?;
-                    if self.peek_token()? == Token::Null {
+                    if self.peek_token()? == &Token::Null {
                         self.consume_token(&Token::Null)?;
                         nullable = false;
                     }
@@ -2346,7 +2366,7 @@ impl Parser {
     }
 
     fn parse_optional_constraint_name(&mut self) -> Result<Option<String>> {
-        if matches!(self.peek_token(), Ok(Token::Constraint)) {
+        if matches!(self.peek_token(), Ok(&Token::Constraint)) {
             self.consume_token(&Token::Constraint)?;
             return Ok(Some(self.parse_identifier()?));
         }
@@ -2401,7 +2421,7 @@ impl Parser {
         let mut columns = Vec::new();
         loop {
             columns.push(self.parse_identifier()?);
-            if matches!(self.peek_token(), Ok(Token::Comma)) {
+            if matches!(self.peek_token(), Ok(&Token::Comma)) {
                 self.consume_token(&Token::Comma)?;
                 continue;
             }
@@ -2421,7 +2441,7 @@ impl Parser {
         let referenced_columns = self.parse_column_reference_list()?;
         let mut on_delete = crate::parser::ast::ForeignKeyAction::Restrict;
         let mut on_update = crate::parser::ast::ForeignKeyAction::Restrict;
-        while matches!(self.peek_token(), Ok(Token::On)) {
+        while matches!(self.peek_token(), Ok(&Token::On)) {
             self.consume_token(&Token::On)?;
             let target_is_delete = match self.peek_token()? {
                 Token::Delete => {
@@ -2479,8 +2499,8 @@ impl Parser {
     }
 
     fn parse_data_type(&mut self) -> Result<SqlTypeName> {
-        let token = self.peek_token()?;
-        let data_type = match token {
+        let token = self.peek_token()?.clone();
+        let data_type = match &token {
             Token::Int8 => return self.parse_integer_type(Token::Int8, SqlTypeName::Int8),
             Token::Int16 => return self.parse_integer_type(Token::Int16, SqlTypeName::Int16),
             Token::Int32 | Token::Int => {
@@ -2507,7 +2527,11 @@ impl Parser {
             Token::Interval => {
                 self.consume_token(&token)?;
                 let start = match self.peek_token()? {
-                    Token::Identifier(name) => name,
+                    Token::Identifier(name) => {
+                        let name_clone = name.clone();
+                        self.advance();
+                        name_clone
+                    }
                     other => {
                         return Err(HematiteError::ParseError(format!(
                             "Expected INTERVAL qualifier after INTERVAL, found: {:?}",
@@ -2515,10 +2539,13 @@ impl Parser {
                         )))
                     }
                 };
-                self.consume_token(&Token::Identifier(start.clone()))?;
                 self.consume_token(&Token::To)?;
                 let end = match self.peek_token()? {
-                    Token::Identifier(name) => name,
+                    Token::Identifier(name) => {
+                        let name_clone = name.clone();
+                        self.advance();
+                        name_clone
+                    }
                     other => {
                         return Err(HematiteError::ParseError(format!(
                             "Expected INTERVAL qualifier after TO, found: {:?}",
@@ -2526,7 +2553,6 @@ impl Parser {
                         )))
                     }
                 };
-                self.consume_token(&Token::Identifier(end.clone()))?;
                 return match (start.as_str(), end.as_str()) {
                     ("YEAR", "MONTH") => Ok(SqlTypeName::IntervalYearMonth),
                     ("DAY", "SECOND") => Ok(SqlTypeName::IntervalDaySecond),
@@ -2538,7 +2564,7 @@ impl Parser {
             }
             Token::Time => {
                 self.consume_token(&token)?;
-                if matches!(self.peek_token(), Ok(Token::With)) {
+                if matches!(self.peek_token(), Ok(&Token::With)) {
                     self.consume_token(&Token::With)?;
                     self.consume_token(&Token::Time)?;
                     self.consume_token(&Token::Zone)?;
@@ -2550,7 +2576,7 @@ impl Parser {
             Token::Varchar | Token::Char | Token::BinaryType | Token::VarBinary => {
                 self.consume_token(&token)?;
                 let length = self.parse_type_length()?;
-                return Ok(match token {
+                return Ok(match &token {
                     Token::Varchar => SqlTypeName::VarChar(length),
                     Token::Char => SqlTypeName::Char(length),
                     Token::BinaryType => SqlTypeName::Binary(length),
@@ -2563,7 +2589,7 @@ impl Parser {
                 return Ok(SqlTypeName::Enum(self.parse_enum_variants()?));
             }
             Token::Identifier(name) => {
-                if let Some(keyword) = uppercase_keyword_match(&name, &DATA_TYPE_KEYWORDS) {
+                if let Some(keyword) = uppercase_keyword_match(name, &DATA_TYPE_KEYWORDS) {
                     return Err(HematiteError::ParseError(format!(
                         "Keyword '{}' must be capitalized as '{}'",
                         name, keyword
@@ -2571,7 +2597,7 @@ impl Parser {
                 }
                 return Err(HematiteError::ParseError(format!(
                     "Expected data type, found: {:?}",
-                    Token::Identifier(name)
+                    Token::Identifier(name.clone())
                 )));
             }
             _ => {
@@ -2601,8 +2627,9 @@ impl Parser {
         loop {
             match self.peek_token()? {
                 Token::StringLiteral(value) => {
-                    self.consume_token(&Token::StringLiteral(value.clone()))?;
-                    variants.push(value);
+                    let value_clone = value.clone();
+                    self.advance();
+                    variants.push(value_clone);
                 }
                 token => {
                     return Err(HematiteError::ParseError(format!(
@@ -2643,7 +2670,7 @@ impl Parser {
         let length = match self.peek_token()? {
             Token::NumberLiteral(length) => {
                 let parsed = parse_positive_u32_literal(&length, "length")?;
-                self.consume_token(&Token::NumberLiteral(length))?;
+                self.advance();
                 parsed
             }
             token => {
@@ -2658,14 +2685,14 @@ impl Parser {
     }
 
     fn parse_optional_numeric_precision(&mut self) -> Result<(Option<u32>, Option<u32>)> {
-        if !matches!(self.peek_token(), Ok(Token::LeftParen)) {
+        if !matches!(self.peek_token(), Ok(&Token::LeftParen)) {
             return Ok((None, None));
         }
 
         self.consume_token(&Token::LeftParen)?;
         let precision = self.consume_positive_integer_literal("precision")?;
         let mut scale = None;
-        if matches!(self.peek_token(), Ok(Token::Comma)) {
+        if matches!(self.peek_token(), Ok(&Token::Comma)) {
             self.consume_token(&Token::Comma)?;
             scale = Some(self.consume_positive_integer_literal("scale")?);
         }
@@ -2677,7 +2704,7 @@ impl Parser {
         match self.peek_token()? {
             Token::NumberLiteral(value) => {
                 let parsed = parse_non_negative_u32_literal(&value, label)?;
-                self.consume_token(&Token::NumberLiteral(value))?;
+                self.advance();
                 Ok(parsed)
             }
             token => Err(HematiteError::ParseError(format!(
@@ -2691,34 +2718,38 @@ impl Parser {
         let token = self.peek_token()?;
         match token {
             Token::StringLiteral(value) => {
-                self.consume_token(&Token::StringLiteral(value.clone()))?;
+                let value = value.clone();
+                self.advance();
                 Ok(LiteralValue::Text(value))
             }
             Token::BlobLiteral(value) => {
-                self.consume_token(&Token::BlobLiteral(value.clone()))?;
+                let value = value.clone();
+                self.advance();
                 Ok(LiteralValue::Blob(value))
             }
             Token::NumberLiteral(value) => {
-                self.consume_token(&Token::NumberLiteral(value.clone()))?;
-                if value.contains('.') {
-                    Ok(LiteralValue::Float(normalize_float_literal(&value)))
+                let value_clone = value.clone();
+                self.advance();
+                if value_clone.contains('.') {
+                    Ok(LiteralValue::Float(normalize_float_literal(&value_clone)))
                 } else {
-                    Ok(LiteralValue::Integer(value.parse::<i128>().map_err(
+                    Ok(LiteralValue::Integer(value_clone.parse::<i128>().map_err(
                         |_| {
                             HematiteError::ParseError(format!(
                                 "Invalid integer literal '{}'",
-                                value
+                                value_clone
                             ))
                         },
                     )?))
                 }
             }
             Token::BooleanLiteral(value) => {
-                self.consume_token(&Token::BooleanLiteral(value.clone()))?;
+                let value = *value;
+                self.advance();
                 Ok(LiteralValue::Boolean(value))
             }
             Token::NullLiteral | Token::Null => {
-                if token == Token::NullLiteral {
+                if token == &Token::NullLiteral {
                     self.consume_token(&Token::NullLiteral)?;
                 } else {
                     self.consume_token(&Token::Null)?;
@@ -2732,14 +2763,14 @@ impl Parser {
         }
     }
 
-    fn peek_token(&self) -> Result<Token> {
-        if self.position < self.tokens.len() {
-            Ok(self.tokens[self.position].clone())
-        } else {
-            Err(HematiteError::ParseError(
-                "Unexpected end of input".to_string(),
-            ))
-        }
+    fn peek_token(&self) -> Result<&Token> {
+        self.tokens
+            .get(self.position)
+            .ok_or_else(|| HematiteError::ParseError("Unexpected end of input".to_string()))
+    }
+
+    fn advance(&mut self) {
+        self.position += 1;
     }
 
     fn next_token_is(&self, expected: &Token) -> bool {
@@ -2750,11 +2781,11 @@ impl Parser {
 
     fn consume_token(&mut self, expected: &Token) -> Result<()> {
         let token = self.peek_token()?;
-        if token == *expected {
+        if token == expected {
             self.position += 1;
             Ok(())
-        } else if let Token::Identifier(name) = &token {
-            if let Some(keyword) = uppercase_keyword_match(name, ALL_UPPERCASE_KEYWORDS) {
+        } else if let Token::Identifier(name) = token {
+            if let Some(keyword) = uppercase_keyword_match(name.as_str(), ALL_UPPERCASE_KEYWORDS) {
                 Err(HematiteError::ParseError(format!(
                     "Keyword '{}' must be capitalized as '{}'",
                     name, keyword

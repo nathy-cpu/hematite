@@ -79,8 +79,8 @@ pub fn build_executor(program: ExecutionProgram) -> Box<dyn QueryExecutor> {
 pub struct SelectExecutor {
     pub statement: SelectStatement,
     pub access_path: SelectAccessPath,
-    outer_scopes: Vec<CorrelatedScope>,
-    materialized_ctes: HashMap<String, Arc<QueryResult>>,
+    outer_scopes: Arc<Vec<CorrelatedScope>>,
+    materialized_ctes: Arc<HashMap<String, Arc<QueryResult>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -131,7 +131,7 @@ struct CorrelatedScope {
     row: Vec<Value>,
 }
 
-type SubqueryCache = HashMap<String, QueryResult>;
+type SubqueryCache = HashMap<usize, QueryResult>;
 
 fn evaluate_case_expression<FBool, FExpr>(
     branches: &[CaseWhenClause],
@@ -256,13 +256,13 @@ impl SelectExecutor {
         Self {
             statement,
             access_path,
-            outer_scopes: Vec::new(),
-            materialized_ctes: HashMap::new(),
+            outer_scopes: Arc::new(Vec::new()),
+            materialized_ctes: Arc::new(HashMap::new()),
         }
     }
 
     fn with_outer_scope(mut self, sources: &[ResolvedSource], row: &[Value]) -> Self {
-        self.outer_scopes.push(CorrelatedScope {
+        Arc::make_mut(&mut self.outer_scopes).push(CorrelatedScope {
             sources: sources.to_vec(),
             row: row.to_vec(),
         });
@@ -749,7 +749,7 @@ impl SelectExecutor {
         current_row: &[Value],
     ) -> Result<SelectStatement> {
         let mut bound = subquery.clone();
-        let mut scopes = self.outer_scopes.clone();
+        let mut scopes = self.outer_scopes.as_ref().clone();
         scopes.push(CorrelatedScope {
             sources: current_sources.to_vec(),
             row: current_row.to_vec(),
@@ -998,16 +998,13 @@ impl SelectExecutor {
             return self.execute_subquery(ctx, subquery, current_sources, current_row);
         }
 
-        // Use a deterministic canonical SQL string as the cache key for subqueries.
-        // This avoids pointer-based keys which miss across AST clones and
-        // is significantly cheaper than Debug-formatting the full AST.
-        let key = subquery.to_sql();
+        let key = subquery as *const SelectStatement as usize;
         if let Some(result) = cache.get(&key) {
             return Ok(result.clone());
         }
 
         let result = self.execute_subquery(ctx, subquery, None, None)?;
-        cache.insert(key.clone(), result.clone());
+        cache.insert(key, result.clone());
         Ok(result)
     }
 
@@ -1165,7 +1162,7 @@ impl SelectExecutor {
         sources: &[ResolvedSource],
         row: &[Value],
     ) -> Result<Vec<Value>> {
-        let mut projected = Vec::new();
+        let mut projected = Vec::with_capacity(self.statement.columns.len());
 
         for item in &self.statement.columns {
             match item {
@@ -1462,7 +1459,7 @@ impl SelectExecutor {
             self.execute_subquery(ctx, &cte.query, None, None)?
         };
         // Store a shared Arc-wrapped result to make reuse cheap across clones.
-        self.materialized_ctes.insert(key, Arc::new(result.clone()));
+        Arc::make_mut(&mut self.materialized_ctes).insert(key, Arc::new(result.clone()));
         Ok(result)
     }
 
@@ -1500,12 +1497,17 @@ impl SelectExecutor {
                 )))
             }
         };
+        let mut seen_union_rows = if matches!(operator, SetOperator::Union) {
+            Some(build_row_lookup(rows.clone()))
+        } else {
+            None
+        };
         let mut delta = rows.clone();
 
         let key = Self::cte_key(&cte.name);
         let mut converged = false;
         for _ in 0..MAX_RECURSIVE_CTE_ITERATIONS {
-            self.materialized_ctes.insert(
+            Arc::make_mut(&mut self.materialized_ctes).insert(
                 key.clone(),
                 Arc::new(QueryResult {
                     affected_rows: delta.len(),
@@ -1526,11 +1528,26 @@ impl SelectExecutor {
 
             delta = match operator {
                 SetOperator::Union => {
+                    let seen_rows = seen_union_rows.as_mut().expect("initialized above");
                     let mut unique_rows = Vec::new();
+                    let mut round_rows = HashMap::new();
                     for row in next_rows {
-                        if !rows.contains(&row) && !unique_rows.contains(&row) {
-                            unique_rows.push(row);
+                        if row_lookup_contains(seen_rows, &row)
+                            || row_lookup_contains(&round_rows, &row)
+                        {
+                            continue;
                         }
+                        round_rows
+                            .entry(hash_row(&row))
+                            .or_insert_with(Vec::new)
+                            .push(row.clone());
+                        unique_rows.push(row);
+                    }
+                    for row in &unique_rows {
+                        seen_rows
+                            .entry(hash_row(row))
+                            .or_insert_with(Vec::new)
+                            .push(row.clone());
                     }
                     unique_rows
                 }
@@ -1545,7 +1562,7 @@ impl SelectExecutor {
             rows.extend(delta.clone());
         }
 
-        self.materialized_ctes.insert(
+        Arc::make_mut(&mut self.materialized_ctes).insert(
             key,
             Arc::new(QueryResult {
                 affected_rows: rows.len(),
@@ -1747,7 +1764,10 @@ impl SelectExecutor {
         let (sources, mut filtered_rows) = self.materialize_filtered_rows(ctx)?;
         let mut subquery_cache = SubqueryCache::new();
 
-        if !self.statement.order_by.is_empty() {
+        let requires_pre_projection_sort = !self.statement.order_by.is_empty()
+            && self.statement.group_by.is_empty()
+            && !self.has_aggregate_projection();
+        if requires_pre_projection_sort {
             // Precompute the mapping from ORDER BY items to flat column indices and their
             // text comparison contexts so the comparator doesn't recompute on every comparison.
             let mut order_meta: Vec<(Option<usize>, Option<TextComparisonContext>, SortDirection)> =
@@ -1791,7 +1811,7 @@ impl SelectExecutor {
         }
 
         if !self.statement.group_by.is_empty() || self.has_aggregate_projection() {
-            return self.execute_grouped(ctx, &mut subquery_cache, &sources, &filtered_rows);
+            return self.execute_grouped(ctx, &mut subquery_cache, &sources, filtered_rows);
         }
 
         if self.has_window_projection() {
@@ -1884,7 +1904,7 @@ impl SelectExecutor {
         let mut projected_rows = Vec::with_capacity(filtered_rows.len());
 
         for (row_index, row) in filtered_rows.iter().enumerate() {
-            let mut projected = Vec::new();
+            let mut projected = Vec::with_capacity(self.statement.columns.len());
 
             for item in &self.statement.columns {
                 match item {
@@ -2950,13 +2970,13 @@ impl SelectExecutor {
         ctx: &mut ExecutionContext<'_>,
         cache: &mut SubqueryCache,
         sources: &[ResolvedSource],
-        filtered_rows: &[Vec<Value>],
+        filtered_rows: Vec<Vec<Value>>,
     ) -> Result<Vec<Vec<Vec<Value>>>> {
         if self.statement.group_by.is_empty() {
             if filtered_rows.is_empty() && self.has_aggregate_projection() {
                 return Ok(vec![Vec::new()]);
             }
-            return Ok(vec![filtered_rows.to_vec()]);
+            return Ok(vec![filtered_rows]);
         }
 
         // Use a hash-map keyed by a 64-bit hash of the group key vector to
@@ -2968,7 +2988,7 @@ impl SelectExecutor {
                 .statement
                 .group_by
                 .iter()
-                .map(|expr| self.evaluate_expression(ctx, cache, sources, expr, row))
+                .map(|expr| self.evaluate_expression(ctx, cache, sources, expr, &row))
                 .collect::<Result<Vec<_>>>()?;
 
             let h = hash_row(&key);
@@ -2977,9 +2997,9 @@ impl SelectExecutor {
                 .iter_mut()
                 .find(|(existing_key, _)| *existing_key == key)
             {
-                rows.push(row.clone());
+                rows.push(row);
             } else {
-                bucket.push((key, vec![row.clone()]));
+                bucket.push((key, vec![row]));
             }
         }
 
@@ -3033,7 +3053,7 @@ impl SelectExecutor {
         ctx: &mut ExecutionContext,
         cache: &mut SubqueryCache,
         sources: &[ResolvedSource],
-        filtered_rows: &[Vec<Value>],
+        filtered_rows: Vec<Vec<Value>>,
     ) -> Result<QueryResult> {
         let groups = self.build_groups(ctx, cache, sources, filtered_rows)?;
         let output_columns = self.get_column_names(sources);
@@ -3071,7 +3091,7 @@ impl SelectExecutor {
         all_rows: Vec<Vec<Value>>,
     ) -> Result<Vec<Vec<Value>>> {
         let skip_filter = matches!(self.access_path, SelectAccessPath::RowIdLookup);
-        let mut filtered_rows = Vec::new();
+        let mut filtered_rows = Vec::with_capacity(all_rows.len());
 
         for row in all_rows {
             let include = if skip_filter {
@@ -4815,21 +4835,37 @@ fn apply_set_operation(
             apply_distinct_if_needed(true, &mut left_rows);
             let mut distinct_right = right_rows;
             apply_distinct_if_needed(true, &mut distinct_right);
+            let right_lookup = build_row_lookup(distinct_right);
             left_rows
                 .into_iter()
-                .filter(|row| distinct_right.contains(row))
+                .filter(|row| row_lookup_contains(&right_lookup, row))
                 .collect()
         }
         SetOperator::Except => {
             apply_distinct_if_needed(true, &mut left_rows);
             let mut distinct_right = right_rows;
             apply_distinct_if_needed(true, &mut distinct_right);
+            let right_lookup = build_row_lookup(distinct_right);
             left_rows
                 .into_iter()
-                .filter(|row| !distinct_right.contains(row))
+                .filter(|row| !row_lookup_contains(&right_lookup, row))
                 .collect()
         }
     }
+}
+
+fn build_row_lookup(rows: Vec<Vec<Value>>) -> HashMap<u64, Vec<Vec<Value>>> {
+    let mut lookup: HashMap<u64, Vec<Vec<Value>>> = HashMap::new();
+    for row in rows {
+        lookup.entry(hash_row(&row)).or_default().push(row);
+    }
+    lookup
+}
+
+fn row_lookup_contains(lookup: &HashMap<u64, Vec<Vec<Value>>>, row: &[Value]) -> bool {
+    lookup
+        .get(&hash_row(row))
+        .is_some_and(|bucket| bucket.iter().any(|candidate| candidate == row))
 }
 
 fn primary_key_values(table: &Table, row: &[Value]) -> Result<Vec<Value>> {
@@ -5731,19 +5767,17 @@ fn apply_distinct_if_needed(distinct: bool, rows: &mut Vec<Vec<Value>>) {
         return;
     }
     // Preserve first-seen ordering while avoiding O(n^2) behavior of Vec::contains.
-    // Use a 64-bit hash to partition rows into buckets and then compare within
-    // a bucket to handle collisions. This avoids allocating strings for each
-    // unique row while remaining stable and correct.
-    let mut seen: HashMap<u64, Vec<Vec<Value>>> = HashMap::new();
-    let mut distinct_rows = Vec::new();
+    // Store indices of already-emitted rows per hash bucket to avoid cloning each
+    // distinct row into the hash structure.
+    let mut seen: HashMap<u64, Vec<usize>> = HashMap::new();
+    let mut distinct_rows = Vec::with_capacity(rows.len());
     for row in rows.drain(..) {
         let key = hash_row(&row);
         let bucket = seen.entry(key).or_default();
-        if !bucket.iter().any(|r| r == &row) {
-            // store a clone in the bucket for future collision checks, and
-            // move the original into the output preserving order.
-            bucket.push(row.clone());
+        if !bucket.iter().any(|index| distinct_rows[*index] == row) {
+            let next_index = distinct_rows.len();
             distinct_rows.push(row);
+            bucket.push(next_index);
         }
     }
     *rows = distinct_rows;

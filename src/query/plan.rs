@@ -6,14 +6,13 @@ use crate::parser::ast::{
     DropStatement, InsertStatement, SelectStatement, UpdateStatement,
 };
 
-use super::optimizer::SelectOptimizations;
+
 
 pub struct QueryPlan {
     pub node: PlanNode,
     pub program: ExecutionProgram,
     pub estimated_cost: f64,
     pub select_analysis: Option<SelectAnalysis>,
-    pub optimizations: Option<SelectOptimizations>,
 }
 
 impl std::fmt::Debug for QueryPlan {
@@ -22,7 +21,6 @@ impl std::fmt::Debug for QueryPlan {
             .field("node", &self.node)
             .field("estimated_cost", &self.estimated_cost)
             .field("select_analysis", &self.select_analysis)
-            .field("optimizations", &self.optimizations)
             .field("program", &self.program)
             .finish()
     }

@@ -718,8 +718,11 @@ mod optimizer_tests {
     use crate::catalog::types::DataType;
     use crate::catalog::Schema;
     use crate::error::Result;
+    use crate::parser::ast::{
+        Expression, LogicalOperator, SelectItem, SelectStatement, Statement, TableReference,
+    };
+    use crate::parser::LiteralValue;
     use crate::query::optimizer::*;
-    use crate::query::planner::SelectAnalysis;
 
     #[test]
     fn test_query_optimizer() -> Result<()> {
@@ -742,22 +745,84 @@ mod optimizer_tests {
         catalog.create_table("users".to_string(), columns)?;
 
         let optimizer = QueryOptimizer::new(catalog);
+        let statement = Statement::Select(SelectStatement {
+            with_clause: Vec::new(),
+            distinct: false,
+            columns: vec![SelectItem::Expression(Expression::Binary {
+                left: Box::new(Expression::Literal(LiteralValue::Integer(1))),
+                operator: crate::parser::ast::ArithmeticOperator::Add,
+                right: Box::new(Expression::Literal(LiteralValue::Integer(2))),
+            })],
+            column_aliases: vec![None],
+            from: TableReference::Table("users".to_string(), None),
+            where_clause: None,
+            group_by: Vec::new(),
+            having_clause: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            set_operation: None,
+        });
 
-        let analysis = SelectAnalysis {
-            table_name: "users".to_string(),
-            source_count: 1,
-            has_complex_source: false,
-            table_id: crate::catalog::TableId::new(1),
-            rowid_lookup: None,
-            estimated_rows: 1000,
-            usable_indexes: vec![],
-            accessed_columns: vec![],
+        let optimized = optimizer.optimize_statement(statement)?;
+        let Statement::Select(select) = optimized else {
+            panic!("optimizer should preserve statement kind");
         };
+        let SelectItem::Expression(Expression::Literal(LiteralValue::Integer(3))) =
+            &select.columns[0]
+        else {
+            panic!("expected constant expression folding in projection");
+        };
+        Ok(())
+    }
 
-        let optimizations = optimizer.optimize_select(&analysis)?;
+    #[test]
+    fn test_query_optimizer_simplifies_logical_identities() -> Result<()> {
+        let mut catalog = Schema::new();
 
-        assert_eq!(optimizations.recommended_index_scans.len(), 0);
-        // Allow either true or false for covering index recommendation
+        let columns = vec![
+            crate::catalog::Column::new(
+                crate::catalog::ColumnId::new(1),
+                "id".to_string(),
+                DataType::Int,
+            )
+            .primary_key(true),
+            crate::catalog::Column::new(
+                crate::catalog::ColumnId::new(2),
+                "name".to_string(),
+                DataType::Text,
+            ),
+        ];
+        catalog.create_table("users".to_string(), columns)?;
+
+        let optimizer = QueryOptimizer::new(catalog);
+        let statement = Statement::Select(SelectStatement {
+            with_clause: Vec::new(),
+            distinct: false,
+            columns: vec![SelectItem::Expression(Expression::Logical {
+                left: Box::new(Expression::Literal(LiteralValue::Boolean(true))),
+                operator: LogicalOperator::And,
+                right: Box::new(Expression::Column("id".to_string())),
+            })],
+            column_aliases: vec![None],
+            from: TableReference::Table("users".to_string(), None),
+            where_clause: None,
+            group_by: Vec::new(),
+            having_clause: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            set_operation: None,
+        });
+
+        let optimized = optimizer.optimize_statement(statement)?;
+        let Statement::Select(select) = optimized else {
+            panic!("optimizer should preserve statement kind");
+        };
+        let SelectItem::Expression(Expression::Column(column)) = &select.columns[0] else {
+            panic!("expected logical identity simplification to produce the right-hand expression");
+        };
+        assert_eq!(column, "id");
         Ok(())
     }
 }
@@ -861,10 +926,6 @@ mod planner_tests {
         );
         assert!(node.has_filter);
         assert!(plan.select_analysis.is_some());
-        let optimizations = plan
-            .optimizations
-            .expect("select plans should be optimized");
-        assert_eq!(optimizations.recommended_index_scans.len(), 1);
         Ok(())
     }
 
@@ -1609,6 +1670,120 @@ mod planner_tests {
             plan.select_analysis.as_ref().and_then(|a| a.rowid_lookup),
             Some(7)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_query_planner_select_uses_rowid_lookup_with_additional_filters() -> Result<()> {
+        let mut catalog = Schema::new();
+
+        let columns = vec![
+            crate::catalog::Column::new(
+                crate::catalog::ColumnId::new(1),
+                "id".to_string(),
+                DataType::Int,
+            )
+            .primary_key(true),
+            crate::catalog::Column::new(
+                crate::catalog::ColumnId::new(2),
+                "name".to_string(),
+                DataType::Text,
+            ),
+        ];
+        catalog.create_table("users".to_string(), columns)?;
+
+        let planner = QueryPlanner::new(catalog);
+        let statement = SelectStatement {
+            with_clause: Vec::new(),
+            distinct: false,
+            columns: vec![SelectItem::Column("id".to_string())],
+            column_aliases: vec![None],
+            from: TableReference::Table("users".to_string(), None),
+            where_clause: Some(WhereClause {
+                conditions: vec![Condition::Logical {
+                    left: Box::new(Condition::Comparison {
+                        left: Expression::Column("rowid".to_string()),
+                        operator: ComparisonOperator::Equal,
+                        right: Expression::Literal(LiteralValue::Integer(7)),
+                    }),
+                    operator: LogicalOperator::And,
+                    right: Box::new(Condition::Like {
+                        expr: Expression::Column("name".to_string()),
+                        pattern: Expression::Literal(LiteralValue::Text("A%".to_string())),
+                        is_not: false,
+                    }),
+                }],
+            }),
+            group_by: Vec::new(),
+            having_clause: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            set_operation: None,
+        };
+
+        let plan = planner.plan(Statement::Select(statement))?;
+        let node = expect_select_node(&plan);
+        assert_eq!(node.access_path, SelectAccessPath::RowIdLookup);
+        assert_eq!(
+            plan.select_analysis.as_ref().and_then(|a| a.rowid_lookup),
+            Some(7)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_query_planner_select_uses_primary_key_lookup_with_additional_filters() -> Result<()> {
+        let mut catalog = Schema::new();
+
+        let columns = vec![
+            crate::catalog::Column::new(
+                crate::catalog::ColumnId::new(1),
+                "id".to_string(),
+                DataType::Int,
+            )
+            .primary_key(true),
+            crate::catalog::Column::new(
+                crate::catalog::ColumnId::new(2),
+                "name".to_string(),
+                DataType::Text,
+            ),
+        ];
+        catalog.create_table("users".to_string(), columns)?;
+
+        let planner = QueryPlanner::new(catalog);
+        let statement = SelectStatement {
+            with_clause: Vec::new(),
+            distinct: false,
+            columns: vec![SelectItem::Column("id".to_string())],
+            column_aliases: vec![None],
+            from: TableReference::Table("users".to_string(), None),
+            where_clause: Some(WhereClause {
+                conditions: vec![Condition::Logical {
+                    left: Box::new(Condition::Comparison {
+                        left: Expression::Column("id".to_string()),
+                        operator: ComparisonOperator::Equal,
+                        right: Expression::Literal(LiteralValue::Integer(1)),
+                    }),
+                    operator: LogicalOperator::And,
+                    right: Box::new(Condition::Comparison {
+                        left: Expression::Column("name".to_string()),
+                        operator: ComparisonOperator::GreaterThan,
+                        right: Expression::Literal(LiteralValue::Text("A".to_string())),
+                    }),
+                }],
+            }),
+            group_by: Vec::new(),
+            having_clause: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            set_operation: None,
+        };
+
+        let plan = planner.plan(Statement::Select(statement))?;
+        let node = expect_select_node(&plan);
+        assert_eq!(node.access_path, SelectAccessPath::PrimaryKeyLookup);
         Ok(())
     }
 
