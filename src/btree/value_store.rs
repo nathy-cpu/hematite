@@ -190,13 +190,13 @@ pub fn materialize_stored_value(storage: &mut Pager, logical_value: &[u8]) -> Re
         .encode()
 }
 
-pub fn hydrate_stored_value(storage: &mut Pager, stored_value: &[u8]) -> Result<Vec<u8>> {
+pub fn hydrate_stored_value(storage: &Pager, stored_value: &[u8]) -> Result<Vec<u8>> {
     let mut overflow_cache = OverflowReadCache::default();
     hydrate_stored_value_with_cache(storage, stored_value, &mut overflow_cache)
 }
 
 pub(crate) fn hydrate_stored_value_with_cache(
-    storage: &mut Pager,
+    storage: &Pager,
     stored_value: &[u8],
     overflow_cache: &mut OverflowReadCache,
 ) -> Result<Vec<u8>> {

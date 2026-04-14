@@ -7,7 +7,7 @@ use crate::storage::{
 use std::collections::HashSet;
 
 impl Pager {
-    pub fn validate_integrity(&mut self) -> Result<PagerIntegrityReport> {
+    pub fn validate_integrity(&self) -> Result<PagerIntegrityReport> {
         let (max_page_id_exclusive, logical_free_pages, logical_checksums, wal_overrides) =
             if let Some(state) = &self.latest_wal_state {
                 (
@@ -76,8 +76,8 @@ impl Pager {
                 )));
             }
 
-            let page = if self.cache.is_dirty(page_id) {
-                self.cache.peek(page_id).cloned().ok_or_else(|| {
+            let page = if self.cache_read()?.is_dirty(page_id) {
+                self.cache_read()?.peek(page_id).cloned().ok_or_else(|| {
                     crate::error::HematiteError::StorageError(format!(
                         "Dirty page {} missing from page cache",
                         page_id

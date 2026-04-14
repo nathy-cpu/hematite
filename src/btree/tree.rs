@@ -20,13 +20,19 @@ use crate::storage::{
     Page, PageId, Pager, DB_HEADER_PAGE_ID, INVALID_PAGE_ID, STORAGE_METADATA_PAGE_ID,
 };
 use std::collections::HashSet;
-use std::sync::{Arc, RwLock, RwLockWriteGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 pub struct BTreeManager {
     storage: Arc<RwLock<Pager>>,
 }
 
 impl BTreeManager {
+    fn lock_storage_read(&self) -> Result<RwLockReadGuard<'_, Pager>> {
+        self.storage.read().map_err(|_| {
+            HematiteError::InternalError("B-tree manager storage lock is poisoned".to_string())
+        })
+    }
+
     fn lock_storage(&self) -> Result<RwLockWriteGuard<'_, Pager>> {
         self.storage.write().map_err(|_| {
             HematiteError::InternalError("B-tree manager storage lock is poisoned".to_string())
@@ -50,7 +56,7 @@ impl BTreeManager {
     }
 
     pub fn open_tree(&mut self, root_page_id: PageId) -> Result<BTreeIndex> {
-        let page = self.lock_storage()?.read_page_shared(root_page_id)?;
+        let page = self.lock_storage_read()?.read_page_shared(root_page_id)?;
         let _node = BTreeNode::from_shared_page(page)?;
         Ok(BTreeIndex::from_shared_storage(
             self.storage.clone(),
@@ -116,7 +122,7 @@ impl BTreeManager {
             return Ok(false);
         }
 
-        let page = self.lock_storage()?.read_page_shared(page_id)?;
+        let page = self.lock_storage_read()?.read_page_shared(page_id)?;
         let node = BTreeNode::from_shared_page(page)?;
         node.validate_cell_layouts()?;
 
@@ -236,11 +242,7 @@ pub fn reset_tree_pages(pager: &mut Pager, root_page_id: PageId) -> Result<()> {
     initialize_empty_tree_root(pager, root_page_id)
 }
 
-pub fn collect_tree_page_ids(
-    pager: &mut Pager,
-    page_id: PageId,
-    out: &mut Vec<PageId>,
-) -> Result<()> {
+pub fn collect_tree_page_ids(pager: &Pager, page_id: PageId, out: &mut Vec<PageId>) -> Result<()> {
     out.push(page_id);
     let page = pager.read_page_shared(page_id)?;
     let node = BTreeNode::from_shared_page(page)?;
@@ -263,7 +265,7 @@ pub struct TreeSpaceStats {
     pub internal_pages: usize,
 }
 
-pub fn collect_tree_space_stats(pager: &mut Pager, root_page_id: PageId) -> Result<TreeSpaceStats> {
+pub fn collect_tree_space_stats(pager: &Pager, root_page_id: PageId) -> Result<TreeSpaceStats> {
     let mut visited = HashSet::new();
     let mut stats = TreeSpaceStats::default();
     collect_tree_space_stats_recursive(pager, root_page_id, &mut visited, &mut stats)?;
@@ -271,7 +273,7 @@ pub fn collect_tree_space_stats(pager: &mut Pager, root_page_id: PageId) -> Resu
 }
 
 fn collect_tree_space_stats_recursive(
-    pager: &mut Pager,
+    pager: &Pager,
     page_id: PageId,
     visited: &mut HashSet<PageId>,
     stats: &mut TreeSpaceStats,

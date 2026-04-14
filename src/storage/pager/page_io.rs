@@ -5,14 +5,14 @@ use crate::storage::PageId;
 use std::sync::Arc;
 
 impl Pager {
-    pub fn read_page(&mut self, page_id: PageId) -> Result<Page> {
+    pub fn read_page(&self, page_id: PageId) -> Result<Page> {
         Ok((*self.read_page_shared(page_id)?).clone())
     }
 
-    pub(crate) fn read_page_shared(&mut self, page_id: PageId) -> Result<Arc<Page>> {
+    pub(crate) fn read_page_shared(&self, page_id: PageId) -> Result<Arc<Page>> {
         self.check_error_state()?;
         let view_token = self.cache_view_token();
-        if let Some(page) = self.cache.get_for_view(page_id, view_token) {
+        if let Some(page) = self.cache_read()?.peek_for_view(page_id, view_token) {
             return Ok(page);
         }
 
@@ -39,7 +39,8 @@ impl Pager {
                     && page_id < transaction.wal_next_page_id
                 {
                     let page = Arc::new(Page::new(page_id));
-                    self.cache.put_shared_with_view(page.clone(), view_token);
+                    self.cache_write()?
+                        .put_shared_with_view(page.clone(), view_token);
                     return Ok(page);
                 }
             }
@@ -63,13 +64,15 @@ impl Pager {
                         )));
                     }
                 }
-                self.cache.put_shared_with_view(page.clone(), view_token);
+                self.cache_write()?
+                    .put_shared_with_view(page.clone(), view_token);
                 return Ok(page);
             }
             let visible_next_page_id = state.visible_next_page_id();
             if page_id >= self.file_manager.next_page_id() && page_id < visible_next_page_id {
                 let page = Arc::new(Page::new(page_id));
-                self.cache.put_shared_with_view(page.clone(), view_token);
+                self.cache_write()?
+                    .put_shared_with_view(page.clone(), view_token);
                 return Ok(page);
             }
         }
@@ -88,7 +91,8 @@ impl Pager {
                 )));
             }
         }
-        self.cache.put_shared_with_view(page.clone(), view_token);
+        self.cache_write()?
+            .put_shared_with_view(page.clone(), view_token);
         Ok(page)
     }
 
@@ -100,15 +104,18 @@ impl Pager {
             self.page_checksums
                 .insert(page_id, Self::calculate_page_checksum(&page));
         }
-        self.cache.put(page);
-        self.cache.mark_dirty(page_id);
+        {
+            let cache = self.cache_mut()?;
+            cache.put(page);
+            cache.mark_dirty(page_id);
+        }
         if self.transaction.is_some() {
             self.transition_state(PagerState::WriterCacheMod)?;
         }
 
         // Spill already-journaled dirty pages to disk when the cache is over
         // capacity and no clean pages remain for eviction.
-        if self.cache.needs_spill() {
+        if self.cache_read()?.needs_spill() {
             self.spill_pages()?;
         }
 
@@ -123,19 +130,20 @@ impl Pager {
         if self.active_rollback_transaction().is_some() {
             self.sync_rollback_journal()?;
         }
-        let candidates = self.cache.spillable_candidates();
+        let candidates = self.cache_read()?.spillable_candidates();
         for page_id in candidates {
             // Skip metadata page — it must be written last during flush.
             if page_id == STORAGE_METADATA_PAGE_ID {
                 continue;
             }
-            if let Some(page) = self.cache.peek(page_id) {
-                if let Err(e) = self.file_manager.write_page(page) {
+            let page = self.cache_read()?.peek_shared(page_id);
+            if let Some(page) = page {
+                if let Err(e) = self.file_manager.write_page(page.as_ref()) {
                     self.enter_error_state();
                     return Err(e);
                 }
             }
-            self.cache.clear_dirty(page_id);
+            self.cache_mut()?.clear_dirty(page_id);
             // After clearing dirty, the page becomes a clean cache entry that
             // regular LRU eviction can reclaim.
         }
@@ -155,7 +163,7 @@ impl Pager {
             self.sync_rollback_journal()?;
         }
 
-        let dirty_ids = self.cache.dirty_page_ids();
+        let dirty_ids = self.cache_read()?.dirty_page_ids();
         let mut metadata_page_dirty = false;
 
         for page_id in dirty_ids.iter().copied() {
@@ -164,24 +172,26 @@ impl Pager {
                 continue;
             }
 
-            if let Some(page) = self.cache.peek(page_id) {
-                if let Err(e) = self.file_manager.write_page(page) {
+            let page = self.cache_read()?.peek_shared(page_id);
+            if let Some(page) = page {
+                if let Err(e) = self.file_manager.write_page(page.as_ref()) {
                     self.enter_error_state();
                     return Err(e);
                 }
             }
-            self.cache.clear_dirty(page_id);
+            self.cache_mut()?.clear_dirty(page_id);
         }
 
         // Metadata is written last so it cannot describe page state that has not reached disk.
         if metadata_page_dirty {
-            if let Some(page) = self.cache.peek(STORAGE_METADATA_PAGE_ID) {
-                if let Err(e) = self.file_manager.write_page(page) {
+            let page = self.cache_read()?.peek_shared(STORAGE_METADATA_PAGE_ID);
+            if let Some(page) = page {
+                if let Err(e) = self.file_manager.write_page(page.as_ref()) {
                     self.enter_error_state();
                     return Err(e);
                 }
             }
-            self.cache.clear_dirty(STORAGE_METADATA_PAGE_ID);
+            self.cache_mut()?.clear_dirty(STORAGE_METADATA_PAGE_ID);
         }
         if let Err(e) = self.file_manager.flush() {
             self.enter_error_state();

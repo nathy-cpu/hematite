@@ -291,7 +291,7 @@ mod mod_tests {
 
         assert_eq!(final_root_page_id, original_root_page_id);
 
-        let mut reopened = trees.open_tree(final_root_page_id)?;
+        let reopened = trees.open_tree(final_root_page_id)?;
         assert_eq!(
             reopened.get(&42u32.to_be_bytes())?,
             Some(b"value-42".to_vec())
@@ -451,7 +451,7 @@ mod mod_tests {
         tree.insert(b"blob", &large_value)?;
 
         let shared = trees.shared_storage();
-        let mut raw_tree = BTreeIndex::from_shared_storage(shared.clone(), root_page_id);
+        let raw_tree = BTreeIndex::from_shared_storage(shared.clone(), root_page_id);
         let stored_value = raw_tree
             .search_typed::<RawBytesCodec>(&b"blob".to_vec())?
             .expect("stored value should exist");
@@ -480,7 +480,7 @@ mod mod_tests {
         tree.insert(b"blob", &large_value)?;
 
         let shared = trees.shared_storage();
-        let mut raw_tree = BTreeIndex::from_shared_storage(shared.clone(), root_page_id);
+        let raw_tree = BTreeIndex::from_shared_storage(shared.clone(), root_page_id);
         let stored_value = raw_tree
             .search_typed::<RawBytesCodec>(&b"blob".to_vec())?
             .expect("stored value should exist");
@@ -546,7 +546,7 @@ mod mod_tests {
         tree.insert(b"blob", &large_value)?;
 
         let shared = trees.shared_storage();
-        let mut raw_tree = BTreeIndex::from_shared_storage(shared.clone(), root_page_id);
+        let raw_tree = BTreeIndex::from_shared_storage(shared.clone(), root_page_id);
         let stored_value = raw_tree
             .search_typed::<RawBytesCodec>(&b"blob".to_vec())?
             .expect("stored value should exist");
@@ -574,7 +574,7 @@ mod mod_tests {
         tree.insert(b"blob", &large_value)?;
 
         let shared = trees.shared_storage();
-        let mut raw_tree = BTreeIndex::from_shared_storage(shared.clone(), root_page_id);
+        let raw_tree = BTreeIndex::from_shared_storage(shared.clone(), root_page_id);
         let stored_value = raw_tree
             .search_typed::<RawBytesCodec>(&b"blob".to_vec())?
             .expect("stored value should exist");
@@ -606,7 +606,7 @@ mod mod_tests {
         }
 
         drop(tree);
-        let mut reopened = trees.open_tree(root_page_id)?;
+        let reopened = trees.open_tree(root_page_id)?;
         for key in [0u32, 7, 31, 63] {
             let value = reopened
                 .get(&key.to_be_bytes())?
@@ -641,7 +641,7 @@ mod mod_tests {
         }
 
         drop(tree);
-        let mut reopened = trees.open_tree(root_page_id)?;
+        let reopened = trees.open_tree(root_page_id)?;
         for key in 40u32..48 {
             let value = reopened
                 .get(&key.to_be_bytes())?
@@ -692,7 +692,7 @@ mod mod_tests {
 
         drop(tree);
         assert!(trees.validate_tree(root_page_id)?);
-        let mut reopened = trees.open_tree(root_page_id)?;
+        let reopened = trees.open_tree(root_page_id)?;
         for (key, value) in expected {
             let res = reopened.get(&key.to_be_bytes())?;
             if res != Some(value.clone()) {

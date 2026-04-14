@@ -206,7 +206,7 @@ mod pager_tests {
     #[cfg(unix)]
     use std::os::fd::AsRawFd;
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Barrier};
+    use std::sync::{Arc, Barrier, RwLock};
     use std::thread;
 
     fn checksum_for_test(data: &[u8]) -> u32 {
@@ -291,13 +291,13 @@ mod pager_tests {
         pager.write_page(page)?;
 
         // Without flush, dirty write should not be visible to a fresh pager.
-        let mut before_flush = Pager::new(test_db.path(), 8)?;
+        let before_flush = Pager::new(test_db.path(), 8)?;
         let on_disk_before = before_flush.read_page(page_id)?;
         assert_eq!(on_disk_before.data[0], 0);
 
         pager.flush()?;
 
-        let mut after_flush = Pager::new(test_db.path(), 8)?;
+        let after_flush = Pager::new(test_db.path(), 8)?;
         let on_disk_after = after_flush.read_page(page_id)?;
         assert_eq!(on_disk_after.data[0], 99);
 
@@ -340,7 +340,7 @@ mod pager_tests {
             page_id
         };
 
-        let mut reopened = Pager::new(test_db.path(), 8)?;
+        let reopened = Pager::new(test_db.path(), 8)?;
         let page = reopened.read_page(page_id)?;
         assert_eq!(page.data[0], 99);
         Ok(())
@@ -364,7 +364,7 @@ mod pager_tests {
             page_id
         };
 
-        let mut reopened = Pager::new(test_db.path(), 8)?;
+        let reopened = Pager::new(test_db.path(), 8)?;
         let page = reopened.read_page(page_id)?;
         assert_eq!(page.data[0], 10);
         Ok(())
@@ -478,7 +478,7 @@ mod pager_tests {
             (first_page_id, second_page_id)
         };
 
-        let mut reopened = Pager::new(test_db.path(), 8)?;
+        let reopened = Pager::new(test_db.path(), 8)?;
         assert_eq!(reopened.read_page(first_page_id)?.data[0], 10);
         assert_eq!(reopened.read_page(second_page_id)?.data[0], 20);
         Ok(())
@@ -516,7 +516,7 @@ mod pager_tests {
         };
         fs::write(&journal_path, journal.encode()?)?;
 
-        let mut reopened = Pager::new(test_db.path(), 8)?;
+        let reopened = Pager::new(test_db.path(), 8)?;
         assert_eq!(reopened.read_page(page_id)?.data[0], 55);
         assert!(!journal_path.exists());
         Ok(())
@@ -613,7 +613,7 @@ mod pager_tests {
 
         writer.commit_transaction()?;
 
-        let mut reopened = Pager::new(test_db.path(), 8)?;
+        let reopened = Pager::new(test_db.path(), 8)?;
         assert_eq!(reopened.read_page(page_id)?.data[0], 55);
         Ok(())
     }
@@ -644,7 +644,7 @@ mod pager_tests {
 
         pager.commit_transaction()?;
 
-        let mut reopened = Pager::new(test_db.path(), 8)?;
+        let reopened = Pager::new(test_db.path(), 8)?;
         assert_eq!(reopened.read_page(page_id)?.data[0], 10);
         Ok(())
     }
@@ -660,6 +660,54 @@ mod pager_tests {
 
         second.end_read()?;
         first.end_read()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_shared_pager_rwlock_allows_parallel_read_guards_for_page_reads(
+    ) -> crate::error::Result<()> {
+        let shared = Arc::new(RwLock::new(Pager::new_in_memory(8)?));
+        let page_id = {
+            let mut pager = shared.write().map_err(|_| {
+                crate::error::HematiteError::InternalError(
+                    "Shared pager write lock is poisoned".to_string(),
+                )
+            })?;
+            let page_id = pager.allocate_page()?;
+            let mut page = Page::new(page_id);
+            page.data[0] = 42;
+            pager.write_page(page)?;
+            pager.flush()?;
+            page_id
+        };
+
+        let start = Arc::new(Barrier::new(3));
+        let overlap = Arc::new(Barrier::new(3));
+        let mut handles = Vec::new();
+
+        for _ in 0..2 {
+            let shared = Arc::clone(&shared);
+            let start = Arc::clone(&start);
+            let overlap = Arc::clone(&overlap);
+            handles.push(thread::spawn(move || -> crate::error::Result<u8> {
+                start.wait();
+                let pager = shared.read().map_err(|_| {
+                    crate::error::HematiteError::InternalError(
+                        "Shared pager read lock is poisoned".to_string(),
+                    )
+                })?;
+                overlap.wait();
+                Ok(pager.read_page(page_id)?.data[0])
+            }));
+        }
+
+        start.wait();
+        overlap.wait();
+
+        for handle in handles {
+            assert_eq!(handle.join().expect("reader thread panicked")?, 42);
+        }
+
         Ok(())
     }
 
@@ -1292,7 +1340,7 @@ mod pager_tests {
 
         let reopened = Pager::new(test_db.path(), 8)?;
         assert_eq!(reopened.journal_mode(), JournalMode::Rollback);
-        let mut reopened = reopened;
+        let reopened = reopened;
         let page = reopened.read_page(page_id)?;
         assert_eq!(page.data[0], 88);
         Ok(())
@@ -1424,7 +1472,7 @@ mod pager_tests {
         reader.end_read()?;
 
         writer.checkpoint_wal()?;
-        let mut reopened = Pager::new(test_db.path(), 8)?;
+        let reopened = Pager::new(test_db.path(), 8)?;
         assert!(reopened.read_page(trailing_page_id).is_err());
         Ok(())
     }
@@ -1500,7 +1548,7 @@ mod pager_tests {
         };
         fs::write(&wal_path, WalRecord::encode_file(&[wal_record])?)?;
 
-        let mut pager = Pager::new(test_db.path(), 8)?;
+        let pager = Pager::new(test_db.path(), 8)?;
         let report = pager.validate_integrity()?;
         assert_eq!(report.verified_checksum_pages, 1);
         Ok(())

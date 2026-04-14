@@ -36,7 +36,7 @@ use crate::storage::{
 };
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
 pub struct FileManager {
@@ -66,20 +66,21 @@ impl FileManagerSnapshot {
 
 #[derive(Debug)]
 enum FileBackend {
-    Disk(File),
+    Disk { file: File, path: PathBuf },
     Memory(Vec<u8>),
 }
 
 impl FileManager {
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
-            .open(path)?;
+            .open(&path)?;
 
         let manager = Self {
-            backend: FileBackend::Disk(file),
+            backend: FileBackend::Disk { file, path },
             position: 0,
             next_page_id: 0,
             free_list: FreeList::new(),
@@ -134,12 +135,11 @@ impl FileManager {
         Ok(())
     }
 
-    pub fn read_page(&mut self, page_id: PageId) -> Result<Page> {
+    pub fn read_page(&self, page_id: PageId) -> Result<Page> {
         let offset = Self::page_offset(page_id)?;
 
         let mut data = vec![0u8; PAGE_SIZE];
-        self.seek(SeekFrom::Start(offset))?;
-        self.read_exact(&mut data).map_err(|err| {
+        self.read_exact_at(offset, &mut data).map_err(|err| {
             crate::error::HematiteError::StorageError(format!(
                 "Failed to read page {} at offset {}: {}",
                 page_id, offset, err
@@ -150,7 +150,7 @@ impl FileManager {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn detect_format_generation(&mut self) -> Result<Option<FormatGeneration>> {
+    pub(crate) fn detect_format_generation(&self) -> Result<Option<FormatGeneration>> {
         let len = self.len()? as usize;
         if len == 0 {
             return Ok(None);
@@ -176,10 +176,9 @@ impl FileManager {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn read_region(&mut self, offset: u64, len: usize) -> Result<Vec<u8>> {
+    pub(crate) fn read_region(&self, offset: u64, len: usize) -> Result<Vec<u8>> {
         let mut bytes = vec![0u8; len];
-        self.seek(SeekFrom::Start(offset))?;
-        self.read_exact(&mut bytes)?;
+        self.read_exact_at(offset, &mut bytes)?;
         Ok(bytes)
     }
 
@@ -218,7 +217,7 @@ impl FileManager {
 
     pub fn flush(&mut self) -> Result<()> {
         match &mut self.backend {
-            FileBackend::Disk(file) => {
+            FileBackend::Disk { file, .. } => {
                 file.sync_all()?;
             }
             FileBackend::Memory(_) => {}
@@ -333,14 +332,35 @@ impl FileManager {
 
     fn len(&self) -> Result<u64> {
         match &self.backend {
-            FileBackend::Disk(file) => Ok(file.metadata()?.len()),
+            FileBackend::Disk { file, .. } => Ok(file.metadata()?.len()),
             FileBackend::Memory(buffer) => Ok(buffer.len() as u64),
         }
     }
 
+    fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        match &self.backend {
+            FileBackend::Disk { path, .. } => {
+                let mut file = File::open(path)?;
+                file.seek(SeekFrom::Start(offset))?;
+                file.read_exact(buf)?;
+            }
+            FileBackend::Memory(buffer) => {
+                let offset = offset as usize;
+                let end = offset + buf.len();
+                if end > buffer.len() {
+                    return Err(crate::error::HematiteError::StorageError(
+                        "Attempted to read beyond in-memory storage bounds".to_string(),
+                    ));
+                }
+                buf.copy_from_slice(&buffer[offset..end]);
+            }
+        }
+        Ok(())
+    }
+
     fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
         match &mut self.backend {
-            FileBackend::Disk(file) => {
+            FileBackend::Disk { file, .. } => {
                 let position = file.seek(pos)?;
                 self.position = position;
                 Ok(position)
@@ -365,26 +385,6 @@ impl FileManager {
         }
     }
 
-    fn read_exact(&mut self, buf: &mut [u8]) -> Result<()> {
-        match &mut self.backend {
-            FileBackend::Disk(file) => {
-                file.read_exact(buf)?;
-            }
-            FileBackend::Memory(buffer) => {
-                let offset = self.position as usize;
-                let end = offset + buf.len();
-                if end > buffer.len() {
-                    return Err(crate::error::HematiteError::StorageError(
-                        "Attempted to read beyond in-memory storage bounds".to_string(),
-                    ));
-                }
-                buf.copy_from_slice(&buffer[offset..end]);
-                self.position = end as u64;
-            }
-        }
-        Ok(())
-    }
-
     fn write_all(&mut self, buf: &[u8]) -> Result<()> {
         #[cfg(test)]
         if let Some(remaining_writes) = self.fail_on_write_countdown.as_mut() {
@@ -398,7 +398,7 @@ impl FileManager {
             *remaining_writes -= 1;
         }
         match &mut self.backend {
-            FileBackend::Disk(file) => {
+            FileBackend::Disk { file, .. } => {
                 file.write_all(buf)?;
             }
             FileBackend::Memory(buffer) => {
@@ -416,7 +416,7 @@ impl FileManager {
 
     fn set_len(&mut self, len: u64) -> Result<()> {
         match &mut self.backend {
-            FileBackend::Disk(file) => {
+            FileBackend::Disk { file, .. } => {
                 file.set_len(len)?;
             }
             FileBackend::Memory(buffer) => {

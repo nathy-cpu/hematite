@@ -39,8 +39,8 @@ impl PagerSnapshot {
 impl Pager {
     fn clone_dirty_pages(&self) -> Result<Vec<Page>> {
         let mut dirty_pages = Vec::new();
-        for page_id in self.cache.dirty_page_ids() {
-            let page = self.cache.peek(page_id).cloned().ok_or_else(|| {
+        for page_id in self.cache_read()?.dirty_page_ids() {
+            let page = self.cache_read()?.peek(page_id).cloned().ok_or_else(|| {
                 crate::error::HematiteError::StorageError(format!(
                     "Dirty page {} missing from page cache",
                     page_id
@@ -108,17 +108,19 @@ impl Pager {
 
         self.file_manager
             .restore_snapshot(savepoint.file_manager.clone())?;
-        self.cache.reset();
+        self.cache_mut()?.reset();
         self.page_checksums = savepoint.page_checksums.clone();
         for page in savepoint.dirty_pages.iter().cloned() {
             let page_id = page.id;
-            self.cache.put(page);
-            self.cache.mark_dirty(page_id);
+            let cache = self.cache_mut()?;
+            cache.put(page);
+            cache.mark_dirty(page_id);
         }
         for record in &savepoint.page_records {
             let page = Page::from_bytes(record.page_id, record.data.clone())?;
-            self.cache.put(page);
-            self.cache.mark_dirty(record.page_id);
+            let cache = self.cache_mut()?;
+            cache.put(page);
+            cache.mark_dirty(record.page_id);
         }
 
         let transaction = self.active_rollback_transaction_mut().ok_or_else(|| {
@@ -128,7 +130,7 @@ impl Pager {
         })?;
         transaction.savepoints.truncate(position + 1);
         self.sync_rollback_journal_from_transaction()?;
-        self.state = if self.cache.dirty_page_ids().is_empty() {
+        self.state = if self.cache_mut()?.dirty_page_ids().is_empty() {
             PagerState::WriterLocked
         } else {
             PagerState::WriterCacheMod
@@ -147,7 +149,7 @@ impl Pager {
 
         Ok(PagerSnapshot::Full {
             file_manager: self.file_manager.snapshot()?,
-            cache: self.cache.clone(),
+            cache: self.cache_mut()?.clone(),
             page_checksums: self.page_checksums.clone(),
             transaction: self.transaction.clone(),
             state: self.state,
@@ -164,7 +166,7 @@ impl Pager {
                 state,
             } => {
                 self.file_manager.restore_snapshot(file_manager)?;
-                self.cache = cache;
+                *self.cache_mut()? = cache;
                 self.page_checksums = page_checksums;
                 self.transaction = transaction;
                 self.sync_rollback_journal_from_transaction()?;

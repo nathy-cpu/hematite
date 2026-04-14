@@ -88,13 +88,13 @@ impl Pager {
     }
 
     pub(super) fn refresh_persisted_view(&mut self) -> Result<()> {
-        if self.transaction.is_some() || self.cache.dirty_count() != 0 {
+        if self.transaction.is_some() || self.cache_mut()?.dirty_count() != 0 {
             return Ok(());
         }
 
         self.load_persisted_state()?;
         if self.journal_mode != JournalMode::Wal {
-            self.cache.reset();
+            self.cache_mut()?.reset();
         }
         self.load_latest_wal_state()
     }
@@ -141,7 +141,7 @@ impl Pager {
         }
         .encode(Self::CHECKSUM_METADATA_VERSION);
         let existing_page = self
-            .cache
+            .cache_mut()?
             .peek(STORAGE_METADATA_PAGE_ID)
             .cloned()
             .unwrap_or(self.file_manager.read_page(STORAGE_METADATA_PAGE_ID)?);
@@ -152,10 +152,13 @@ impl Pager {
     pub(super) fn stage_persisted_state_page(&mut self) -> Result<()> {
         let page = self.encoded_persisted_state_page()?;
         self.snapshot_original_page(STORAGE_METADATA_PAGE_ID)?;
-        self.cache.put(page);
-        self.cache.mark_dirty(STORAGE_METADATA_PAGE_ID);
+        {
+            let cache = self.cache_mut()?;
+            cache.put(page);
+            cache.mark_dirty(STORAGE_METADATA_PAGE_ID);
+        }
         if self.active_rollback_transaction().is_some() {
-            self.cache.mark_need_sync(STORAGE_METADATA_PAGE_ID);
+            self.cache_mut()?.mark_need_sync(STORAGE_METADATA_PAGE_ID);
         }
         Ok(())
     }
@@ -164,8 +167,9 @@ impl Pager {
         let page = self.encoded_persisted_state_page()?;
         self.file_manager.write_page(&page)?;
         self.file_manager.flush()?;
-        self.cache.put(page);
-        self.cache.clear_dirty(STORAGE_METADATA_PAGE_ID);
+        let cache = self.cache_mut()?;
+        cache.put(page);
+        cache.clear_dirty(STORAGE_METADATA_PAGE_ID);
         Ok(())
     }
 
@@ -187,7 +191,7 @@ impl Pager {
             return Ok(());
         }
 
-        let page = if let Some(page) = self.cache.peek(page_id) {
+        let page = if let Some(page) = self.cache_mut()?.peek(page_id) {
             page.clone()
         } else {
             self.file_manager.read_page(page_id)?
@@ -218,8 +222,11 @@ impl Pager {
             transaction.journaled_pages.insert(page_id);
             record
         };
-        self.cache.mark_journaled(page_id);
-        self.cache.mark_need_sync(page_id);
+        {
+            let cache = self.cache_mut()?;
+            cache.mark_journaled(page_id);
+            cache.mark_need_sync(page_id);
+        }
         self.journal_needs_sync = true;
         self.append_rollback_journal_record(&record)?;
         Ok(())
@@ -316,8 +323,9 @@ impl Pager {
             return Ok(());
         };
         file.sync_all()?;
-        for page_id in self.cache.dirty_page_ids() {
-            self.cache.clear_need_sync(page_id);
+        let dirty_ids = self.cache_mut()?.dirty_page_ids();
+        for page_id in dirty_ids {
+            self.cache_mut()?.clear_need_sync(page_id);
         }
         self.journal_needs_sync = false;
         Ok(())
@@ -455,7 +463,7 @@ impl Pager {
     }
 
     pub(super) fn restore_from_journal(&mut self, journal: &RollbackJournal) -> Result<()> {
-        self.cache.reset();
+        self.cache_mut()?.reset();
         self.file_manager
             .restore_file_len(journal.original_file_len)?;
         self.file_manager
@@ -475,7 +483,7 @@ impl Pager {
         let transaction = self.active_wal_transaction().cloned().ok_or_else(|| {
             crate::error::HematiteError::StorageError("Pager transaction is not active".to_string())
         })?;
-        self.cache.reset();
+        self.cache_mut()?.reset();
         self.page_checksums = transaction.original_checksums;
         self.load_latest_wal_state()
     }
@@ -498,12 +506,12 @@ impl Pager {
             .map(|state| state.visible_sequence + 1)
             .unwrap_or(1);
 
-        let mut page_ids = self.cache.dirty_page_ids();
+        let mut page_ids = self.cache_read()?.dirty_page_ids();
         page_ids.sort_unstable();
 
         let mut frames = Vec::with_capacity(page_ids.len());
         for page_id in page_ids {
-            let page = self.cache.peek(page_id).cloned().ok_or_else(|| {
+            let page = self.cache_read()?.peek(page_id).cloned().ok_or_else(|| {
                 crate::error::HematiteError::StorageError(format!(
                     "Dirty page {} missing from page cache",
                     page_id
@@ -515,7 +523,7 @@ impl Pager {
             });
         }
         let metadata_page = self
-            .cache
+            .cache_read()?
             .peek(STORAGE_METADATA_PAGE_ID)
             .cloned()
             .unwrap_or(self.file_manager.read_page(STORAGE_METADATA_PAGE_ID)?);
@@ -532,9 +540,11 @@ impl Pager {
         }
         self.load_latest_wal_state()?;
         let committed_view_token = self.cache_view_token();
-        for page_id in self.cache.dirty_page_ids() {
-            self.cache.clear_dirty(page_id);
-            self.cache.set_view_token(page_id, committed_view_token);
+        let dirty_ids = self.cache_mut()?.dirty_page_ids();
+        for page_id in dirty_ids {
+            let cache = self.cache_mut()?;
+            cache.clear_dirty(page_id);
+            cache.set_view_token(page_id, committed_view_token);
         }
         Ok(())
     }

@@ -16,7 +16,7 @@
 //!
 //! The cursor reads nodes through the shared pager but exposes only logical key/value positions.
 use std::cell::OnceCell;
-use std::sync::{Arc, RwLock, RwLockWriteGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 use crate::btree::node::BTreeNode;
 use crate::btree::{BTreeKey, BTreeValue, NodeType};
@@ -59,8 +59,8 @@ impl BTreeCursor {
         Ok(cursor)
     }
 
-    fn lock_storage(&self) -> Result<RwLockWriteGuard<'_, Pager>> {
-        self.storage.write().map_err(|_| {
+    fn lock_storage(&self) -> Result<RwLockReadGuard<'_, Pager>> {
+        self.storage.read().map_err(|_| {
             HematiteError::InternalError("B-tree cursor storage lock is poisoned".to_string())
         })
     }
@@ -202,7 +202,7 @@ impl BTreeCursor {
         let mut current_page_id = page_id;
         let mut frames = Vec::new();
         let at_end = {
-            let mut storage = self.lock_storage()?;
+            let storage = self.lock_storage()?;
             loop {
                 let page = storage.read_page_shared(current_page_id)?;
                 let node = BTreeNode::from_shared_page(page)?;
@@ -361,7 +361,7 @@ impl BTreeCursor {
     fn traverse_to_leftmost_leaf(&mut self, page_id: PageId) -> Result<()> {
         let mut current_page_id = page_id;
         let mut frames = Vec::new();
-        let mut storage = self.lock_storage()?;
+        let storage = self.lock_storage()?;
 
         loop {
             let page = storage.read_page_shared(current_page_id)?;
@@ -400,7 +400,7 @@ impl BTreeCursor {
     fn traverse_to_rightmost_leaf(&mut self, page_id: PageId) -> Result<()> {
         let mut current_page_id = page_id;
         let mut frames = Vec::new();
-        let mut storage = self.lock_storage()?;
+        let storage = self.lock_storage()?;
 
         loop {
             let page = storage.read_page_shared(current_page_id)?;

@@ -51,7 +51,7 @@ pub(crate) fn lookup_primary_key_rowid(
     key_values: &[Value],
 ) -> Result<Option<u64>> {
     let key_values = normalize_primary_key_values(table, key_values);
-    let mut tree = open_required_tree(
+    let tree = open_required_tree(
         engine,
         table.primary_key_index_root_page_id,
         &format!("primary-key index for table '{}'", table.name),
@@ -290,7 +290,7 @@ pub(crate) fn validate_table_indexes(engine: &mut CatalogEngine, table: &Table) 
     for row in &rows {
         let key_values = table.get_primary_key_values(&row.values)?;
         let key_values = normalize_primary_key_values(table, &key_values);
-        let mut tree = open_required_tree(
+        let tree = open_required_tree(
             engine,
             table.primary_key_index_root_page_id,
             &format!("primary-key index for table '{}'", table.name),

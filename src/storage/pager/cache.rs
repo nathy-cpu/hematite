@@ -60,14 +60,18 @@ impl PageCache {
         self.get_for_view(page_id, 0)
     }
 
-    pub(crate) fn get_for_view(&mut self, page_id: PageId, view_token: u64) -> Option<Arc<Page>> {
-        let page = self.entries.get(&page_id).and_then(|entry| {
+    pub(crate) fn peek_for_view(&self, page_id: PageId, view_token: u64) -> Option<Arc<Page>> {
+        self.entries.get(&page_id).and_then(|entry| {
             if entry.meta.dirty || entry.meta.writeable || entry.meta.view_token == view_token {
                 Some(entry.page.clone())
             } else {
                 None
             }
-        });
+        })
+    }
+
+    pub(crate) fn get_for_view(&mut self, page_id: PageId, view_token: u64) -> Option<Arc<Page>> {
+        let page = self.peek_for_view(page_id, view_token);
         if page.is_some() {
             self.touch(page_id);
         }

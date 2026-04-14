@@ -20,7 +20,7 @@ use crate::btree::KeyValueCodec;
 use crate::btree::{BTreeKey, BTreeValue, NodeType};
 use crate::error::{HematiteError, Result};
 use crate::storage::{Page, PageId, Pager};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 use super::node;
 
@@ -36,8 +36,8 @@ pub struct BTreeIndex {
 }
 
 impl BTreeIndex {
-    fn lock_storage(&self) -> Result<std::sync::RwLockWriteGuard<'_, Pager>> {
-        self.storage.write().map_err(|_| {
+    fn lock_storage_read(&self) -> Result<RwLockReadGuard<'_, Pager>> {
+        self.storage.read().map_err(|_| {
             crate::error::HematiteError::InternalError(
                 "B-tree index storage lock is poisoned".to_string(),
             )
@@ -63,8 +63,8 @@ impl BTreeIndex {
     }
 
     #[cfg(test)]
-    pub fn search(&mut self, key: &BTreeKey) -> Result<Option<BTreeValue>> {
-        let mut storage = self.lock_storage()?;
+    pub fn search(&self, key: &BTreeKey) -> Result<Option<BTreeValue>> {
+        let storage = self.lock_storage_read()?;
         let mut current_page_id = self.root_page_id;
 
         loop {
@@ -81,10 +81,10 @@ impl BTreeIndex {
         }
     }
 
-    pub fn search_typed<C: KeyValueCodec>(&mut self, key: &C::Key) -> Result<Option<C::Value>> {
+    pub fn search_typed<C: KeyValueCodec>(&self, key: &C::Key) -> Result<Option<C::Value>> {
         let encoded_key = C::encode_key(key)?;
         let key = BTreeKey::new(encoded_key);
-        let mut storage = self.lock_storage()?;
+        let storage = self.lock_storage_read()?;
         let mut current_page_id = self.root_page_id;
 
         loop {

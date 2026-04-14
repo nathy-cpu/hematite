@@ -101,7 +101,7 @@ impl Pager {
         self.page_checksums = state.page_checksums;
         self.latest_wal_state = None;
         self.wal_read_snapshot = None;
-        self.cache.reset();
+        self.cache_mut()?.reset();
         self.remove_wal_file()?;
         self.persist_checksums()
     }

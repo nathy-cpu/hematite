@@ -22,7 +22,7 @@ impl Pager {
     pub fn deallocate_page(&mut self, page_id: PageId) -> Result<()> {
         self.check_error_state()?;
         self.snapshot_original_page(page_id)?;
-        self.cache.remove(page_id);
+        self.cache_mut()?.remove(page_id);
         self.page_checksums.remove(&page_id);
         if self.journal_mode == JournalMode::Wal {
             if let Some(transaction) = self.active_wal_transaction_mut() {

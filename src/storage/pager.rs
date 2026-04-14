@@ -117,6 +117,7 @@ use std::fs;
 use std::fs::File;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 pub(crate) use self::savepoint::PagerSnapshot;
 pub use self::state::{JournalMode, PagerState};
@@ -170,7 +171,7 @@ fn compact_transaction_free_pages(transaction: &mut WalTransaction) {
 #[derive(Debug)]
 pub struct Pager {
     file_manager: FileManager,
-    cache: PageCache,
+    cache: RwLock<PageCache>,
     page_checksums: HashMap<PageId, u32>,
     journal_mode: JournalMode,
     journal_path: Option<PathBuf>,
@@ -216,7 +217,7 @@ impl Pager {
             .or_else(|| Some(path.as_ref().to_path_buf()));
         let mut pager = Self {
             file_manager,
-            cache: PageCache::new(cache_capacity),
+            cache: RwLock::new(PageCache::new(cache_capacity)),
             page_checksums: HashMap::new(),
             journal_mode: JournalMode::Rollback,
             journal_path,
@@ -245,7 +246,7 @@ impl Pager {
         let file_manager = FileManager::new_in_memory()?;
         Ok(Self {
             file_manager,
-            cache: PageCache::new(cache_capacity),
+            cache: RwLock::new(PageCache::new(cache_capacity)),
             page_checksums: HashMap::new(),
             journal_mode: JournalMode::Rollback,
             journal_path: None,
@@ -279,8 +280,8 @@ impl Pager {
         self.transaction.is_some()
     }
 
-    pub(crate) fn has_pending_changes(&self) -> bool {
-        self.transaction.is_some() || self.cache.dirty_count() != 0
+    pub(crate) fn has_pending_changes(&self) -> Result<bool> {
+        Ok(self.transaction.is_some() || self.cache_read()?.dirty_count() != 0)
     }
 
     pub fn journal_mode(&self) -> JournalMode {
@@ -321,6 +322,30 @@ impl Pager {
             .or(self.latest_wal_state.as_ref())
     }
 
+    fn cache_read(&self) -> Result<RwLockReadGuard<'_, PageCache>> {
+        self.cache.read().map_err(|_| {
+            crate::error::HematiteError::InternalError(
+                "Pager page cache lock is poisoned".to_string(),
+            )
+        })
+    }
+
+    fn cache_write(&self) -> Result<RwLockWriteGuard<'_, PageCache>> {
+        self.cache.write().map_err(|_| {
+            crate::error::HematiteError::InternalError(
+                "Pager page cache lock is poisoned".to_string(),
+            )
+        })
+    }
+
+    fn cache_mut(&mut self) -> Result<&mut PageCache> {
+        self.cache.get_mut().map_err(|_| {
+            crate::error::HematiteError::InternalError(
+                "Pager page cache lock is poisoned".to_string(),
+            )
+        })
+    }
+
     /// Prepare a page for in-place mutation.
     /// Captures original page image (for rollback journals) and returns an owned `Page`
     /// that callers may mutate and then write back using `write_page`.
@@ -334,7 +359,7 @@ impl Pager {
         self.snapshot_original_page(page_id)?;
 
         // Ask cache for an owned Page ready for mutation (copy-on-write).
-        let page = self.cache.take_page_for_write(page_id);
+        let page = self.cache_mut()?.take_page_for_write(page_id);
 
         Ok(page)
     }

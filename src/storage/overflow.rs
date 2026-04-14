@@ -96,7 +96,7 @@ pub fn free_overflow_chain(storage: &mut Pager, first_page: Option<PageId>) -> R
 }
 
 pub fn validate_overflow_chain(
-    storage: &mut Pager,
+    storage: &Pager,
     first_page: Option<PageId>,
     expected_len: usize,
 ) -> Result<OverflowChainReport> {
@@ -151,7 +151,7 @@ pub fn validate_overflow_chain(
 }
 
 pub fn collect_overflow_page_ids(
-    storage: &mut Pager,
+    storage: &Pager,
     first_page: Option<PageId>,
 ) -> Result<Vec<PageId>> {
     let mut ids = Vec::new();
@@ -182,7 +182,7 @@ pub fn collect_overflow_page_ids(
 }
 
 pub(crate) fn read_overflow_chain_cached_with_cache(
-    storage: &mut Pager,
+    storage: &Pager,
     first_page: Option<PageId>,
     expected_len: usize,
     cache: &mut OverflowReadCache,

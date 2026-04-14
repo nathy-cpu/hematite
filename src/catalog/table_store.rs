@@ -162,7 +162,7 @@ pub(crate) fn lookup_row_by_rowid(
     rowid: u64,
 ) -> Result<Option<StoredRow>> {
     let root_page_id = engine.table_runtime_metadata(table_name)?.root_page_id;
-    let mut tree = engine.open_tree(root_page_id)?;
+    let tree = engine.open_tree(root_page_id)?;
     match tree.get(&rowid.to_be_bytes())? {
         Some(value) => Ok(Some(RowCodec::decode_stored_row(&value)?)),
         None => Ok(None),

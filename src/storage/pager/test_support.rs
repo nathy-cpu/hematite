@@ -3,11 +3,15 @@ use super::{Pager, PagerState};
 #[cfg(test)]
 impl Pager {
     pub(crate) fn dirty_page_count(&self) -> usize {
-        self.cache.dirty_count()
+        self.cache_read()
+            .expect("pager cache lock should not be poisoned in tests")
+            .dirty_count()
     }
 
     pub(crate) fn cached_page_count(&self) -> usize {
-        self.cache.entry_count()
+        self.cache_read()
+            .expect("pager cache lock should not be poisoned in tests")
+            .entry_count()
     }
 
     pub(crate) fn wal_snapshot_sequence(&self) -> Option<u64> {

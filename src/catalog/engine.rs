@@ -224,7 +224,7 @@ not available yet.",
     #[cfg(test)]
     pub(crate) fn read_page(&self, page_id: PageId) -> Result<crate::storage::Page> {
         let storage = self.tree_store().shared_storage();
-        let mut pager = storage.write().map_err(|_| {
+        let pager = storage.read().map_err(|_| {
             HematiteError::InternalError("Catalog engine pager lock is poisoned".to_string())
         })?;
         pager.read_page(page_id)

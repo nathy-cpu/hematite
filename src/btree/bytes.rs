@@ -36,7 +36,7 @@
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::{Arc, RwLock, RwLockWriteGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::btree::codec::RawBytesCodec;
 use crate::btree::cursor::BTreeCursor;
@@ -82,6 +82,12 @@ impl ByteTreeStore {
     pub const DB_HEADER_PAGE_ID: PageId = DB_HEADER_PAGE_ID;
     pub const RESERVED_METADATA_PAGE_ID: PageId = STORAGE_METADATA_PAGE_ID;
 
+    fn lock_storage_read(&self) -> Result<RwLockReadGuard<'_, Pager>> {
+        self.storage.read().map_err(|_| {
+            HematiteError::InternalError("ByteTreeStore storage lock is poisoned".to_string())
+        })
+    }
+
     fn lock_storage(&self) -> Result<RwLockWriteGuard<'_, Pager>> {
         self.storage.write().map_err(|_| {
             HematiteError::InternalError("ByteTreeStore storage lock is poisoned".to_string())
@@ -111,7 +117,7 @@ impl ByteTreeStore {
     }
 
     pub fn read_reserved_blob(&self, page_id: PageId) -> Result<Option<Vec<u8>>> {
-        let mut pager = self.lock_storage()?;
+        let pager = self.lock_storage_read()?;
         match pager.read_page_shared(page_id) {
             Ok(page) => Ok(Some(page.data.clone())),
             Err(err) => {
@@ -163,11 +169,11 @@ impl ByteTreeStore {
     }
 
     pub fn transaction_active(&self) -> Result<bool> {
-        Ok(self.lock_storage()?.transaction_active())
+        Ok(self.lock_storage_read()?.transaction_active())
     }
 
     pub(crate) fn has_pending_changes(&self) -> Result<bool> {
-        Ok(self.lock_storage()?.has_pending_changes())
+        self.lock_storage_read()?.has_pending_changes()
     }
 
     pub(crate) fn snapshot(&self) -> Result<ByteTreeStoreSnapshot> {
@@ -200,7 +206,7 @@ impl ByteTreeStore {
     }
 
     pub fn journal_mode(&self) -> Result<JournalMode> {
-        Ok(self.lock_storage()?.journal_mode())
+        Ok(self.lock_storage_read()?.journal_mode())
     }
 
     pub fn set_journal_mode(&self, journal_mode: JournalMode) -> Result<()> {
@@ -212,27 +218,27 @@ impl ByteTreeStore {
     }
 
     pub fn file_len(&self) -> Result<u64> {
-        self.lock_storage()?.file_len()
+        self.lock_storage_read()?.file_len()
     }
 
     pub fn allocated_page_count(&self) -> Result<usize> {
-        Ok(self.lock_storage()?.allocated_page_count())
+        Ok(self.lock_storage_read()?.allocated_page_count())
     }
 
     pub fn free_page_ids(&self) -> Result<Vec<PageId>> {
-        Ok(self.lock_storage()?.free_pages().to_vec())
+        Ok(self.lock_storage_read()?.free_pages().to_vec())
     }
 
     pub fn fragmented_free_page_count(&self) -> Result<usize> {
-        Ok(self.lock_storage()?.fragmented_free_page_count())
+        Ok(self.lock_storage_read()?.fragmented_free_page_count())
     }
 
     pub fn trailing_free_page_count(&self) -> Result<usize> {
-        Ok(self.lock_storage()?.trailing_free_page_count())
+        Ok(self.lock_storage_read()?.trailing_free_page_count())
     }
 
     pub fn validate_storage(&self) -> Result<PagerIntegrityReport> {
-        self.lock_storage()?.validate_integrity()
+        self.lock_storage_read()?.validate_integrity()
     }
 
     pub fn create_tree(&self) -> Result<PageId> {
@@ -269,14 +275,14 @@ impl ByteTreeStore {
     }
 
     pub fn validate_tree_overflow(&self, root_page_id: PageId) -> Result<()> {
-        let mut pager = self.lock_storage()?;
+        let pager = self.lock_storage_read()?;
         let mut tree_page_ids = Vec::new();
-        collect_tree_page_ids(&mut pager, root_page_id, &mut tree_page_ids)?;
+        collect_tree_page_ids(&pager, root_page_id, &mut tree_page_ids)?;
         let tree_pages = tree_page_ids.into_iter().collect::<HashSet<_>>();
         let free_pages = pager.free_pages().iter().copied().collect::<HashSet<_>>();
         let mut owned_overflow_pages = HashSet::new();
         validate_tree_overflow_pages(
-            &mut pager,
+            &pager,
             root_page_id,
             &tree_pages,
             &free_pages,
@@ -293,15 +299,15 @@ impl ByteTreeStore {
     }
 
     pub fn collect_page_ids(&self, root_page_id: PageId) -> Result<Vec<PageId>> {
-        let mut pager = self.lock_storage()?;
+        let pager = self.lock_storage_read()?;
         let mut page_ids = Vec::new();
-        collect_tree_page_ids(&mut pager, root_page_id, &mut page_ids)?;
+        collect_tree_page_ids(&pager, root_page_id, &mut page_ids)?;
         Ok(page_ids)
     }
 
     pub fn collect_space_stats(&self, root_page_id: PageId) -> Result<TreeSpaceStats> {
-        let mut pager = self.lock_storage()?;
-        collect_tree_space_stats(&mut pager, root_page_id)
+        let pager = self.lock_storage_read()?;
+        collect_tree_space_stats(&pager, root_page_id)
     }
 }
 
@@ -311,6 +317,12 @@ pub struct ByteTree {
 }
 
 impl ByteTree {
+    fn lock_storage_read(&self) -> Result<RwLockReadGuard<'_, Pager>> {
+        self.storage.read().map_err(|_| {
+            HematiteError::InternalError("ByteTree storage lock is poisoned".to_string())
+        })
+    }
+
     fn lock_storage(&self) -> Result<RwLockWriteGuard<'_, Pager>> {
         self.storage.write().map_err(|_| {
             HematiteError::InternalError("ByteTree storage lock is poisoned".to_string())
@@ -342,11 +354,11 @@ impl ByteTree {
         self.index.root_page_id()
     }
 
-    pub fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         match self.index.search_typed::<RawBytesCodec>(&key.to_vec())? {
             Some(stored_value) => {
-                let mut storage = self.lock_storage()?;
-                Ok(Some(hydrate_stored_value(&mut storage, &stored_value)?))
+                let storage = self.lock_storage_read()?;
+                Ok(Some(hydrate_stored_value(&storage, &stored_value)?))
             }
             None => Ok(None),
         }
@@ -390,7 +402,7 @@ impl ByteTree {
             let logical_value = match stored_value {
                 Some(stored_value) => {
                     let mut storage = tree.lock_storage()?;
-                    let logical_value = hydrate_stored_value(&mut storage, &stored_value)?;
+                    let logical_value = hydrate_stored_value(&storage, &stored_value)?;
                     free_stored_value_overflow(&mut storage, &stored_value)?;
                     Some(logical_value)
                 }
@@ -400,7 +412,7 @@ impl ByteTree {
         })
     }
 
-    pub fn entry(&mut self, key: &[u8]) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+    pub fn entry(&self, key: &[u8]) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
         Ok(self.get(key)?.map(|value| (key.to_vec(), value)))
     }
 
@@ -462,7 +474,7 @@ fn free_tree_overflow(storage: &mut Pager, root_page_id: PageId) -> Result<()> {
 }
 
 fn validate_tree_overflow_pages(
-    storage: &mut Pager,
+    storage: &Pager,
     root_page_id: PageId,
     tree_pages: &HashSet<PageId>,
     free_pages: &HashSet<PageId>,
@@ -525,8 +537,8 @@ pub struct ByteTreeCursor {
 }
 
 impl ByteTreeCursor {
-    fn lock_storage(&self) -> Result<RwLockWriteGuard<'_, Pager>> {
-        self.storage.write().map_err(|_| {
+    fn lock_storage(&self) -> Result<RwLockReadGuard<'_, Pager>> {
+        self.storage.read().map_err(|_| {
             HematiteError::InternalError("ByteTreeCursor storage lock is poisoned".to_string())
         })
     }
@@ -558,11 +570,11 @@ impl ByteTreeCursor {
     pub fn current(&self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
         match (self.inner.key_view(), self.inner.value_view()) {
             (Some(key), Some(value)) => {
-                let mut storage = self.lock_storage()?;
+                let storage = self.lock_storage()?;
                 let mut overflow_cache = self.overflow_cache.borrow_mut();
                 Ok(Some((
                     key.to_vec(),
-                    hydrate_stored_value_with_cache(&mut storage, value, &mut overflow_cache)?,
+                    hydrate_stored_value_with_cache(&storage, value, &mut overflow_cache)?,
                 )))
             }
             _ => Ok(None),
