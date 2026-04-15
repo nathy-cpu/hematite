@@ -361,7 +361,6 @@ fn frame_checksum(
     hash
 }
 
-
 fn read_u32_be(bytes: &[u8], offset: usize) -> u32 {
     u32::from_be_bytes([
         bytes[offset],
