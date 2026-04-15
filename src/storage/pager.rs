@@ -106,18 +106,19 @@ use self::cache::PageCache;
 use self::locking::WalReaderRegistration;
 use self::state::PagerLockMode;
 use crate::error::Result;
+use crate::storage::free_list::FreeList;
 use crate::storage::journal::JournalRecord;
 use crate::storage::wal::VisibleWalState;
 use crate::storage::{
-    file_manager::FileManager, file_manager::FileManagerSnapshot, Page, PageId,
-    STORAGE_METADATA_PAGE_ID,
+    file_len_for_next_page_id, file_manager::FileManager, file_manager::FileManagerSnapshot, Page,
+    PageId, DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID,
 };
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::fs::File;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 pub(crate) use self::savepoint::PagerSnapshot;
 pub use self::state::{JournalMode, PagerState};
@@ -127,6 +128,9 @@ pub(crate) struct RollbackTransaction {
     original_file_len: u64,
     original_free_pages: Vec<PageId>,
     original_checksums: HashMap<PageId, u32>,
+    rollback_next_page_id: PageId,
+    rollback_free_list: FreeList,
+    rollback_uninitialized_pages: HashSet<PageId>,
     journaled_pages: HashSet<PageId>,
     page_records: Vec<JournalRecord>,
     savepoints: Vec<RollbackSavepoint>,
@@ -137,6 +141,10 @@ pub(crate) struct RollbackTransaction {
 struct RollbackSavepoint {
     id: u64,
     file_manager: FileManagerSnapshot,
+    rollback_next_page_id: PageId,
+    rollback_free_pages: Vec<PageId>,
+    rollback_free_page_set: HashSet<PageId>,
+    rollback_uninitialized_pages: HashSet<PageId>,
     page_checksums: HashMap<PageId, u32>,
     dirty_pages: Vec<Page>,
     page_records: Vec<JournalRecord>,
@@ -147,6 +155,7 @@ struct RollbackSavepoint {
 pub(crate) struct WalTransaction {
     wal_next_page_id: PageId,
     wal_free_pages: Vec<PageId>,
+    wal_free_page_set: HashSet<PageId>,
     original_checksums: HashMap<PageId, u32>,
 }
 
@@ -156,14 +165,25 @@ pub(crate) enum PagerTransaction {
     Wal(WalTransaction),
 }
 
+#[derive(Debug, Clone)]
+struct WalReadSnapshot {
+    visible_sequence: u64,
+    state: Arc<VisibleWalState>,
+}
+
 fn compact_transaction_free_pages(transaction: &mut WalTransaction) {
     transaction.wal_free_pages.sort_unstable();
     transaction.wal_free_pages.dedup();
+    transaction.wal_free_page_set.clear();
+    transaction
+        .wal_free_page_set
+        .extend(transaction.wal_free_pages.iter().copied());
     while let Some(&last_page_id) = transaction.wal_free_pages.last() {
         if last_page_id + 1 != transaction.wal_next_page_id {
             break;
         }
         transaction.wal_free_pages.pop();
+        transaction.wal_free_page_set.remove(&last_page_id);
         transaction.wal_next_page_id = transaction.wal_next_page_id.saturating_sub(1);
     }
 }
@@ -181,8 +201,8 @@ pub struct Pager {
     rollback_lock_file: Option<File>,
     wal_write_lock_file: Option<File>,
     wal_reader_registration: Option<WalReaderRegistration>,
-    wal_read_snapshot: Option<VisibleWalState>,
-    latest_wal_state: Option<VisibleWalState>,
+    wal_read_snapshot: Option<WalReadSnapshot>,
+    latest_wal_state: Option<Arc<VisibleWalState>>,
     transaction: Option<PagerTransaction>,
     state: PagerState,
     /// Open handle to the rollback journal file for incremental appending.
@@ -194,6 +214,8 @@ pub struct Pager {
     /// Whether the current rollback journal contents must be synced before dirty pages can spill
     /// or flush to the main database file.
     journal_needs_sync: bool,
+    #[cfg(test)]
+    wal_visible_state_reload_count: usize,
 }
 
 impl Pager {
@@ -235,6 +257,8 @@ impl Pager {
             journal_record_count: 0,
             journal_header_len: 0,
             journal_needs_sync: false,
+            #[cfg(test)]
+            wal_visible_state_reload_count: 0,
         };
         pager.recover_if_needed()?;
         pager.load_persisted_state()?;
@@ -264,6 +288,8 @@ impl Pager {
             journal_record_count: 0,
             journal_header_len: 0,
             journal_needs_sync: false,
+            #[cfg(test)]
+            wal_visible_state_reload_count: 0,
         })
     }
 
@@ -319,7 +345,63 @@ impl Pager {
     fn current_wal_visible_state(&self) -> Option<&VisibleWalState> {
         self.wal_read_snapshot
             .as_ref()
-            .or(self.latest_wal_state.as_ref())
+            .map(|snapshot| snapshot.state.as_ref())
+            .or_else(|| self.latest_wal_state.as_ref().map(Arc::as_ref))
+    }
+
+    fn rollback_visible_next_page_id(&self) -> Option<PageId> {
+        self.active_rollback_transaction()
+            .map(|transaction| transaction.rollback_next_page_id)
+    }
+
+    fn rollback_page_is_free(&self, page_id: PageId) -> bool {
+        self.active_rollback_transaction()
+            .map(|transaction| transaction.rollback_free_list.contains(page_id))
+            .unwrap_or(false)
+    }
+
+    fn rollback_page_is_uninitialized(&self, page_id: PageId) -> bool {
+        self.active_rollback_transaction()
+            .map(|transaction| transaction.rollback_uninitialized_pages.contains(&page_id))
+            .unwrap_or(false)
+    }
+
+    pub(super) fn apply_rollback_space_overlay_if_needed(&mut self) -> Result<()> {
+        let Some(transaction) = self.active_rollback_transaction() else {
+            return Ok(());
+        };
+        let next_page_id = transaction.rollback_next_page_id;
+        let free_pages = transaction.rollback_free_list.as_slice().to_vec();
+        self.file_manager
+            .restore_file_len(file_len_for_next_page_id(next_page_id))?;
+        self.file_manager.set_next_page_id(next_page_id);
+        self.file_manager.set_free_pages(free_pages);
+        Ok(())
+    }
+
+    pub(super) fn logical_free_pages(&self) -> &[PageId] {
+        if let Some(transaction) = self.active_rollback_transaction() {
+            transaction.rollback_free_list.as_slice()
+        } else {
+            self.file_manager.free_pages()
+        }
+    }
+
+    pub(super) fn logical_file_len(&self) -> Result<u64> {
+        if let Some(next_page_id) = self.rollback_visible_next_page_id() {
+            return Ok(file_len_for_next_page_id(next_page_id));
+        }
+        self.file_manager.file_len()
+    }
+
+    pub(super) fn can_deallocate_page(page_id: PageId) -> Result<()> {
+        if page_id == DB_HEADER_PAGE_ID || page_id == STORAGE_METADATA_PAGE_ID {
+            return Err(crate::error::HematiteError::StorageError(format!(
+                "Cannot deallocate reserved page {}",
+                page_id
+            )));
+        }
+        Ok(())
     }
 
     fn cache_read(&self) -> Result<RwLockReadGuard<'_, PageCache>> {

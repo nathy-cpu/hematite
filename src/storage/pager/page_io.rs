@@ -16,9 +16,24 @@ impl Pager {
             return Ok(page);
         }
 
+        if let Some(transaction_next_page_id) = self.rollback_visible_next_page_id() {
+            if page_id >= transaction_next_page_id || self.rollback_page_is_free(page_id) {
+                return Err(crate::error::HematiteError::StorageError(format!(
+                    "Page {} is not allocated in the active rollback transaction",
+                    page_id
+                )));
+            }
+            if self.rollback_page_is_uninitialized(page_id) {
+                let page = Arc::new(Page::new(page_id));
+                self.cache_write()?
+                    .put_shared_with_view(page.clone(), view_token);
+                return Ok(page);
+            }
+        }
+
         if self.journal_mode == JournalMode::Wal {
             if let Some(transaction) = self.active_wal_transaction() {
-                if transaction.wal_free_pages.contains(&page_id)
+                if transaction.wal_free_page_set.contains(&page_id)
                     && page_id < transaction.wal_next_page_id
                 {
                     return Err(crate::error::HematiteError::StorageError(format!(
@@ -33,7 +48,7 @@ impl Pager {
                     .unwrap_or_else(|| self.file_manager.next_page_id());
                 let base_page_is_free = base_visible_state
                     .map(|state| state.is_page_free(page_id))
-                    .unwrap_or_else(|| self.file_manager.free_pages().contains(&page_id));
+                    .unwrap_or_else(|| self.file_manager.is_free_page(page_id));
 
                 if (page_id >= base_visible_next_page_id || base_page_is_free)
                     && page_id < transaction.wal_next_page_id
@@ -100,14 +115,28 @@ impl Pager {
         self.check_error_state()?;
         let page_id = page.id;
         self.snapshot_original_page(page_id)?;
+        if let Some(transaction) = self.active_rollback_transaction_mut() {
+            transaction.rollback_uninitialized_pages.remove(&page_id);
+        }
         if page_id != STORAGE_METADATA_PAGE_ID {
             self.page_checksums
                 .insert(page_id, Self::calculate_page_checksum(&page));
         }
+        let rollback_transaction_active = self.active_rollback_transaction().is_some();
+        let journal_needs_sync = self.journal_needs_sync;
         {
             let cache = self.cache_mut()?;
             cache.put(page);
             cache.mark_dirty(page_id);
+            if rollback_transaction_active {
+                // New pages do not have a pre-transaction image, so they are not journaled by
+                // snapshot_original_page. Mark them as spill-eligible once the journal sync
+                // barrier has been satisfied.
+                cache.mark_journaled(page_id);
+                if journal_needs_sync {
+                    cache.mark_need_sync(page_id);
+                }
+            }
         }
         if self.transaction.is_some() {
             self.transition_state(PagerState::WriterCacheMod)?;
@@ -129,6 +158,7 @@ impl Pager {
     fn spill_pages(&mut self) -> Result<()> {
         if self.active_rollback_transaction().is_some() {
             self.sync_rollback_journal()?;
+            self.apply_rollback_space_overlay_if_needed()?;
         }
         let candidates = self.cache_read()?.spillable_candidates();
         for page_id in candidates {
@@ -161,6 +191,7 @@ impl Pager {
         self.stage_persisted_state_page()?;
         if self.active_rollback_transaction().is_some() {
             self.sync_rollback_journal()?;
+            self.apply_rollback_space_overlay_if_needed()?;
         }
 
         let dirty_ids = self.cache_read()?.dirty_page_ids();

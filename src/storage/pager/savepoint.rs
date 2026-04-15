@@ -70,6 +70,15 @@ impl Pager {
             RollbackSavepoint {
                 id: transaction.next_savepoint_id,
                 file_manager,
+                rollback_next_page_id: transaction.rollback_next_page_id,
+                rollback_free_pages: transaction.rollback_free_list.as_slice().to_vec(),
+                rollback_free_page_set: transaction
+                    .rollback_free_list
+                    .as_slice()
+                    .iter()
+                    .copied()
+                    .collect(),
+                rollback_uninitialized_pages: transaction.rollback_uninitialized_pages.clone(),
                 page_checksums,
                 dirty_pages,
                 page_records: Vec::new(),
@@ -128,6 +137,11 @@ impl Pager {
                 "Rollback transaction disappeared during savepoint restore".to_string(),
             )
         })?;
+        transaction.rollback_next_page_id = savepoint.rollback_next_page_id;
+        transaction
+            .rollback_free_list
+            .replace(savepoint.rollback_free_pages.clone());
+        transaction.rollback_uninitialized_pages = savepoint.rollback_uninitialized_pages.clone();
         transaction.savepoints.truncate(position + 1);
         self.sync_rollback_journal_from_transaction()?;
         self.state = if self.cache_mut()?.dirty_page_ids().is_empty() {

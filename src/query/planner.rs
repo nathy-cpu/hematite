@@ -32,7 +32,7 @@ impl QueryPlanner {
     pub fn plan(&self, statement: Statement) -> Result<QueryPlan> {
         // Validate statement against catalog
         validate_statement(&statement, &self.catalog)?;
-        
+
         // Logical optimization
         let optimizer = QueryOptimizer::new(self.catalog.clone());
         let optimized_stmt = optimizer.optimize_statement(statement)?;

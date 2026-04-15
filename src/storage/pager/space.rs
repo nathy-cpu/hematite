@@ -6,9 +6,22 @@ use std::collections::HashMap;
 impl Pager {
     pub fn allocate_page(&mut self) -> Result<PageId> {
         self.check_error_state()?;
+        if let Some(transaction) = self.active_rollback_transaction_mut() {
+            let page_id = if let Some(page_id) = transaction.rollback_free_list.pop_free_page() {
+                page_id
+            } else {
+                let page_id = transaction.rollback_next_page_id;
+                transaction.rollback_next_page_id =
+                    transaction.rollback_next_page_id.saturating_add(1);
+                page_id
+            };
+            transaction.rollback_uninitialized_pages.insert(page_id);
+            return Ok(page_id);
+        }
         if self.journal_mode == JournalMode::Wal {
             if let Some(transaction) = self.active_wal_transaction_mut() {
                 if let Some(page_id) = transaction.wal_free_pages.pop() {
+                    transaction.wal_free_page_set.remove(&page_id);
                     return Ok(page_id);
                 }
                 let page_id = transaction.wal_next_page_id;
@@ -21,12 +34,24 @@ impl Pager {
 
     pub fn deallocate_page(&mut self, page_id: PageId) -> Result<()> {
         self.check_error_state()?;
+        Self::can_deallocate_page(page_id)?;
         self.snapshot_original_page(page_id)?;
         self.cache_mut()?.remove(page_id);
         self.page_checksums.remove(&page_id);
+        if let Some(transaction) = self.active_rollback_transaction_mut() {
+            transaction.rollback_uninitialized_pages.remove(&page_id);
+            if !transaction.rollback_free_list.contains(page_id) {
+                transaction.rollback_free_list.push_free_page(page_id);
+            }
+            transaction.rollback_free_list.compact_trailing_pages(
+                &mut transaction.rollback_next_page_id,
+                crate::storage::FIRST_ALLOCATABLE_PAGE_ID,
+            );
+            return Ok(());
+        }
         if self.journal_mode == JournalMode::Wal {
             if let Some(transaction) = self.active_wal_transaction_mut() {
-                if !transaction.wal_free_pages.contains(&page_id) {
+                if transaction.wal_free_page_set.insert(page_id) {
                     transaction.wal_free_pages.push(page_id);
                 }
                 compact_transaction_free_pages(transaction);

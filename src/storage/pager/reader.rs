@@ -1,4 +1,4 @@
-use super::{JournalMode, Pager, PagerLockMode, PagerState};
+use super::{JournalMode, Pager, PagerLockMode, PagerState, WalReadSnapshot};
 use crate::error::Result;
 
 impl Pager {
@@ -23,7 +23,10 @@ impl Pager {
                 let _ = self.leave_reader_scope();
                 return Err(err);
             }
-            self.wal_read_snapshot = Some(snapshot);
+            self.wal_read_snapshot = Some(WalReadSnapshot {
+                visible_sequence: snapshot.visible_sequence,
+                state: snapshot,
+            });
         }
         if !matches!(self.lock_mode, PagerLockMode::Write) {
             self.transition_state(PagerState::Reader)?;

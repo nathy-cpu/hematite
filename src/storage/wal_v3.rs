@@ -4,7 +4,7 @@ use crate::error::{HematiteError, Result};
 use crate::storage::PAGE_SIZE;
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 const V3_WAL_MAGIC: &[u8; 4] = b"HTW3";
@@ -119,6 +119,37 @@ impl V3WalFrame {
         bytes.extend_from_slice(&checksum.to_be_bytes());
         bytes.extend_from_slice(&self.page_bytes);
         Ok(bytes)
+    }
+
+    pub(crate) fn write_to(&self, header: &V3WalHeader, file: &mut std::fs::File) -> Result<()> {
+        if self.page_bytes.len() != PAGE_SIZE {
+            return Err(HematiteError::StorageError(format!(
+                "v3 WAL frame for page {} has invalid image size {}",
+                self.page_number,
+                self.page_bytes.len()
+            )));
+        }
+
+        let checksum = frame_checksum(
+            self.page_number,
+            self.database_page_count,
+            self.commit_sequence,
+            header.salt_1,
+            header.salt_2,
+            &self.page_bytes,
+        );
+
+        let mut prefix = [0u8; V3_WAL_FRAME_PREFIX_SIZE];
+        prefix[..4].copy_from_slice(&self.page_number.to_be_bytes());
+        prefix[4..8].copy_from_slice(&self.database_page_count.to_be_bytes());
+        prefix[8..16].copy_from_slice(&self.commit_sequence.to_be_bytes());
+        prefix[16..20].copy_from_slice(&header.salt_1.to_be_bytes());
+        prefix[20..24].copy_from_slice(&header.salt_2.to_be_bytes());
+        prefix[24..28].copy_from_slice(&checksum.to_be_bytes());
+
+        file.write_all(&prefix)?;
+        file.write_all(&self.page_bytes)?;
+        Ok(())
     }
 
     pub(crate) fn decode(bytes: &[u8], header: &V3WalHeader) -> Result<(Self, usize)> {
@@ -246,10 +277,10 @@ impl V3WalFile {
                 "Existing v3 WAL file has a truncated header".to_string(),
             ));
         } else {
-            let existing_header = {
-                let bytes = fs::read(path)?;
-                V3WalHeader::decode(&bytes)?
-            };
+            let mut bytes = [0u8; V3_WAL_HEADER_SIZE];
+            file.seek(SeekFrom::Start(0))?;
+            file.read_exact(&mut bytes)?;
+            let existing_header = V3WalHeader::decode(&bytes)?;
             if existing_header.page_size != header.page_size
                 || existing_header.salt_1 != header.salt_1
                 || existing_header.salt_2 != header.salt_2
@@ -258,13 +289,34 @@ impl V3WalFile {
                     "Existing v3 WAL header does not match append request".to_string(),
                 ));
             }
+            file.seek(SeekFrom::End(0))?;
         }
 
         for frame in frames {
-            file.write_all(&frame.encode(header)?)?;
+            frame.write_to(header, &mut file)?;
         }
         file.sync_all()?;
         Ok(())
+    }
+
+    pub(crate) fn load_header_from_path<P: AsRef<Path>>(path: P) -> Result<Option<V3WalHeader>> {
+        let mut file = match OpenOptions::new().read(true).open(path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err.into()),
+        };
+        let metadata_len = file.metadata()?.len();
+        if metadata_len == 0 {
+            return Ok(None);
+        }
+        if metadata_len < V3_WAL_HEADER_SIZE as u64 {
+            return Err(HematiteError::StorageError(
+                "v3 WAL header is truncated".to_string(),
+            ));
+        }
+        let mut bytes = [0u8; V3_WAL_HEADER_SIZE];
+        file.read_exact(&mut bytes)?;
+        Ok(Some(V3WalHeader::decode(&bytes)?))
     }
 }
 
@@ -289,24 +341,26 @@ fn frame_checksum(
     salt_2: u32,
     page_bytes: &[u8],
 ) -> u32 {
-    let mut bytes = Vec::with_capacity(4 + 4 + 8 + 4 + 4 + page_bytes.len());
-    bytes.extend_from_slice(&page_number.to_be_bytes());
-    bytes.extend_from_slice(&database_page_count.to_be_bytes());
-    bytes.extend_from_slice(&commit_sequence.to_be_bytes());
-    bytes.extend_from_slice(&salt_1.to_be_bytes());
-    bytes.extend_from_slice(&salt_2.to_be_bytes());
-    bytes.extend_from_slice(page_bytes);
-    checksum_bytes(&bytes)
-}
-
-fn checksum_bytes(bytes: &[u8]) -> u32 {
     let mut hash: u32 = 0x811C9DC5;
-    for byte in bytes {
-        hash ^= u32::from(*byte);
-        hash = hash.wrapping_mul(0x01000193);
+    macro_rules! feed_bytes {
+        ($slice:expr) => {
+            for b in $slice {
+                hash ^= u32::from(*b);
+                hash = hash.wrapping_mul(0x01000193);
+            }
+        };
     }
+
+    feed_bytes!(&page_number.to_be_bytes());
+    feed_bytes!(&database_page_count.to_be_bytes());
+    feed_bytes!(&commit_sequence.to_be_bytes());
+    feed_bytes!(&salt_1.to_be_bytes());
+    feed_bytes!(&salt_2.to_be_bytes());
+    feed_bytes!(page_bytes);
+
     hash
 }
+
 
 fn read_u32_be(bytes: &[u8], offset: usize) -> u32 {
     u32::from_be_bytes([

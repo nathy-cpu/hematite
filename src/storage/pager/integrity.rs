@@ -16,6 +16,13 @@ impl Pager {
                     state.page_checksums.clone(),
                     state.page_overrides.clone(),
                 )
+            } else if let Some(transaction) = self.active_rollback_transaction() {
+                (
+                    transaction.rollback_next_page_id,
+                    transaction.rollback_free_list.as_slice().to_vec(),
+                    self.page_checksums.clone(),
+                    std::collections::HashMap::new(),
+                )
             } else {
                 (
                     self.file_manager.next_page_id(),

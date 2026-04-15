@@ -98,7 +98,7 @@ impl Pager {
             self.file_manager.write_page(&page)?;
         }
         self.file_manager.flush()?;
-        self.page_checksums = state.page_checksums;
+        self.page_checksums = state.page_checksums.clone();
         self.latest_wal_state = None;
         self.wal_read_snapshot = None;
         self.cache_mut()?.reset();

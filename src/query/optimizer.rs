@@ -176,9 +176,7 @@ impl QueryOptimizer {
                     self.optimize_expression(value)?;
                 }
             }
-            Condition::InSubquery {
-                expr, subquery, ..
-            } => {
+            Condition::InSubquery { expr, subquery, .. } => {
                 self.optimize_expression(expr)?;
                 self.optimize_select(subquery)?;
             }
@@ -368,7 +366,10 @@ impl QueryOptimizer {
                 }
 
                 if let Expression::Literal(probe) = inner.as_ref() {
-                    if values.iter().all(|value| matches!(value, Expression::Literal(_))) {
+                    if values
+                        .iter()
+                        .all(|value| matches!(value, Expression::Literal(_)))
+                    {
                         let literals = values
                             .iter()
                             .filter_map(|value| match value {
@@ -725,7 +726,11 @@ fn fold_between_literals(
     let upper_ok =
         literal_partial_cmp(probe, upper).map(|ordering| ordering != Ordering::Greater)?;
     let matched = lower_ok && upper_ok;
-    Some(LiteralValue::Boolean(if is_not { !matched } else { matched }))
+    Some(LiteralValue::Boolean(if is_not {
+        !matched
+    } else {
+        matched
+    }))
 }
 
 fn like_matches(pattern: &str, text: &str) -> bool {

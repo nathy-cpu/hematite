@@ -31,12 +31,19 @@ use crate::storage::format::{
 };
 use crate::storage::free_list::FreeList;
 use crate::storage::{
-    file_len_for_next_page_id, next_page_id_for_file_len, Page, PageId, FIRST_ALLOCATABLE_PAGE_ID,
-    PAGE_SIZE,
+    file_len_for_next_page_id, next_page_id_for_file_len, Page, PageId, DB_HEADER_PAGE_ID,
+    FIRST_ALLOCATABLE_PAGE_ID, PAGE_SIZE, STORAGE_METADATA_PAGE_ID,
 };
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::io::{Seek, SeekFrom, Write};
+use std::path::Path;
+
+#[cfg(not(any(unix, windows)))]
+use std::io::Read;
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
+#[cfg(windows)]
+use std::os::windows::fs::FileExt;
 
 #[derive(Debug)]
 pub struct FileManager {
@@ -54,33 +61,22 @@ pub(crate) struct FileManagerSnapshot {
     free_pages: Vec<PageId>,
 }
 
-impl FileManagerSnapshot {
-    pub(crate) fn file_len(&self) -> u64 {
-        self.file_len
-    }
-
-    pub(crate) fn free_pages(&self) -> &[PageId] {
-        &self.free_pages
-    }
-}
-
 #[derive(Debug)]
 enum FileBackend {
-    Disk { file: File, path: PathBuf },
+    Disk { file: File },
     Memory(Vec<u8>),
 }
 
 impl FileManager {
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let path = path.as_ref().to_path_buf();
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
-            .open(&path)?;
+            .open(path.as_ref())?;
 
         let manager = Self {
-            backend: FileBackend::Disk { file, path },
+            backend: FileBackend::Disk { file },
             position: 0,
             next_page_id: 0,
             free_list: FreeList::new(),
@@ -226,6 +222,12 @@ impl FileManager {
     }
 
     pub fn deallocate_page(&mut self, page_id: PageId) -> Result<()> {
+        if page_id == DB_HEADER_PAGE_ID || page_id == STORAGE_METADATA_PAGE_ID {
+            return Err(crate::error::HematiteError::StorageError(format!(
+                "Cannot deallocate reserved page {}",
+                page_id
+            )));
+        }
         // Add to free list for reuse
         self.free_list.push_free_page(page_id);
         self.compact_trailing_free_pages()?;
@@ -233,6 +235,9 @@ impl FileManager {
     }
 
     pub fn deallocate_page_deferred(&mut self, page_id: PageId) {
+        if page_id == DB_HEADER_PAGE_ID || page_id == STORAGE_METADATA_PAGE_ID {
+            return;
+        }
         self.free_list.push_free_page(page_id);
     }
 
@@ -242,6 +247,10 @@ impl FileManager {
 
     pub fn set_free_pages(&mut self, free_pages: Vec<PageId>) {
         self.free_list.replace(free_pages);
+    }
+
+    pub fn is_free_page(&self, page_id: PageId) -> bool {
+        self.free_list.contains(page_id)
     }
 
     pub fn file_len(&self) -> Result<u64> {
@@ -263,6 +272,10 @@ impl FileManager {
         self.next_page_id
     }
 
+    pub(crate) fn set_next_page_id(&mut self, next_page_id: u32) {
+        self.next_page_id = next_page_id.max(FIRST_ALLOCATABLE_PAGE_ID);
+    }
+
     pub(crate) fn allocated_page_count(&self) -> usize {
         self.next_page_id.saturating_sub(FIRST_ALLOCATABLE_PAGE_ID) as usize
     }
@@ -276,7 +289,7 @@ impl FileManager {
         let mut candidate = self.next_page_id;
         while candidate > FIRST_ALLOCATABLE_PAGE_ID {
             let page_id = candidate - 1;
-            if self.free_list.as_slice().contains(&page_id) {
+            if self.free_list.contains(page_id) {
                 count += 1;
                 candidate -= 1;
             } else {
@@ -339,10 +352,17 @@ impl FileManager {
 
     fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
         match &self.backend {
-            FileBackend::Disk { path, .. } => {
-                let mut file = File::open(path)?;
-                file.seek(SeekFrom::Start(offset))?;
-                file.read_exact(buf)?;
+            FileBackend::Disk { file } => {
+                #[cfg(any(unix, windows))]
+                {
+                    read_exact_at_position(file, offset, buf)?;
+                }
+                #[cfg(not(any(unix, windows)))]
+                {
+                    let mut clone = file.try_clone()?;
+                    clone.seek(SeekFrom::Start(offset))?;
+                    clone.read_exact(buf)?;
+                }
             }
             FileBackend::Memory(buffer) => {
                 let offset = offset as usize;
@@ -432,6 +452,26 @@ impl FileManager {
     }
 }
 
+#[cfg(any(unix, windows))]
+fn read_exact_at_position(file: &File, mut offset: u64, mut buf: &mut [u8]) -> std::io::Result<()> {
+    while !buf.is_empty() {
+        #[cfg(unix)]
+        let bytes_read = file.read_at(buf, offset)?;
+        #[cfg(windows)]
+        let bytes_read = file.seek_read(buf, offset)?;
+        if bytes_read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "failed to fill whole buffer",
+            ));
+        }
+        offset = offset.saturating_add(bytes_read as u64);
+        let (_, tail) = buf.split_at_mut(bytes_read);
+        buf = tail;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 impl FileManager {
     pub fn inject_write_failure(&mut self) {
@@ -499,5 +539,20 @@ mod tests {
         assert_eq!(&page_one[..16], b"Hematite format3");
         assert_eq!(page_one[100], PageKind::LeafTable as u8);
         assert_eq!(manager.file_len().unwrap(), 4096);
+    }
+
+    #[test]
+    fn deallocate_reserved_pages_are_rejected() {
+        let mut manager = FileManager::new_in_memory().unwrap();
+
+        let page_zero_err = manager.deallocate_page(0).unwrap_err();
+        assert!(page_zero_err
+            .to_string()
+            .contains("Cannot deallocate reserved page 0"));
+
+        let page_one_err = manager.deallocate_page(1).unwrap_err();
+        assert!(page_one_err
+            .to_string()
+            .contains("Cannot deallocate reserved page 1"));
     }
 }

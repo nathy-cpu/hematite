@@ -21,6 +21,7 @@ pub struct VisibleWalState {
     pub visible_sequence: u64,
     pub file_len: u64,
     pub free_pages: Vec<PageId>,
+    pub free_page_set: HashSet<PageId>,
     pub page_checksums: HashMap<PageId, u32>,
     pub page_overrides: HashMap<PageId, Vec<u8>>,
 }
@@ -31,10 +32,12 @@ impl VisibleWalState {
         free_pages: Vec<PageId>,
         page_checksums: HashMap<PageId, u32>,
     ) -> Self {
+        let free_page_set = free_pages.iter().copied().collect();
         Self {
             visible_sequence: 0,
             file_len,
             free_pages,
+            free_page_set,
             page_checksums,
             page_overrides: HashMap::new(),
         }
@@ -42,21 +45,38 @@ impl VisibleWalState {
 
     #[allow(dead_code)]
     pub fn apply_record(&self, record: &WalRecord) -> Result<Self> {
-        if record.sequence <= self.visible_sequence {
+        let mut next = self.clone();
+        next.apply_committed_delta(
+            record.sequence,
+            record.file_len,
+            record.free_pages.clone(),
+            record.checksums.iter().copied().collect(),
+            &record.frames,
+        )?;
+        Ok(next)
+    }
+
+    pub fn apply_committed_delta(
+        &mut self,
+        sequence: u64,
+        file_len: u64,
+        free_pages: Vec<PageId>,
+        page_checksums: HashMap<PageId, u32>,
+        frames: &[WalFrame],
+    ) -> Result<()> {
+        if sequence <= self.visible_sequence {
             return Err(HematiteError::StorageError(
                 "WAL sequences must increase strictly".to_string(),
             ));
         }
 
-        let visible_next_page_id = visible_next_page_id(record.file_len);
-        let free_page_set = record.free_pages.iter().copied().collect::<HashSet<_>>();
-
-        let mut page_overrides = self.page_overrides.clone();
-        page_overrides.retain(|page_id, _| {
+        let visible_next_page_id = visible_next_page_id(file_len);
+        let free_page_set = free_pages.iter().copied().collect::<HashSet<_>>();
+        self.page_overrides.retain(|page_id, _| {
             *page_id < visible_next_page_id && !free_page_set.contains(page_id)
         });
 
-        for frame in &record.frames {
+        for frame in frames {
             if frame.data.len() != PAGE_SIZE {
                 return Err(HematiteError::StorageError(format!(
                     "WAL frame {} has invalid image size {}",
@@ -73,19 +93,19 @@ impl VisibleWalState {
             if free_page_set.contains(&frame.page_id) {
                 return Err(HematiteError::StorageError(format!(
                     "WAL record {} marks page {} free and dirty",
-                    record.sequence, frame.page_id
+                    sequence, frame.page_id
                 )));
             }
-            page_overrides.insert(frame.page_id, frame.data.clone());
+            self.page_overrides
+                .insert(frame.page_id, frame.data.clone());
         }
 
-        Ok(Self {
-            visible_sequence: record.sequence,
-            file_len: record.file_len,
-            free_pages: record.free_pages.clone(),
-            page_checksums: record.checksums.iter().copied().collect(),
-            page_overrides,
-        })
+        self.visible_sequence = sequence;
+        self.file_len = file_len;
+        self.free_pages = free_pages;
+        self.free_page_set = free_page_set;
+        self.page_checksums = page_checksums;
+        Ok(())
     }
 
     pub fn visible_next_page_id(&self) -> PageId {
@@ -97,7 +117,7 @@ impl VisibleWalState {
     }
 
     pub fn is_page_free(&self, page_id: PageId) -> bool {
-        self.free_pages.contains(&page_id)
+        self.free_page_set.contains(&page_id)
     }
 
     pub fn page_bytes(&self, page_id: PageId) -> Option<&[u8]> {
@@ -163,28 +183,52 @@ pub(crate) fn load_visible_state_from_path_with_base<P: AsRef<Path>>(
         file_len_for_next_page_id(database_page_count)
     };
 
-    let metadata_page_bytes = page_overrides_btree
-        .get(&STORAGE_METADATA_PAGE_ID)
-        .map(Vec::as_slice)
-        .unwrap_or(baseline_metadata_page);
-
-    let persisted =
-        parse_metadata_page(metadata_page_bytes).unwrap_or_else(|| PersistedPagerState {
+    let metadata_frame_present = page_overrides_btree.contains_key(&STORAGE_METADATA_PAGE_ID);
+    let persisted = if metadata_frame_present {
+        let metadata_page_bytes = page_overrides_btree
+            .get(&STORAGE_METADATA_PAGE_ID)
+            .map(Vec::as_slice)
+            .unwrap_or(baseline_metadata_page);
+        match parse_metadata_page(metadata_page_bytes) {
+            Ok(Some(persisted)) => persisted,
+            Ok(None) => {
+                return Err(HematiteError::CorruptedData(
+                    "Committed WAL metadata frame is missing pager metadata".to_string(),
+                ))
+            }
+            Err(err) => {
+                return Err(HematiteError::CorruptedData(format!(
+                    "Committed WAL metadata frame is malformed: {}",
+                    err
+                )))
+            }
+        }
+    } else {
+        PersistedPagerState {
             journal_mode: JournalMode::Wal,
             free_pages: baseline_free_pages,
             checksums: baseline_checksums,
-        });
+        }
+    };
 
     let visible_next_page_id = next_page_id_for_file_len(file_len);
     let free_page_set = persisted.free_pages.iter().copied().collect::<HashSet<_>>();
     page_overrides_btree
         .retain(|page_id, _| *page_id < visible_next_page_id && !free_page_set.contains(page_id));
 
+    let PersistedPagerState {
+        journal_mode: _,
+        free_pages,
+        checksums,
+    } = persisted;
+    let free_page_set = free_pages.iter().copied().collect();
+
     Ok(Some(VisibleWalState {
         visible_sequence: latest_sequence,
         file_len,
-        free_pages: persisted.free_pages,
-        page_checksums: persisted.checksums,
+        free_pages,
+        free_page_set,
+        page_checksums: checksums,
         page_overrides: page_overrides_btree.into_iter().collect(),
     }))
 }
@@ -237,11 +281,11 @@ impl WalRecord {
                 });
             }
 
-            let persisted = parse_metadata_page(&metadata_page).unwrap_or(PersistedPagerState {
-                journal_mode: JournalMode::Wal,
-                free_pages: Vec::new(),
-                checksums: HashMap::new(),
-            });
+            let persisted = parse_metadata_page(&metadata_page)?.ok_or_else(|| {
+                HematiteError::CorruptedData(
+                    "Committed WAL metadata frame is missing pager metadata".to_string(),
+                )
+            })?;
 
             let mut checksums = persisted.checksums.into_iter().collect::<Vec<_>>();
             checksums.sort_by_key(|(page_id, _)| *page_id);
@@ -329,9 +373,7 @@ impl WalRecord {
 }
 
 fn existing_or_default_header(path: &Path) -> Result<V3WalHeader> {
-    Ok(V3WalFile::load_from_path(path)?
-        .map(|wal| wal.header)
-        .unwrap_or_default())
+    Ok(V3WalFile::load_header_from_path(path)?.unwrap_or_default())
 }
 
 fn synthesize_v3_frames(
@@ -363,7 +405,6 @@ fn synthesize_v3_frames(
     let metadata_page_bytes = metadata_page::write_pager_metadata(&base_page, &metadata_payload)?;
 
     let mut v3_frames = Vec::with_capacity(frames.len() + 1);
-    let mut saw_metadata_page = false;
     for frame in frames {
         if frame.data.len() != PAGE_SIZE {
             return Err(HematiteError::StorageError(format!(
@@ -373,7 +414,6 @@ fn synthesize_v3_frames(
             )));
         }
         if frame.page_id == STORAGE_METADATA_PAGE_ID {
-            saw_metadata_page = true;
             continue;
         }
         v3_frames.push(V3WalFrame {
@@ -384,7 +424,6 @@ fn synthesize_v3_frames(
         });
     }
 
-    let _ = saw_metadata_page;
     v3_frames.push(V3WalFrame {
         page_number: STORAGE_METADATA_PAGE_ID,
         database_page_count,
@@ -394,9 +433,11 @@ fn synthesize_v3_frames(
     Ok(v3_frames)
 }
 
-fn parse_metadata_page(bytes: &[u8]) -> Option<PersistedPagerState> {
-    let metadata_bytes = metadata_page::read_pager_metadata(bytes).ok()??;
-    PersistedPagerState::decode_bytes(&metadata_bytes, 1).ok()
+fn parse_metadata_page(bytes: &[u8]) -> Result<Option<PersistedPagerState>> {
+    let Some(metadata_bytes) = metadata_page::read_pager_metadata(bytes)? else {
+        return Ok(None);
+    };
+    Ok(Some(PersistedPagerState::decode_bytes(&metadata_bytes, 1)?))
 }
 
 fn visible_next_page_id(file_len: u64) -> PageId {

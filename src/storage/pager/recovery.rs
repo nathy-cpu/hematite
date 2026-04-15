@@ -8,12 +8,14 @@ use crate::storage::wal::{
     WalFrame,
 };
 use crate::storage::{
-    metadata_page, next_page_id_for_file_len, Page, PageId, PAGE_SIZE, STORAGE_METADATA_PAGE_ID,
+    file_len_for_next_page_id, metadata_page, next_page_id_for_file_len, Page, PageId, PAGE_SIZE,
+    STORAGE_METADATA_PAGE_ID,
 };
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 impl Pager {
     fn legacy_checksum_store_path(db_path: &Path) -> PathBuf {
@@ -99,19 +101,24 @@ impl Pager {
         self.load_latest_wal_state()
     }
 
-    pub(super) fn snapshot_wal_visible_state(&mut self) -> Result<VisibleWalState> {
+    pub(super) fn snapshot_wal_visible_state(&mut self) -> Result<Arc<VisibleWalState>> {
         if let Some(state) = &self.latest_wal_state {
             return Ok(state.clone());
         }
 
-        Ok(VisibleWalState::from_database_state(
-            self.file_manager.file_len()?,
-            self.file_manager.free_pages().to_vec(),
+        Ok(Arc::new(VisibleWalState::from_database_state(
+            self.logical_file_len()?,
+            self.logical_free_pages().to_vec(),
             self.page_checksums.clone(),
-        ))
+        )))
     }
 
     pub(super) fn load_latest_wal_state(&mut self) -> Result<()> {
+        #[cfg(test)]
+        {
+            self.wal_visible_state_reload_count =
+                self.wal_visible_state_reload_count.saturating_add(1);
+        }
         if self.journal_mode != JournalMode::Wal {
             self.latest_wal_state = None;
             return Ok(());
@@ -129,14 +136,15 @@ impl Pager {
             self.file_manager.free_pages().to_vec(),
             self.page_checksums.clone(),
             &metadata_page.data,
-        )?;
+        )?
+        .map(Arc::new);
         Ok(())
     }
 
     fn encoded_persisted_state_page(&mut self) -> Result<Page> {
         let contents = PersistedPagerState {
             journal_mode: self.journal_mode,
-            free_pages: self.file_manager.free_pages().to_vec(),
+            free_pages: self.logical_free_pages().to_vec(),
             checksums: self.page_checksums.clone(),
         }
         .encode(Self::CHECKSUM_METADATA_VERSION);
@@ -186,7 +194,8 @@ impl Pager {
             return Ok(());
         }
 
-        let page_end = page_id as u64 * PAGE_SIZE as u64;
+        let page_start = page_id as u64 * PAGE_SIZE as u64;
+        let page_end = page_start.saturating_add(PAGE_SIZE as u64);
         if page_end > transaction.original_file_len {
             return Ok(());
         }
@@ -199,8 +208,8 @@ impl Pager {
 
         if let Some(transaction) = self.active_rollback_transaction_mut() {
             for savepoint in &mut transaction.savepoints {
-                let live_at_savepoint = page_end <= savepoint.file_manager.file_len()
-                    && !savepoint.file_manager.free_pages().contains(&page_id);
+                let live_at_savepoint = page_id < savepoint.rollback_next_page_id
+                    && !savepoint.rollback_free_page_set.contains(&page_id);
                 if live_at_savepoint && savepoint.captured_page_ids.insert(page_id) {
                     savepoint.page_records.push(JournalRecord {
                         page_id,
@@ -538,7 +547,23 @@ impl Pager {
                 &frames,
             )?;
         }
-        self.load_latest_wal_state()?;
+        let mut updated_visible_state = if let Some(state) = &self.latest_wal_state {
+            state.as_ref().clone()
+        } else {
+            VisibleWalState::from_database_state(
+                self.file_manager.file_len()?,
+                self.file_manager.free_pages().to_vec(),
+                self.page_checksums.clone(),
+            )
+        };
+        updated_visible_state.apply_committed_delta(
+            next_sequence,
+            file_len_for_next_page_id(wal_next_page_id),
+            wal_free_pages.clone(),
+            self.page_checksums.clone(),
+            &frames,
+        )?;
+        self.latest_wal_state = Some(Arc::new(updated_visible_state));
         let committed_view_token = self.cache_view_token();
         let dirty_ids = self.cache_mut()?.dirty_page_ids();
         for page_id in dirty_ids {

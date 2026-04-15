@@ -6,8 +6,6 @@ use crate::parser::ast::{
     DropStatement, InsertStatement, SelectStatement, UpdateStatement,
 };
 
-
-
 pub struct QueryPlan {
     pub node: PlanNode,
     pub program: ExecutionProgram,

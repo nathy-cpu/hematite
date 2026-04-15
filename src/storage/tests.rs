@@ -43,8 +43,15 @@ mod freelist_tests {
 
 mod wal_tests {
     use crate::storage::file_len_for_next_page_id;
-    use crate::storage::wal::{VisibleWalState, WalFrame, WalRecord};
+    use crate::storage::metadata_page;
+    use crate::storage::wal::{
+        load_visible_state_from_path_with_base, VisibleWalState, WalFrame, WalRecord,
+    };
+    use crate::storage::wal_v3::{V3WalFile, V3WalFrame, V3WalHeader};
+    use crate::storage::{PAGE_SIZE, STORAGE_METADATA_PAGE_ID};
+    use crate::test_utils::TestDbFile;
     use std::collections::HashMap;
+    use std::fs;
 
     #[test]
     fn test_wal_record_file_roundtrip() -> crate::error::Result<()> {
@@ -188,6 +195,40 @@ mod wal_tests {
             .to_string()
             .contains("WAL sequences must increase strictly"));
     }
+
+    #[test]
+    fn test_wal_visible_state_rejects_malformed_committed_metadata_frame(
+    ) -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_wal_rejects_malformed_committed_metadata");
+        let wal_path = std::path::PathBuf::from(format!("{}.wal", test_db.path()));
+
+        let malformed_payload = vec![0xAA, 0xBB, 0xCC, 0xDD];
+        let metadata_page_bytes =
+            metadata_page::write_pager_metadata(&vec![0u8; PAGE_SIZE], &malformed_payload)?;
+
+        let wal = V3WalFile {
+            header: V3WalHeader::default(),
+            frames: vec![V3WalFrame {
+                page_number: STORAGE_METADATA_PAGE_ID,
+                database_page_count: 2,
+                commit_sequence: 1,
+                page_bytes: metadata_page_bytes,
+            }],
+        };
+        fs::write(&wal_path, wal.encode()?)?;
+
+        let err = load_visible_state_from_path_with_base(
+            &wal_path,
+            file_len_for_next_page_id(2),
+            Vec::new(),
+            HashMap::new(),
+            &vec![0u8; PAGE_SIZE],
+        )
+        .unwrap_err();
+        assert!(matches!(err, crate::error::HematiteError::CorruptedData(_)));
+        assert!(err.to_string().contains("malformed"));
+        Ok(())
+    }
 }
 
 mod pager_tests {
@@ -195,7 +236,10 @@ mod pager_tests {
     use crate::storage::pager::Pager;
     use crate::storage::pager_metadata::PersistedPagerState;
     use crate::storage::wal::{WalFrame, WalRecord};
-    use crate::storage::{metadata_page, JournalMode, Page, PAGE_SIZE, STORAGE_METADATA_PAGE_ID};
+    use crate::storage::wal_v3::{V3WalFile, V3WalFrame, V3WalHeader};
+    use crate::storage::{
+        metadata_page, JournalMode, Page, DB_HEADER_PAGE_ID, PAGE_SIZE, STORAGE_METADATA_PAGE_ID,
+    };
     use crate::test_utils::TestDbFile;
     use std::collections::HashMap;
     use std::ffi::OsString;
@@ -318,6 +362,116 @@ mod pager_tests {
         pager.flush()?;
         assert_eq!(pager.dirty_page_count(), 0);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_rollback_defers_physical_file_growth_until_flush() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_rollback_defers_file_growth");
+        let mut pager = Pager::new(test_db.path(), 32)?;
+        let original_len = fs::metadata(test_db.path())?.len();
+
+        pager.begin_transaction()?;
+        let page_id = pager.allocate_page()?;
+        let mut page = Page::new(page_id);
+        page.data[0] = 0x5A;
+        pager.write_page(page)?;
+
+        assert_eq!(
+            fs::metadata(test_db.path())?.len(),
+            original_len,
+            "rollback transaction mutated file length before journal sync barrier"
+        );
+
+        pager.flush()?;
+        assert!(
+            fs::metadata(test_db.path())?.len() > original_len,
+            "file should grow only after rollback journal sync + flush path"
+        );
+
+        pager.rollback_transaction()?;
+        assert_eq!(fs::metadata(test_db.path())?.len(), original_len);
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_rejects_reserved_page_deallocation() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_rejects_reserved_deallocate");
+        let mut pager = Pager::new(test_db.path(), 8)?;
+
+        let err = pager.deallocate_page(DB_HEADER_PAGE_ID).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Cannot deallocate reserved page 0"));
+
+        let err = pager.deallocate_page(STORAGE_METADATA_PAGE_ID).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Cannot deallocate reserved page 1"));
+
+        pager.begin_transaction()?;
+        let err = pager.deallocate_page(DB_HEADER_PAGE_ID).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Cannot deallocate reserved page 0"));
+        pager.rollback_transaction()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_wal_commit_updates_visible_state_without_full_reload() -> crate::error::Result<()>
+    {
+        let test_db = TestDbFile::new("_test_pager_wal_commit_incremental_visible_state");
+        let mut pager = Pager::new(test_db.path(), 16)?;
+        let page_id = pager.allocate_page()?;
+        let mut page = Page::new(page_id);
+        page.data[0] = 1;
+        pager.write_page(page)?;
+        pager.flush()?;
+        pager.set_journal_mode(JournalMode::Wal)?;
+
+        for step in 0..6u8 {
+            pager.begin_transaction()?;
+            let mut updated = pager.read_page(page_id)?;
+            updated.data[0] = step.saturating_add(2);
+            pager.write_page(updated)?;
+
+            let reloads_before_commit = pager.wal_visible_state_reload_count();
+            pager.commit_transaction()?;
+            let reloads_after_commit = pager.wal_visible_state_reload_count();
+
+            assert_eq!(
+                reloads_after_commit, reloads_before_commit,
+                "WAL commit should not reload full visible state from disk"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_large_transaction_stays_cache_bounded_under_pressure() -> crate::error::Result<()>
+    {
+        let test_db = TestDbFile::new("_test_pager_large_tx_cache_pressure");
+        let mut pager = Pager::new(test_db.path(), 8)?;
+        pager.begin_transaction()?;
+
+        let mut peak_cached_pages = 0usize;
+        for i in 0..160u32 {
+            let page_id = pager.allocate_page()?;
+            let mut page = Page::new(page_id);
+            page.data[0..4].copy_from_slice(&i.to_le_bytes());
+            pager.write_page(page)?;
+            peak_cached_pages = peak_cached_pages.max(pager.cached_page_count());
+        }
+
+        assert!(
+            peak_cached_pages <= 24,
+            "cache grew unexpectedly under spill pressure: {} pages",
+            peak_cached_pages
+        );
+
+        pager.rollback_transaction()?;
         Ok(())
     }
 
@@ -946,6 +1100,36 @@ mod pager_tests {
         assert!(err
             .to_string()
             .contains("Legacy reserved metadata layout is unsupported"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_open_rejects_malformed_committed_wal_metadata_frame() -> crate::error::Result<()>
+    {
+        let test_db = TestDbFile::new("_test_pager_rejects_malformed_committed_wal_metadata");
+        {
+            let mut pager = Pager::new(test_db.path(), 8)?;
+            pager.set_journal_mode(JournalMode::Wal)?;
+            pager.flush()?;
+        }
+
+        let wal_path = std::path::PathBuf::from(format!("{}.wal", test_db.path()));
+        let malformed_payload = vec![0xAA, 0xBB, 0xCC, 0xDD];
+        let metadata_page_bytes =
+            metadata_page::write_pager_metadata(&vec![0u8; PAGE_SIZE], &malformed_payload)?;
+        let wal = V3WalFile {
+            header: V3WalHeader::default(),
+            frames: vec![V3WalFrame {
+                page_number: STORAGE_METADATA_PAGE_ID,
+                database_page_count: 2,
+                commit_sequence: 1,
+                page_bytes: metadata_page_bytes,
+            }],
+        };
+        fs::write(&wal_path, wal.encode()?)?;
+
+        let err = Pager::new(test_db.path(), 8).unwrap_err();
+        assert!(err.to_string().contains("malformed"));
         Ok(())
     }
 
@@ -1605,7 +1789,10 @@ mod mod_tests {
     use crate::btree::value_store::StoredValueLayout;
     use crate::btree::{BTreeKey, NodeType};
     use crate::catalog::{CatalogEngine, Value};
-    use crate::storage::overflow::collect_overflow_page_ids;
+    use crate::storage::overflow::{
+        collect_overflow_page_ids, validate_overflow_chain, write_overflow_chain,
+        OVERFLOW_CHUNK_CAPACITY,
+    };
     use crate::storage::{Page, Pager, PAGE_SIZE, STORAGE_METADATA_PAGE_ID};
     use crate::test_utils::TestDbFile;
     use std::io::{Seek, SeekFrom, Write};
@@ -1733,6 +1920,22 @@ mod mod_tests {
         assert_eq!(report.total_rows, 1);
         assert!(report.overflow_page_count > 0);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_overflow_validation_rejects_trailing_chain_pages() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_storage_overflow_trailing_chain_rejected");
+        let mut pager = Pager::new(test_db.path(), 32)?;
+
+        let payload = vec![0x2A; OVERFLOW_CHUNK_CAPACITY + 128];
+        let first_page = write_overflow_chain(&mut pager, &payload)?
+            .expect("non-empty payload should produce overflow pages");
+        pager.flush()?;
+
+        let err =
+            validate_overflow_chain(&pager, Some(first_page), OVERFLOW_CHUNK_CAPACITY).unwrap_err();
+        assert!(err.to_string().contains("trailing pages"));
         Ok(())
     }
 

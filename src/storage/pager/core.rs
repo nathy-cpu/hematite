@@ -22,10 +22,15 @@ impl Pager {
 
         self.transaction = Some(match self.journal_mode {
             JournalMode::Rollback => {
+                let mut rollback_free_list = crate::storage::free_list::FreeList::new();
+                rollback_free_list.replace(self.file_manager.free_pages().to_vec());
                 let mut rollback = RollbackTransaction {
                     original_file_len: self.file_manager.file_len()?,
                     original_free_pages: self.file_manager.free_pages().to_vec(),
                     original_checksums: self.page_checksums.clone(),
+                    rollback_next_page_id: self.file_manager.next_page_id(),
+                    rollback_free_list: rollback_free_list.clone(),
+                    rollback_uninitialized_pages: HashSet::new(),
                     journaled_pages: HashSet::new(),
                     page_records: Vec::new(),
                     savepoints: Vec::new(),
@@ -34,6 +39,15 @@ impl Pager {
                 let baseline = RollbackSavepoint {
                     id: 0,
                     file_manager: self.file_manager.snapshot()?,
+                    rollback_next_page_id: rollback.rollback_next_page_id,
+                    rollback_free_pages: rollback.rollback_free_list.as_slice().to_vec(),
+                    rollback_free_page_set: rollback
+                        .rollback_free_list
+                        .as_slice()
+                        .iter()
+                        .copied()
+                        .collect(),
+                    rollback_uninitialized_pages: rollback.rollback_uninitialized_pages.clone(),
                     page_checksums: self.page_checksums.clone(),
                     dirty_pages: Vec::new(),
                     page_records: Vec::new(),
@@ -48,7 +62,8 @@ impl Pager {
                 PagerTransaction::Wal(WalTransaction {
                     wal_next_page_id: visible_state.visible_next_page_id(),
                     wal_free_pages: visible_state.free_pages.clone(),
-                    original_checksums: visible_state.page_checksums,
+                    wal_free_page_set: visible_state.free_page_set.clone(),
+                    original_checksums: visible_state.page_checksums.clone(),
                 })
             }
         });

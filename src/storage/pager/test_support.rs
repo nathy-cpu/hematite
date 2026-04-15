@@ -20,6 +20,10 @@ impl Pager {
             .map(|snapshot| snapshot.visible_sequence)
     }
 
+    pub(crate) fn wal_visible_state_reload_count(&self) -> usize {
+        self.wal_visible_state_reload_count
+    }
+
     pub fn inject_io_failure(&mut self) {
         self.file_manager.inject_write_failure();
     }

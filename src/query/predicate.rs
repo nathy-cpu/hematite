@@ -51,8 +51,10 @@ fn collect_literal_equalities(
             left,
             operator: LogicalOperator::And,
             right,
-        } => collect_literal_equalities(left, equalities)
-            && collect_literal_equalities(right, equalities),
+        } => {
+            collect_literal_equalities(left, equalities)
+                && collect_literal_equalities(right, equalities)
+        }
         // OR/NOT and non-equality predicates are not contradictions; they simply do
         // not contribute guaranteed equality constraints for access-path selection.
         _ => true,

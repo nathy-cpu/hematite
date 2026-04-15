@@ -22,10 +22,12 @@
 #[cfg(test)]
 use crate::error::Result;
 use crate::storage::PageId;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Default)]
 pub struct FreeList {
     pages: Vec<PageId>,
+    positions: HashMap<PageId, usize>,
 }
 
 impl FreeList {
@@ -33,17 +35,44 @@ impl FreeList {
     pub const METADATA_VERSION: u32 = 1;
 
     pub fn new() -> Self {
-        Self { pages: Vec::new() }
+        Self {
+            pages: Vec::new(),
+            positions: HashMap::new(),
+        }
     }
 
     pub fn pop_free_page(&mut self) -> Option<PageId> {
-        self.pages.pop()
+        let page_id = self.pages.pop()?;
+        self.positions.remove(&page_id);
+        Some(page_id)
     }
 
     pub fn push_free_page(&mut self, page_id: PageId) {
-        if !self.pages.contains(&page_id) {
-            self.pages.push(page_id);
+        if self.positions.contains_key(&page_id) {
+            return;
         }
+        let position = self.pages.len();
+        self.pages.push(page_id);
+        self.positions.insert(page_id, position);
+    }
+
+    pub fn contains(&self, page_id: PageId) -> bool {
+        self.positions.contains_key(&page_id)
+    }
+
+    pub fn remove_page(&mut self, page_id: PageId) -> bool {
+        let Some(position) = self.positions.remove(&page_id) else {
+            return false;
+        };
+
+        let Some(last_page_id) = self.pages.pop() else {
+            return false;
+        };
+        if position < self.pages.len() {
+            self.pages[position] = last_page_id;
+            self.positions.insert(last_page_id, position);
+        }
+        true
     }
 
     pub fn as_slice(&self) -> &[PageId] {
@@ -51,14 +80,22 @@ impl FreeList {
     }
 
     pub fn replace(&mut self, free_pages: Vec<PageId>) {
-        self.pages = free_pages;
+        self.pages.clear();
+        self.positions.clear();
+        for page_id in free_pages {
+            if self.positions.contains_key(&page_id) {
+                continue;
+            }
+            let position = self.pages.len();
+            self.pages.push(page_id);
+            self.positions.insert(page_id, position);
+        }
     }
 
     pub fn compact_trailing_pages(&mut self, next_page_id: &mut u32, minimum_next_page_id: u32) {
         while *next_page_id > minimum_next_page_id {
             let candidate = *next_page_id - 1;
-            if let Some(position) = self.pages.iter().position(|page_id| *page_id == candidate) {
-                self.pages.swap_remove(position);
+            if self.remove_page(candidate) {
                 *next_page_id -= 1;
             } else {
                 break;
@@ -81,6 +118,7 @@ impl FreeList {
         }
 
         let mut pages = Vec::with_capacity(records.len());
+        let mut positions = HashMap::with_capacity(records.len());
         for record in records {
             let payload = record.strip_prefix("freelist|").ok_or_else(|| {
                 crate::error::HematiteError::StorageError(
@@ -94,13 +132,14 @@ impl FreeList {
                 )
             })?;
 
-            if pages.contains(&page_id) {
+            if positions.contains_key(&page_id) {
                 return Err(crate::error::HematiteError::StorageError(format!(
                     "Duplicate freelist page id {} in metadata",
                     page_id
                 )));
             }
 
+            positions.insert(page_id, pages.len());
             pages.push(page_id);
         }
 
@@ -112,6 +151,6 @@ impl FreeList {
             )));
         }
 
-        Ok(Self { pages })
+        Ok(Self { pages, positions })
     }
 }

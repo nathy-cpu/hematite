@@ -143,6 +143,11 @@ pub fn validate_overflow_chain(
             "Overflow chain ended before expected payload length".to_string(),
         ));
     }
+    if current != 0 {
+        return Err(HematiteError::CorruptedData(
+            "Overflow chain has trailing pages beyond expected payload length".to_string(),
+        ));
+    }
 
     Ok(OverflowChainReport {
         page_count,
