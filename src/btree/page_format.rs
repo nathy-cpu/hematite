@@ -351,21 +351,27 @@ pub(crate) fn remove_cell(page: &mut Page, is_page_one: bool, index: usize) -> R
         header.cell_count - 1,
     );
 
+    // Handle freed body bytes:
+    // - tiny freed regions become fragments (tracked in fragmented_free_bytes)
+    // - if the freed region is exactly at the current cell_content_start, advance it
+    // - otherwise, insert the freed region into the freeblock chain
     if cell_size < MIN_FREEBLOCK_SIZE {
         let frag_byte = header.header_offset + OFFSET_FRAGMENTED_FREE_BYTES;
         let old_frags = page.data[frag_byte] as usize;
         let new_frags = (old_frags + cell_size).min(255);
         page.data[frag_byte] = new_frags as u8;
-    }
-
-    // If the freed cell was at cell_content_start, advance it.
-    if cell_offset == header.cell_content_start as usize {
+    } else if cell_offset == header.cell_content_start as usize {
+        // advance cell_content_start past the freed region
         let new_start = cell_offset + cell_size;
         write_u16_be(
             &mut page.data,
             header.header_offset + OFFSET_CELL_CONTENT_START,
             new_start as u16,
         );
+    } else {
+        // normal-sized freed region not at the head of the content area:
+        // add it to the freeblock chain so it can be reused later.
+        add_to_freeblock_chain(&mut page.data, header.header_offset, cell_offset, cell_size);
     }
 
     // Trigger defragmentation only if fragmentation is excessive (>60 bytes).

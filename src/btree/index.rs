@@ -236,7 +236,24 @@ impl BTreeIndex {
         let left_child_page_id = pager.allocate_page()?;
         let root_snapshot = pager.read_page(self.root_page_id)?;
         let mut left_child_page = Page::new(left_child_page_id);
-        left_child_page.data.copy_from_slice(&root_snapshot.data);
+
+        // If the old root is page 0, the first DATABASE_HEADER_SIZE bytes are the
+        // database header and must not be copied into a regular b-tree page.
+        let header_offset = if self.root_page_id == 0 {
+            crate::storage::format::DATABASE_HEADER_SIZE
+        } else {
+            0usize
+        };
+
+        if header_offset == 0 {
+            // Normal case: copy entire page image.
+            left_child_page.data.copy_from_slice(&root_snapshot.data);
+        } else {
+            // Copy only the b-tree payload region from page 0 into the child's page start.
+            let copy_len = crate::storage::PAGE_SIZE - header_offset;
+            left_child_page.data[..copy_len].copy_from_slice(&root_snapshot.data[header_offset..]);
+        }
+
         pager.write_page(left_child_page)?;
 
         let mut new_root = BTreeNode::new_internal(self.root_page_id);
@@ -246,7 +263,34 @@ impl BTreeIndex {
 
         let mut root_page = Page::new(self.root_page_id);
         BTreeNode::to_page(&new_root, &mut root_page)?;
-        pager.write_page(root_page)
+
+        // If the root lives at page 0 we must preserve the database header bytes
+        // (first DATABASE_HEADER_SIZE bytes). Merge the newly-serialized b-tree
+        // payload into a page image that keeps the existing header.
+        let header_offset = if self.root_page_id == 0 {
+            crate::storage::format::DATABASE_HEADER_SIZE
+        } else {
+            0usize
+        };
+
+        if header_offset == 0 {
+            // Return the Result directly so the function returns the pager operation result.
+            return pager.write_page(root_page);
+        } else {
+            // `root_snapshot` was read earlier in this function; reuse it to preserve
+            // the database header region that lives at the start of page 0.
+            let mut merged = Page::new(self.root_page_id);
+            // Start with the existing snapshot so the DB header remains intact.
+            merged.data.copy_from_slice(&root_snapshot.data);
+            let copy_len = crate::storage::PAGE_SIZE - header_offset;
+            // Copy the b-tree payload region from the freshly-serialized root page
+            // into the merged image while preserving the database header at the
+            // front of page 0. The b-tree header is written at `header_offset`
+            // inside `root_page`, so copy from that offset.
+            merged.data[header_offset..]
+                .copy_from_slice(&root_page.data[header_offset..header_offset + copy_len]);
+            return pager.write_page(merged);
+        }
     }
 
     pub fn delete_with_mutation(
@@ -347,8 +391,21 @@ impl BTreeIndex {
         if node.keys.is_empty() && !node.children.is_empty() {
             let child_page_id = node.children[0];
             let child_page = pager.read_page(child_page_id)?;
-            let mut root_page = Page::new(self.root_page_id);
-            root_page.data.copy_from_slice(&child_page.data);
+            // Read an owned snapshot of the existing root page so we preserve any
+            // database-header bytes that live at the start of page 0.
+            let mut root_page = pager.read_page(self.root_page_id)?;
+
+            if self.root_page_id == 0 {
+                let header_offset = crate::storage::format::DATABASE_HEADER_SIZE;
+                let copy_len = crate::storage::PAGE_SIZE - header_offset;
+                // Merge the child's b-tree payload into the existing root snapshot,
+                // preserving the database header bytes at the front of page 0.
+                root_page.data[header_offset..header_offset + copy_len]
+                    .copy_from_slice(&child_page.data[..copy_len]);
+            } else {
+                root_page.data.copy_from_slice(&child_page.data);
+            }
+
             pager.write_page(root_page)?;
             pager.deallocate_page(child_page_id)?;
             Ok(Some(self.root_page_id))
@@ -683,5 +740,221 @@ impl BTreeIndex {
             Some(value) => Ok(Some(C::decode_value(value.as_bytes())?)),
             None => Ok(None),
         }
+    }
+}
+
+#[cfg(test)]
+mod index_extra_tests {
+    use super::*;
+    use crate::btree::node::BTreeNode;
+    use crate::btree::page_format::{
+        initialize_btree_page, insert_cell as pf_insert_cell, remove_cell as pf_remove_cell,
+        set_rightmost_child, total_free_space as pf_total_free_space,
+    };
+    use crate::btree::{BTreeKey, BTreeValue};
+    use crate::storage::format::PageKind;
+    use crate::storage::{Page, Pager};
+    use std::sync::{Arc, RwLock};
+
+    #[test]
+    fn test_remove_cell_adds_freeblock() {
+        // Build a simple leaf page in-memory, insert three cells, remove the middle one,
+        // and assert total_free_space increases (freed region added to freeblock chain).
+        let mut page = Page::new(2);
+        initialize_btree_page(&mut page, PageKind::LeafTable, false).unwrap();
+
+        // Helper to build a simple leaf cell: 2 bytes key_len, 2 bytes val_len, key bytes, value bytes.
+        let make_cell = |klen: usize, vlen: usize, key_byte: u8, val_byte: u8| -> Vec<u8> {
+            let mut cell = Vec::with_capacity(4 + klen + vlen);
+            cell.extend_from_slice(&(klen as u16).to_be_bytes());
+            cell.extend_from_slice(&(vlen as u16).to_be_bytes());
+            cell.extend(std::iter::repeat(key_byte).take(klen));
+            cell.extend(std::iter::repeat(val_byte).take(vlen));
+            cell
+        };
+
+        let c1 = make_cell(2, 2, 0x11, 0x21);
+        let c2 = make_cell(3, 3, 0x12, 0x22);
+        let c3 = make_cell(4, 1, 0x13, 0x23);
+
+        pf_insert_cell(&mut page, false, 0, &c1).unwrap();
+        pf_insert_cell(&mut page, false, 1, &c2).unwrap();
+        pf_insert_cell(&mut page, false, 2, &c3).unwrap();
+
+        let free_before = pf_total_free_space(&page, false).unwrap();
+        // Remove middle cell
+        pf_remove_cell(&mut page, false, 1).unwrap();
+        let free_after = pf_total_free_space(&page, false).unwrap();
+
+        assert!(
+            free_after > free_before,
+            "Expected free space to increase after removing a non-head cell"
+        );
+    }
+
+    #[test]
+    fn test_create_new_root_preserves_db_header() {
+        // Ensure create_new_root does not overwrite the database header when root==0.
+        let pager = Pager::new_in_memory(10).expect("create pager");
+        let storage = Arc::new(RwLock::new(pager));
+
+        // Build an index that claims root is page 0 (the DB header page).
+        let mut index = BTreeIndex::from_shared_storage(Arc::clone(&storage), 0);
+
+        // Acquire a write handle to the pager and create a right child page to use.
+        {
+            let mut pg = storage.write().unwrap();
+
+            // Initialize a valid database header on page 0 so subsequent operations
+            // which preserve the header can be verified.
+            let db_header = crate::storage::format::DatabaseHeaderV3::default();
+            let header_bytes = db_header.encode();
+            let mut page0 = Page::new(0);
+            page0.data[..crate::storage::format::DATABASE_HEADER_SIZE]
+                .copy_from_slice(&header_bytes);
+            pg.write_page(page0).unwrap();
+
+            let right = pg.allocate_page().unwrap();
+            let key = BTreeKey::new(vec![0x42]);
+            // Call create_new_root which should copy the b-tree payload region but preserve DB header.
+            index
+                .create_new_root(&mut pg, key, right)
+                .expect("create_new_root");
+        }
+
+        // Read page 0 and ensure the database header is still decodable.
+        {
+            let pg_read = storage.read().unwrap();
+            let page0 = pg_read.read_page(0).expect("read page0");
+            let header = crate::storage::format::DatabaseHeaderV3::decode(&page0.data)
+                .expect("db header decode should succeed");
+            assert_eq!(
+                header.page_size as usize,
+                crate::storage::PAGE_SIZE,
+                "Database header page_size should be preserved"
+            );
+
+            // Also ensure the b-tree page header at page 0 parses (with page-one offset).
+            let _bt_header = crate::btree::page_format::BTreePageHeaderV3::parse(&page0, true)
+                .expect("B-tree header parse should succeed on page 0 after create_new_root");
+        }
+    }
+
+    #[test]
+    fn test_check_root_underflow_preserves_db_header() {
+        // Prepare a pager where root is page 0 (DB header). Create a single child page,
+        // then make the root an internal page with zero keys and that child as rightmost.
+        let pager = Pager::new_in_memory(10).expect("create pager");
+        let storage = Arc::new(RwLock::new(pager));
+
+        // Ensure page 0 has a valid database header.
+        {
+            let mut pg = storage.write().unwrap();
+            let db_header = crate::storage::format::DatabaseHeaderV3::default();
+            let header_bytes = db_header.encode();
+            let mut page0 = Page::new(0);
+            page0.data[..crate::storage::format::DATABASE_HEADER_SIZE]
+                .copy_from_slice(&header_bytes);
+            pg.write_page(page0).unwrap();
+        }
+
+        // Create a child leaf page.
+        let child_id = {
+            let mut pg = storage.write().unwrap();
+            pg.allocate_page().unwrap()
+        };
+
+        {
+            // Write a simple leaf page into child_id
+            let mut child_page = Page::new(child_id);
+            let mut child_node = BTreeNode::new_leaf(child_id);
+            // put one trivial key/value so child page is a valid b-tree leaf
+            child_node.keys.push_back(BTreeKey::new(vec![0x1]));
+            child_node.values.push_back(BTreeValue::new(vec![0x2]));
+            child_node.key_count = child_node.keys.len();
+            child_node.to_page(&mut child_page).unwrap();
+
+            let mut pg = storage.write().unwrap();
+            pg.write_page(child_page).unwrap();
+        }
+
+        {
+            // Construct an internal root page at page 0 with zero keys and rightmost child = child_id
+            // Obtain the existing page-0 snapshot from the pager so we preserve any
+            // pre-initialized database header bytes. Initialize the b-tree payload
+            // region on top of that snapshot so the header remains intact.
+            let mut pg = storage.write().unwrap();
+            let mut root_page = pg.read_page(0).unwrap();
+            crate::btree::page_format::initialize_btree_page(
+                &mut root_page,
+                PageKind::InteriorTable,
+                true,
+            )
+            .unwrap();
+            set_rightmost_child(&mut root_page, true, child_id).unwrap();
+
+            pg.write_page(root_page).unwrap();
+        }
+
+        // Create BTreeIndex view and invoke check_root_underflow
+        let mut idx = BTreeIndex::from_shared_storage(Arc::clone(&storage), 0);
+        {
+            let mut pg = storage.write().unwrap();
+            let res = idx
+                .check_root_underflow(&mut pg)
+                .expect("check_root_underflow");
+            assert_eq!(
+                res,
+                Some(0),
+                "check_root_underflow should return Some(root_page_id)"
+            );
+        }
+
+        // After contraction, verify the DB header on page 0 is still decodable.
+        {
+            let pg_read = storage.read().unwrap();
+            let page0 = pg_read.read_page(0).expect("read page0");
+            let _header =
+                crate::storage::format::DatabaseHeaderV3::decode(&page0.data).expect("db header");
+        }
+    }
+
+    #[test]
+    fn test_validate_tree_simple_leaf() {
+        // Validate that validate_tree accepts a simple leaf tree created on a single page.
+        let pager = Pager::new_in_memory(10).expect("create pager");
+        let storage = Arc::new(RwLock::new(pager));
+        let mut manager =
+            crate::btree::tree::BTreeManager::from_shared_storage(Arc::clone(&storage));
+
+        // allocate a page and initialize a single-leaf b-tree page
+        let page_id = {
+            let mut pg = storage.write().unwrap();
+            pg.allocate_page().unwrap()
+        };
+
+        {
+            let mut leaf_page = Page::new(page_id);
+            crate::btree::page_format::initialize_btree_page(
+                &mut leaf_page,
+                PageKind::LeafTable,
+                false,
+            )
+            .unwrap();
+
+            // build a simple leaf node and write it
+            let mut node = BTreeNode::new_leaf(page_id);
+            node.keys.push_back(BTreeKey::new(vec![0xAA]));
+            node.values.push_back(BTreeValue::new(vec![0xBB]));
+            node.key_count = 1;
+            node.to_page(&mut leaf_page).unwrap();
+
+            let mut pg = storage.write().unwrap();
+            pg.write_page(leaf_page).unwrap();
+        }
+
+        // validate_tree should return true for this small valid leaf-root tree
+        let ok = manager.validate_tree(page_id).expect("validate_tree ran");
+        assert!(ok, "validate_tree should accept a simple valid leaf page");
     }
 }

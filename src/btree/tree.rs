@@ -157,8 +157,20 @@ impl BTreeManager {
 
         match node.node_type {
             NodeType::Leaf => {
-                if node.keys.len() != node.values.len() {
-                    return Ok(false);
+                // For decoded nodes, ensure keys/values parity.
+                // For lazy (undecoded) nodes, the `keys`/`values` VecDeque are empty;
+                // validate by probing procedural accessors up to `key_count`.
+                if node.is_decoded {
+                    if node.keys.len() != node.values.len() {
+                        return Ok(false);
+                    }
+                } else {
+                    // Validate that each declared key has a corresponding key and value view.
+                    for index in 0..node.key_count {
+                        // `get_key_view`/`get_value_view` will validate bounds and layout.
+                        let _ = node.get_key_view(index)?;
+                        let _ = node.get_value_view(index)?;
+                    }
                 }
 
                 if let Some(expected_depth) = state.leaf_depth {
