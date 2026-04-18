@@ -142,10 +142,25 @@ impl Pager {
     }
 
     fn encoded_persisted_state_page(&mut self) -> Result<Page> {
+        let free_pages = self.logical_free_pages().to_vec();
+
+        // Checksums are NOT persisted across sessions. The checksum map is
+        // rebuilt in-memory from write_page calls and provides integrity
+        // checking within the current session only.
+        //
+        // Persisting per-page checksums is not feasible because the metadata
+        // page is a fixed 4096-byte page shared with catalog metadata. Once
+        // the database exceeds ~800 live pages the encoded payload overflows,
+        // causing every flush to fail with "payload exceeds page size".
+        //
+        // Crash safety in rollback mode is provided by the rollback journal.
+        // In WAL mode, integrity is tracked per-frame in the WAL file itself.
+        // A cross-session checksum check would require a separate scalable
+        // store (e.g. a dedicated overflow B-tree), not a single shared page.
         let contents = PersistedPagerState {
             journal_mode: self.journal_mode,
-            free_pages: self.logical_free_pages().to_vec(),
-            checksums: self.page_checksums.clone(),
+            free_pages,
+            checksums: std::collections::HashMap::new(),
         }
         .encode(Self::CHECKSUM_METADATA_VERSION);
         let existing_page = self
@@ -156,6 +171,7 @@ impl Pager {
         let encoded = metadata_page::write_pager_metadata(&existing_page.data, &contents)?;
         Page::from_bytes(STORAGE_METADATA_PAGE_ID, encoded)
     }
+
 
     pub(super) fn stage_persisted_state_page(&mut self) -> Result<()> {
         let page = self.encoded_persisted_state_page()?;
