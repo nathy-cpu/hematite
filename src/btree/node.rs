@@ -10,7 +10,7 @@
 //! old contiguous key/value section format.
 
 use crate::btree::page_format::{
-    insert_cell as pf_insert_cell, remove_cell as pf_remove_cell,
+    compute_cell_size, insert_cell as pf_insert_cell, remove_cell as pf_remove_cell,
     total_free_space as pf_total_free_space, BTreePageHeaderV3,
 };
 use crate::btree::{BTreeKey, BTreeValue, NodeType, BTREE_ORDER};
@@ -209,7 +209,10 @@ impl BTreeNode {
             offsets.push(cell_pointer_from_header(&page, &header, index)?);
         }
         node.cell_offsets = offsets;
-        *node.cell_ranges_cache.borrow_mut() = Some(compute_cell_ranges(&node.cell_offsets)?);
+        // BUG-02 fix: use exact per-cell sizing (reads key_len/value_len from page
+        // bytes) so the last cell's range is not over-estimated to PAGE_SIZE.
+        *node.cell_ranges_cache.borrow_mut() =
+            Some(compute_cell_ranges_exact(&page, &header, &node.cell_offsets)?);
 
         Ok(node)
     }
@@ -621,8 +624,10 @@ impl BTreeNode {
             offsets.push(cell_pointer_from_header(page, &header, i)?);
         }
         self.cell_offsets = offsets;
-        // Invalidate cached cell ranges because offsets changed.
-        *self.cell_ranges_cache.borrow_mut() = None;
+        // BUG-02 fix: rebuild the cell-range cache with exact per-cell sizing
+        // so the last cell is not over-estimated to PAGE_SIZE.
+        *self.cell_ranges_cache.borrow_mut() =
+            Some(compute_cell_ranges_exact(page, &header, &self.cell_offsets)?);
         self.payload_len = PAGE_SIZE.saturating_sub(header.cell_content_start as usize);
         self.keys.clear();
         self.values.clear();
@@ -951,11 +956,10 @@ impl BTreeNode {
                 "Can only merge leaf nodes".to_string(),
             ));
         }
-        if !self.can_merge_with(other) {
-            return Err(HematiteError::StorageError(
-                "Nodes cannot be merged".to_string(),
-            ));
-        }
+        // BUG-06 fix: removed redundant can_merge_with check here. The caller
+        // (merge_with_left/right_sibling) already checked eligibility before
+        // calling this function. Repeating the check clones and decodes both
+        // nodes a second time for no benefit.
         self.keys.append(&mut other.keys);
         self.values.append(&mut other.values);
         self.key_count = self.keys.len();
@@ -976,11 +980,9 @@ impl BTreeNode {
                 "Can only merge internal nodes".to_string(),
             ));
         }
-        if !self.can_merge_internal_with_separator(other, &separator_key) {
-            return Err(HematiteError::StorageError(
-                "Nodes cannot be merged".to_string(),
-            ));
-        }
+        // BUG-06 fix: removed redundant can_merge_internal_with_separator check.
+        // The caller already checked eligibility; repeating it here clones and
+        // decodes both nodes a second time for no benefit.
         self.keys.push_back(separator_key);
         self.keys.append(&mut other.keys);
         self.children.append(&mut other.children);
@@ -990,45 +992,43 @@ impl BTreeNode {
     }
 
     pub fn is_underflow(&self) -> bool {
-        match self.node_type {
-            NodeType::Leaf => self.key_count < (MAX_KEYS / 2),
-            NodeType::Internal => self.key_count < ((MAX_KEYS - 1) / 2),
-        }
+        // BUG-07 fix: base underflow on page-space utilisation instead of the
+        // MAX_KEYS constant, which is higher than the realistic per-page key
+        // capacity and would trigger rebalancing on almost every delete.
+        let used = self.serialized_size_on_page().unwrap_or(PAGE_SIZE);
+        let capacity = PAGE_SIZE - page_header_offset(self.page_id);
+        // Underflow when the node occupies less than 25 % of its available space.
+        used * 4 < capacity
     }
 
-    fn cell_range_for_index(&self, index_or_offset: usize) -> Result<(usize, usize)> {
-        if self.cell_offsets.is_empty() {
-            return Err(HematiteError::StorageError(
-                "Index out of bounds".to_string(),
-            ));
+    fn cell_range_for_index(&self, index: usize) -> Result<(usize, usize)> {
+        // BUG-01 fix: the parameter is always a cell *index*, never a byte
+        // offset.  The previous dual-interpretation (index if < len, else
+        // treated as offset) would silently return the wrong cell when the
+        // cell count exceeded a cell's byte offset value.
+        if index >= self.cell_offsets.len() {
+            return Err(HematiteError::StorageError(format!(
+                "Cell index {} out of bounds (len={})",
+                index,
+                self.cell_offsets.len()
+            )));
         }
 
-        let idx = if index_or_offset < self.cell_offsets.len() {
-            index_or_offset
-        } else {
-            // Treat value as a byte offset. Find its index in the pointer array.
-            match self
-                .cell_offsets
-                .iter()
-                .position(|&off| off as usize == index_or_offset)
-            {
-                Some(p) => p,
-                None => {
-                    return Err(HematiteError::StorageError(
-                        "Index out of bounds".to_string(),
-                    ))
-                }
-            }
-        };
-
+        // Populate cache on first access.  The cache is built with exact sizes
+        // in from_shared_page; if it is missing here (e.g. after in-place
+        // mutation that cleared the cache) fall back to the offset-neighbour
+        // approximation so callers still work.
         if self.cell_ranges_cache.borrow().is_none() {
             *self.cell_ranges_cache.borrow_mut() = Some(compute_cell_ranges(&self.cell_offsets)?);
         }
         self.cell_ranges_cache
             .borrow()
             .as_ref()
-            .and_then(|ranges| ranges.get(idx).copied())
-            .ok_or_else(|| HematiteError::StorageError("Index out of bounds".to_string()))
+            .and_then(|ranges| ranges.get(index).copied())
+            .ok_or_else(|| HematiteError::StorageError(format!(
+                "Cell index {} out of bounds in cache",
+                index
+            )))
     }
 }
 
@@ -1065,6 +1065,27 @@ fn compute_cell_ranges(cell_offsets: &[u16]) -> Result<Vec<(usize, usize)>> {
     }
 
     Ok(ranges)
+}
+
+/// Exact-sizing variant of compute_cell_ranges that reads key_len/value_len
+/// from the page bytes for each cell, rather than inferring the last cell's
+/// end from PAGE_SIZE.  This prevents the last cell's range from including
+/// trailing freeblock/fragment bytes, which would mask corruption.
+///
+/// BUG-02 fix: called from from_shared_page and try_remove_cell_in_place.
+fn compute_cell_ranges_exact(
+    page: &Page,
+    header: &BTreePageHeaderV3,
+    cell_offsets: &[u16],
+) -> Result<Vec<(usize, usize)>> {
+    cell_offsets
+        .iter()
+        .map(|&off| {
+            let start = off as usize;
+            let size = compute_cell_size(page, header, start)?;
+            Ok((start, start + size))
+        })
+        .collect()
 }
 
 fn page_header_offset(page_id: PageId) -> usize {

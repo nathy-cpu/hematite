@@ -332,9 +332,20 @@ impl Pager {
             return Ok(());
         };
         file.sync_all()?;
+        // BUG-09 fix: only clear need_sync on pages that are already journaled.
+        // Pages dirtied after this journal sync started have not had their
+        // original images captured yet; clearing need_sync on them would allow
+        // them to spill to the main file without journal coverage.
         let dirty_ids = self.cache_mut()?.dirty_page_ids();
         for page_id in dirty_ids {
-            self.cache_mut()?.clear_need_sync(page_id);
+            let is_journaled = self
+                .cache_read()?
+                .meta(page_id)
+                .map(|m| m.journaled)
+                .unwrap_or(false);
+            if is_journaled {
+                self.cache_mut()?.clear_need_sync(page_id);
+            }
         }
         self.journal_needs_sync = false;
         Ok(())

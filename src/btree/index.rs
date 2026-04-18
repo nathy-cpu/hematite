@@ -369,13 +369,23 @@ impl BTreeIndex {
                 let child_page_id = node.children[child_index];
 
                 let deleted_value = self.delete_recursive(pager, child_page_id, key)?;
-                if self.is_child_underflow(pager, child_page_id)? {
+
+                // BUG-04/03 fix: only write back the internal page when it was
+                // actually modified (rebalancing changed the node), and read the
+                // existing page instead of creating a blank one (Page::new would
+                // zero the DB header bytes on page 0).
+                let mut node_modified = false;
+                if deleted_value.is_some() && self.is_child_underflow(pager, child_page_id)? {
                     self.rebalance_node(pager, &mut node, child_index)?;
+                    node_modified = true;
                 }
 
-                let mut page = Page::new(page_id);
-                node.to_page(&mut page)?;
-                pager.write_page(page)?;
+                if node_modified {
+                    let mut page = pager.read_page(page_id)?;
+                    node.to_page(&mut page)?;
+                    pager.write_page(page)?;
+                }
+
                 deleted_value
             }
         };
@@ -440,9 +450,15 @@ impl BTreeIndex {
             }
         }
 
+        // BUG-05 fix: track whether the merge actually happened and try the
+        // other sibling before giving up. Both merge functions return Ok(false)
+        // when can_merge is false — previously we ignored that and returned Ok(())
+        // leaving the underflowing child in the tree.
+        let mut merged = false;
         if child_index > 0 {
-            self.merge_with_left_sibling(pager, parent, child_index)?;
-        } else {
+            merged = self.merge_with_left_sibling(pager, parent, child_index)?;
+        }
+        if !merged && child_index < parent.children.len() - 1 {
             self.merge_with_right_sibling(pager, parent, child_index)?;
         }
 
@@ -579,12 +595,14 @@ impl BTreeIndex {
         Ok(true)
     }
 
+    // BUG-05/10 fix: returns bool indicating whether the merge was performed.
+    // BUG-10 fix: deallocates the absorbed child page after a successful merge.
     fn merge_with_left_sibling(
         &mut self,
         pager: &mut Pager,
         parent: &mut BTreeNode,
         child_index: usize,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let left_sibling_id = parent.children[child_index - 1];
         let child_id = parent.children[child_index];
 
@@ -605,7 +623,7 @@ impl BTreeIndex {
         };
 
         if !can_merge {
-            return Ok(());
+            return Ok(false);
         }
 
         parent.keys.remove(child_index - 1);
@@ -613,9 +631,11 @@ impl BTreeIndex {
 
         match (left_sibling.node_type, child_node.node_type) {
             (NodeType::Leaf, NodeType::Leaf) => {
+                // merge_leaf already calls pager.deallocate_page(child_node.page_id)
                 left_sibling.merge_leaf(&mut child_node, pager)?;
             }
             (NodeType::Internal, NodeType::Internal) => {
+                // merge_internal already calls pager.deallocate_page(child_node.page_id)
                 left_sibling.merge_internal(&mut child_node, separator_key, pager)?;
             }
             _ => {
@@ -625,20 +645,23 @@ impl BTreeIndex {
             }
         }
 
-        let mut write_left = Page::new(left_sibling_id);
+        let mut write_left = pager.read_page(left_sibling_id)?;
         left_sibling.to_page(&mut write_left)?;
         pager.write_page(write_left)?;
-        // Note: child_page becomes unused and could be deallocated
+        // child_id was absorbed into left_sibling and already deallocated
+        // inside merge_leaf / merge_internal via storage.deallocate_page.
 
-        Ok(())
+        Ok(true)
     }
 
+    // BUG-05/10 fix: returns bool indicating whether the merge was performed.
+    // BUG-10 fix: deallocates the absorbed right sibling page after a successful merge.
     fn merge_with_right_sibling(
         &mut self,
         pager: &mut Pager,
         parent: &mut BTreeNode,
         child_index: usize,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let child_id = parent.children[child_index];
         let right_sibling_id = parent.children[child_index + 1];
 
@@ -659,7 +682,7 @@ impl BTreeIndex {
         };
 
         if !can_merge {
-            return Ok(());
+            return Ok(false);
         }
 
         parent.keys.remove(child_index);
@@ -667,9 +690,11 @@ impl BTreeIndex {
 
         match (child_node.node_type, right_sibling.node_type) {
             (NodeType::Leaf, NodeType::Leaf) => {
+                // merge_leaf already calls pager.deallocate_page(right_sibling.page_id)
                 child_node.merge_leaf(&mut right_sibling, pager)?;
             }
             (NodeType::Internal, NodeType::Internal) => {
+                // merge_internal already calls pager.deallocate_page(right_sibling.page_id)
                 child_node.merge_internal(&mut right_sibling, separator_key, pager)?;
             }
             _ => {
@@ -679,12 +704,13 @@ impl BTreeIndex {
             }
         }
 
-        let mut write_child = Page::new(child_id);
+        let mut write_child = pager.read_page(child_id)?;
         child_node.to_page(&mut write_child)?;
         pager.write_page(write_child)?;
-        // Note: right_page becomes unused and could be deallocated
+        // right_sibling_id was absorbed into child_node and already deallocated
+        // inside merge_leaf / merge_internal via storage.deallocate_page.
 
-        Ok(())
+        Ok(true)
     }
 }
 

@@ -88,7 +88,13 @@ impl Pager {
         } else {
             self.commit_rollback_transaction()?;
         }
-        self.remove_journal_file()?;
+        // BUG-08 fix: only remove the journal file in rollback mode.  In WAL
+        // mode there is no rollback journal; the unconditional call could
+        // silently delete a stale-but-valid rollback journal left from a prior
+        // mode switch, destroying crash-recovery evidence.
+        if self.journal_mode == JournalMode::Rollback {
+            self.remove_journal_file()?;
+        }
         self.transaction = None;
         self.exit_writer_scope_to_open()?;
         Ok(())
