@@ -131,6 +131,11 @@ impl FileManager {
         Ok(())
     }
 
+    pub fn sync_with_disk(&mut self) -> Result<()> {
+        let file_len = self.len()?;
+        self.load_existing_file(file_len)
+    }
+
     pub fn read_page(&self, page_id: PageId) -> Result<Page> {
         let offset = Self::page_offset(page_id)?;
 

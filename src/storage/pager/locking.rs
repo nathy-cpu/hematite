@@ -4,6 +4,8 @@ use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
@@ -134,16 +136,28 @@ impl Pager {
         if self.journal_mode == JournalMode::Rollback {
             let lock_path = self.rollback_lock_path()?;
             let file = open_lock_file(&lock_path)?;
-            match try_lock_shared(&file) {
-                Ok(()) => {
-                    self.rollback_lock_file = Some(file);
+            
+            let start = Instant::now();
+            let mut backoff = Duration::from_millis(1);
+            let timeout = Duration::from_secs(5);
+
+            loop {
+                match try_lock_shared(&file) {
+                    Ok(()) => {
+                        self.rollback_lock_file = Some(file);
+                        break;
+                    }
+                    Err(err) if is_lock_busy(&err) => {
+                        if start.elapsed() >= timeout {
+                            return Err(HematiteError::StorageError(
+                                "database is locked for writing".to_string(),
+                            ));
+                        }
+                        thread::sleep(backoff);
+                        backoff = (backoff * 2).min(Duration::from_millis(100));
+                    }
+                    Err(err) => return Err(err.into()),
                 }
-                Err(err) if is_lock_busy(&err) => {
-                    return Err(HematiteError::StorageError(
-                        "database is locked for writing".to_string(),
-                    ));
-                }
-                Err(err) => return Err(err.into()),
             }
         }
 
@@ -229,16 +243,28 @@ impl Pager {
         };
 
         let file = open_lock_file(&lock_path)?;
-        match try_lock_exclusive(&file) {
-            Ok(()) => {
-                *lock_slot = Some(file);
-                self.lock_mode = PagerLockMode::Write;
-                Ok(())
+        let start = Instant::now();
+        let mut backoff = Duration::from_millis(1);
+        let timeout = Duration::from_secs(5);
+
+        loop {
+            match try_lock_exclusive(&file) {
+                Ok(()) => {
+                    *lock_slot = Some(file);
+                    self.lock_mode = PagerLockMode::Write;
+                    return Ok(());
+                }
+                Err(err) if is_lock_busy(&err) => {
+                    if start.elapsed() >= timeout {
+                        return Err(HematiteError::StorageError(
+                            "database is locked".to_string(),
+                        ));
+                    }
+                    thread::sleep(backoff);
+                    backoff = (backoff * 2).min(Duration::from_millis(100));
+                }
+                Err(err) => return Err(err.into()),
             }
-            Err(err) if is_lock_busy(&err) => Err(HematiteError::StorageError(
-                "database is locked".to_string(),
-            )),
-            Err(err) => Err(err.into()),
         }
     }
 

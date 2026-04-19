@@ -956,10 +956,11 @@ impl BTreeNode {
                 "Can only merge leaf nodes".to_string(),
             ));
         }
-        // BUG-06 fix: removed redundant can_merge_with check here. The caller
-        // (merge_with_left/right_sibling) already checked eligibility before
-        // calling this function. Repeating the check clones and decodes both
-        // nodes a second time for no benefit.
+        if !self.can_merge_with(other) {
+            return Err(HematiteError::StorageError(
+                "Nodes cannot be merged".to_string(),
+            ));
+        }
         self.keys.append(&mut other.keys);
         self.values.append(&mut other.values);
         self.key_count = self.keys.len();
@@ -1078,14 +1079,24 @@ fn compute_cell_ranges_exact(
     header: &BTreePageHeaderV3,
     cell_offsets: &[u16],
 ) -> Result<Vec<(usize, usize)>> {
-    cell_offsets
-        .iter()
-        .map(|&off| {
-            let start = off as usize;
-            let size = compute_cell_size(page, header, start)?;
-            Ok((start, start + size))
-        })
-        .collect()
+    let mut ranges = Vec::with_capacity(cell_offsets.len());
+    for &off in cell_offsets {
+        let start = off as usize;
+        let size = compute_cell_size(page, header, start)?;
+        ranges.push((start, start + size));
+    }
+
+    let mut sorted_ranges = ranges.clone();
+    sorted_ranges.sort_unstable_by_key(|r| r.0);
+    for window in sorted_ranges.windows(2) {
+        if window[0].1 > window[1].0 {
+            return Err(HematiteError::CorruptedData(
+                "Overlapping B-tree cells or duplicate pointers".to_string(),
+            ));
+        }
+    }
+
+    Ok(ranges)
 }
 
 fn page_header_offset(page_id: PageId) -> usize {

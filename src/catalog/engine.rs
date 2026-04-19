@@ -309,7 +309,8 @@ not available yet.",
     }
 
     pub fn begin_transaction(&mut self) -> Result<()> {
-        self.tree_store().begin_transaction()
+        self.tree_store().begin_transaction()?;
+        self.refresh_runtime_metadata()
     }
 
     pub fn commit_transaction(&mut self) -> Result<()> {
@@ -331,7 +332,8 @@ not available yet.",
     }
 
     pub(crate) fn begin_read(&mut self) -> Result<()> {
-        self.tree_store().begin_read()
+        self.tree_store().begin_read()?;
+        self.refresh_runtime_metadata()
     }
 
     pub(crate) fn end_read(&mut self) -> Result<()> {
