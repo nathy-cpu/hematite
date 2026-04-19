@@ -22,6 +22,30 @@ mod mod_tests {
         Pager::new(db.path(), 100)
     }
 
+    fn build_split_byte_tree() -> Result<(ByteTreeStore, crate::storage::PageId)> {
+        let trees = ByteTreeStore::new(Pager::new_in_memory(100)?);
+        let root_page_id = trees.create_tree()?;
+        let mut tree = trees.open_tree(root_page_id)?;
+        for i in 0..100u32 {
+            tree.insert(&i.to_be_bytes(), &[i as u8])?;
+        }
+        Ok((trees, root_page_id))
+    }
+
+    fn corrupt_right_leaf_page_kind(
+        trees: &ByteTreeStore,
+        root_page_id: crate::storage::PageId,
+    ) -> Result<()> {
+        let page_ids = trees.collect_page_ids(root_page_id)?;
+        assert!(page_ids.len() >= 3, "expected split tree");
+
+        let shared = trees.shared_storage();
+        let mut pager = shared.write().unwrap();
+        let mut page = pager.read_page(page_ids[2])?;
+        page.data[0] = 0xFF;
+        pager.write_page(page)
+    }
+
     #[derive(Debug, Clone)]
     struct LcgRng {
         state: u64,
@@ -325,6 +349,33 @@ mod mod_tests {
                 (b"alpha:2".to_vec(), b"a2".to_vec())
             ]
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_byte_tree_entries_with_prefix_propagates_cursor_next_error() -> Result<()> {
+        let (trees, root_page_id) = build_split_byte_tree()?;
+        corrupt_right_leaf_page_kind(&trees, root_page_id)?;
+
+        let tree = trees.open_tree(root_page_id)?;
+        let err = tree.entries_with_prefix(b"").unwrap_err();
+        assert!(matches!(err, crate::error::HematiteError::StorageError(_)));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_byte_tree_collect_remaining_propagates_cursor_next_error() -> Result<()> {
+        let (trees, root_page_id) = build_split_byte_tree()?;
+        let tree = trees.open_tree(root_page_id)?;
+        let mut cursor = tree.cursor()?;
+        assert!(cursor.current()?.is_some());
+
+        corrupt_right_leaf_page_kind(&trees, root_page_id)?;
+
+        let err = cursor.collect_remaining().unwrap_err();
+        assert!(matches!(err, crate::error::HematiteError::StorageError(_)));
 
         Ok(())
     }

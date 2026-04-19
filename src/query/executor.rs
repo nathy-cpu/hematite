@@ -3226,23 +3226,11 @@ impl SelectExecutor {
                                 .to_string(),
                         )
                     })?;
-                let encoded_key = ctx.engine.encode_primary_key(&primary_key_values)?;
-                let mut index_cursor = ctx.engine.open_primary_key_cursor(table)?;
-                let rowid = index_cursor
-                    .seek_key(&encoded_key)
-                    .then(|| index_cursor.current().map(|entry| entry.row_id))
-                    .flatten();
-                match rowid {
-                    Some(rowid) => {
-                        let mut table_cursor = ctx.engine.open_table_cursor(table_name)?;
-                        Ok(table_cursor
-                            .seek_rowid(rowid)
-                            .then(|| table_cursor.current().map(|row| vec![row.values.clone()]))
-                            .flatten()
-                            .unwrap_or_default())
-                    }
-                    None => Ok(Vec::new()),
-                }
+                Ok(ctx
+                    .engine
+                    .lookup_row_by_primary_key(table, &primary_key_values)?
+                    .map(|row| vec![row.values])
+                    .unwrap_or_default())
             }
             SelectAccessPath::SecondaryIndexLookup(ref index_name) => {
                 let key_values = self
@@ -3253,31 +3241,12 @@ impl SelectExecutor {
                             index_name
                         ))
                     })?;
-                let encoded_key = ctx.engine.encode_secondary_index_key(&key_values)?;
-                let mut index_cursor = ctx.engine.open_secondary_index_cursor(table, index_name)?;
-                let mut table_cursor = ctx.engine.open_table_cursor(table_name)?;
-                let mut rows = Vec::new();
-
-                if index_cursor.seek_key(&encoded_key) {
-                    loop {
-                        let Some(entry) = index_cursor.current() else {
-                            break;
-                        };
-                        if entry.key.as_slice() != encoded_key.as_slice() {
-                            break;
-                        }
-                        if table_cursor.seek_rowid(entry.row_id) {
-                            if let Some(row) = table_cursor.current() {
-                                rows.push(row.values.clone());
-                            }
-                        }
-                        if !index_cursor.next() {
-                            break;
-                        }
-                    }
-                }
-
-                Ok(rows)
+                Ok(ctx
+                    .engine
+                    .lookup_rows_by_secondary_index(table, index_name, &key_values)?
+                    .into_iter()
+                    .map(|row| row.values)
+                    .collect())
             }
             SelectAccessPath::FullTableScan => ctx.engine.read_from_table(table_name),
             SelectAccessPath::JoinScan => Err(HematiteError::InternalError(
@@ -3568,7 +3537,7 @@ impl InsertExecutor {
                 &mut subquery_cache,
                 &sources,
                 &assignment.value,
-                &row.values,
+                &original_values,
             )?;
             row.values[column_index] = coerce_column_value(column, value)?;
         }
@@ -3864,7 +3833,7 @@ impl QueryExecutor for UpdateExecutor {
                 let value = {
                     let evaluation_row = row_contexts
                         .and_then(|rows| rows.get(index).map(Vec::as_slice))
-                        .unwrap_or(updated_row.as_slice());
+                        .unwrap_or(stored_row.values.as_slice());
                     select_executor.evaluate_expression(
                         ctx,
                         &mut subquery_cache,
@@ -3964,12 +3933,9 @@ fn locate_rowids_for_access_path(
             let Some(primary_key_values) = select_executor.extract_primary_key_lookup(table) else {
                 return Ok(Vec::new());
             };
-            let encoded_key = ctx.engine.encode_primary_key(&primary_key_values)?;
-            let mut index_cursor = ctx.engine.open_primary_key_cursor(table)?;
-            Ok(index_cursor
-                .seek_key(&encoded_key)
-                .then(|| index_cursor.current().map(|entry| entry.row_id))
-                .flatten()
+            Ok(ctx
+                .engine
+                .lookup_primary_key_rowid(table, &primary_key_values)?
                 .into_iter()
                 .collect())
         }
@@ -3979,26 +3945,8 @@ fn locate_rowids_for_access_path(
             else {
                 return Ok(Vec::new());
             };
-            let encoded_key = ctx.engine.encode_secondary_index_key(&key_values)?;
-            let mut index_cursor = ctx.engine.open_secondary_index_cursor(table, index_name)?;
-            let mut rowids = Vec::new();
-
-            if index_cursor.seek_key(&encoded_key) {
-                loop {
-                    let Some(entry) = index_cursor.current() else {
-                        break;
-                    };
-                    if entry.key.as_slice() != encoded_key.as_slice() {
-                        break;
-                    }
-                    rowids.push(entry.row_id);
-                    if !index_cursor.next() {
-                        break;
-                    }
-                }
-            }
-
-            Ok(rowids)
+            ctx.engine
+                .lookup_secondary_index_rowids(table, index_name, &key_values)
         }
         SelectAccessPath::FullTableScan => {
             let mut table_cursor = ctx.engine.open_table_cursor(table_name)?;
@@ -4025,31 +3973,61 @@ fn locate_rows_for_access_path(
     access_path: &SelectAccessPath,
     select_executor: &SelectExecutor,
 ) -> Result<Vec<StoredRow>> {
+    if matches!(access_path, SelectAccessPath::FullTableScan) {
+        let mut table_cursor = ctx.engine.open_table_cursor(table_name)?;
+        let mut rows = Vec::new();
+        let mut subquery_cache = SubqueryCache::new();
+        let sources = select_executor.resolve_sources(ctx)?;
+
+        if table_cursor.first() {
+            loop {
+                if let Some(row) = table_cursor.current() {
+                    let include = match &select_executor.statement.where_clause {
+                        Some(where_clause) => select_executor.conditions_match(
+                            ctx,
+                            &mut subquery_cache,
+                            &sources,
+                            &where_clause.conditions,
+                            &row.values,
+                        )?,
+                        None => true,
+                    };
+
+                    if include {
+                        rows.push(row.clone());
+                    }
+                }
+
+                if !table_cursor.next() {
+                    break;
+                }
+            }
+        }
+
+        return Ok(rows);
+    }
+
     let rowids =
         locate_rowids_for_access_path(ctx, table, table_name, access_path, select_executor)?;
-    let mut table_cursor = ctx.engine.open_table_cursor(table_name)?;
     let mut rows = Vec::new();
     let mut subquery_cache = SubqueryCache::new();
     let sources = select_executor.resolve_sources(ctx)?;
 
     for rowid in rowids {
-        if table_cursor.seek_rowid(rowid) {
-            if let Some(row) = table_cursor.current() {
-                let row = row.clone();
-                let include = match &select_executor.statement.where_clause {
-                    Some(where_clause) => select_executor.conditions_match(
-                        ctx,
-                        &mut subquery_cache,
-                        &sources,
-                        &where_clause.conditions,
-                        &row.values,
-                    )?,
-                    None => true,
-                };
+        if let Some(row) = ctx.engine.lookup_row_by_rowid(table_name, rowid)? {
+            let include = match &select_executor.statement.where_clause {
+                Some(where_clause) => select_executor.conditions_match(
+                    ctx,
+                    &mut subquery_cache,
+                    &sources,
+                    &where_clause.conditions,
+                    &row.values,
+                )?,
+                None => true,
+            };
 
-                if include {
-                    rows.push(row);
-                }
+            if include {
+                rows.push(row);
             }
         }
     }

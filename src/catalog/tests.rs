@@ -3,11 +3,12 @@ mod tests {
     use crate::catalog::table::{CheckConstraint, ForeignKeyAction, ForeignKeyConstraint};
     use crate::catalog::types::{DataType, IntervalDaySecondValue, IntervalYearMonthValue, Value};
     use crate::catalog::{
-        Catalog, Column, ColumnId, DatabaseHeader, NamedConstraintKind, Schema, Table, TableId,
-        Trigger, TriggerEvent, View,
+        Catalog, CatalogEngine, Column, ColumnId, DatabaseHeader, NamedConstraintKind, Schema,
+        Table, TableId, Trigger, TriggerEvent, View,
     };
     use crate::error::Result;
     use crate::storage::Page;
+    use crate::test_utils::TestDbFile;
 
     #[test]
     fn test_database_header_creation() {
@@ -165,6 +166,34 @@ mod tests {
         assert!(deserialized.primary_key);
         assert!(deserialized.auto_increment);
         assert!(!deserialized.nullable);
+        Ok(())
+    }
+
+    #[test]
+    fn test_catalog_visit_tree_entries_propagates_cursor_next_error() -> Result<()> {
+        let db = TestDbFile::new("_test_catalog_visit_tree_entries_propagates_cursor_next_error");
+        let engine = CatalogEngine::new(db.path())?;
+        let root_page_id = engine.create_empty_btree()?;
+        let mut tree = engine.open_tree(root_page_id)?;
+
+        for i in 0..100u32 {
+            tree.insert(&i.to_be_bytes(), &[i as u8])?;
+        }
+
+        let page_ids = engine.collect_tree_page_ids(root_page_id)?;
+        assert!(page_ids.len() >= 3, "expected split tree");
+
+        engine.with_pager(|pager| {
+            let mut page = pager.read_page(page_ids[2])?;
+            page.data[0] = 0xFF;
+            pager.write_page(page)
+        })?;
+
+        let err = engine
+            .visit_tree_entries(root_page_id, |_key, _value| Ok(()))
+            .unwrap_err();
+        assert!(matches!(err, crate::error::HematiteError::StorageError(_)));
+
         Ok(())
     }
 

@@ -451,9 +451,7 @@ not available yet.",
         cursor.first()?;
         while let Some((key, value)) = cursor.current()? {
             visit(&key, &value)?;
-            if cursor.next().is_err() {
-                break;
-            }
+            cursor.next()?;
         }
         Ok(())
     }

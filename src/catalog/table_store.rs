@@ -124,7 +124,7 @@ pub(crate) fn open_table_cursor(
         rows.push(RowCodec::decode_stored_row(value)?);
         Ok(())
     })?;
-    Ok(TableCursor::new(rows))
+    Ok(TableCursor::from_ordered_rows(rows))
 }
 
 pub(crate) fn read_rows_with_ids(

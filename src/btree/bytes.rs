@@ -436,9 +436,7 @@ impl ByteTree {
                 break;
             }
             entries.push((key, value));
-            if cursor.next().is_err() {
-                break;
-            }
+            cursor.next()?;
         }
         Ok(entries)
     }
@@ -595,9 +593,7 @@ impl ByteTreeCursor {
         let mut entries = Vec::new();
         while let Some(entry) = self.current()? {
             entries.push(entry);
-            if self.next().is_err() {
-                break;
-            }
+            self.next()?;
         }
         Ok(entries)
     }

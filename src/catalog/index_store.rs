@@ -264,7 +264,7 @@ pub(crate) fn open_primary_key_cursor(
         });
         Ok(())
     })?;
-    Ok(IndexCursor::new(entries))
+    Ok(IndexCursor::from_ordered_entries(entries))
 }
 
 pub(crate) fn open_secondary_index_cursor(
@@ -282,7 +282,7 @@ pub(crate) fn open_secondary_index_cursor(
         entries.push(decode_secondary_entry(key, value)?);
         Ok(())
     })?;
-    Ok(IndexCursor::new(entries))
+    Ok(IndexCursor::from_ordered_entries(entries))
 }
 
 pub(crate) fn validate_table_indexes(engine: &mut CatalogEngine, table: &Table) -> Result<()> {

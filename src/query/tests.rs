@@ -556,6 +556,173 @@ mod executor_tests {
     }
 
     #[test]
+    fn test_update_executor_uses_original_row_values_for_multiple_assignments() -> Result<()> {
+        let mut catalog = Schema::new();
+
+        let columns = vec![
+            Column::new(
+                crate::catalog::ColumnId::new(1),
+                "id".to_string(),
+                DataType::Int,
+            )
+            .primary_key(true),
+            Column::new(
+                crate::catalog::ColumnId::new(2),
+                "a".to_string(),
+                DataType::Int,
+            ),
+            Column::new(
+                crate::catalog::ColumnId::new(3),
+                "b".to_string(),
+                DataType::Int,
+            ),
+        ];
+        let table_id = catalog.create_table("pairs".to_string(), columns)?;
+
+        let db = TestDbFile::new(
+            "_test_update_executor_uses_original_row_values_for_multiple_assignments",
+        );
+        let mut storage = CatalogEngine::new(db.path())?;
+        let root_page_id = storage.create_table("pairs")?;
+        let primary_key_root_page_id = storage.create_empty_btree()?;
+        catalog.set_table_root_page(table_id, root_page_id)?;
+        catalog.set_table_primary_key_root_page(table_id, primary_key_root_page_id)?;
+
+        let table = catalog.get_table_by_name("pairs").unwrap().clone();
+        let row = vec![Value::Integer(1), Value::Integer(10), Value::Integer(20)];
+        let row_id = storage.insert_into_table("pairs", row.clone())?;
+        storage.register_primary_key_row(
+            &table,
+            crate::catalog::StoredRow {
+                row_id,
+                values: row,
+            },
+        )?;
+
+        let mut ctx = ExecutionContext::for_mutation(&catalog, &mut storage);
+        let statement = UpdateStatement {
+            table: "pairs".to_string(),
+            target_binding: None,
+            source: None,
+            assignments: vec![
+                UpdateAssignment {
+                    column: "a".to_string(),
+                    value: Expression::Column("b".to_string()),
+                },
+                UpdateAssignment {
+                    column: "b".to_string(),
+                    value: Expression::Column("a".to_string()),
+                },
+            ],
+            where_clause: Some(WhereClause {
+                conditions: vec![Condition::Comparison {
+                    left: Expression::Column("id".to_string()),
+                    operator: ComparisonOperator::Equal,
+                    right: Expression::Literal(LiteralValue::Integer(1)),
+                }],
+            }),
+        };
+
+        let mut executor = UpdateExecutor::new(
+            statement,
+            crate::query::planner::SelectAccessPath::PrimaryKeyLookup,
+        );
+        let result = executor.execute(&mut ctx)?;
+
+        assert_eq!(result.affected_rows, 1);
+        let row = ctx
+            .engine
+            .lookup_row_by_primary_key(&table, &[Value::Integer(1)])?
+            .expect("updated row should exist");
+        assert_eq!(
+            row.values,
+            vec![Value::Integer(1), Value::Integer(20), Value::Integer(10)]
+        );
+        storage.flush()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_insert_on_duplicate_uses_original_row_values_for_multiple_assignments() -> Result<()> {
+        let mut catalog = Schema::new();
+
+        let columns = vec![
+            Column::new(
+                crate::catalog::ColumnId::new(1),
+                "id".to_string(),
+                DataType::Int,
+            )
+            .primary_key(true),
+            Column::new(
+                crate::catalog::ColumnId::new(2),
+                "a".to_string(),
+                DataType::Int,
+            ),
+            Column::new(
+                crate::catalog::ColumnId::new(3),
+                "b".to_string(),
+                DataType::Int,
+            ),
+        ];
+        let table_id = catalog.create_table("pairs".to_string(), columns)?;
+
+        let db = TestDbFile::new(
+            "_test_insert_on_duplicate_uses_original_row_values_for_multiple_assignments",
+        );
+        let mut storage = CatalogEngine::new(db.path())?;
+        let root_page_id = storage.create_table("pairs")?;
+        let primary_key_root_page_id = storage.create_empty_btree()?;
+        catalog.set_table_root_page(table_id, root_page_id)?;
+        catalog.set_table_primary_key_root_page(table_id, primary_key_root_page_id)?;
+
+        let table = catalog.get_table_by_name("pairs").unwrap().clone();
+        let row = vec![Value::Integer(1), Value::Integer(10), Value::Integer(20)];
+        let row_id = storage.insert_into_table("pairs", row.clone())?;
+        storage.register_primary_key_row(
+            &table,
+            crate::catalog::StoredRow {
+                row_id,
+                values: row,
+            },
+        )?;
+
+        let mut ctx = ExecutionContext::for_mutation(&catalog, &mut storage);
+        let statement = InsertStatement {
+            table: "pairs".to_string(),
+            columns: vec!["id".to_string(), "a".to_string(), "b".to_string()],
+            source: InsertSource::Values(vec![vec![
+                Expression::Literal(LiteralValue::Integer(1)),
+                Expression::Literal(LiteralValue::Integer(111)),
+                Expression::Literal(LiteralValue::Integer(222)),
+            ]]),
+            on_duplicate: Some(vec![
+                UpdateAssignment {
+                    column: "a".to_string(),
+                    value: Expression::Column("b".to_string()),
+                },
+                UpdateAssignment {
+                    column: "b".to_string(),
+                    value: Expression::Column("a".to_string()),
+                },
+            ]),
+        };
+
+        let mut executor = InsertExecutor::new(statement);
+        executor.execute(&mut ctx)?;
+
+        let row = ctx
+            .engine
+            .lookup_row_by_primary_key(&table, &[Value::Integer(1)])?
+            .expect("updated row should exist");
+        assert_eq!(
+            row.values,
+            vec![Value::Integer(1), Value::Integer(20), Value::Integer(10)]
+        );
+        storage.flush()?;
+        Ok(())
+    }
+
+    #[test]
     fn test_create_executor() -> Result<()> {
         let catalog = Schema::new();
         let db = TestDbFile::new("_test_create_executor");

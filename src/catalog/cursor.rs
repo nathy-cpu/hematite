@@ -11,6 +11,10 @@ pub struct TableCursor {
 impl TableCursor {
     pub fn new(mut rows: Vec<StoredRow>) -> Self {
         rows.sort_by_key(|row| row.row_id);
+        Self::from_ordered_rows(rows)
+    }
+
+    pub(crate) fn from_ordered_rows(rows: Vec<StoredRow>) -> Self {
         Self {
             rows,
             position: None,
@@ -73,6 +77,10 @@ pub struct IndexCursor {
 impl IndexCursor {
     pub fn new(mut entries: Vec<IndexEntry>) -> Self {
         entries.sort_by(|l, r| l.key.cmp(&r.key).then(l.row_id.cmp(&r.row_id)));
+        Self::from_ordered_entries(entries)
+    }
+
+    pub(crate) fn from_ordered_entries(entries: Vec<IndexEntry>) -> Self {
         Self {
             entries,
             position: None,

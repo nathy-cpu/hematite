@@ -136,7 +136,7 @@ impl Pager {
         if self.journal_mode == JournalMode::Rollback {
             let lock_path = self.rollback_lock_path()?;
             let file = open_lock_file(&lock_path)?;
-            
+
             let start = Instant::now();
             let mut backoff = Duration::from_millis(1);
             let timeout = Duration::from_secs(5);

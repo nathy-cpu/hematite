@@ -211,8 +211,11 @@ impl BTreeNode {
         node.cell_offsets = offsets;
         // BUG-02 fix: use exact per-cell sizing (reads key_len/value_len from page
         // bytes) so the last cell's range is not over-estimated to PAGE_SIZE.
-        *node.cell_ranges_cache.borrow_mut() =
-            Some(compute_cell_ranges_exact(&page, &header, &node.cell_offsets)?);
+        *node.cell_ranges_cache.borrow_mut() = Some(compute_cell_ranges_exact(
+            &page,
+            &header,
+            &node.cell_offsets,
+        )?);
 
         Ok(node)
     }
@@ -626,8 +629,11 @@ impl BTreeNode {
         self.cell_offsets = offsets;
         // BUG-02 fix: rebuild the cell-range cache with exact per-cell sizing
         // so the last cell is not over-estimated to PAGE_SIZE.
-        *self.cell_ranges_cache.borrow_mut() =
-            Some(compute_cell_ranges_exact(page, &header, &self.cell_offsets)?);
+        *self.cell_ranges_cache.borrow_mut() = Some(compute_cell_ranges_exact(
+            page,
+            &header,
+            &self.cell_offsets,
+        )?);
         self.payload_len = PAGE_SIZE.saturating_sub(header.cell_content_start as usize);
         self.keys.clear();
         self.values.clear();
@@ -1026,10 +1032,9 @@ impl BTreeNode {
             .borrow()
             .as_ref()
             .and_then(|ranges| ranges.get(index).copied())
-            .ok_or_else(|| HematiteError::StorageError(format!(
-                "Cell index {} out of bounds in cache",
-                index
-            )))
+            .ok_or_else(|| {
+                HematiteError::StorageError(format!("Cell index {} out of bounds in cache", index))
+            })
     }
 }
 

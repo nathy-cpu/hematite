@@ -403,7 +403,11 @@ fn add_to_freeblock_chain(data: &mut [u8], header_offset: usize, offset: usize, 
     write_u16_be(data, prev_ptr_offset, offset as u16);
 }
 
-pub(crate) fn compute_cell_size(page: &Page, header: &BTreePageHeaderV3, cell_offset: usize) -> Result<usize> {
+pub(crate) fn compute_cell_size(
+    page: &Page,
+    header: &BTreePageHeaderV3,
+    cell_offset: usize,
+) -> Result<usize> {
     if cell_offset >= PAGE_SIZE {
         return Err(HematiteError::CorruptedData(
             "Cell offset out of bounds".to_string(),

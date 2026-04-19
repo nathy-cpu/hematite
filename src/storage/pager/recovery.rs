@@ -165,31 +165,28 @@ impl Pager {
         };
 
         let encoded = full_state.encode(Self::CHECKSUM_METADATA_VERSION);
-        let metadata_page_bytes = match metadata_page::write_pager_metadata(
-            &existing_page.data,
-            &encoded,
-        ) {
-            Ok(bytes) => bytes,
-            Err(crate::error::HematiteError::StorageError(ref msg))
-                if msg.contains("exceeds page size") =>
-            {
-                // Fallback: exclude checksums if they cause an overflow.
-                // This ensures large databases remain functional while small
-                // databases retain persistent integrity checking.
-                let fallback_state = PersistedPagerState {
-                    journal_mode: self.journal_mode,
-                    free_pages,
-                    checksums: std::collections::HashMap::new(),
-                };
-                let fallback_encoded = fallback_state.encode(Self::CHECKSUM_METADATA_VERSION);
-                metadata_page::write_pager_metadata(&existing_page.data, &fallback_encoded)?
-            }
-            Err(err) => return Err(err),
-        };
+        let metadata_page_bytes =
+            match metadata_page::write_pager_metadata(&existing_page.data, &encoded) {
+                Ok(bytes) => bytes,
+                Err(crate::error::HematiteError::StorageError(ref msg))
+                    if msg.contains("exceeds page size") =>
+                {
+                    // Fallback: exclude checksums if they cause an overflow.
+                    // This ensures large databases remain functional while small
+                    // databases retain persistent integrity checking.
+                    let fallback_state = PersistedPagerState {
+                        journal_mode: self.journal_mode,
+                        free_pages,
+                        checksums: std::collections::HashMap::new(),
+                    };
+                    let fallback_encoded = fallback_state.encode(Self::CHECKSUM_METADATA_VERSION);
+                    metadata_page::write_pager_metadata(&existing_page.data, &fallback_encoded)?
+                }
+                Err(err) => return Err(err),
+            };
 
         Page::from_bytes(STORAGE_METADATA_PAGE_ID, metadata_page_bytes)
     }
-
 
     pub(super) fn stage_persisted_state_page(&mut self) -> Result<()> {
         let page = self.encoded_persisted_state_page()?;
