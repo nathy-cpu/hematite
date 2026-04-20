@@ -5776,6 +5776,7 @@ mod connection_tests {
 
 mod interface_tests {
     use crate::error::Result;
+    use crate::script_is_complete;
     use crate::sql::interface::*;
     use crate::sql::ExecutedStatement;
     use crate::sql::FromRow;
@@ -6060,6 +6061,14 @@ mod interface_tests {
         let rs = db.query("SELECT name FROM users ORDER BY id;")?;
         assert_eq!(rs.len(), 1);
         assert_eq!(rs.get_row(0).unwrap().get_string(0)?, "Alice");
+        Ok(())
+    }
+
+    #[test]
+    fn test_script_is_complete_detects_trailing_partial_statement() -> Result<()> {
+        assert!(script_is_complete("SELECT 1;")?);
+        assert!(!script_is_complete("SELECT 1; INSERT INTO logs (id")?);
+        assert!(!script_is_complete("SELECT 1")?);
         Ok(())
     }
 }
