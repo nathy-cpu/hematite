@@ -889,10 +889,7 @@ mod parser_tests {
     use crate::parser::{LiteralValue, SqlTypeName};
 
     fn parse_statement(sql: &str) -> Result<Statement> {
-        let mut lexer = Lexer::new(sql);
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.into_tokens());
-        parser.parse()
+        parse_sql_statement(sql)
     }
 
     fn parse_select(sql: &str) -> Result<SelectStatement> {
@@ -2391,7 +2388,7 @@ mod parser_tests {
 mod perf_baseline_tests {
     use crate::error::Result;
     use crate::parser::parser::parse_condition_fragment;
-    use crate::parser::{Lexer, Parser};
+    use crate::parser::{tokenize_sql, Parser};
     use crate::sql::script::split_script_tokens;
     use std::time::{Duration, Instant};
 
@@ -2409,9 +2406,7 @@ mod perf_baseline_tests {
     }
 
     fn parse_statement_tokens(sql: &str) -> Result<usize> {
-        let mut lexer = Lexer::new(sql);
-        lexer.tokenize()?;
-        let tokens = lexer.into_tokens();
+        let tokens = tokenize_sql(sql)?;
         let token_count = tokens.len();
         let mut parser = Parser::new(tokens);
         let _ = parser.parse()?;

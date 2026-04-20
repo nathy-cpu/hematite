@@ -7,7 +7,7 @@ pub mod types;
 
 pub use ast::*;
 pub use lexer::Lexer;
-pub use parser::Parser;
+pub use parser::{parse_sql_statement, tokenize_sql, Parser};
 pub use types::*;
 
 #[cfg(test)]

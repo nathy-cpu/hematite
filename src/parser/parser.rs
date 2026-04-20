@@ -2132,85 +2132,38 @@ impl Parser {
     }
 
     fn parse_column_list(&mut self) -> Result<Vec<String>> {
-        let mut columns = Vec::new();
-
-        loop {
-            let token = self.peek_token()?;
+        self.parse_comma_separated(|parser| {
+            let token = parser.peek_token()?;
             match token {
                 Token::Identifier(name) => {
                     let name_clone = name.clone();
-                    self.advance();
-                    columns.push(name_clone);
+                    parser.advance();
+                    Ok(name_clone)
                 }
-                _ => {
-                    return Err(HematiteError::ParseError(format!(
-                        "Expected column name, found: {:?}",
-                        token
-                    )))
-                }
+                _ => Err(HematiteError::ParseError(format!(
+                    "Expected column name, found: {:?}",
+                    token
+                ))),
             }
-
-            if self.peek_token()? == &Token::Comma {
-                self.consume_token(&Token::Comma)?;
-                continue;
-            } else {
-                break;
-            }
-        }
-
-        Ok(columns)
+        })
     }
 
     fn parse_update_assignments(&mut self) -> Result<Vec<UpdateAssignment>> {
-        let mut assignments = Vec::new();
-
-        loop {
-            let column = self.parse_identifier()?;
-            self.consume_token(&Token::Equal)?;
-            let value = self.parse_expression()?;
-            assignments.push(UpdateAssignment { column, value });
-
-            if matches!(self.peek_token(), Ok(&Token::Comma)) {
-                self.consume_token(&Token::Comma)?;
-                continue;
-            }
-
-            break;
-        }
-
-        Ok(assignments)
+        self.parse_comma_separated(|parser| {
+            let column = parser.parse_identifier()?;
+            parser.consume_token(&Token::Equal)?;
+            let value = parser.parse_expression()?;
+            Ok(UpdateAssignment { column, value })
+        })
     }
 
     fn parse_value_lists(&mut self) -> Result<Vec<Vec<Expression>>> {
-        let mut value_lists = Vec::new();
-
-        loop {
-            self.consume_token(&Token::LeftParen)?;
-            let mut values = Vec::new();
-
-            loop {
-                values.push(self.parse_expression()?);
-
-                if self.peek_token()? == &Token::Comma {
-                    self.consume_token(&Token::Comma)?;
-                    continue;
-                } else {
-                    break;
-                }
-            }
-
-            self.consume_token(&Token::RightParen)?;
-            value_lists.push(values);
-
-            if self.peek_token()? == &Token::Comma {
-                self.consume_token(&Token::Comma)?;
-                continue;
-            } else {
-                break;
-            }
-        }
-
-        Ok(value_lists)
+        self.parse_comma_separated(|parser| {
+            parser.consume_token(&Token::LeftParen)?;
+            let values = parser.parse_comma_separated(|parser| parser.parse_expression())?;
+            parser.consume_token(&Token::RightParen)?;
+            Ok(values)
+        })
     }
 
     fn parse_table_definition_items(
@@ -2220,12 +2173,13 @@ impl Parser {
         let mut constraints = Vec::new();
 
         loop {
-            match self.peek_token()? {
+            let token = self.peek_token()?;
+            match token {
                 Token::Constraint | Token::Check | Token::Foreign => {
                     constraints.push(self.parse_table_constraint()?);
                 }
                 Token::Identifier(_) => columns.push(self.parse_column_definition()?),
-                token => {
+                _ => {
                     return Err(HematiteError::ParseError(format!(
                         "Expected column definition or table constraint, found: {:?}",
                         token
@@ -2236,9 +2190,8 @@ impl Parser {
             if self.peek_token()? == &Token::Comma {
                 self.consume_token(&Token::Comma)?;
                 continue;
-            } else {
-                break;
             }
+            break;
         }
 
         Ok((columns, constraints))
@@ -2401,15 +2354,7 @@ impl Parser {
 
     fn parse_column_reference_list(&mut self) -> Result<Vec<String>> {
         self.consume_token(&Token::LeftParen)?;
-        let mut columns = Vec::new();
-        loop {
-            columns.push(self.parse_identifier()?);
-            if matches!(self.peek_token(), Ok(&Token::Comma)) {
-                self.consume_token(&Token::Comma)?;
-                continue;
-            }
-            break;
-        }
+        let columns = self.parse_comma_separated(|parser| parser.parse_identifier())?;
         self.consume_token(&Token::RightParen)?;
         Ok(columns)
     }
@@ -2745,6 +2690,21 @@ impl Parser {
         self.position += 1;
     }
 
+    fn parse_comma_separated<T, F>(&mut self, mut parse_item: F) -> Result<Vec<T>>
+    where
+        F: FnMut(&mut Self) -> Result<T>,
+    {
+        let mut items = Vec::new();
+        loop {
+            items.push(parse_item(self)?);
+            if !matches!(self.peek_token(), Ok(&Token::Comma)) {
+                break;
+            }
+            self.consume_token(&Token::Comma)?;
+        }
+        Ok(items)
+    }
+
     fn next_token_is(&self, expected: &Token) -> bool {
         self.tokens
             .get(self.position + 1)
@@ -2789,10 +2749,19 @@ impl Parser {
     }
 }
 
-pub fn parse_condition_fragment(sql: &str) -> Result<Condition> {
+pub fn tokenize_sql(sql: &str) -> Result<Vec<Token>> {
     let mut lexer = Lexer::new(sql);
     lexer.tokenize()?;
-    let mut parser = Parser::new(lexer.into_tokens());
+    Ok(lexer.into_tokens())
+}
+
+pub fn parse_sql_statement(sql: &str) -> Result<Statement> {
+    let mut parser = Parser::new(tokenize_sql(sql)?);
+    parser.parse()
+}
+
+pub fn parse_condition_fragment(sql: &str) -> Result<Condition> {
+    let mut parser = Parser::new(tokenize_sql(sql)?);
     let condition = parser.parse_or_condition()?;
     if parser.position != parser.tokens.len() {
         return Err(HematiteError::ParseError(

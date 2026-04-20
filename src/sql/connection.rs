@@ -28,7 +28,7 @@ use crate::parser::ast::{
     InsertStatement, SelectIntoStatement, SelectStatement, Statement, TableReference, TriggerEvent,
     WhereClause,
 };
-use crate::parser::{Lexer, Parser, SqlTypeName};
+use crate::parser::{parse_sql_statement, SqlTypeName};
 use crate::query::lowering::raise_literal_value;
 use crate::query::metadata as query_metadata;
 use crate::query::validation::{projected_column_names, source_column_names, validate_statement};
@@ -479,11 +479,7 @@ impl Connection {
     }
 
     fn parse_statement(sql: &str) -> Result<crate::parser::ast::Statement> {
-        let mut lexer = Lexer::new(sql);
-        lexer.tokenize()?;
-
-        let mut parser = Parser::new(lexer.into_tokens());
-        parser.parse()
+        parse_sql_statement(sql)
     }
 
     fn parse_select_sql(sql: &str) -> Result<SelectStatement> {
