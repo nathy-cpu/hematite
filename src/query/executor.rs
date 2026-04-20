@@ -81,6 +81,7 @@ pub struct SelectExecutor {
     pub access_path: SelectAccessPath,
     outer_scopes: Arc<Vec<CorrelatedScope>>,
     materialized_ctes: Arc<HashMap<String, Arc<QueryResult>>>,
+    table_row_counts: Arc<HashMap<String, usize>>,
 }
 
 #[derive(Debug, Clone)]
@@ -283,6 +284,7 @@ impl SelectExecutor {
             access_path,
             outer_scopes: Arc::new(Vec::new()),
             materialized_ctes: Arc::new(HashMap::new()),
+            table_row_counts: Arc::new(HashMap::new()),
         }
     }
 
@@ -739,7 +741,7 @@ impl SelectExecutor {
             subquery.clone()
         };
         let planner = QueryPlanner::new(ctx.catalog.clone())
-            .with_table_row_counts(current_table_row_counts(ctx.engine));
+            .with_table_row_counts(self.table_row_counts.as_ref().clone());
         let plan = planner.plan(Statement::Select(effective_subquery))?;
         match plan.program {
             ExecutionProgram::Select {
@@ -749,6 +751,7 @@ impl SelectExecutor {
                 let mut executor = SelectExecutor::new(statement, access_path);
                 executor.outer_scopes = self.outer_scopes.clone();
                 executor.materialized_ctes = self.materialized_ctes.clone();
+                executor.table_row_counts = self.table_row_counts.clone();
                 if let (Some(sources), Some(row)) = (current_sources, current_row) {
                     executor = executor.with_outer_scope(sources, row);
                 }
@@ -1549,6 +1552,7 @@ impl SelectExecutor {
                 SelectExecutor::new(recursive_term.clone(), SelectAccessPath::JoinScan);
             recursive_executor.outer_scopes = self.outer_scopes.clone();
             recursive_executor.materialized_ctes = self.materialized_ctes.clone();
+            recursive_executor.table_row_counts = self.table_row_counts.clone();
             let next_rows = recursive_executor.execute_body(ctx)?.rows;
             if next_rows.is_empty() {
                 converged = true;
@@ -1775,6 +1779,7 @@ impl SelectExecutor {
             let mut left_executor = SelectExecutor::new(left_statement, self.access_path.clone());
             left_executor.outer_scopes = self.outer_scopes.clone();
             left_executor.materialized_ctes = self.materialized_ctes.clone();
+            left_executor.table_row_counts = self.table_row_counts.clone();
             let mut left_result = left_executor.execute_body(ctx)?;
             let right_result = self.execute_subquery_cached(
                 ctx,
@@ -3337,6 +3342,9 @@ impl SelectExecutor {
 impl QueryExecutor for SelectExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext) -> Result<QueryResult> {
         validate_statement(&Statement::Select(self.statement.clone()), &ctx.catalog)?;
+        if self.table_row_counts.is_empty() {
+            self.table_row_counts = Arc::new(current_table_row_counts(ctx.engine));
+        }
         self.execute_body(ctx)
     }
 }
