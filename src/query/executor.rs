@@ -305,7 +305,8 @@ impl SelectExecutor {
         column_reference: &str,
     ) -> Result<Option<usize>> {
         let (qualifier, column_name) = SelectStatement::split_column_reference(column_reference);
-        let mut matches = Vec::new();
+        let mut first_match = None;
+        let mut ambiguous = false;
 
         for source in sources {
             if let Some(qualifier) = qualifier {
@@ -324,17 +325,20 @@ impl SelectExecutor {
                 .iter()
                 .position(|column| column == column_name)
             {
-                matches.push(source.offset + index);
+                if first_match.replace(source.offset + index).is_some() {
+                    ambiguous = true;
+                    break;
+                }
             }
         }
 
-        match matches.len() {
-            0 => Ok(None),
-            1 => Ok(matches.into_iter().next()),
-            _ => Err(HematiteError::ParseError(format!(
+        if ambiguous {
+            Err(HematiteError::ParseError(format!(
                 "Column reference '{}' is ambiguous",
                 column_reference
-            ))),
+            )))
+        } else {
+            Ok(first_match)
         }
     }
 
