@@ -631,11 +631,13 @@ impl SelectExecutor {
             } => {
                 let left_result =
                     self.evaluate_boolean_expression(ctx, cache, sources, left, row)?;
-                let right_result =
-                    self.evaluate_boolean_expression(ctx, cache, sources, right, row)?;
                 match operator {
-                    LogicalOperator::And => Ok(self.logical_and(left_result, right_result)),
-                    LogicalOperator::Or => Ok(self.logical_or(left_result, right_result)),
+                    LogicalOperator::And => short_circuit_and(left_result, || {
+                        self.evaluate_boolean_expression(ctx, cache, sources, right, row)
+                    }),
+                    LogicalOperator::Or => short_circuit_or(left_result, || {
+                        self.evaluate_boolean_expression(ctx, cache, sources, right, row)
+                    }),
                 }
             }
             _ => coerce_value_to_nullable_bool(
@@ -711,14 +713,6 @@ impl SelectExecutor {
 
         // If we've consumed the whole pattern, it's a match.
         pi == pchars.len()
-    }
-
-    fn logical_and(&self, left: Option<bool>, right: Option<bool>) -> Option<bool> {
-        logical_and_values(left, right)
-    }
-
-    fn logical_or(&self, left: Option<bool>, right: Option<bool>) -> Option<bool> {
-        logical_or_values(left, right)
     }
 
     fn evaluate_in_candidates(
@@ -1175,11 +1169,14 @@ impl SelectExecutor {
                 right,
             } => {
                 let left_result = self.evaluate_condition(ctx, cache, sources, left, row)?;
-                let right_result = self.evaluate_condition(ctx, cache, sources, right, row)?;
 
                 match operator {
-                    LogicalOperator::And => Ok(self.logical_and(left_result, right_result)),
-                    LogicalOperator::Or => Ok(self.logical_or(left_result, right_result)),
+                    LogicalOperator::And => short_circuit_and(left_result, || {
+                        self.evaluate_condition(ctx, cache, sources, right, row)
+                    }),
+                    LogicalOperator::Or => short_circuit_or(left_result, || {
+                        self.evaluate_condition(ctx, cache, sources, right, row)
+                    }),
                 }
             }
         }
@@ -2712,19 +2709,30 @@ impl SelectExecutor {
                     output_columns,
                     group_rows,
                 )?;
-                let right_result = self.evaluate_projected_boolean_expression(
-                    ctx,
-                    cache,
-                    sources,
-                    right,
-                    row,
-                    output_columns,
-                    group_rows,
-                )?;
-                Ok(match operator {
-                    LogicalOperator::And => logical_and_values(left_result, right_result),
-                    LogicalOperator::Or => logical_or_values(left_result, right_result),
-                })
+                match operator {
+                    LogicalOperator::And => short_circuit_and(left_result, || {
+                        self.evaluate_projected_boolean_expression(
+                            ctx,
+                            cache,
+                            sources,
+                            right,
+                            row,
+                            output_columns,
+                            group_rows,
+                        )
+                    }),
+                    LogicalOperator::Or => short_circuit_or(left_result, || {
+                        self.evaluate_projected_boolean_expression(
+                            ctx,
+                            cache,
+                            sources,
+                            right,
+                            row,
+                            output_columns,
+                            group_rows,
+                        )
+                    }),
+                }
             }
             _ => coerce_value_to_nullable_bool(
                 self.evaluate_projected_expression(
@@ -2960,19 +2968,30 @@ impl SelectExecutor {
                     output_columns,
                     group_rows,
                 )?;
-                let right_result = self.evaluate_projected_condition(
-                    ctx,
-                    cache,
-                    sources,
-                    right,
-                    row,
-                    output_columns,
-                    group_rows,
-                )?;
 
                 match operator {
-                    LogicalOperator::And => Ok(self.logical_and(left_result, right_result)),
-                    LogicalOperator::Or => Ok(self.logical_or(left_result, right_result)),
+                    LogicalOperator::And => short_circuit_and(left_result, || {
+                        self.evaluate_projected_condition(
+                            ctx,
+                            cache,
+                            sources,
+                            right,
+                            row,
+                            output_columns,
+                            group_rows,
+                        )
+                    }),
+                    LogicalOperator::Or => short_circuit_or(left_result, || {
+                        self.evaluate_projected_condition(
+                            ctx,
+                            cache,
+                            sources,
+                            right,
+                            row,
+                            output_columns,
+                            group_rows,
+                        )
+                    }),
                 }
             }
         }
@@ -8008,6 +8027,28 @@ fn logical_or_values(left: Option<bool>, right: Option<bool>) -> Option<bool> {
         (Some(true), _) | (_, Some(true)) => Some(true),
         (Some(false), Some(false)) => Some(false),
         _ => None,
+    }
+}
+
+fn short_circuit_and<F>(left: Option<bool>, eval_right: F) -> Result<Option<bool>>
+where
+    F: FnOnce() -> Result<Option<bool>>,
+{
+    match left {
+        Some(false) => Ok(Some(false)),
+        Some(true) => eval_right(),
+        None => eval_right().map(|right| logical_and_values(None, right)),
+    }
+}
+
+fn short_circuit_or<F>(left: Option<bool>, eval_right: F) -> Result<Option<bool>>
+where
+    F: FnOnce() -> Result<Option<bool>>,
+{
+    match left {
+        Some(true) => Ok(Some(true)),
+        Some(false) => eval_right(),
+        None => eval_right().map(|right| logical_or_values(None, right)),
     }
 }
 
