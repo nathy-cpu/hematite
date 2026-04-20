@@ -1266,20 +1266,7 @@ impl Parser {
             Token::NumberLiteral(value) => {
                 let value_clone = value.clone();
                 self.advance();
-                if value_clone.contains('.') {
-                    Ok(Expression::Literal(LiteralValue::Float(
-                        normalize_float_literal(&value_clone),
-                    )))
-                } else {
-                    Ok(Expression::Literal(LiteralValue::Integer(
-                        value_clone.parse::<i128>().map_err(|_| {
-                            HematiteError::ParseError(format!(
-                                "Invalid integer literal '{}'",
-                                value_clone
-                            ))
-                        })?,
-                    )))
-                }
+                Ok(Expression::Literal(parse_number_literal(&value_clone)?))
             }
             Token::BooleanLiteral(value) => {
                 let value_clone = value.clone();
@@ -2730,18 +2717,7 @@ impl Parser {
             Token::NumberLiteral(value) => {
                 let value_clone = value.clone();
                 self.advance();
-                if value_clone.contains('.') {
-                    Ok(LiteralValue::Float(normalize_float_literal(&value_clone)))
-                } else {
-                    Ok(LiteralValue::Integer(value_clone.parse::<i128>().map_err(
-                        |_| {
-                            HematiteError::ParseError(format!(
-                                "Invalid integer literal '{}'",
-                                value_clone
-                            ))
-                        },
-                    )?))
-                }
+                Ok(parse_number_literal(&value_clone)?)
             }
             Token::BooleanLiteral(value) => {
                 let value = *value;
@@ -2862,6 +2838,19 @@ fn parse_positive_u32_literal(value: &str, label: &str) -> Result<u32> {
         )));
     }
     Ok(parsed)
+}
+
+fn parse_number_literal(value: &str) -> Result<LiteralValue> {
+    if value.contains('.') {
+        value
+            .parse::<f64>()
+            .map_err(|_| HematiteError::ParseError(format!("Invalid float literal '{}'", value)))?;
+        Ok(LiteralValue::Float(normalize_float_literal(value)))
+    } else {
+        Ok(LiteralValue::Integer(value.parse::<i128>().map_err(|_| {
+            HematiteError::ParseError(format!("Invalid integer literal '{}'", value))
+        })?))
+    }
 }
 
 const TOP_LEVEL_KEYWORDS: &[&str] = &[

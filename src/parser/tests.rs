@@ -2359,6 +2359,15 @@ mod parser_tests {
         ));
         Ok(())
     }
+
+    #[test]
+    fn test_parser_rejects_out_of_range_integer_literal() {
+        let err = parse_statement("SELECT 170141183460469231731687303715884105728;")
+            .expect_err("out of range integer should fail in parser");
+        assert!(err
+            .to_string()
+            .contains("Invalid integer literal '170141183460469231731687303715884105728'"));
+    }
 }
 
 mod perf_baseline_tests {

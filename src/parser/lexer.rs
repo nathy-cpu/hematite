@@ -540,16 +540,6 @@ impl<'a> Lexer<'a> {
         }
 
         let number_str = &self.input[start..self.position];
-        if has_decimal {
-            number_str
-                .parse::<f64>()
-                .map_err(|_| HematiteError::ParseError("Invalid number".to_string()))?;
-        } else {
-            number_str
-                .parse::<i128>()
-                .map_err(|_| HematiteError::ParseError("Invalid integer".to_string()))?;
-        }
-
         self.tokens
             .push(Token::NumberLiteral(number_str.to_string()));
 
