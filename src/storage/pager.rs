@@ -99,6 +99,9 @@ mod state;
 #[cfg(test)]
 #[path = "pager/test_support.rs"]
 mod test_support;
+#[cfg(test)]
+#[path = "pager/tests.rs"]
+mod tests;
 #[path = "pager/wal.rs"]
 mod wal;
 

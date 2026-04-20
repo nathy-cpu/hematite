@@ -1366,6 +1366,308 @@ mod mod_tests {
     }
 }
 
+mod cell_format_tests {
+    use crate::btree::cell_format::{
+        table_leaf_local_payload_size, TableInteriorCell, TableLeafCell,
+    };
+
+    #[test]
+    fn table_leaf_cell_roundtrips_without_overflow() {
+        let payload = b"hello world".to_vec();
+        let cell = TableLeafCell::from_payload(7, &payload, None, 4096).unwrap();
+        let encoded = cell.encode(4096).unwrap();
+        let (decoded, used) = TableLeafCell::decode(&encoded, 4096).unwrap();
+
+        assert_eq!(used, encoded.len());
+        assert_eq!(decoded.rowid, 7);
+        assert_eq!(decoded.payload_size, payload.len());
+        assert_eq!(decoded.local_payload, payload);
+        assert_eq!(decoded.overflow_page_id, None);
+    }
+
+    #[test]
+    fn table_leaf_cell_roundtrips_with_overflow_pointer() {
+        let payload = vec![0xAA; 10_000];
+        let expected_local = table_leaf_local_payload_size(4096, payload.len());
+        let cell = TableLeafCell::from_payload(99, &payload, Some(44), 4096).unwrap();
+        let encoded = cell.encode(4096).unwrap();
+        let (decoded, used) = TableLeafCell::decode(&encoded, 4096).unwrap();
+
+        assert_eq!(used, encoded.len());
+        assert_eq!(decoded.rowid, 99);
+        assert_eq!(decoded.payload_size, payload.len());
+        assert_eq!(decoded.local_payload.len(), expected_local);
+        assert_eq!(decoded.overflow_page_id, Some(44));
+        assert_eq!(decoded.local_payload, payload[..expected_local]);
+    }
+
+    #[test]
+    fn table_leaf_cell_rejects_missing_overflow_pointer() {
+        let payload = vec![0x11; 10_000];
+        let error = TableLeafCell::from_payload(3, &payload, None, 4096).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("table leaf payload requires an overflow page id"));
+    }
+
+    #[test]
+    fn table_interior_cell_roundtrip() {
+        let cell = TableInteriorCell {
+            left_child_page_id: 12,
+            rowid: 55,
+        };
+        let encoded = cell.encode().unwrap();
+        let (decoded, used) = TableInteriorCell::decode(&encoded).unwrap();
+
+        assert_eq!(used, encoded.len());
+        assert_eq!(decoded, cell);
+    }
+}
+
+mod page_format_tests {
+    use crate::btree::page_format::{
+        cell_pointer, defragment_page, initialize_btree_page, insert_cell, remove_cell,
+        set_rightmost_child, BTreePageHeaderV3,
+    };
+    use crate::storage::format::PageKind;
+    use crate::storage::Page;
+
+    fn dummy_cell(len: usize) -> Vec<u8> {
+        assert!(len >= 4);
+        let mut buf = vec![1; len];
+        let val_len = (len - 4) as u16;
+        buf[0..2].copy_from_slice(&0u16.to_be_bytes());
+        buf[2..4].copy_from_slice(&val_len.to_be_bytes());
+        buf
+    }
+
+    #[test]
+    fn initializes_leaf_page_with_page_one_offset() {
+        let mut page = Page::new(1);
+        initialize_btree_page(&mut page, PageKind::LeafTable, true).unwrap();
+
+        let header = BTreePageHeaderV3::parse(&page, true).unwrap();
+        assert_eq!(header.header_offset, 100);
+        assert_eq!(header.cell_count, 0);
+        assert_eq!(header.cell_content_start, crate::storage::PAGE_SIZE as u16);
+    }
+
+    #[test]
+    fn initializes_interior_page_with_rightmost_child_slot() {
+        let mut page = Page::new(2);
+        initialize_btree_page(&mut page, PageKind::InteriorTable, false).unwrap();
+        set_rightmost_child(&mut page, false, 99).unwrap();
+
+        let header = BTreePageHeaderV3::parse(&page, false).unwrap();
+        assert_eq!(header.rightmost_child, Some(99));
+    }
+
+    #[test]
+    fn inserts_cells_and_tracks_pointer_order() {
+        let mut page = Page::new(2);
+        initialize_btree_page(&mut page, PageKind::LeafTable, false).unwrap();
+
+        let first = vec![1u8; 8];
+        let second = vec![2u8; 5];
+        insert_cell(&mut page, false, 0, &first).unwrap();
+        insert_cell(&mut page, false, 1, &second).unwrap();
+
+        let header = BTreePageHeaderV3::parse(&page, false).unwrap();
+        assert_eq!(header.cell_count, 2);
+        let first_ptr = cell_pointer(&page, false, 0).unwrap();
+        let second_ptr = cell_pointer(&page, false, 1).unwrap();
+        assert!(first_ptr > second_ptr);
+    }
+
+    #[test]
+    fn remove_cell_defragments_page() {
+        let mut page = Page::new(1);
+        initialize_btree_page(&mut page, PageKind::LeafTable, false).unwrap();
+        insert_cell(&mut page, false, 0, &dummy_cell(8)).unwrap();
+        insert_cell(&mut page, false, 1, &dummy_cell(6)).unwrap();
+        insert_cell(&mut page, false, 2, &dummy_cell(4)).unwrap();
+
+        remove_cell(&mut page, false, 1).unwrap();
+
+        let header = BTreePageHeaderV3::parse(&page, false).unwrap();
+        assert_eq!(header.cell_count, 2);
+        assert_eq!(header.fragmented_free_bytes, 0);
+        assert!(header.pointer_area_end() <= header.cell_content_start as usize);
+    }
+
+    #[test]
+    fn explicit_defragmentation_keeps_cell_count_stable() {
+        let mut page = Page::new(2);
+        initialize_btree_page(&mut page, PageKind::LeafTable, false).unwrap();
+        insert_cell(&mut page, false, 0, &dummy_cell(7)).unwrap();
+        insert_cell(&mut page, false, 1, &dummy_cell(9)).unwrap();
+
+        defragment_page(&mut page, false).unwrap();
+
+        let header = BTreePageHeaderV3::parse(&page, false).unwrap();
+        assert_eq!(header.cell_count, 2);
+        assert_eq!(header.fragmented_free_bytes, 0);
+    }
+}
+
+mod index_extra_tests {
+    use crate::btree::index::BTreeIndex;
+    use crate::btree::node::BTreeNode;
+    use crate::btree::page_format::{
+        initialize_btree_page, insert_cell as pf_insert_cell, remove_cell as pf_remove_cell,
+        set_rightmost_child, total_free_space as pf_total_free_space,
+    };
+    use crate::btree::tree::BTreeManager;
+    use crate::btree::{BTreeKey, BTreeValue};
+    use crate::storage::format::{DatabaseHeaderV3, PageKind, DATABASE_HEADER_SIZE};
+    use crate::storage::{Page, Pager, PAGE_SIZE};
+    use std::sync::{Arc, RwLock};
+
+    #[test]
+    fn test_remove_cell_adds_freeblock() {
+        let mut page = Page::new(2);
+        initialize_btree_page(&mut page, PageKind::LeafTable, false).unwrap();
+
+        let make_cell = |klen: usize, vlen: usize, key_byte: u8, val_byte: u8| -> Vec<u8> {
+            let mut cell = Vec::with_capacity(4 + klen + vlen);
+            cell.extend_from_slice(&(klen as u16).to_be_bytes());
+            cell.extend_from_slice(&(vlen as u16).to_be_bytes());
+            cell.extend(std::iter::repeat_n(key_byte, klen));
+            cell.extend(std::iter::repeat_n(val_byte, vlen));
+            cell
+        };
+
+        let c1 = make_cell(2, 2, 0x11, 0x21);
+        let c2 = make_cell(3, 3, 0x12, 0x22);
+        let c3 = make_cell(4, 1, 0x13, 0x23);
+
+        pf_insert_cell(&mut page, false, 0, &c1).unwrap();
+        pf_insert_cell(&mut page, false, 1, &c2).unwrap();
+        pf_insert_cell(&mut page, false, 2, &c3).unwrap();
+
+        let free_before = pf_total_free_space(&page, false).unwrap();
+        pf_remove_cell(&mut page, false, 1).unwrap();
+        let free_after = pf_total_free_space(&page, false).unwrap();
+
+        assert!(free_after > free_before);
+    }
+
+    #[test]
+    fn test_create_new_root_preserves_db_header() {
+        let pager = Pager::new_in_memory(10).expect("create pager");
+        let storage = Arc::new(RwLock::new(pager));
+        let mut index = BTreeIndex::from_shared_storage(Arc::clone(&storage), 0);
+
+        {
+            let mut pg = storage.write().unwrap();
+            let db_header = DatabaseHeaderV3::default();
+            let header_bytes = db_header.encode();
+            let mut page0 = Page::new(0);
+            page0.data[..DATABASE_HEADER_SIZE].copy_from_slice(&header_bytes);
+            pg.write_page(page0).unwrap();
+
+            let right = pg.allocate_page().unwrap();
+            let key = BTreeKey::new(vec![0x42]);
+            index
+                .create_new_root(&mut pg, key, right)
+                .expect("create_new_root");
+        }
+
+        {
+            let pg_read = storage.read().unwrap();
+            let page0 = pg_read.read_page(0).expect("read page0");
+            let header = DatabaseHeaderV3::decode(&page0.data).expect("db header decode");
+            assert_eq!(header.page_size as usize, PAGE_SIZE);
+            let _bt_header = crate::btree::page_format::BTreePageHeaderV3::parse(&page0, true)
+                .expect("b-tree header parse");
+        }
+    }
+
+    #[test]
+    fn test_check_root_underflow_preserves_db_header() {
+        let pager = Pager::new_in_memory(10).expect("create pager");
+        let storage = Arc::new(RwLock::new(pager));
+
+        {
+            let mut pg = storage.write().unwrap();
+            let db_header = DatabaseHeaderV3::default();
+            let header_bytes = db_header.encode();
+            let mut page0 = Page::new(0);
+            page0.data[..DATABASE_HEADER_SIZE].copy_from_slice(&header_bytes);
+            pg.write_page(page0).unwrap();
+        }
+
+        let child_id = {
+            let mut pg = storage.write().unwrap();
+            pg.allocate_page().unwrap()
+        };
+
+        {
+            let mut child_page = Page::new(child_id);
+            let mut child_node = BTreeNode::new_leaf(child_id);
+            child_node.keys.push_back(BTreeKey::new(vec![0x1]));
+            child_node.values.push_back(BTreeValue::new(vec![0x2]));
+            child_node.key_count = child_node.keys.len();
+            child_node.to_page(&mut child_page).unwrap();
+
+            let mut pg = storage.write().unwrap();
+            pg.write_page(child_page).unwrap();
+        }
+
+        {
+            let mut pg = storage.write().unwrap();
+            let mut root_page = pg.read_page(0).unwrap();
+            initialize_btree_page(&mut root_page, PageKind::InteriorTable, true).unwrap();
+            set_rightmost_child(&mut root_page, true, child_id).unwrap();
+            pg.write_page(root_page).unwrap();
+        }
+
+        let mut idx = BTreeIndex::from_shared_storage(Arc::clone(&storage), 0);
+        {
+            let mut pg = storage.write().unwrap();
+            let res = idx
+                .check_root_underflow(&mut pg)
+                .expect("check_root_underflow");
+            assert_eq!(res, Some(0));
+        }
+
+        {
+            let pg_read = storage.read().unwrap();
+            let page0 = pg_read.read_page(0).expect("read page0");
+            let _header = DatabaseHeaderV3::decode(&page0.data).expect("db header");
+        }
+    }
+
+    #[test]
+    fn test_validate_tree_simple_leaf() {
+        let pager = Pager::new_in_memory(10).expect("create pager");
+        let storage = Arc::new(RwLock::new(pager));
+        let mut manager = BTreeManager::from_shared_storage(Arc::clone(&storage));
+
+        let page_id = {
+            let mut pg = storage.write().unwrap();
+            pg.allocate_page().unwrap()
+        };
+
+        {
+            let mut leaf_page = Page::new(page_id);
+            initialize_btree_page(&mut leaf_page, PageKind::LeafTable, false).unwrap();
+
+            let mut node = BTreeNode::new_leaf(page_id);
+            node.keys.push_back(BTreeKey::new(vec![0xAA]));
+            node.values.push_back(BTreeValue::new(vec![0xBB]));
+            node.key_count = 1;
+            node.to_page(&mut leaf_page).unwrap();
+
+            let mut pg = storage.write().unwrap();
+            pg.write_page(leaf_page).unwrap();
+        }
+
+        let ok = manager.validate_tree(page_id).expect("validate_tree ran");
+        assert!(ok);
+    }
+}
+
 mod value_store_tests {
     use crate::btree::value_store::{
         StoredValueLayout, STORED_VALUE_HEADER_SIZE, STORED_VALUE_LOCAL_CAPACITY,

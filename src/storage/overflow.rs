@@ -14,13 +14,13 @@ pub const OVERFLOW_PAYLOAD_CAPACITY: usize = crate::storage::PAGE_SIZE - OVERFLO
 pub const OVERFLOW_CHUNK_CAPACITY: usize = OVERFLOW_PAYLOAD_CAPACITY;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct OverflowPage {
-    next_page_id: u32,
-    payload_chunk: Vec<u8>,
+pub(crate) struct OverflowPage {
+    pub(crate) next_page_id: u32,
+    pub(crate) payload_chunk: Vec<u8>,
 }
 
 impl OverflowPage {
-    fn encode(&self, page_id: PageId) -> Result<Page> {
+    pub(crate) fn encode(&self, page_id: PageId) -> Result<Page> {
         if self.payload_chunk.len() > OVERFLOW_PAYLOAD_CAPACITY {
             return Err(HematiteError::StorageError(format!(
                 "overflow payload chunk {} exceeds capacity {}",
@@ -38,7 +38,7 @@ impl OverflowPage {
         Ok(page)
     }
 
-    fn decode(page: &Page, expected_chunk_len: usize) -> Result<Self> {
+    pub(crate) fn decode(page: &Page, expected_chunk_len: usize) -> Result<Self> {
         if page.data[0] != PageKind::Overflow as u8 {
             return Err(HematiteError::StorageError(
                 "overflow page kind mismatch".to_string(),
@@ -60,7 +60,7 @@ impl OverflowPage {
     }
 }
 
-fn split_payload_into_overflow_chunks(payload: &[u8]) -> Vec<Vec<u8>> {
+pub(crate) fn split_payload_into_overflow_chunks(payload: &[u8]) -> Vec<Vec<u8>> {
     if payload.is_empty() {
         return Vec::new();
     }
@@ -71,7 +71,7 @@ fn split_payload_into_overflow_chunks(payload: &[u8]) -> Vec<Vec<u8>> {
         .collect()
 }
 
-fn encode_overflow_chain(page_ids: &[PageId], payload: &[u8]) -> Result<Vec<Page>> {
+pub(crate) fn encode_overflow_chain(page_ids: &[PageId], payload: &[u8]) -> Result<Vec<Page>> {
     let chunks = split_payload_into_overflow_chunks(payload);
     if chunks.len() != page_ids.len() {
         return Err(HematiteError::StorageError(format!(
@@ -322,51 +322,4 @@ pub(crate) fn read_overflow_chain_cached_with_cache(
     }
 
     Ok(payload)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        encode_overflow_chain, split_payload_into_overflow_chunks, OverflowPage,
-        OVERFLOW_CHUNK_CAPACITY,
-    };
-    use crate::storage::Page;
-
-    #[test]
-    fn overflow_chunk_split_uses_full_intermediate_pages() {
-        let payload = vec![0x7A; OVERFLOW_CHUNK_CAPACITY * 2 + 19];
-        let chunks = split_payload_into_overflow_chunks(&payload);
-
-        assert_eq!(chunks.len(), 3);
-        assert_eq!(chunks[0].len(), OVERFLOW_CHUNK_CAPACITY);
-        assert_eq!(chunks[1].len(), OVERFLOW_CHUNK_CAPACITY);
-        assert_eq!(chunks[2].len(), 19);
-    }
-
-    #[test]
-    fn overflow_chain_roundtrip() {
-        let payload = vec![0x44; OVERFLOW_CHUNK_CAPACITY + 37];
-        let pages = encode_overflow_chain(&[8, 9], &payload).unwrap();
-        let mut decoded = Vec::new();
-
-        for (index, page) in pages.iter().enumerate() {
-            let remaining = payload.len() - decoded.len();
-            let expected_chunk_len = remaining.min(OVERFLOW_CHUNK_CAPACITY);
-            let overflow = OverflowPage::decode(page, expected_chunk_len).unwrap();
-            let expected_next_page_id = pages.get(index + 1).map(|page| page.id).unwrap_or(0);
-            assert_eq!(overflow.next_page_id, expected_next_page_id);
-            decoded.extend_from_slice(&overflow.payload_chunk);
-        }
-
-        assert_eq!(decoded, payload);
-    }
-
-    #[test]
-    fn overflow_page_rejects_wrong_kind() {
-        let mut page = Page::new(5);
-        page.data[0] = 0xFF;
-
-        let error = OverflowPage::decode(&page, 10).unwrap_err();
-        assert!(error.to_string().contains("overflow page kind mismatch"));
-    }
 }

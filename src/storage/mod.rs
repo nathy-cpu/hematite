@@ -48,6 +48,4 @@ pub use types::{
 };
 
 #[cfg(test)]
-mod pager_fault_test;
-#[cfg(test)]
 mod tests;

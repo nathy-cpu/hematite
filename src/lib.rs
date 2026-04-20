@@ -60,7 +60,7 @@ pub mod sql;
 pub mod storage;
 
 #[cfg(test)]
-mod architecture_tests;
+mod tests;
 
 #[cfg(test)]
 pub mod test_utils;

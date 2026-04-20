@@ -25,6 +25,7 @@ fn top_level_module(path: &Path) -> Option<&'static str> {
         "query" => Some("query"),
         "parser" => Some("parser"),
         "sql" => Some("sql"),
+        "cli" => Some("cli"),
         "main.rs" => Some("main"),
         _ => None,
     }
@@ -80,7 +81,8 @@ fn production_imports_match_layer_matrix_or_temporary_exceptions() {
         ),
         ("parser", BTreeSet::from(["parser", "error"])),
         ("sql", BTreeSet::from(["sql", "query", "parser", "error"])),
-        ("main", BTreeSet::from(["sql", "error"])),
+        ("cli", BTreeSet::from(["cli", "error"])),
+        ("main", BTreeSet::from(["cli", "sql", "error"])),
     ]);
 
     let temporary_exceptions: BTreeSet<(&str, &str)> =

@@ -3302,3 +3302,455 @@ mod serialization_tests {
         assert!(matches!(err, HematiteError::CorruptedData(_)));
     }
 }
+
+mod file_manager_tests {
+    use crate::storage::file_manager::FileManager;
+    use crate::storage::format::{DatabaseHeaderV3, FormatGeneration, PageKind};
+
+    #[test]
+    fn raw_region_io_roundtrips_in_memory() {
+        let mut manager = FileManager::new_in_memory().unwrap();
+        manager.write_region(17, b"hematite").unwrap();
+
+        let bytes = manager.read_region(17, 8).unwrap();
+        assert_eq!(bytes, b"hematite");
+    }
+
+    #[test]
+    fn raw_region_write_grows_in_memory_backend() {
+        let mut manager = FileManager::new_in_memory().unwrap();
+        manager.write_region(128, b"db").unwrap();
+
+        assert!(manager.file_len().unwrap() >= 130);
+        assert_eq!(manager.read_region(128, 2).unwrap(), b"db");
+    }
+
+    #[test]
+    fn truncate_to_shrinks_in_memory_backend() {
+        let mut manager = FileManager::new_in_memory().unwrap();
+        manager.write_region(256, b"pager").unwrap();
+        manager.truncate_to(64).unwrap();
+
+        assert_eq!(manager.file_len().unwrap(), 64);
+    }
+
+    #[test]
+    fn detect_format_generation_recognizes_v3_files() {
+        let mut manager = FileManager::new_in_memory().unwrap();
+        manager
+            .bootstrap_v3_database(&DatabaseHeaderV3::default(), PageKind::LeafTable)
+            .unwrap();
+
+        assert_eq!(
+            manager.detect_format_generation().unwrap(),
+            Some(FormatGeneration::V3)
+        );
+    }
+
+    #[test]
+    fn bootstrap_v3_database_writes_page_one_image() {
+        let mut manager = FileManager::new_in_memory().unwrap();
+        manager
+            .bootstrap_v3_database(&DatabaseHeaderV3::default(), PageKind::LeafTable)
+            .unwrap();
+
+        let page_one = manager.read_region(0, 4096).unwrap();
+        assert_eq!(&page_one[..16], b"Hematite format3");
+        assert_eq!(page_one[100], PageKind::LeafTable as u8);
+        assert_eq!(manager.file_len().unwrap(), 4096);
+    }
+
+    #[test]
+    fn deallocate_reserved_pages_are_rejected() {
+        let mut manager = FileManager::new_in_memory().unwrap();
+
+        let page_zero_err = manager.deallocate_page(0).unwrap_err();
+        assert!(page_zero_err
+            .to_string()
+            .contains("Cannot deallocate reserved page 0"));
+
+        let page_one_err = manager.deallocate_page(1).unwrap_err();
+        assert!(page_one_err
+            .to_string()
+            .contains("Cannot deallocate reserved page 1"));
+    }
+}
+
+mod format_tests {
+    use crate::storage::format::{
+        bootstrap_database_page_one, choose_local_payload_size, decode_varint,
+        detect_format_generation, encode_varint, max_local_payload, min_local_payload,
+        usable_space, DatabaseHeaderV3, FormatGeneration, PageKind, DATABASE_HEADER_SIZE,
+    };
+
+    #[test]
+    fn v3_database_header_roundtrip() {
+        let header = DatabaseHeaderV3 {
+            page_count: 17,
+            schema_root_page: 5,
+            next_table_id: 42,
+            user_version: 99,
+            ..DatabaseHeaderV3::default()
+        };
+
+        let encoded = header.encode();
+        assert_eq!(encoded.len(), DATABASE_HEADER_SIZE);
+        assert_eq!(DatabaseHeaderV3::decode(&encoded).unwrap(), header);
+    }
+
+    #[test]
+    fn v3_database_header_rejects_corrupted_checksum() {
+        let header = DatabaseHeaderV3::default();
+        let mut encoded = header.encode();
+        encoded[24] ^= 0xFF;
+
+        let err = DatabaseHeaderV3::decode(&encoded).unwrap_err();
+        assert!(err.to_string().contains("checksum mismatch"));
+    }
+
+    #[test]
+    fn format_detection_recognizes_v3_header() {
+        let header = DatabaseHeaderV3::default();
+        let encoded = header.encode();
+        assert_eq!(
+            detect_format_generation(&encoded),
+            Some(FormatGeneration::V3)
+        );
+    }
+
+    #[test]
+    fn page_kind_roundtrip() {
+        for kind in [
+            PageKind::InteriorIndex,
+            PageKind::InteriorTable,
+            PageKind::LeafIndex,
+            PageKind::LeafTable,
+            PageKind::Overflow,
+            PageKind::FreelistTrunk,
+            PageKind::FreelistLeaf,
+        ] {
+            assert_eq!(PageKind::from_byte(kind as u8).unwrap(), kind);
+        }
+    }
+
+    #[test]
+    fn sqlite_style_local_payload_bounds_hold() {
+        let usable = usable_space(4096, 0);
+        let min_local = min_local_payload(usable);
+        let max_local = max_local_payload(usable);
+        assert!(min_local < max_local);
+
+        let local = choose_local_payload_size(usable, 10_000);
+        assert!(local >= min_local);
+        assert!(local <= max_local);
+    }
+
+    #[test]
+    fn varint_roundtrip_examples() {
+        for value in [
+            0,
+            1,
+            127,
+            128,
+            255,
+            16_384,
+            u32::MAX as u64,
+            u64::from(u32::MAX) + 1,
+        ] {
+            let encoded = encode_varint(value);
+            let (decoded, used) = decode_varint(&encoded).unwrap();
+            assert_eq!(decoded, value);
+            assert_eq!(used, encoded.len());
+        }
+    }
+
+    #[test]
+    fn bootstrap_page_one_writes_header_and_root_page_header() {
+        let header = DatabaseHeaderV3::default();
+        let page = bootstrap_database_page_one(&header, PageKind::LeafTable).unwrap();
+
+        assert_eq!(&page[..DATABASE_HEADER_SIZE], &header.encode());
+        assert_eq!(page[100], PageKind::LeafTable as u8);
+        assert_eq!(u16::from_be_bytes([page[105], page[106]]), 4096);
+    }
+}
+
+mod metadata_page_tests {
+    use crate::storage::metadata_page::{
+        read_catalog_metadata, read_pager_metadata, write_catalog_metadata, write_pager_metadata,
+    };
+    use crate::storage::PAGE_SIZE;
+
+    #[test]
+    fn metadata_page_preserves_both_sections() {
+        let empty = vec![0; PAGE_SIZE];
+        let page = write_pager_metadata(&empty, b"pager=yes").unwrap();
+        let page = write_catalog_metadata(&page, b"catalog=yes").unwrap();
+
+        assert_eq!(read_pager_metadata(&page).unwrap().unwrap(), b"pager=yes");
+        assert_eq!(
+            read_catalog_metadata(&page).unwrap().unwrap(),
+            b"catalog=yes"
+        );
+    }
+
+    #[test]
+    fn metadata_page_rejects_legacy_catalog_payload() {
+        let payload = b"version=1\ntable_count=0";
+        let mut legacy_page = vec![0; PAGE_SIZE];
+        legacy_page[0..4].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+        legacy_page[4..4 + payload.len()].copy_from_slice(payload);
+
+        let err = write_pager_metadata(&legacy_page, b"pager=yes").unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Legacy reserved metadata layout is unsupported"));
+    }
+
+    #[test]
+    fn metadata_page_rejects_btree_root_bytes_as_legacy_metadata() {
+        let mut page = vec![0; PAGE_SIZE];
+        page[0..4].copy_from_slice(b"BTRE");
+
+        let err = read_catalog_metadata(&page).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Legacy reserved metadata layout is unsupported"));
+        let err = read_pager_metadata(&page).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Legacy reserved metadata layout is unsupported"));
+    }
+}
+
+mod overflow_unit_tests {
+    use crate::storage::overflow::{
+        encode_overflow_chain, split_payload_into_overflow_chunks, OverflowPage,
+        OVERFLOW_CHUNK_CAPACITY,
+    };
+    use crate::storage::Page;
+
+    #[test]
+    fn overflow_chunk_split_uses_full_intermediate_pages() {
+        let payload = vec![0x7A; OVERFLOW_CHUNK_CAPACITY * 2 + 19];
+        let chunks = split_payload_into_overflow_chunks(&payload);
+
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].len(), OVERFLOW_CHUNK_CAPACITY);
+        assert_eq!(chunks[1].len(), OVERFLOW_CHUNK_CAPACITY);
+        assert_eq!(chunks[2].len(), 19);
+    }
+
+    #[test]
+    fn overflow_chain_roundtrip() {
+        let payload = vec![0x44; OVERFLOW_CHUNK_CAPACITY + 37];
+        let pages = encode_overflow_chain(&[8, 9], &payload).unwrap();
+        let mut decoded = Vec::new();
+
+        for (index, page) in pages.iter().enumerate() {
+            let remaining = payload.len() - decoded.len();
+            let expected_chunk_len = remaining.min(OVERFLOW_CHUNK_CAPACITY);
+            let overflow = OverflowPage::decode(page, expected_chunk_len).unwrap();
+            let expected_next_page_id = pages.get(index + 1).map(|page| page.id).unwrap_or(0);
+            assert_eq!(overflow.next_page_id, expected_next_page_id);
+            decoded.extend_from_slice(&overflow.payload_chunk);
+        }
+
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn overflow_page_rejects_wrong_kind() {
+        let mut page = Page::new(5);
+        page.data[0] = 0xFF;
+
+        let error = OverflowPage::decode(&page, 10).unwrap_err();
+        assert!(error.to_string().contains("overflow page kind mismatch"));
+    }
+}
+
+mod journal_codec_tests {
+    use crate::storage::journal::{
+        EncodedRollbackJournal, JournalFileRecord, JournalFileState, JournalHeader,
+    };
+    use crate::storage::PAGE_SIZE;
+
+    const JOURNAL_HEADER_SIZE: usize = 36;
+
+    #[test]
+    fn v3_rollback_journal_roundtrip() {
+        let journal = EncodedRollbackJournal {
+            header: JournalHeader {
+                state: JournalFileState::Committed,
+                original_database_page_count: 12,
+                checksum_seed: 0xDEADBEEF,
+                ..JournalHeader::default()
+            },
+            original_free_pages: vec![5, 9],
+            original_checksums: vec![(2, 100), (7, 200)],
+            records: vec![
+                JournalFileRecord {
+                    page_number: 2,
+                    page_bytes: vec![0x11; PAGE_SIZE],
+                },
+                JournalFileRecord {
+                    page_number: 9,
+                    page_bytes: vec![0xAB; PAGE_SIZE],
+                },
+            ],
+        };
+
+        let encoded = journal.encode().expect("encode journal");
+        let decoded = EncodedRollbackJournal::decode(&encoded).expect("decode journal");
+
+        assert_eq!(decoded.header.state, JournalFileState::Committed);
+        assert_eq!(decoded.header.original_database_page_count, 12);
+        assert_eq!(decoded.header.checksum_seed, 0xDEADBEEF);
+        assert_eq!(decoded.header.free_page_count, 2);
+        assert_eq!(decoded.header.checksum_count, 2);
+        assert_eq!(decoded.header.record_count, 2);
+        assert_eq!(decoded.original_free_pages, journal.original_free_pages);
+        assert_eq!(decoded.original_checksums, journal.original_checksums);
+        assert_eq!(decoded.records, journal.records);
+    }
+
+    #[test]
+    fn v3_rollback_journal_rejects_checksum_corruption() {
+        let journal = EncodedRollbackJournal {
+            header: JournalHeader::default(),
+            original_free_pages: vec![],
+            original_checksums: vec![],
+            records: vec![JournalFileRecord {
+                page_number: 3,
+                page_bytes: vec![0x55; PAGE_SIZE],
+            }],
+        };
+
+        let mut encoded = journal.encode().expect("encode journal");
+        let checksum_index = JOURNAL_HEADER_SIZE + 4;
+        encoded[checksum_index] ^= 0x01;
+
+        let error = EncodedRollbackJournal::decode(&encoded).expect_err("corruption should fail");
+        assert!(error
+            .to_string()
+            .contains("v3 rollback journal record checksum mismatch"));
+    }
+
+    #[test]
+    fn v3_rollback_journal_rejects_duplicate_pages() {
+        let journal = EncodedRollbackJournal {
+            header: JournalHeader::default(),
+            original_free_pages: vec![],
+            original_checksums: vec![],
+            records: vec![
+                JournalFileRecord {
+                    page_number: 4,
+                    page_bytes: vec![0x22; PAGE_SIZE],
+                },
+                JournalFileRecord {
+                    page_number: 4,
+                    page_bytes: vec![0x33; PAGE_SIZE],
+                },
+            ],
+        };
+
+        let error = journal.encode().expect_err("duplicate pages should fail");
+        assert!(error
+            .to_string()
+            .contains("v3 rollback journal contains duplicate page 4"));
+    }
+
+    #[test]
+    fn v3_rollback_journal_rejects_truncated_metadata_sections() {
+        let journal = EncodedRollbackJournal {
+            header: JournalHeader::default(),
+            original_free_pages: vec![2],
+            original_checksums: vec![(3, 10)],
+            records: vec![],
+        };
+
+        let mut encoded = journal.encode().expect("encode journal");
+        encoded.truncate(encoded.len() - 2);
+
+        let error = EncodedRollbackJournal::decode(&encoded).expect_err("truncation should fail");
+        assert!(error.to_string().contains("truncated"));
+    }
+}
+
+mod wal_codec_tests {
+    use crate::storage::wal::{WalFile, WalFrame, WalHeader};
+
+    #[test]
+    fn v3_wal_roundtrip() {
+        let wal = WalFile {
+            header: WalHeader::default(),
+            frames: vec![
+                WalFrame::committed(1, 3, 1, vec![7u8; crate::storage::PAGE_SIZE]),
+                WalFrame::committed(2, 3, 1, vec![9u8; crate::storage::PAGE_SIZE]),
+                WalFrame::committed(2, 4, 2, vec![11u8; crate::storage::PAGE_SIZE]),
+            ],
+        };
+
+        let encoded = wal.encode().unwrap();
+        let decoded = WalFile::decode(&encoded).unwrap();
+        assert_eq!(decoded, wal);
+    }
+
+    #[test]
+    fn v3_wal_reconstructs_visible_pages_for_commit_boundary() {
+        let wal = WalFile {
+            header: WalHeader::default(),
+            frames: vec![
+                WalFrame::committed(1, 3, 1, vec![1u8; crate::storage::PAGE_SIZE]),
+                WalFrame::committed(2, 3, 1, vec![2u8; crate::storage::PAGE_SIZE]),
+                WalFrame::committed(2, 4, 2, vec![3u8; crate::storage::PAGE_SIZE]),
+            ],
+        };
+
+        let (page_count_1, visible_1) = wal.visible_pages_at(1).unwrap();
+        assert_eq!(page_count_1, 3);
+        assert_eq!(visible_1.get(&2).unwrap()[0], 2);
+
+        let (page_count_2, visible_2) = wal.visible_pages_at(2).unwrap();
+        assert_eq!(page_count_2, 4);
+        assert_eq!(visible_2.get(&2).unwrap()[0], 3);
+    }
+
+    #[test]
+    fn v3_wal_rejects_checksum_corruption() {
+        let wal = WalFile {
+            header: WalHeader::default(),
+            frames: vec![WalFrame::committed(
+                1,
+                3,
+                1,
+                vec![7u8; crate::storage::PAGE_SIZE],
+            )],
+        };
+
+        let mut encoded = wal.encode().unwrap();
+        let last = encoded.len() - 1;
+        encoded[last] ^= 0xFF;
+
+        let err = WalFile::decode(&encoded).unwrap_err();
+        assert!(err.to_string().contains("checksum mismatch"));
+    }
+
+    #[test]
+    fn v3_wal_decode_ignores_truncated_tail_frame() {
+        let wal = WalFile {
+            header: WalHeader::default(),
+            frames: vec![
+                WalFrame::committed(1, 3, 1, vec![7u8; crate::storage::PAGE_SIZE]),
+                WalFrame::committed(2, 3, 2, vec![9u8; crate::storage::PAGE_SIZE]),
+            ],
+        };
+
+        let mut encoded = wal.encode().unwrap();
+        encoded.truncate(encoded.len() - 19);
+
+        let decoded = WalFile::decode(&encoded).unwrap();
+        assert_eq!(decoded.frames.len(), 1);
+        assert_eq!(decoded.frames[0].commit_sequence, 1);
+    }
+}
