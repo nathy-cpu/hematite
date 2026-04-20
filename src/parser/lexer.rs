@@ -476,41 +476,35 @@ impl<'a> Lexer<'a> {
     }
 
     fn read_blob_literal(&mut self) -> Result<()> {
-        self.advance_char(); // Skip X
-        self.advance_char(); // Skip opening quote
-        let mut literal = String::new();
+        self.position += 2; // Skip X'
+        let mut bytes = Vec::new();
+        let mut high_nibble = None;
 
         while self.position < self.input.len() {
-            let ch = self.current_char();
-            if ch == '\'' {
-                if literal.len() % 2 != 0 {
+            let byte = self.current_byte();
+            if byte == b'\'' {
+                if high_nibble.is_some() {
                     return Err(HematiteError::ParseError(
                         "Hex blob literal must contain an even number of digits".to_string(),
                     ));
                 }
 
-                let mut bytes = Vec::with_capacity(literal.len() / 2);
-                for index in (0..literal.len()).step_by(2) {
-                    let byte =
-                        u8::from_str_radix(&literal[index..index + 2], 16).map_err(|_| {
-                            HematiteError::ParseError("Invalid hex blob literal".to_string())
-                        })?;
-                    bytes.push(byte);
-                }
-
                 self.tokens.push(Token::BlobLiteral(bytes));
-                self.advance_char(); // Skip closing quote
+                self.position += 1; // Skip closing quote
                 return Ok(());
             }
 
-            if !ch.is_ascii_hexdigit() {
-                return Err(HematiteError::ParseError(
+            let nibble = hex_nibble(byte).ok_or_else(|| {
+                HematiteError::ParseError(
                     "Hex blob literal may only contain hexadecimal digits".to_string(),
-                ));
+                )
+            })?;
+            if let Some(high) = high_nibble.take() {
+                bytes.push((high << 4) | nibble);
+            } else {
+                high_nibble = Some(nibble);
             }
-
-            literal.push(ch);
-            self.advance_char();
+            self.position += 1;
         }
 
         Err(HematiteError::ParseError(
@@ -624,4 +618,13 @@ fn is_identifier_start_byte(byte: u8) -> bool {
 
 fn is_identifier_continue_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }

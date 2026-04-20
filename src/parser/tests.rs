@@ -373,6 +373,24 @@ mod lexer_tests {
     }
 
     #[test]
+    fn test_hex_blob_literal_rejects_odd_digit_count() {
+        let mut lexer = Lexer::new("SELECT X'ABC' FROM files;");
+        let err = lexer.tokenize().expect_err("odd hex digit count should fail");
+        assert!(err
+            .to_string()
+            .contains("Hex blob literal must contain an even number of digits"));
+    }
+
+    #[test]
+    fn test_hex_blob_literal_rejects_non_hex_digits() {
+        let mut lexer = Lexer::new("SELECT X'GG' FROM files;");
+        let err = lexer.tokenize().expect_err("non-hex digit should fail");
+        assert!(err
+            .to_string()
+            .contains("Hex blob literal may only contain hexadecimal digits"));
+    }
+
+    #[test]
     fn test_in_statement() -> Result<()> {
         let mut lexer = Lexer::new("SELECT id FROM users WHERE id IN (1, 2, 3);");
         lexer.tokenize()?;
