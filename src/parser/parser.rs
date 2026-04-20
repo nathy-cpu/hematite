@@ -2818,9 +2818,9 @@ impl Parser {
 }
 
 pub fn parse_condition_fragment(sql: &str) -> Result<Condition> {
-    let mut lexer = Lexer::new(sql.to_string());
+    let mut lexer = Lexer::new(sql);
     lexer.tokenize()?;
-    let mut parser = Parser::new(lexer.get_tokens().to_vec());
+    let mut parser = Parser::new(lexer.into_tokens());
     let condition = parser.parse_or_condition()?;
     if parser.position != parser.tokens.len() {
         return Err(HematiteError::ParseError(

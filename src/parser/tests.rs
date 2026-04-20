@@ -287,7 +287,7 @@ mod lexer_tests {
 
     #[test]
     fn test_simple_select() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT * FROM users".to_string());
+        let mut lexer = Lexer::new("SELECT * FROM users");
         lexer.tokenize()?;
 
         let expected = vec![
@@ -303,7 +303,7 @@ mod lexer_tests {
 
     #[test]
     fn test_distinct_statement() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT DISTINCT name FROM users;".to_string());
+        let mut lexer = Lexer::new("SELECT DISTINCT name FROM users;");
         lexer.tokenize()?;
 
         let expected = vec![
@@ -322,8 +322,7 @@ mod lexer_tests {
     #[test]
     fn test_backtick_identifier_and_type_alias_tokens() -> Result<()> {
         let mut lexer = Lexer::new(
-            "CREATE TABLE `user data` (`id` INT PRIMARY KEY, `active` BOOL, `score` FLOAT, `name` VARCHAR(32));"
-                .to_string(),
+            "CREATE TABLE `user data` (`id` INT PRIMARY KEY, `active` BOOL, `score` FLOAT, `name` VARCHAR(32));",
         );
         lexer.tokenize()?;
 
@@ -358,7 +357,7 @@ mod lexer_tests {
 
     #[test]
     fn test_hex_blob_literal_tokens() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT X'48656C6C6F' FROM files;".to_string());
+        let mut lexer = Lexer::new("SELECT X'48656C6C6F' FROM files;");
         lexer.tokenize()?;
 
         let expected = vec![
@@ -375,7 +374,7 @@ mod lexer_tests {
 
     #[test]
     fn test_in_statement() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT id FROM users WHERE id IN (1, 2, 3);".to_string());
+        let mut lexer = Lexer::new("SELECT id FROM users WHERE id IN (1, 2, 3);");
         lexer.tokenize()?;
 
         let expected = vec![
@@ -402,7 +401,7 @@ mod lexer_tests {
 
     #[test]
     fn test_between_statement() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT id FROM users WHERE id BETWEEN 1 AND 3;".to_string());
+        let mut lexer = Lexer::new("SELECT id FROM users WHERE id BETWEEN 1 AND 3;");
         lexer.tokenize()?;
 
         let expected = vec![
@@ -425,7 +424,7 @@ mod lexer_tests {
 
     #[test]
     fn test_transaction_tokens() -> Result<()> {
-        let mut lexer = Lexer::new("BEGIN; COMMIT; ROLLBACK;".to_string());
+        let mut lexer = Lexer::new("BEGIN; COMMIT; ROLLBACK;");
         lexer.tokenize()?;
 
         let expected = vec![
@@ -443,7 +442,7 @@ mod lexer_tests {
 
     #[test]
     fn test_select_with_where_and_and() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT id FROM users WHERE id = 1 AND id != 2".to_string());
+        let mut lexer = Lexer::new("SELECT id FROM users WHERE id = 1 AND id != 2");
         lexer.tokenize()?;
 
         let expected = vec![
@@ -467,7 +466,7 @@ mod lexer_tests {
 
     #[test]
     fn test_limit_statement() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT id FROM users ORDER BY name DESC LIMIT 5;".to_string());
+        let mut lexer = Lexer::new("SELECT id FROM users ORDER BY name DESC LIMIT 5;");
         lexer.tokenize()?;
 
         let expected = vec![
@@ -491,7 +490,7 @@ mod lexer_tests {
     #[test]
     fn test_offset_statement() -> Result<()> {
         let mut lexer =
-            Lexer::new("SELECT id FROM users ORDER BY name DESC LIMIT 5 OFFSET 2;".to_string());
+            Lexer::new("SELECT id FROM users ORDER BY name DESC LIMIT 5 OFFSET 2;");
         lexer.tokenize()?;
 
         let expected = vec![
@@ -516,7 +515,7 @@ mod lexer_tests {
 
     #[test]
     fn test_count_statement() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT COUNT(*) FROM users;".to_string());
+        let mut lexer = Lexer::new("SELECT COUNT(*) FROM users;");
         lexer.tokenize()?;
 
         let expected = vec![
@@ -536,7 +535,7 @@ mod lexer_tests {
 
     #[test]
     fn test_aggregate_statement() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT SUM(score) FROM users;".to_string());
+        let mut lexer = Lexer::new("SELECT SUM(score) FROM users;");
         lexer.tokenize()?;
 
         let expected = vec![
@@ -557,7 +556,7 @@ mod lexer_tests {
     #[test]
     fn test_group_by_having_statement() -> Result<()> {
         let mut lexer = Lexer::new(
-            "SELECT name, COUNT(id) FROM users GROUP BY name HAVING name = 'Alice';".to_string(),
+            "SELECT name, COUNT(id) FROM users GROUP BY name HAVING name = 'Alice';",
         );
         lexer.tokenize()?;
 
@@ -587,7 +586,7 @@ mod lexer_tests {
 
     #[test]
     fn test_placeholder_statement() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT * FROM users WHERE id = ?;".to_string());
+        let mut lexer = Lexer::new("SELECT * FROM users WHERE id = ?;");
         lexer.tokenize()?;
 
         let expected = vec![
@@ -608,7 +607,7 @@ mod lexer_tests {
 
     #[test]
     fn test_order_by_statement() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT id FROM users ORDER BY name DESC, id ASC;".to_string());
+        let mut lexer = Lexer::new("SELECT id FROM users ORDER BY name DESC, id ASC;");
         lexer.tokenize()?;
 
         let expected = vec![
@@ -632,7 +631,7 @@ mod lexer_tests {
 
     #[test]
     fn test_insert_statement() -> Result<()> {
-        let mut lexer = Lexer::new("INSERT INTO users (id, name) VALUES (1, 'John')".to_string());
+        let mut lexer = Lexer::new("INSERT INTO users (id, name) VALUES (1, 'John')");
         lexer.tokenize()?;
 
         let expected = vec![
@@ -659,8 +658,7 @@ mod lexer_tests {
     #[test]
     fn test_create_and_drop_index_tokens() -> Result<()> {
         let mut lexer = Lexer::new(
-            "CREATE INDEX idx_users_name ON users (name); DROP INDEX idx_users_name ON users;"
-                .to_string(),
+            "CREATE INDEX idx_users_name ON users (name); DROP INDEX idx_users_name ON users;",
         );
         lexer.tokenize()?;
 
@@ -688,7 +686,7 @@ mod lexer_tests {
 
     #[test]
     fn test_delete_statement() -> Result<()> {
-        let mut lexer = Lexer::new("DELETE FROM users WHERE id = 1;".to_string());
+        let mut lexer = Lexer::new("DELETE FROM users WHERE id = 1;");
         lexer.tokenize()?;
 
         let expected = vec![
@@ -709,7 +707,7 @@ mod lexer_tests {
     #[test]
     fn test_update_statement() -> Result<()> {
         let mut lexer =
-            Lexer::new("UPDATE users SET name = 'John', active = TRUE WHERE id = 1;".to_string());
+            Lexer::new("UPDATE users SET name = 'John', active = TRUE WHERE id = 1;");
         lexer.tokenize()?;
 
         let expected = vec![
@@ -736,7 +734,7 @@ mod lexer_tests {
 
     #[test]
     fn test_is_null_statement() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT * FROM users WHERE name IS NOT NULL;".to_string());
+        let mut lexer = Lexer::new("SELECT * FROM users WHERE name IS NOT NULL;");
         lexer.tokenize()?;
 
         let expected = vec![
@@ -758,7 +756,7 @@ mod lexer_tests {
 
     #[test]
     fn test_drop_table_statement() -> Result<()> {
-        let mut lexer = Lexer::new("DROP TABLE users;".to_string());
+        let mut lexer = Lexer::new("DROP TABLE users;");
         lexer.tokenize()?;
 
         let expected = vec![
@@ -775,7 +773,7 @@ mod lexer_tests {
     #[test]
     fn test_create_table() -> Result<()> {
         let mut lexer =
-            Lexer::new("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)".to_string());
+            Lexer::new("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)");
         lexer.tokenize()?;
 
         let expected = vec![
@@ -799,7 +797,7 @@ mod lexer_tests {
 
     #[test]
     fn test_unicode_identifier_and_string_literal() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT navn FROM brukere WHERE navn = 'Alíce';".to_string());
+        let mut lexer = Lexer::new("SELECT navn FROM brukere WHERE navn = 'Alíce';");
         lexer.tokenize()?;
 
         let expected = vec![
@@ -821,7 +819,7 @@ mod lexer_tests {
     #[test]
     fn test_string_literal_escaped_quotes() -> Result<()> {
         let mut lexer =
-            Lexer::new("INSERT INTO users (name) VALUES ('O\\'Brien'), ('D''Angelo');".to_string());
+            Lexer::new("INSERT INTO users (name) VALUES ('O\\'Brien'), ('D''Angelo');");
         lexer.tokenize()?;
 
         assert_eq!(
@@ -849,7 +847,7 @@ mod lexer_tests {
 
     #[test]
     fn test_lowercase_keywords_are_not_tokenized_as_keywords() -> Result<()> {
-        let mut lexer = Lexer::new("select * from users;".to_string());
+        let mut lexer = Lexer::new("select * from users;");
         lexer.tokenize()?;
 
         let expected = vec![
@@ -873,9 +871,9 @@ mod parser_tests {
     use crate::parser::{LiteralValue, SqlTypeName};
 
     fn parse_statement(sql: &str) -> Result<Statement> {
-        let mut lexer = Lexer::new(sql.to_string());
+        let mut lexer = Lexer::new(sql);
         lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let mut parser = Parser::new(lexer.into_tokens());
         parser.parse()
     }
 
@@ -2261,24 +2259,24 @@ mod parser_tests {
 
     #[test]
     fn test_parse_explain_describe_and_show_tables() -> Result<()> {
-        let mut lexer = Lexer::new("EXPLAIN SELECT * FROM users;".to_string());
+        let mut lexer = Lexer::new("EXPLAIN SELECT * FROM users;");
         lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let mut parser = Parser::new(lexer.into_tokens());
         assert!(matches!(parser.parse()?, Statement::Explain(_)));
 
-        let mut lexer = Lexer::new("DESCRIBE users;".to_string());
+        let mut lexer = Lexer::new("DESCRIBE users;");
         lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let mut parser = Parser::new(lexer.into_tokens());
         assert!(matches!(parser.parse()?, Statement::Describe(_)));
 
-        let mut lexer = Lexer::new("SHOW TABLES;".to_string());
+        let mut lexer = Lexer::new("SHOW TABLES;");
         lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let mut parser = Parser::new(lexer.into_tokens());
         assert!(matches!(parser.parse()?, Statement::ShowTables));
 
-        let mut lexer = Lexer::new("SHOW VIEWS;".to_string());
+        let mut lexer = Lexer::new("SHOW VIEWS;");
         lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let mut parser = Parser::new(lexer.into_tokens());
         assert!(matches!(parser.parse()?, Statement::ShowViews));
         Ok(())
     }
@@ -2384,9 +2382,9 @@ mod perf_baseline_tests {
     }
 
     fn parse_statement_tokens(sql: &str) -> Result<usize> {
-        let mut lexer = Lexer::new(sql.to_string());
+        let mut lexer = Lexer::new(sql);
         lexer.tokenize()?;
-        let tokens = lexer.get_tokens().to_vec();
+        let tokens = lexer.into_tokens();
         let token_count = tokens.len();
         let mut parser = Parser::new(tokens);
         let _ = parser.parse()?;

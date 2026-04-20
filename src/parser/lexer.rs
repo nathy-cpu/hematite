@@ -159,14 +159,14 @@ pub enum Token {
 }
 
 #[derive(Debug, Clone)]
-pub struct Lexer {
-    input: String,
+pub struct Lexer<'a> {
+    input: &'a str,
     position: usize,
     tokens: Vec<Token>,
 }
 
-impl Lexer {
-    pub fn new(input: String) -> Self {
+impl<'a> Lexer<'a> {
+    pub fn new(input: &'a str) -> Self {
         Self {
             input,
             position: 0,
@@ -211,6 +211,10 @@ impl Lexer {
 
     pub fn get_tokens(&self) -> &[Token] {
         &self.tokens
+    }
+
+    pub fn into_tokens(self) -> Vec<Token> {
+        self.tokens
     }
 
     fn skip_whitespace(&mut self) {

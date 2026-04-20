@@ -479,10 +479,10 @@ impl Connection {
     }
 
     fn parse_statement(sql: &str) -> Result<crate::parser::ast::Statement> {
-        let mut lexer = Lexer::new(sql.to_string());
+        let mut lexer = Lexer::new(sql);
         lexer.tokenize()?;
 
-        let mut parser = Parser::new(lexer.get_tokens().to_vec());
+        let mut parser = Parser::new(lexer.into_tokens());
         parser.parse()
     }
 
