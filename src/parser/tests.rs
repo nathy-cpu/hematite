@@ -2362,3 +2362,119 @@ mod parser_tests {
         Ok(())
     }
 }
+
+mod perf_baseline_tests {
+    use crate::error::Result;
+    use crate::parser::parser::parse_condition_fragment;
+    use crate::parser::{Lexer, Parser};
+    use crate::sql::script::split_script_tokens;
+    use std::time::{Duration, Instant};
+
+    fn measure<F>(label: &str, iterations: usize, mut run: F) -> Duration
+    where
+        F: FnMut(),
+    {
+        let start = Instant::now();
+        for _ in 0..iterations {
+            run();
+        }
+        let elapsed = start.elapsed();
+        eprintln!("{label}: {elapsed:?} over {iterations} iterations");
+        elapsed
+    }
+
+    fn parse_statement_tokens(sql: &str) -> Result<usize> {
+        let mut lexer = Lexer::new(sql.to_string());
+        lexer.tokenize()?;
+        let tokens = lexer.get_tokens().to_vec();
+        let token_count = tokens.len();
+        let mut parser = Parser::new(tokens);
+        let _ = parser.parse()?;
+        Ok(token_count)
+    }
+
+    #[test]
+    #[ignore]
+    fn baseline_large_select_parse() -> Result<()> {
+        let sql = "SELECT u.id, u.name, p.title, COUNT(c.id) AS comment_count FROM users u LEFT JOIN posts p ON u.id = p.user_id LEFT JOIN comments c ON p.id = c.post_id WHERE u.active = TRUE AND p.score > 10 GROUP BY u.id, u.name, p.title HAVING COUNT(c.id) > 1 ORDER BY p.title DESC, u.name ASC LIMIT 200 OFFSET 10;";
+        let token_count = parse_statement_tokens(sql)?;
+        let elapsed = measure("baseline_large_select_parse", 2_000, || {
+            parse_statement_tokens(sql).expect("large select should parse");
+        });
+        eprintln!("large select bytes={}, tokens={token_count}", sql.len());
+        assert!(elapsed > Duration::ZERO);
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn baseline_large_insert_values_parse() -> Result<()> {
+        let values = (0..400)
+            .map(|i| format!("({}, 'user{}', {}, TRUE)", i + 1, i + 1, (i % 97) + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "INSERT INTO users (id, name, score, active) VALUES {values};"
+        );
+        let token_count = parse_statement_tokens(&sql)?;
+        let elapsed = measure("baseline_large_insert_values_parse", 250, || {
+            parse_statement_tokens(&sql).expect("large insert should parse");
+        });
+        eprintln!("large insert bytes={}, tokens={token_count}", sql.len());
+        assert!(elapsed > Duration::ZERO);
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn baseline_ddl_heavy_script_split() -> Result<()> {
+        let script = (0..120)
+            .map(|i| {
+                format!(
+                    "CREATE TABLE t{i} (id INT PRIMARY KEY, name TEXT, active BOOLEAN DEFAULT TRUE); ALTER TABLE t{i} ADD COLUMN score INT; CREATE INDEX idx_t{i}_score ON t{i} (score);"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let statements = split_script_tokens(&script)?;
+        let statement_count = statements.len();
+        let elapsed = measure("baseline_ddl_heavy_script_split", 150, || {
+            split_script_tokens(&script).expect("script split should succeed");
+        });
+        eprintln!(
+            "ddl script bytes={}, statements={statement_count}",
+            script.len()
+        );
+        assert!(elapsed > Duration::ZERO);
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn baseline_string_blob_heavy_parse() -> Result<()> {
+        let blob = "AB".repeat(2_048);
+        let sql = format!(
+            "INSERT INTO files (name, payload, note) VALUES ('alpha', X'{blob}', 'O\\'Brien''s report with unicode Alíce and emojis omitted');"
+        );
+        let token_count = parse_statement_tokens(&sql)?;
+        let elapsed = measure("baseline_string_blob_heavy_parse", 250, || {
+            parse_statement_tokens(&sql).expect("blob-heavy insert should parse");
+        });
+        eprintln!("blob-heavy bytes={}, tokens={token_count}", sql.len());
+        assert!(elapsed > Duration::ZERO);
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn baseline_check_condition_fragment_parse() -> Result<()> {
+        let sql = "(score BETWEEN 1 AND 100 AND (status = 'ACTIVE' OR status = 'PENDING')) OR (expires_at IS NULL AND retries < 3)";
+        let _ = parse_condition_fragment(sql)?;
+        let elapsed = measure("baseline_check_condition_fragment_parse", 5_000, || {
+            parse_condition_fragment(sql).expect("condition fragment should parse");
+        });
+        eprintln!("condition fragment bytes={}", sql.len());
+        assert!(elapsed > Duration::ZERO);
+        Ok(())
+    }
+}
