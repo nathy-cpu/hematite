@@ -742,7 +742,8 @@ pub(crate) fn validate_column_reference(
     catalog: &Schema,
     from: &TableReference,
 ) -> Result<()> {
-    validate_column_reference_with_outer(select, name, catalog, from, &[])
+    let local_bindings = collect_source_bindings(select, catalog, from)?;
+    validate_column_reference_with_outer(name, &local_bindings, &[])
 }
 
 fn validate_select(select: &SelectStatement, catalog: &Schema) -> Result<()> {
@@ -817,13 +818,13 @@ fn validate_select_with_outer_bindings(
         }
     }
 
-    let bindings = collect_source_bindings(select, catalog, &select.from)?;
-    if bindings.is_empty() {
+    let local_bindings = collect_source_bindings(select, catalog, &select.from)?;
+    if local_bindings.is_empty() {
         return Err(HematiteError::ParseError(
             "SELECT requires at least one table source".to_string(),
         ));
     }
-    validate_table_reference(select, catalog, &select.from, outer_bindings)?;
+    validate_table_reference(select, catalog, &select.from, &local_bindings, outer_bindings)?;
 
     let has_aggregate = select.columns.iter().any(|item| match item {
         SelectItem::CountAll | SelectItem::Aggregate { .. } => true,
@@ -859,35 +860,43 @@ fn validate_select_with_outer_bindings(
         match item {
             SelectItem::Column(name) => {
                 validate_column_reference_with_outer(
-                    select,
                     name,
-                    catalog,
-                    &select.from,
+                    &local_bindings,
                     outer_bindings,
                 )?;
             }
             SelectItem::Expression(expr) => {
-                validate_expression(select, expr, catalog, &select.from, outer_bindings)?;
+                validate_expression_with_bindings(
+                    select,
+                    expr,
+                    catalog,
+                    &select.from,
+                    &local_bindings,
+                    outer_bindings,
+                )?;
             }
             SelectItem::Aggregate { column, .. } => {
                 validate_column_reference_with_outer(
-                    select,
                     column,
-                    catalog,
-                    &select.from,
+                    &local_bindings,
                     outer_bindings,
                 )?;
             }
             SelectItem::Window { function, window } => {
                 for expr in &window.partition_by {
-                    validate_expression(select, expr, catalog, &select.from, outer_bindings)?;
+                    validate_expression_with_bindings(
+                        select,
+                        expr,
+                        catalog,
+                        &select.from,
+                        &local_bindings,
+                        outer_bindings,
+                    )?;
                 }
                 for item in &window.order_by {
                     validate_column_reference_with_outer(
-                        select,
                         &item.column,
-                        catalog,
-                        &select.from,
+                        &local_bindings,
                         outer_bindings,
                     )?;
                 }
@@ -905,12 +914,26 @@ fn validate_select_with_outer_bindings(
 
     if let Some(where_clause) = &select.where_clause {
         for condition in &where_clause.conditions {
-            validate_condition(select, condition, catalog, &select.from, outer_bindings)?;
+            validate_condition_with_bindings(
+                select,
+                condition,
+                catalog,
+                &select.from,
+                &local_bindings,
+                outer_bindings,
+            )?;
         }
     }
 
     for expr in &select.group_by {
-        validate_expression(select, expr, catalog, &select.from, outer_bindings)?;
+        validate_expression_with_bindings(
+            select,
+            expr,
+            catalog,
+            &select.from,
+            &local_bindings,
+            outer_bindings,
+        )?;
     }
 
     if !select.group_by.is_empty() {
@@ -965,10 +988,8 @@ fn validate_select_with_outer_bindings(
 
     for item in &select.order_by {
         validate_column_reference_with_outer(
-            select,
             &item.column,
-            catalog,
-            &select.from,
+            &local_bindings,
             outer_bindings,
         )?;
     }
@@ -1590,6 +1611,7 @@ fn validate_table_reference(
     select: &SelectStatement,
     catalog: &Schema,
     from: &TableReference,
+    local_bindings: &[SourceBinding],
     outer_bindings: &[SourceBinding],
 ) -> Result<()> {
     match from {
@@ -1600,16 +1622,23 @@ fn validate_table_reference(
             Ok(())
         }
         TableReference::CrossJoin(left, right) => {
-            validate_table_reference(select, catalog, left, outer_bindings)?;
-            validate_table_reference(select, catalog, right, outer_bindings)
+            validate_table_reference(select, catalog, left, local_bindings, outer_bindings)?;
+            validate_table_reference(select, catalog, right, local_bindings, outer_bindings)
         }
         TableReference::InnerJoin { left, right, on }
         | TableReference::LeftJoin { left, right, on }
         | TableReference::RightJoin { left, right, on }
         | TableReference::FullOuterJoin { left, right, on } => {
-            validate_table_reference(select, catalog, left, outer_bindings)?;
-            validate_table_reference(select, catalog, right, outer_bindings)?;
-            validate_condition(select, on, catalog, from, outer_bindings)
+            validate_table_reference(select, catalog, left, local_bindings, outer_bindings)?;
+            validate_table_reference(select, catalog, right, local_bindings, outer_bindings)?;
+            validate_condition_with_bindings(
+                select,
+                on,
+                catalog,
+                from,
+                local_bindings,
+                outer_bindings,
+            )
         }
     }
 }
@@ -1621,23 +1650,70 @@ fn validate_condition(
     from: &TableReference,
     outer_bindings: &[SourceBinding],
 ) -> Result<()> {
+    let local_bindings = collect_source_bindings(select, catalog, from)?;
+    validate_condition_with_bindings(select, condition, catalog, from, &local_bindings, outer_bindings)
+}
+
+fn validate_condition_with_bindings(
+    select: &SelectStatement,
+    condition: &Condition,
+    catalog: &Schema,
+    from: &TableReference,
+    local_bindings: &[SourceBinding],
+    outer_bindings: &[SourceBinding],
+) -> Result<()> {
     match condition {
         Condition::Comparison { left, right, .. } => {
-            validate_expression(select, left, catalog, from, outer_bindings)?;
-            validate_expression(select, right, catalog, from, outer_bindings)?;
+            validate_expression_with_bindings(
+                select,
+                left,
+                catalog,
+                from,
+                local_bindings,
+                outer_bindings,
+            )?;
+            validate_expression_with_bindings(
+                select,
+                right,
+                catalog,
+                from,
+                local_bindings,
+                outer_bindings,
+            )?;
         }
         Condition::InList { expr, values, .. } => {
-            validate_expression(select, expr, catalog, from, outer_bindings)?;
+            validate_expression_with_bindings(
+                select,
+                expr,
+                catalog,
+                from,
+                local_bindings,
+                outer_bindings,
+            )?;
             for value in values {
-                validate_expression(select, value, catalog, from, outer_bindings)?;
+                validate_expression_with_bindings(
+                    select,
+                    value,
+                    catalog,
+                    from,
+                    local_bindings,
+                    outer_bindings,
+                )?;
             }
         }
         Condition::InSubquery { expr, subquery, .. } => {
-            validate_expression(select, expr, catalog, from, outer_bindings)?;
+            validate_expression_with_bindings(
+                select,
+                expr,
+                catalog,
+                from,
+                local_bindings,
+                outer_bindings,
+            )?;
             validate_select_with_outer_bindings(
                 subquery,
                 catalog,
-                &combined_outer_bindings(select, catalog, from, outer_bindings)?,
+                &combined_outer_bindings(local_bindings, outer_bindings),
             )?;
             if subquery.columns.len() != 1 {
                 return Err(HematiteError::ParseError(
@@ -1648,30 +1724,93 @@ fn validate_condition(
         Condition::Between {
             expr, lower, upper, ..
         } => {
-            validate_expression(select, expr, catalog, from, outer_bindings)?;
-            validate_expression(select, lower, catalog, from, outer_bindings)?;
-            validate_expression(select, upper, catalog, from, outer_bindings)?;
+            validate_expression_with_bindings(
+                select,
+                expr,
+                catalog,
+                from,
+                local_bindings,
+                outer_bindings,
+            )?;
+            validate_expression_with_bindings(
+                select,
+                lower,
+                catalog,
+                from,
+                local_bindings,
+                outer_bindings,
+            )?;
+            validate_expression_with_bindings(
+                select,
+                upper,
+                catalog,
+                from,
+                local_bindings,
+                outer_bindings,
+            )?;
         }
         Condition::Like { expr, pattern, .. } => {
-            validate_expression(select, expr, catalog, from, outer_bindings)?;
-            validate_expression(select, pattern, catalog, from, outer_bindings)?;
+            validate_expression_with_bindings(
+                select,
+                expr,
+                catalog,
+                from,
+                local_bindings,
+                outer_bindings,
+            )?;
+            validate_expression_with_bindings(
+                select,
+                pattern,
+                catalog,
+                from,
+                local_bindings,
+                outer_bindings,
+            )?;
         }
         Condition::Exists { subquery, .. } => {
             validate_select_with_outer_bindings(
                 subquery,
                 catalog,
-                &combined_outer_bindings(select, catalog, from, outer_bindings)?,
+                &combined_outer_bindings(local_bindings, outer_bindings),
             )?;
         }
         Condition::NullCheck { expr, .. } => {
-            validate_expression(select, expr, catalog, from, outer_bindings)?;
+            validate_expression_with_bindings(
+                select,
+                expr,
+                catalog,
+                from,
+                local_bindings,
+                outer_bindings,
+            )?;
         }
         Condition::Not(condition) => {
-            validate_condition(select, condition, catalog, from, outer_bindings)?;
+            validate_condition_with_bindings(
+                select,
+                condition,
+                catalog,
+                from,
+                local_bindings,
+                outer_bindings,
+            )?;
         }
         Condition::Logical { left, right, .. } => {
-            validate_condition(select, left, catalog, from, outer_bindings)?;
-            validate_condition(select, right, catalog, from, outer_bindings)?;
+            validate_condition_with_bindings(
+                select,
+                left,
+                catalog,
+                from,
+                local_bindings,
+                outer_bindings,
+            )?;
+            validate_condition_with_bindings(
+                select,
+                right,
+                catalog,
+                from,
+                local_bindings,
+                outer_bindings,
+            )?;
         }
     }
 
@@ -1685,15 +1824,27 @@ fn validate_expression(
     from: &TableReference,
     outer_bindings: &[SourceBinding],
 ) -> Result<()> {
+    let local_bindings = collect_source_bindings(select, catalog, from)?;
+    validate_expression_with_bindings(select, expr, catalog, from, &local_bindings, outer_bindings)
+}
+
+fn validate_expression_with_bindings(
+    select: &SelectStatement,
+    expr: &Expression,
+    catalog: &Schema,
+    from: &TableReference,
+    local_bindings: &[SourceBinding],
+    outer_bindings: &[SourceBinding],
+) -> Result<()> {
     match expr {
         Expression::Column(name) => {
-            validate_column_reference_with_outer(select, name, catalog, from, outer_bindings)?
+            validate_column_reference_with_outer(name, local_bindings, outer_bindings)?
         }
         Expression::ScalarSubquery(subquery) => {
             validate_select_with_outer_bindings(
                 subquery,
                 catalog,
-                &combined_outer_bindings(select, catalog, from, outer_bindings)?,
+                &combined_outer_bindings(local_bindings, outer_bindings),
             )?;
             if subquery.columns.len() != 1 {
                 return Err(HematiteError::ParseError(
@@ -1706,47 +1857,124 @@ fn validate_expression(
             else_expr,
         } => {
             for branch in branches {
-                validate_expression(select, &branch.condition, catalog, from, outer_bindings)?;
-                validate_expression(select, &branch.result, catalog, from, outer_bindings)?;
+                validate_expression_with_bindings(
+                    select,
+                    &branch.condition,
+                    catalog,
+                    from,
+                    local_bindings,
+                    outer_bindings,
+                )?;
+                validate_expression_with_bindings(
+                    select,
+                    &branch.result,
+                    catalog,
+                    from,
+                    local_bindings,
+                    outer_bindings,
+                )?;
             }
             if let Some(else_expr) = else_expr {
-                validate_expression(select, else_expr, catalog, from, outer_bindings)?;
+                validate_expression_with_bindings(
+                    select,
+                    else_expr,
+                    catalog,
+                    from,
+                    local_bindings,
+                    outer_bindings,
+                )?;
             }
         }
         Expression::ScalarFunctionCall { args, .. } => {
             for arg in args {
-                validate_expression(select, arg, catalog, from, outer_bindings)?;
+                validate_expression_with_bindings(
+                    select,
+                    arg,
+                    catalog,
+                    from,
+                    local_bindings,
+                    outer_bindings,
+                )?;
             }
         }
         Expression::AggregateCall { target, .. } => {
             if let AggregateTarget::Column(name) = target {
-                validate_column_reference_with_outer(select, name, catalog, from, outer_bindings)?;
+                validate_column_reference_with_outer(name, local_bindings, outer_bindings)?;
             }
         }
         Expression::Cast { expr, .. } => {
-            validate_expression(select, expr, catalog, from, outer_bindings)?;
+            validate_expression_with_bindings(
+                select,
+                expr,
+                catalog,
+                from,
+                local_bindings,
+                outer_bindings,
+            )?;
         }
         Expression::UnaryMinus(expr) | Expression::UnaryNot(expr) => {
-            validate_expression(select, expr, catalog, from, outer_bindings)?;
+            validate_expression_with_bindings(
+                select,
+                expr,
+                catalog,
+                from,
+                local_bindings,
+                outer_bindings,
+            )?;
         }
         Expression::Binary { left, right, .. }
         | Expression::Comparison { left, right, .. }
         | Expression::Logical { left, right, .. } => {
-            validate_expression(select, left, catalog, from, outer_bindings)?;
-            validate_expression(select, right, catalog, from, outer_bindings)?;
+            validate_expression_with_bindings(
+                select,
+                left,
+                catalog,
+                from,
+                local_bindings,
+                outer_bindings,
+            )?;
+            validate_expression_with_bindings(
+                select,
+                right,
+                catalog,
+                from,
+                local_bindings,
+                outer_bindings,
+            )?;
         }
         Expression::InList { expr, values, .. } => {
-            validate_expression(select, expr, catalog, from, outer_bindings)?;
+            validate_expression_with_bindings(
+                select,
+                expr,
+                catalog,
+                from,
+                local_bindings,
+                outer_bindings,
+            )?;
             for value in values {
-                validate_expression(select, value, catalog, from, outer_bindings)?;
+                validate_expression_with_bindings(
+                    select,
+                    value,
+                    catalog,
+                    from,
+                    local_bindings,
+                    outer_bindings,
+                )?;
             }
         }
         Expression::InSubquery { expr, subquery, .. } => {
-            validate_expression(select, expr, catalog, from, outer_bindings)?;
+            validate_expression_with_bindings(
+                select,
+                expr,
+                catalog,
+                from,
+                local_bindings,
+                outer_bindings,
+            )?;
             validate_select_with_outer_bindings(
                 subquery,
                 catalog,
-                &combined_outer_bindings(select, catalog, from, outer_bindings)?,
+                &combined_outer_bindings(local_bindings, outer_bindings),
             )?;
             if subquery.columns.len() != 1 {
                 return Err(HematiteError::ParseError(
@@ -1757,23 +1985,65 @@ fn validate_expression(
         Expression::Between {
             expr, lower, upper, ..
         } => {
-            validate_expression(select, expr, catalog, from, outer_bindings)?;
-            validate_expression(select, lower, catalog, from, outer_bindings)?;
-            validate_expression(select, upper, catalog, from, outer_bindings)?;
+            validate_expression_with_bindings(
+                select,
+                expr,
+                catalog,
+                from,
+                local_bindings,
+                outer_bindings,
+            )?;
+            validate_expression_with_bindings(
+                select,
+                lower,
+                catalog,
+                from,
+                local_bindings,
+                outer_bindings,
+            )?;
+            validate_expression_with_bindings(
+                select,
+                upper,
+                catalog,
+                from,
+                local_bindings,
+                outer_bindings,
+            )?;
         }
         Expression::Like { expr, pattern, .. } => {
-            validate_expression(select, expr, catalog, from, outer_bindings)?;
-            validate_expression(select, pattern, catalog, from, outer_bindings)?;
+            validate_expression_with_bindings(
+                select,
+                expr,
+                catalog,
+                from,
+                local_bindings,
+                outer_bindings,
+            )?;
+            validate_expression_with_bindings(
+                select,
+                pattern,
+                catalog,
+                from,
+                local_bindings,
+                outer_bindings,
+            )?;
         }
         Expression::Exists { subquery, .. } => {
             validate_select_with_outer_bindings(
                 subquery,
                 catalog,
-                &combined_outer_bindings(select, catalog, from, outer_bindings)?,
+                &combined_outer_bindings(local_bindings, outer_bindings),
             )?;
         }
         Expression::NullCheck { expr, .. } => {
-            validate_expression(select, expr, catalog, from, outer_bindings)?;
+            validate_expression_with_bindings(
+                select,
+                expr,
+                catalog,
+                from,
+                local_bindings,
+                outer_bindings,
+            )?;
         }
         Expression::Literal(_) | Expression::IntervalLiteral { .. } | Expression::Parameter(_) => {}
     }
@@ -1932,14 +2202,11 @@ pub(crate) fn projected_column_names(
 }
 
 fn validate_column_reference_with_outer(
-    select: &SelectStatement,
     name: &str,
-    catalog: &Schema,
-    from: &TableReference,
+    local_bindings: &[SourceBinding],
     outer_bindings: &[SourceBinding],
 ) -> Result<()> {
     let (qualifier, column_name) = SelectStatement::split_column_reference(name);
-    let local_bindings = collect_source_bindings(select, catalog, from)?;
     let local_matches = collect_matching_source_names(qualifier, column_name, &local_bindings)?;
     if !local_matches.is_empty() {
         return match local_matches.len() {
@@ -2007,14 +2274,12 @@ fn collect_matching_source_names(
 }
 
 fn combined_outer_bindings(
-    select: &SelectStatement,
-    catalog: &Schema,
-    from: &TableReference,
+    local_bindings: &[SourceBinding],
     outer_bindings: &[SourceBinding],
-) -> Result<Vec<SourceBinding>> {
-    let mut bindings = collect_source_bindings(select, catalog, from)?;
+) -> Vec<SourceBinding> {
+    let mut bindings = local_bindings.to_vec();
     bindings.extend(outer_bindings.iter().cloned());
-    Ok(bindings)
+    bindings
 }
 
 fn foreign_keys(create: &CreateStatement) -> Vec<&ForeignKeyDefinition> {
