@@ -87,6 +87,7 @@ pub struct SelectExecutor {
 struct ResolvedSource {
     name: String,
     columns: Vec<String>,
+    column_lookup: HashMap<String, usize>,
     column_types: Vec<DataType>,
     column_collations: Vec<Option<String>>,
     alias: Option<String>,
@@ -94,6 +95,30 @@ struct ResolvedSource {
 }
 
 impl ResolvedSource {
+    fn new(
+        name: String,
+        columns: Vec<String>,
+        column_types: Vec<DataType>,
+        column_collations: Vec<Option<String>>,
+        alias: Option<String>,
+        offset: usize,
+    ) -> Self {
+        let column_lookup = columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| (column.clone(), index))
+            .collect();
+        Self {
+            name,
+            columns,
+            column_lookup,
+            column_types,
+            column_collations,
+            alias,
+            offset,
+        }
+    }
+
     fn width(&self) -> usize {
         self.columns.len()
     }
@@ -320,11 +345,7 @@ impl SelectExecutor {
                 }
             }
 
-            if let Some(index) = source
-                .columns
-                .iter()
-                .position(|column| column == column_name)
-            {
+            if let Some(&index) = source.column_lookup.get(column_name) {
                 if first_match.replace(source.offset + index).is_some() {
                     ambiguous = true;
                     break;
@@ -1374,29 +1395,30 @@ impl SelectExecutor {
     ) -> Result<NamedSource> {
         if let Some(result) = self.materialized_ctes.get(&Self::cte_key(table_name)) {
             return Ok(NamedSource {
-                source: ResolvedSource {
-                    name: table_name.to_string(),
-                    columns: result.columns.clone(),
-                    column_types: vec![DataType::Text; result.columns.len()],
-                    column_collations: vec![None; result.columns.len()],
+                source: ResolvedSource::new(
+                    table_name.to_string(),
+                    result.columns.clone(),
+                    vec![DataType::Text; result.columns.len()],
+                    vec![None; result.columns.len()],
                     alias,
                     offset,
-                },
+                ),
                 kind: NamedSourceKind::MaterializedCte(Arc::clone(result)),
             });
         }
 
         if let Some(cte) = self.statement.lookup_cte(table_name) {
             let columns = self.query_output_columns(&cte.query, ctx)?;
+            let column_count = columns.len();
             return Ok(NamedSource {
-                source: ResolvedSource {
-                    name: table_name.to_string(),
-                    column_types: vec![DataType::Text; columns.len()],
-                    column_collations: vec![None; columns.len()],
+                source: ResolvedSource::new(
+                    table_name.to_string(),
                     columns,
+                    vec![DataType::Text; column_count],
+                    vec![None; column_count],
                     alias,
                     offset,
-                },
+                ),
                 kind: NamedSourceKind::Cte(cte.clone()),
             });
         }
@@ -1405,27 +1427,28 @@ impl SelectExecutor {
             .catalog
             .get_table_by_name(table_name)
             .ok_or_else(|| table_not_found_parse_error(table_name))?;
+        let columns = table
+            .columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect();
         Ok(NamedSource {
-            source: ResolvedSource {
-                name: table.name.clone(),
-                columns: table
-                    .columns
-                    .iter()
-                    .map(|column| column.name.clone())
-                    .collect(),
-                column_types: table
+            source: ResolvedSource::new(
+                table.name.clone(),
+                columns,
+                table
                     .columns
                     .iter()
                     .map(|column| column.data_type.clone())
                     .collect(),
-                column_collations: table
+                table
                     .columns
                     .iter()
                     .map(|column| column.collation.clone())
                     .collect(),
                 alias,
                 offset,
-            },
+            ),
             kind: NamedSourceKind::BaseTable,
         })
     }
@@ -1606,14 +1629,14 @@ impl SelectExecutor {
             TableReference::Derived { subquery, alias } => {
                 let result = self.execute_subquery(ctx, subquery, None, None)?;
                 Ok((
-                    vec![ResolvedSource {
-                        name: alias.clone(),
-                        columns: result.columns.clone(),
-                        column_types: vec![DataType::Text; result.columns.len()],
-                        column_collations: vec![None; result.columns.len()],
-                        alias: None,
-                        offset: 0,
-                    }],
+                    vec![ResolvedSource::new(
+                        alias.clone(),
+                        result.columns.clone(),
+                        vec![DataType::Text; result.columns.len()],
+                        vec![None; result.columns.len()],
+                        None,
+                        0,
+                    )],
                     result.rows,
                 ))
             }
