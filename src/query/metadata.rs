@@ -11,13 +11,14 @@ pub(crate) fn describe_table(catalog: &Catalog, table_name: &str) -> Result<Quer
     let table = catalog.get_table_by_name(table_name)?.ok_or_else(|| {
         HematiteError::ParseError(format!("Table '{}' does not exist", table_name))
     })?;
+    let column_metadata = build_table_column_metadata(&table);
 
     let rows = table
         .columns
         .iter()
         .enumerate()
         .map(|(column_index, column)| {
-            let metadata = table_column_metadata(&table, column_index);
+            let metadata = &column_metadata[column_index];
             vec![
                 Value::Text(column.name.clone()),
                 Value::Text(column.data_type.name().to_string()),
@@ -29,8 +30,8 @@ pub(crate) fn describe_table(catalog: &Catalog, table_name: &str) -> Result<Quer
                 Value::Boolean(column.primary_key),
                 Value::Boolean(metadata.is_unique),
                 Value::Boolean(column.auto_increment),
-                text_or_null(metadata.constraints),
-                text_or_null(metadata.indexes),
+                text_or_null(metadata.constraints.clone()),
+                text_or_null(metadata.indexes.clone()),
             ]
         })
         .collect();
@@ -189,60 +190,79 @@ struct TableColumnMetadata {
     indexes: Option<String>,
 }
 
-fn table_column_metadata(table: &Table, column_index: usize) -> TableColumnMetadata {
-    let mut constraints = Vec::new();
-    let mut indexes = Vec::new();
+fn build_table_column_metadata(table: &Table) -> Vec<TableColumnMetadata> {
+    let mut constraints = vec![Vec::new(); table.columns.len()];
+    let mut indexes = vec![Vec::new(); table.columns.len()];
+    let mut is_unique = vec![false; table.columns.len()];
 
-    if table.primary_key_columns.contains(&column_index) {
-        constraints.push("PRIMARY KEY".to_string());
+    for &column_index in &table.primary_key_columns {
+        if let Some(column_constraints) = constraints.get_mut(column_index) {
+            column_constraints.push("PRIMARY KEY".to_string());
+        }
+    }
+
+    for index in &table.secondary_indexes {
+        if index.unique && index.column_indices.len() == 1 {
+            if let Some(&column_index) = index.column_indices.first() {
+                if let Some(is_unique_column) = is_unique.get_mut(column_index) {
+                    *is_unique_column = true;
+                }
+            }
+        }
+
+        for &column_index in &index.column_indices {
+            if let Some(column_indexes) = indexes.get_mut(column_index) {
+                column_indexes.push(index.name.clone());
+            }
+        }
     }
 
     for constraint in table.list_named_constraints() {
         match constraint.kind {
             crate::catalog::NamedConstraintKind::Check => {
-                if table.check_constraints.iter().any(|check| {
-                    check.name.as_deref() == Some(constraint.name.as_str())
-                        && check
-                            .expression_sql
-                            .contains(&table.columns[column_index].name)
-                }) {
-                    constraints.push(format!("CHECK {}", constraint.name));
+                if let Some(check) = table
+                    .check_constraints
+                    .iter()
+                    .find(|check| check.name.as_deref() == Some(constraint.name.as_str()))
+                {
+                    for (column_index, column) in table.columns.iter().enumerate() {
+                        if check.expression_sql.contains(&column.name) {
+                            constraints[column_index].push(format!("CHECK {}", constraint.name));
+                        }
+                    }
                 }
             }
             crate::catalog::NamedConstraintKind::ForeignKey => {
-                if table.foreign_keys.iter().any(|foreign_key| {
+                if let Some(foreign_key) = table.foreign_keys.iter().find(|foreign_key| {
                     foreign_key.name.as_deref() == Some(constraint.name.as_str())
-                        && foreign_key.column_indices.contains(&column_index)
                 }) {
-                    constraints.push(format!("FOREIGN KEY {}", constraint.name));
+                    for &column_index in &foreign_key.column_indices {
+                        constraints[column_index].push(format!("FOREIGN KEY {}", constraint.name));
+                    }
                 }
             }
             crate::catalog::NamedConstraintKind::Unique => {
-                if table.secondary_indexes.iter().any(|index| {
-                    index.name == constraint.name
-                        && index.unique
-                        && index.column_indices.contains(&column_index)
+                if let Some(index) = table.secondary_indexes.iter().find(|index| {
+                    index.name == constraint.name && index.unique
                 }) {
-                    constraints.push(format!("UNIQUE {}", constraint.name));
+                    for &column_index in &index.column_indices {
+                        constraints[column_index].push(format!("UNIQUE {}", constraint.name));
+                    }
                 }
             }
         }
     }
 
-    for index in &table.secondary_indexes {
-        if index.column_indices.contains(&column_index) {
-            indexes.push(index.name.clone());
-        }
-    }
-
-    TableColumnMetadata {
-        is_unique: table
-            .secondary_indexes
-            .iter()
-            .any(|index| index.unique && index.column_indices == vec![column_index]),
-        constraints: (!constraints.is_empty()).then(|| constraints.join(", ")),
-        indexes: (!indexes.is_empty()).then(|| indexes.join(", ")),
-    }
+    constraints
+        .into_iter()
+        .zip(indexes)
+        .zip(is_unique)
+        .map(|((constraints, indexes), is_unique)| TableColumnMetadata {
+            is_unique,
+            constraints: (!constraints.is_empty()).then(|| constraints.join(", ")),
+            indexes: (!indexes.is_empty()).then(|| indexes.join(", ")),
+        })
+        .collect()
 }
 
 fn text_or_null(value: Option<String>) -> Value {
