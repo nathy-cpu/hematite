@@ -109,7 +109,7 @@ struct TextComparisonContext {
 #[derive(Debug, Clone)]
 enum NamedSourceKind {
     BaseTable,
-    MaterializedCte(Vec<Vec<Value>>),
+    MaterializedCte(Arc<QueryResult>),
     Cte(CommonTableExpression),
 }
 
@@ -1378,7 +1378,7 @@ impl SelectExecutor {
                     alias,
                     offset,
                 },
-                kind: NamedSourceKind::MaterializedCte(result.rows.clone()),
+                kind: NamedSourceKind::MaterializedCte(Arc::clone(result)),
             });
         }
 
@@ -1435,13 +1435,13 @@ impl SelectExecutor {
         let named_source = self.named_source(ctx, table_name, alias, 0)?;
         let rows = match named_source.kind {
             NamedSourceKind::BaseTable => ctx.engine.read_from_table(table_name)?,
-            NamedSourceKind::MaterializedCte(rows) => rows,
+            NamedSourceKind::MaterializedCte(result) => result.rows.clone(),
             NamedSourceKind::Cte(cte) => {
                 let key = Self::cte_key(table_name);
                 if let Some(result) = self.materialized_ctes.get(&key) {
                     result.as_ref().rows.clone()
                 } else {
-                    self.materialize_cte(ctx, &cte)?.rows
+                    self.materialize_cte(ctx, &cte)?.rows.clone()
                 }
             }
         };
@@ -1452,10 +1452,10 @@ impl SelectExecutor {
         &mut self,
         ctx: &mut ExecutionContext<'_>,
         cte: &CommonTableExpression,
-    ) -> Result<QueryResult> {
+    ) -> Result<Arc<QueryResult>> {
         let key = Self::cte_key(&cte.name);
         if let Some(result) = self.materialized_ctes.get(&key) {
-            return Ok(result.as_ref().clone());
+            return Ok(Arc::clone(result));
         }
 
         let result = if cte.recursive {
@@ -1463,8 +1463,8 @@ impl SelectExecutor {
         } else {
             self.execute_subquery(ctx, &cte.query, None, None)?
         };
-        // Store a shared Arc-wrapped result to make reuse cheap across clones.
-        Arc::make_mut(&mut self.materialized_ctes).insert(key, Arc::new(result.clone()));
+        let result = Arc::new(result);
+        Arc::make_mut(&mut self.materialized_ctes).insert(key, Arc::clone(&result));
         Ok(result)
     }
 
