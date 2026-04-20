@@ -3559,6 +3559,7 @@ impl InsertExecutor {
         &self,
         ctx: &ExecutionContext<'_>,
         table: &Table,
+        column_positions: &[Option<usize>],
         value_row: &[Value],
     ) -> Result<Vec<Value>> {
         let mut row = Vec::with_capacity(table.columns.len());
@@ -3574,13 +3575,8 @@ impl InsertExecutor {
                 ))
             })?;
 
-        for column in &table.columns {
-            let value = if let Some(position) = self
-                .statement
-                .columns
-                .iter()
-                .position(|name| name == &column.name)
-            {
+        for (column_index, column) in table.columns.iter().enumerate() {
+            let value = if let Some(position) = column_positions.get(column_index).and_then(|position| *position) {
                 let expr = value_row.get(position).ok_or_else(|| {
                     HematiteError::ParseError(format!("Missing value for column '{}'", column.name))
                 })?;
@@ -3624,6 +3620,7 @@ impl QueryExecutor for InsertExecutor {
         validate_statement(&Statement::Insert(self.statement.clone()), &ctx.catalog)?;
 
         let table = catalog_table(ctx, &self.statement.table)?;
+        let column_positions = build_insert_column_positions(&table, &self.statement.columns)?;
 
         let input_rows = match &self.statement.source {
             InsertSource::Values(rows) => rows
@@ -3653,7 +3650,7 @@ impl QueryExecutor for InsertExecutor {
         };
 
         for value_row in &input_rows {
-            let row_values = self.build_row_with_metadata(ctx, &table, value_row)?;
+            let row_values = self.build_row_with_metadata(ctx, &table, &column_positions, value_row)?;
             if let Some(assignments) = &self.statement.on_duplicate {
                 if let Some(conflicting_row) =
                     self.find_conflicting_row(ctx, &table, &row_values)?
@@ -4792,6 +4789,22 @@ fn current_table_row_counts(engine: &crate::catalog::CatalogEngine) -> HashMap<S
         .iter()
         .map(|(name, metadata)| (name.clone(), metadata.row_count as usize))
         .collect()
+}
+
+fn build_insert_column_positions(table: &Table, input_columns: &[String]) -> Result<Vec<Option<usize>>> {
+    let mut positions = vec![None; table.columns.len()];
+
+    for (input_index, column_name) in input_columns.iter().enumerate() {
+        let table_index = table.get_column_index(column_name).ok_or_else(|| {
+            HematiteError::ParseError(format!(
+                "Column '{}' does not exist in table '{}'",
+                column_name, table.name
+            ))
+        })?;
+        positions[table_index] = Some(input_index);
+    }
+
+    Ok(positions)
 }
 
 fn apply_set_operation(
