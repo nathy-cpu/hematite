@@ -34,7 +34,7 @@ impl QueryPlanner {
         validate_statement(&statement, &self.catalog)?;
 
         // Logical optimization
-        let optimizer = QueryOptimizer::new(self.catalog.clone());
+        let optimizer = QueryOptimizer::from_schema(&self.catalog);
         let optimized_stmt = optimizer.optimize_statement(statement)?;
 
         let plan = match optimized_stmt {

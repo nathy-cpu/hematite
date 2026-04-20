@@ -1,19 +1,20 @@
 //! Query optimizer for improving logical query execution plans.
 
-use crate::catalog::Schema;
 use crate::error::Result;
 use crate::parser::ast::*;
 use crate::parser::LiteralValue;
 use std::cmp::Ordering;
 
 #[derive(Debug, Clone)]
-pub struct QueryOptimizer {
-    _catalog: Schema,
-}
+pub struct QueryOptimizer;
 
 impl QueryOptimizer {
-    pub fn new(catalog: Schema) -> Self {
-        Self { _catalog: catalog }
+    pub fn new(_: crate::catalog::Schema) -> Self {
+        Self
+    }
+
+    pub fn from_schema(_: &crate::catalog::Schema) -> Self {
+        Self
     }
 
     pub fn optimize_statement(&self, statement: Statement) -> Result<Statement> {
