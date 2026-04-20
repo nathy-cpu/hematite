@@ -297,10 +297,10 @@ fn test_pager_reopen_ignores_truncated_wal_tail_after_committed_state() -> Resul
         file_len: crate::storage::file_len_for_next_page_id(page_id + 1),
         free_pages: vec![],
         checksums: vec![(page_id, 123)],
-        frames: vec![WalFrame {
+        frames: vec![WalFrame::new(
             page_id,
-            data: vec![42u8; crate::storage::PAGE_SIZE],
-        }],
+            vec![42u8; crate::storage::PAGE_SIZE],
+        )],
     }])?;
     let mut wal_bytes = fs::read(&wal_path)?;
     wal_bytes.extend_from_slice(&partial_tail[24..partial_tail.len() - 17]);

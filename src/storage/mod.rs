@@ -33,15 +33,12 @@ pub(crate) mod file_manager;
 pub(crate) mod format;
 pub(crate) mod free_list;
 pub(crate) mod journal;
-pub(crate) mod journal_v3;
 pub(crate) mod metadata_page;
 pub(crate) mod overflow;
-pub(crate) mod overflow_v3;
 pub(crate) mod pager;
 pub(crate) mod pager_metadata;
 pub(crate) mod types;
 pub(crate) mod wal;
-pub(crate) mod wal_v3;
 
 pub use pager::{JournalMode, Pager};
 pub use types::{

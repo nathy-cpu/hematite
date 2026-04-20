@@ -45,9 +45,9 @@ mod wal_tests {
     use crate::storage::file_len_for_next_page_id;
     use crate::storage::metadata_page;
     use crate::storage::wal::{
-        load_visible_state_from_path_with_base, VisibleWalState, WalFrame, WalRecord,
+        load_visible_state_from_path_with_base, VisibleWalState, WalFile, WalFrame, WalHeader,
+        WalRecord,
     };
-    use crate::storage::wal_v3::{V3WalFile, V3WalFrame, V3WalHeader};
     use crate::storage::{PAGE_SIZE, STORAGE_METADATA_PAGE_ID};
     use crate::test_utils::TestDbFile;
     use std::collections::HashMap;
@@ -60,20 +60,14 @@ mod wal_tests {
             file_len: file_len_for_next_page_id(3),
             free_pages: vec![9, 12],
             checksums: vec![(2, 11), (4, 22)],
-            frames: vec![WalFrame {
-                page_id: 2,
-                data: vec![7u8; crate::storage::PAGE_SIZE],
-            }],
+            frames: vec![WalFrame::new(2, vec![7u8; crate::storage::PAGE_SIZE])],
         };
         let second = WalRecord {
             sequence: 2,
             file_len: file_len_for_next_page_id(4),
             free_pages: vec![12],
             checksums: vec![(2, 33), (4, 44)],
-            frames: vec![WalFrame {
-                page_id: 4,
-                data: vec![9u8; crate::storage::PAGE_SIZE],
-            }],
+            frames: vec![WalFrame::new(4, vec![9u8; crate::storage::PAGE_SIZE])],
         };
 
         let encoded = WalRecord::encode_file(&[first.clone(), second.clone()])?;
@@ -89,10 +83,7 @@ mod wal_tests {
             file_len: file_len_for_next_page_id(2),
             free_pages: vec![8],
             checksums: vec![(2, 99)],
-            frames: vec![WalFrame {
-                page_id: 2,
-                data: vec![5u8; crate::storage::PAGE_SIZE],
-            }],
+            frames: vec![WalFrame::new(2, vec![5u8; crate::storage::PAGE_SIZE])],
         };
 
         let mut encoded = WalRecord::encode_file(&[record.clone()])?;
@@ -101,10 +92,7 @@ mod wal_tests {
             file_len: file_len_for_next_page_id(3),
             free_pages: vec![],
             checksums: vec![(2, 100)],
-            frames: vec![WalFrame {
-                page_id: 3,
-                data: vec![6u8; crate::storage::PAGE_SIZE],
-            }],
+            frames: vec![WalFrame::new(3, vec![6u8; crate::storage::PAGE_SIZE])],
         }])?;
         partial_tail.truncate(partial_tail.len() - 17);
         encoded.extend_from_slice(&partial_tail[24..]);
@@ -121,10 +109,7 @@ mod wal_tests {
             file_len: file_len_for_next_page_id(2),
             free_pages: vec![],
             checksums: vec![(2, 99)],
-            frames: vec![WalFrame {
-                page_id: 2,
-                data: vec![5u8; crate::storage::PAGE_SIZE],
-            }],
+            frames: vec![WalFrame::new(2, vec![5u8; crate::storage::PAGE_SIZE])],
         };
 
         let mut encoded = WalRecord::encode_file(&[record]).unwrap();
@@ -146,14 +131,8 @@ mod wal_tests {
             free_pages: vec![],
             checksums: vec![(live_page_id, 11), (freed_page_id, 22)],
             frames: vec![
-                WalFrame {
-                    page_id: live_page_id,
-                    data: vec![7u8; crate::storage::PAGE_SIZE],
-                },
-                WalFrame {
-                    page_id: freed_page_id,
-                    data: vec![9u8; crate::storage::PAGE_SIZE],
-                },
+                WalFrame::new(live_page_id, vec![7u8; crate::storage::PAGE_SIZE]),
+                WalFrame::new(freed_page_id, vec![9u8; crate::storage::PAGE_SIZE]),
             ],
         };
         let second = WalRecord {
@@ -161,10 +140,10 @@ mod wal_tests {
             file_len: file_len_for_next_page_id(4),
             free_pages: vec![freed_page_id],
             checksums: vec![(live_page_id, 33)],
-            frames: vec![WalFrame {
-                page_id: live_page_id,
-                data: vec![5u8; crate::storage::PAGE_SIZE],
-            }],
+            frames: vec![WalFrame::new(
+                live_page_id,
+                vec![5u8; crate::storage::PAGE_SIZE],
+            )],
         };
 
         let state = WalRecord::visible_state_from_records(&[first, second])
@@ -206,13 +185,13 @@ mod wal_tests {
         let metadata_page_bytes =
             metadata_page::write_pager_metadata(&vec![0u8; PAGE_SIZE], &malformed_payload)?;
 
-        let wal = V3WalFile {
-            header: V3WalHeader::default(),
-            frames: vec![V3WalFrame {
-                page_number: STORAGE_METADATA_PAGE_ID,
+        let wal = WalFile {
+            header: WalHeader::default(),
+            frames: vec![WalFrame {
+                page_id: STORAGE_METADATA_PAGE_ID,
                 database_page_count: 2,
                 commit_sequence: 1,
-                page_bytes: metadata_page_bytes,
+                data: metadata_page_bytes,
             }],
         };
         fs::write(&wal_path, wal.encode()?)?;
@@ -235,8 +214,7 @@ mod pager_tests {
     use crate::storage::journal::{JournalRecord, JournalState, RollbackJournal};
     use crate::storage::pager::Pager;
     use crate::storage::pager_metadata::PersistedPagerState;
-    use crate::storage::wal::{WalFrame, WalRecord};
-    use crate::storage::wal_v3::{V3WalFile, V3WalFrame, V3WalHeader};
+    use crate::storage::wal::{WalFile, WalFrame, WalHeader, WalRecord};
     use crate::storage::{
         metadata_page, JournalMode, Page, DB_HEADER_PAGE_ID, PAGE_SIZE, STORAGE_METADATA_PAGE_ID,
     };
@@ -1183,13 +1161,13 @@ mod pager_tests {
         let malformed_payload = vec![0xAA, 0xBB, 0xCC, 0xDD];
         let metadata_page_bytes =
             metadata_page::write_pager_metadata(&vec![0u8; PAGE_SIZE], &malformed_payload)?;
-        let wal = V3WalFile {
-            header: V3WalHeader::default(),
-            frames: vec![V3WalFrame {
-                page_number: STORAGE_METADATA_PAGE_ID,
+        let wal = WalFile {
+            header: WalHeader::default(),
+            frames: vec![WalFrame {
+                page_id: STORAGE_METADATA_PAGE_ID,
                 database_page_count: 2,
                 commit_sequence: 1,
-                page_bytes: metadata_page_bytes,
+                data: metadata_page_bytes,
             }],
         };
         fs::write(&wal_path, wal.encode()?)?;
@@ -1295,10 +1273,7 @@ mod pager_tests {
             file_len: crate::storage::file_len_for_next_page_id(4),
             free_pages: vec![],
             checksums: vec![(page_id, checksum_for_test(&wal_page))],
-            frames: vec![WalFrame {
-                page_id,
-                data: wal_page,
-            }],
+            frames: vec![WalFrame::new(page_id, wal_page)],
         };
         fs::write(&wal_path, WalRecord::encode_file(&[wal_record])?)?;
 
@@ -1334,10 +1309,7 @@ mod pager_tests {
             file_len: crate::storage::file_len_for_next_page_id(4),
             free_pages: vec![],
             checksums: vec![(page_id, checksum_for_test(&first_wal_page))],
-            frames: vec![WalFrame {
-                page_id,
-                data: first_wal_page,
-            }],
+            frames: vec![WalFrame::new(page_id, first_wal_page)],
         };
         fs::write(&wal_path, WalRecord::encode_file(&[first_record.clone()])?)?;
 
@@ -1352,10 +1324,7 @@ mod pager_tests {
             file_len: crate::storage::file_len_for_next_page_id(4),
             free_pages: vec![],
             checksums: vec![(page_id, checksum_for_test(&second_wal_page))],
-            frames: vec![WalFrame {
-                page_id,
-                data: second_wal_page,
-            }],
+            frames: vec![WalFrame::new(page_id, second_wal_page)],
         };
         fs::write(
             &wal_path,
@@ -1824,10 +1793,7 @@ mod pager_tests {
             file_len: crate::storage::file_len_for_next_page_id(4),
             free_pages: vec![],
             checksums: vec![(page_id, checksum_for_test(&wal_page))],
-            frames: vec![WalFrame {
-                page_id,
-                data: wal_page,
-            }],
+            frames: vec![WalFrame::new(page_id, wal_page)],
         };
         fs::write(&wal_path, WalRecord::encode_file(&[wal_record])?)?;
 

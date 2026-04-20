@@ -1,19 +1,19 @@
 use super::{JournalMode, Pager, WalFileStamp};
 use crate::error::Result;
-use crate::storage::journal::{JournalRecord, JournalState, RollbackJournal};
-use crate::storage::journal_v3::{V3JournalHeader, V3JournalRecord, V3JournalState};
+use crate::storage::journal::{
+    append_journal_record, initialize_journal_file, mark_journal_committed,
+    write_journal_record_count, JournalRecord, JournalState, RollbackJournal,
+};
 use crate::storage::pager_metadata::PersistedPagerState;
 use crate::storage::wal::{
     append_committed_frames_to_path, load_visible_state_from_path_with_base, VisibleWalState,
     WalFrame,
 };
 use crate::storage::{
-    file_len_for_next_page_id, metadata_page, next_page_id_for_file_len, Page, PageId, PAGE_SIZE,
-    STORAGE_METADATA_PAGE_ID,
+    file_len_for_next_page_id, metadata_page, Page, PageId, PAGE_SIZE, STORAGE_METADATA_PAGE_ID,
 };
 use std::ffi::OsString;
-use std::fs::{self, OpenOptions};
-use std::io::{Seek, SeekFrom, Write};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -358,37 +358,12 @@ impl Pager {
             .iter()
             .map(|(page_id, checksum)| (*page_id, *checksum))
             .collect();
-        let original_file_len = transaction.original_file_len;
-
-        let header = V3JournalHeader {
-            state: V3JournalState::Active,
-            original_database_page_count: next_page_id_for_file_len(original_file_len),
-            free_page_count: original_free_pages.len() as u32,
-            checksum_count: original_checksums.len() as u32,
-            record_count: 0,
-            ..V3JournalHeader::default()
-        };
-
-        let mut bytes =
-            Vec::with_capacity(36 + original_free_pages.len() * 4 + original_checksums.len() * 8);
-        bytes.extend_from_slice(&header.encode());
-        for page_id in &original_free_pages {
-            bytes.extend_from_slice(&page_id.to_be_bytes());
-        }
-        for (page_id, checksum) in &original_checksums {
-            bytes.extend_from_slice(&page_id.to_be_bytes());
-            bytes.extend_from_slice(&checksum.to_be_bytes());
-        }
-
-        let header_len = bytes.len() as u64;
-
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .read(true)
-            .truncate(true)
-            .open(path)?;
-        file.write_all(&bytes)?;
+        let (file, header_len) = initialize_journal_file(
+            path,
+            transaction.original_file_len,
+            &original_free_pages,
+            &original_checksums,
+        )?;
 
         self.journal_file = Some(file);
         self.journal_record_count = 0;
@@ -404,22 +379,11 @@ impl Pager {
             return Ok(());
         };
 
-        let v3_record = V3JournalRecord {
-            page_number: record.page_id,
-            page_bytes: record.data.clone(),
-        };
-        let checksum_seed = V3JournalHeader::default().checksum_seed;
-        let encoded = v3_record.encode(checksum_seed)?;
-        file.write_all(&encoded)?;
+        append_journal_record(file, record)?;
         self.journal_record_count += 1;
 
-        // Update record_count in the header (offset 32) so the journal is
-        // always self-consistent — a crash at any point leaves a decodable file.
-        file.seek(SeekFrom::Start(32))?;
-        file.write_all(&self.journal_record_count.to_be_bytes())?;
-
-        // Seek back to end for the next append.
-        file.seek(SeekFrom::End(0))?;
+        // Keep record count current so crash leaves decodable journal file.
+        write_journal_record_count(file, self.journal_record_count)?;
 
         Ok(())
     }
@@ -459,16 +423,7 @@ impl Pager {
             return Ok(());
         };
 
-        // State byte is at offset 8 in the V3 header.
-        file.seek(SeekFrom::Start(8))?;
-        file.write_all(&[V3JournalState::Committed as u8])?;
-
-        // Record count is at offset 32 in the V3 header.
-        file.seek(SeekFrom::Start(32))?;
-        file.write_all(&self.journal_record_count.to_be_bytes())?;
-
-        file.sync_all()?;
-        Ok(())
+        mark_journal_committed(file, self.journal_record_count)
     }
 
     /// After a savepoint restore, truncate the journal to match the reduced
@@ -489,9 +444,7 @@ impl Pager {
                 let new_file_len = self.journal_header_len + new_record_count as u64 * record_size;
                 file.set_len(new_file_len)?;
 
-                // Update record_count at offset 32.
-                file.seek(SeekFrom::Start(32))?;
-                file.write_all(&new_record_count.to_be_bytes())?;
+                write_journal_record_count(file, new_record_count)?;
                 file.sync_all()?;
 
                 self.journal_record_count = new_record_count;
@@ -638,10 +591,7 @@ impl Pager {
                     page_id
                 ))
             })?;
-            frames.push(WalFrame {
-                page_id,
-                data: page.data,
-            });
+            frames.push(WalFrame::new(page_id, page.data));
         }
         let metadata_page = self
             .cache_read()?
