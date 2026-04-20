@@ -3703,44 +3703,30 @@ impl UpdateExecutor {
         }
     }
 
-    fn ensure_primary_keys_unique(&self, table: &Table, rows: &[Vec<Value>]) -> Result<()> {
-        for i in 0..rows.len() {
-            let left = primary_key_values(table, &rows[i])?;
-            for right_row in rows.iter().skip(i + 1) {
-                let right = primary_key_values(table, right_row)?;
-                if left == right {
-                    return Err(duplicate_primary_key_parse_error(&table.name, &left));
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     fn ensure_updated_primary_keys_remain_unique(
         &self,
         ctx: &mut ExecutionContext<'_>,
         table: &Table,
         updated_rows: &[StoredRow],
     ) -> Result<()> {
-        self.ensure_primary_keys_unique(
-            table,
-            &updated_rows
-                .iter()
-                .map(|row| row.values.clone())
-                .collect::<Vec<_>>(),
-        )?;
+        let row_ids = updated_rows
+            .iter()
+            .map(|row| row.row_id)
+            .collect::<std::collections::HashSet<_>>();
+        let mut primary_keys: HashMap<u64, Vec<Vec<Value>>> = HashMap::new();
 
         for row in updated_rows {
             let candidate_pk = primary_key_values(table, &row.values)?;
+            let key_bucket = primary_keys.entry(hash_row(&candidate_pk)).or_default();
+            if key_bucket.iter().any(|existing| existing == &candidate_pk) {
+                return Err(duplicate_primary_key_parse_error(&table.name, &candidate_pk));
+            }
+            key_bucket.push(candidate_pk.clone());
+
             if let Some(existing_rowid) =
                 ctx.engine.lookup_primary_key_rowid(table, &candidate_pk)?
             {
-                if existing_rowid != row.row_id
-                    && !updated_rows
-                        .iter()
-                        .any(|updated_row| updated_row.row_id == existing_rowid)
-                {
+                if existing_rowid != row.row_id && !row_ids.contains(&existing_rowid) {
                     return Err(duplicate_primary_key_parse_error(
                         &table.name,
                         &candidate_pk,
@@ -3758,6 +3744,10 @@ impl UpdateExecutor {
         table: &Table,
         updated_rows: &[StoredRow],
     ) -> Result<()> {
+        let row_ids = updated_rows
+            .iter()
+            .map(|row| row.row_id)
+            .collect::<std::collections::HashSet<_>>();
         let mut encoded_keys = std::collections::HashSet::new();
 
         for index in table.secondary_indexes.iter().filter(|index| index.unique) {
@@ -3776,10 +3766,7 @@ impl UpdateExecutor {
                     ctx.engine
                         .lookup_secondary_index_rowids(table, &index.name, &key_values)?;
                 if existing_rowids.into_iter().any(|existing_rowid| {
-                    existing_rowid != row.row_id
-                        && !updated_rows
-                            .iter()
-                            .any(|updated_row| updated_row.row_id == existing_rowid)
+                    existing_rowid != row.row_id && !row_ids.contains(&existing_rowid)
                 }) {
                     return Err(unique_index_parse_error(&index.name, &table.name));
                 }
