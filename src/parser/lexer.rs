@@ -182,22 +182,24 @@ impl<'a> Lexer<'a> {
                 break;
             }
 
-            let ch = self.current_char();
+            let byte = self.current_byte();
 
             // Handle identifiers and keywords
-            if ch == 'X' && self.peek_char() == Some('\'') {
+            if byte == b'X' && self.peek_byte() == Some(b'\'') {
                 self.read_blob_literal()?;
-            } else if ch.is_alphabetic() || ch == '_' {
+            } else if is_identifier_start_byte(byte)
+                || (!byte.is_ascii() && self.current_char().is_alphabetic())
+            {
                 self.read_identifier()?;
-            } else if ch == '`' {
+            } else if byte == b'`' {
                 self.read_quoted_identifier()?;
             }
             // Handle string literals
-            else if ch == '\'' {
+            else if byte == b'\'' {
                 self.read_string_literal()?;
             }
             // Handle numbers
-            else if ch.is_ascii_digit() {
+            else if byte.is_ascii_digit() {
                 self.read_number()?;
             }
             // Handle operators and punctuation
@@ -219,12 +221,24 @@ impl<'a> Lexer<'a> {
 
     fn skip_whitespace(&mut self) {
         while self.position < self.input.len() {
-            let ch = self.current_char();
-            if !ch.is_whitespace() {
+            let byte = self.current_byte();
+            if byte.is_ascii_whitespace() {
+                self.position += 1;
+                continue;
+            }
+            if byte.is_ascii() || !self.current_char().is_whitespace() {
                 break;
             }
             self.advance_char();
         }
+    }
+
+    fn current_byte(&self) -> u8 {
+        self.input.as_bytes()[self.position]
+    }
+
+    fn peek_byte(&self) -> Option<u8> {
+        self.input.as_bytes().get(self.position + 1).copied()
     }
 
     fn current_char(&self) -> char {
@@ -247,9 +261,16 @@ impl<'a> Lexer<'a> {
         let start = self.position;
 
         while self.position < self.input.len() {
-            let ch = self.current_char();
-            if ch.is_alphanumeric() || ch == '_' {
-                self.advance_char();
+            let byte = self.current_byte();
+            if is_identifier_continue_byte(byte) {
+                self.position += 1;
+            } else if !byte.is_ascii() {
+                let ch = self.current_char();
+                if ch.is_alphanumeric() || ch == '_' {
+                    self.advance_char();
+                } else {
+                    break;
+                }
             } else {
                 break;
             }
@@ -502,17 +523,17 @@ impl<'a> Lexer<'a> {
         let mut has_decimal = false;
 
         while self.position < self.input.len() {
-            let ch = self.current_char();
-            if ch == '.' {
+            let byte = self.current_byte();
+            if byte == b'.' {
                 if has_decimal {
                     return Err(HematiteError::ParseError(
                         "Invalid number format".to_string(),
                     ));
                 }
                 has_decimal = true;
-                self.advance_char();
-            } else if ch.is_ascii_digit() {
-                self.advance_char();
+                self.position += 1;
+            } else if byte.is_ascii_digit() {
+                self.position += 1;
             } else {
                 break;
             }
@@ -536,73 +557,81 @@ impl<'a> Lexer<'a> {
     }
 
     fn read_operator_or_punctuation(&mut self) -> Result<()> {
-        let ch = self.current_char();
-        let token = match ch {
-            '=' => Token::Equal,
-            '!' => {
-                if self.peek_char() == Some('=') {
-                    self.advance_char();
+        let byte = self.current_byte();
+        let token = match byte {
+            b'=' => Token::Equal,
+            b'!' => {
+                if self.peek_byte() == Some(b'=') {
+                    self.position += 1;
                     Token::NotEqual
                 } else {
                     Token::Not
                 }
             }
-            '<' => {
-                if self.peek_char() == Some('=') {
-                    self.advance_char();
+            b'<' => {
+                if self.peek_byte() == Some(b'=') {
+                    self.position += 1;
                     Token::LessThanOrEqual
-                } else if self.peek_char() == Some('>') {
-                    self.advance_char();
+                } else if self.peek_byte() == Some(b'>') {
+                    self.position += 1;
                     Token::NotEqual
                 } else {
                     Token::LessThan
                 }
             }
-            '>' => {
-                if self.peek_char() == Some('=') {
-                    self.advance_char();
+            b'>' => {
+                if self.peek_byte() == Some(b'=') {
+                    self.position += 1;
                     Token::GreaterThanOrEqual
                 } else {
                     Token::GreaterThan
                 }
             }
-            '&' => {
-                if self.peek_char() == Some('&') {
-                    self.advance_char();
+            b'&' => {
+                if self.peek_byte() == Some(b'&') {
+                    self.position += 1;
                     Token::And
                 } else {
                     return Err(HematiteError::ParseError("Invalid operator".to_string()));
                 }
             }
-            '|' => {
-                if self.peek_char() == Some('|') {
-                    self.advance_char();
+            b'|' => {
+                if self.peek_byte() == Some(b'|') {
+                    self.position += 1;
                     Token::Or
                 } else {
                     return Err(HematiteError::ParseError("Invalid operator".to_string()));
                 }
             }
-            ',' => Token::Comma,
-            '.' => Token::Dot,
-            ';' => Token::Semicolon,
-            '(' => Token::LeftParen,
-            ')' => Token::RightParen,
-            '+' => Token::Plus,
-            '-' => Token::Minus,
-            '*' => Token::Asterisk,
-            '/' => Token::Slash,
-            '%' => Token::Percent,
-            '?' => Token::Placeholder,
+            b',' => Token::Comma,
+            b'.' => Token::Dot,
+            b';' => Token::Semicolon,
+            b'(' => Token::LeftParen,
+            b')' => Token::RightParen,
+            b'+' => Token::Plus,
+            b'-' => Token::Minus,
+            b'*' => Token::Asterisk,
+            b'/' => Token::Slash,
+            b'%' => Token::Percent,
+            b'?' => Token::Placeholder,
             _ => {
                 return Err(HematiteError::ParseError(format!(
                     "Unexpected character: {}",
-                    ch
+                    self.current_char()
                 )))
             }
         };
 
-        self.advance_char();
+        self.position += 1;
         self.tokens.push(token);
         Ok(())
     }
+}
+
+fn is_identifier_start_byte(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_'
+}
+
+fn is_identifier_continue_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
 }
