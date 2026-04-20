@@ -525,17 +525,9 @@ impl Parser {
         let function_name = self.parse_identifier()?;
         self.consume_token(&Token::LeftParen)?;
         self.consume_token(&Token::RightParen)?;
-        let function = match function_name.to_ascii_uppercase().as_str() {
-            "ROW_NUMBER" => WindowFunction::RowNumber,
-            "RANK" => WindowFunction::Rank,
-            "DENSE_RANK" => WindowFunction::DenseRank,
-            _ => {
-                return Err(HematiteError::ParseError(format!(
-                    "Unsupported window function '{}'",
-                    function_name
-                )))
-            }
-        };
+        let function = parse_window_function_name(&function_name).ok_or_else(|| {
+            HematiteError::ParseError(format!("Unsupported window function '{}'", function_name))
+        })?;
         self.parse_window_item(function)
     }
 
@@ -1321,13 +1313,17 @@ impl Parser {
                 )))
             }
         };
-        let leading = self.parse_identifier()?.to_ascii_uppercase();
+        let leading = self.parse_identifier()?;
         self.consume_token(&Token::To)?;
-        let trailing = self.parse_identifier()?.to_ascii_uppercase();
+        let trailing = self.parse_identifier()?;
 
-        let qualifier = match (leading.as_str(), trailing.as_str()) {
-            ("YEAR", "MONTH") => IntervalQualifier::YearToMonth,
-            ("DAY", "SECOND") => IntervalQualifier::DayToSecond,
+        let qualifier = match () {
+            _ if leading.eq_ignore_ascii_case("YEAR") && trailing.eq_ignore_ascii_case("MONTH") => {
+                IntervalQualifier::YearToMonth
+            }
+            _ if leading.eq_ignore_ascii_case("DAY") && trailing.eq_ignore_ascii_case("SECOND") => {
+                IntervalQualifier::DayToSecond
+            }
             _ => {
                 return Err(HematiteError::ParseError(format!(
                     "Unsupported INTERVAL qualifier '{} TO {}'",
@@ -3049,6 +3045,18 @@ fn capitalization_hint_for_token(token: &Token) -> Option<String> {
     }
 }
 
+fn parse_window_function_name(name: &str) -> Option<WindowFunction> {
+    if name.eq_ignore_ascii_case("ROW_NUMBER") {
+        Some(WindowFunction::RowNumber)
+    } else if name.eq_ignore_ascii_case("RANK") {
+        Some(WindowFunction::Rank)
+    } else if name.eq_ignore_ascii_case("DENSE_RANK") {
+        Some(WindowFunction::DenseRank)
+    } else {
+        None
+    }
+}
+
 fn token_keyword_name(token: &Token) -> Option<&'static str> {
     match token {
         Token::Begin => Some("BEGIN"),
@@ -3177,8 +3185,5 @@ fn token_keyword_name(token: &Token) -> Option<&'static str> {
 }
 
 fn is_window_only_function_name(name: &str) -> bool {
-    matches!(
-        name.to_ascii_uppercase().as_str(),
-        "ROW_NUMBER" | "RANK" | "DENSE_RANK"
-    )
+    parse_window_function_name(name).is_some()
 }
