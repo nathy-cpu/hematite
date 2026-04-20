@@ -140,13 +140,16 @@ impl QueryPlanner {
     }
 
     fn plan_update(&self, statement: UpdateStatement) -> Result<QueryPlan> {
-        let access_path = if matches!(statement.source.as_ref(), Some(source) if !matches!(source, TableReference::Table(_, _)))
+        let analysis = if matches!(statement.source.as_ref(), Some(source) if !matches!(source, TableReference::Table(_, _)))
         {
-            SelectAccessPath::JoinScan
+            None
         } else {
-            let analysis = self.analyze_table_access(&statement.table, &statement.where_clause)?;
-            self.choose_access_path(&analysis)
+            Some(self.analyze_table_access(&statement.table, &statement.where_clause)?)
         };
+        let access_path = analysis
+            .as_ref()
+            .map(|analysis| self.choose_access_path(analysis))
+            .unwrap_or(SelectAccessPath::JoinScan);
         let assignment_count = statement.assignments.len();
         let node = PlanNode::Update(UpdatePlanNode {
             table_name: statement.table.clone(),
@@ -160,7 +163,7 @@ impl QueryPlanner {
                 .map(|table| self.estimate_table_rows(table) as f64 + assignment_count as f64)
                 .unwrap_or(assignment_count as f64)
         } else {
-            let analysis = self.analyze_table_access(&statement.table, &statement.where_clause)?;
+            let analysis = analysis.as_ref().expect("non-join access path requires analysis");
             self.estimate_update_cost(&analysis, &access_path, assignment_count)
         };
 
@@ -176,13 +179,16 @@ impl QueryPlanner {
     }
 
     fn plan_delete(&self, statement: DeleteStatement) -> Result<QueryPlan> {
-        let access_path = if matches!(statement.source.as_ref(), Some(source) if !matches!(source, TableReference::Table(_, _)))
+        let analysis = if matches!(statement.source.as_ref(), Some(source) if !matches!(source, TableReference::Table(_, _)))
         {
-            SelectAccessPath::JoinScan
+            None
         } else {
-            let analysis = self.analyze_table_access(&statement.table, &statement.where_clause)?;
-            self.choose_access_path(&analysis)
+            Some(self.analyze_table_access(&statement.table, &statement.where_clause)?)
         };
+        let access_path = analysis
+            .as_ref()
+            .map(|analysis| self.choose_access_path(analysis))
+            .unwrap_or(SelectAccessPath::JoinScan);
         let node = PlanNode::Delete(DeletePlanNode {
             table_name: statement.table.clone(),
             has_filter: statement.where_clause.is_some(),
@@ -194,7 +200,7 @@ impl QueryPlanner {
                 .map(|table| self.estimate_table_rows(table) as f64)
                 .unwrap_or(1.0)
         } else {
-            let analysis = self.analyze_table_access(&statement.table, &statement.where_clause)?;
+            let analysis = analysis.as_ref().expect("non-join access path requires analysis");
             self.estimate_delete_cost(&analysis, &access_path)
         };
 
