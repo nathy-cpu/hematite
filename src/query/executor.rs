@@ -2172,45 +2172,56 @@ impl SelectExecutor {
             .resolve_column_index(sources, column)?
             .ok_or_else(|| HematiteError::ParseError(format!("Column '{}' not found", column)))?;
 
-        let values: Vec<&Value> = rows
-            .iter()
-            .map(|row| &row[index])
-            .filter(|value| !value.is_null())
-            .collect();
-
-        if values.is_empty() {
-            return Ok(Some(match function {
-                AggregateFunction::Count => Value::Integer(0),
-                _ => Value::Null,
-            }));
-        }
-
         match function {
-            AggregateFunction::Count => Ok(Some(Value::Integer(values.len() as i32))),
+            AggregateFunction::Count => {
+                let count = rows
+                    .iter()
+                    .filter(|row| !row[index].is_null())
+                    .count();
+                Ok(Some(Value::Integer(count as i32)))
+            }
             AggregateFunction::Min => {
-                let mut current = values[0].clone();
-                for value in values.into_iter().skip(1) {
-                    if value.partial_cmp(&current).is_some_and(|ord| ord.is_lt()) {
-                        current = value.clone();
+                let mut current: Option<&Value> = None;
+                for row in rows {
+                    let value = &row[index];
+                    if value.is_null() {
+                        continue;
+                    }
+                    if current
+                        .is_none_or(|existing| value.partial_cmp(existing).is_some_and(|ord| ord.is_lt()))
+                    {
+                        current = Some(value);
                     }
                 }
-                Ok(Some(current))
+                Ok(Some(current.cloned().unwrap_or(Value::Null)))
             }
             AggregateFunction::Max => {
-                let mut current = values[0].clone();
-                for value in values.into_iter().skip(1) {
-                    if value.partial_cmp(&current).is_some_and(|ord| ord.is_gt()) {
-                        current = value.clone();
+                let mut current: Option<&Value> = None;
+                for row in rows {
+                    let value = &row[index];
+                    if value.is_null() {
+                        continue;
+                    }
+                    if current
+                        .is_none_or(|existing| value.partial_cmp(existing).is_some_and(|ord| ord.is_gt()))
+                    {
+                        current = Some(value);
                     }
                 }
-                Ok(Some(current))
+                Ok(Some(current.cloned().unwrap_or(Value::Null)))
             }
             AggregateFunction::Sum => {
                 let mut int_sum: i64 = 0;
                 let mut float_sum: f64 = 0.0;
                 let mut has_float = false;
+                let mut saw_value = false;
 
-                for value in &values {
+                for row in rows {
+                    let value = &row[index];
+                    if value.is_null() {
+                        continue;
+                    }
+                    saw_value = true;
                     match value {
                         Value::Integer(i) => {
                             int_sum += *i as i64;
@@ -2233,6 +2244,10 @@ impl SelectExecutor {
                     }
                 }
 
+                if !saw_value {
+                    return Ok(Some(Value::Null));
+                }
+
                 if has_float {
                     Ok(Some(Value::Float(float_sum)))
                 } else {
@@ -2241,9 +2256,14 @@ impl SelectExecutor {
             }
             AggregateFunction::Avg => {
                 let mut sum: f64 = 0.0;
-                let count = values.len() as f64;
+                let mut count = 0usize;
 
-                for value in &values {
+                for row in rows {
+                    let value = &row[index];
+                    if value.is_null() {
+                        continue;
+                    }
+                    count += 1;
                     match value {
                         Value::Integer(i) => {
                             sum += *i as f64;
@@ -2263,7 +2283,11 @@ impl SelectExecutor {
                     }
                 }
 
-                Ok(Some(Value::Float(sum / count)))
+                if count == 0 {
+                    return Ok(Some(Value::Null));
+                }
+
+                Ok(Some(Value::Float(sum / count as f64)))
             }
         }
     }
