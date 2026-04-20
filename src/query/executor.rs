@@ -131,7 +131,7 @@ struct CorrelatedScope {
     row: Vec<Value>,
 }
 
-type SubqueryCache = HashMap<usize, QueryResult>;
+type SubqueryCache = HashMap<usize, Arc<QueryResult>>;
 
 fn evaluate_case_expression<FBool, FExpr>(
     branches: &[CaseWhenClause],
@@ -556,8 +556,8 @@ impl SelectExecutor {
                     self.execute_subquery_cached(ctx, cache, subquery, Some(sources), Some(row))?;
                 let candidates = subquery_result
                     .rows
-                    .into_iter()
-                    .map(|row| row.into_iter().next().unwrap_or(Value::Null))
+                    .iter()
+                    .map(|row| row.first().cloned().unwrap_or(Value::Null))
                     .collect::<Vec<_>>();
                 Ok(self.evaluate_in_candidates(probe, candidates, *is_not, None))
             }
@@ -993,18 +993,23 @@ impl SelectExecutor {
         subquery: &SelectStatement,
         current_sources: Option<&[ResolvedSource]>,
         current_row: Option<&[Value]>,
-    ) -> Result<QueryResult> {
+    ) -> Result<Arc<QueryResult>> {
         if current_sources.is_some() && current_row.is_some() {
-            return self.execute_subquery(ctx, subquery, current_sources, current_row);
+            return Ok(Arc::new(self.execute_subquery(
+                ctx,
+                subquery,
+                current_sources,
+                current_row,
+            )?));
         }
 
         let key = subquery as *const SelectStatement as usize;
         if let Some(result) = cache.get(&key) {
-            return Ok(result.clone());
+            return Ok(Arc::clone(result));
         }
 
-        let result = self.execute_subquery(ctx, subquery, None, None)?;
-        cache.insert(key, result.clone());
+        let result = Arc::new(self.execute_subquery(ctx, subquery, None, None)?);
+        cache.insert(key, Arc::clone(&result));
         Ok(result)
     }
 
@@ -1025,9 +1030,9 @@ impl SelectExecutor {
         }
         Ok(result
             .rows
-            .into_iter()
+            .iter()
             .next()
-            .and_then(|row| row.into_iter().next())
+            .and_then(|row| row.first().cloned())
             .unwrap_or(Value::Null))
     }
 
@@ -1075,8 +1080,8 @@ impl SelectExecutor {
                     self.execute_subquery_cached(ctx, cache, subquery, Some(sources), Some(row))?;
                 let candidates = subquery_result
                     .rows
-                    .into_iter()
-                    .map(|row| row.into_iter().next().unwrap_or(Value::Null))
+                    .iter()
+                    .map(|row| row.first().cloned().unwrap_or(Value::Null))
                     .collect::<Vec<_>>();
                 let text_context = self.text_comparison_context_for_expression(sources, expr)?;
                 Ok(self.evaluate_in_candidates(probe, candidates, *is_not, text_context))
@@ -1755,8 +1760,11 @@ impl SelectExecutor {
                 None,
             )?;
 
-            left_result.rows =
-                apply_set_operation(set_operation.operator, left_result.rows, right_result.rows);
+            left_result.rows = apply_set_operation(
+                set_operation.operator,
+                left_result.rows,
+                right_result.rows.clone(),
+            );
             left_result.affected_rows = left_result.rows.len();
             return Ok(left_result);
         }
@@ -2554,8 +2562,8 @@ impl SelectExecutor {
                     self.execute_subquery_cached(ctx, cache, subquery, Some(sources), Some(row))?;
                 let candidates = subquery_result
                     .rows
-                    .into_iter()
-                    .map(|row| row.into_iter().next().unwrap_or(Value::Null))
+                    .iter()
+                    .map(|row| row.first().cloned().unwrap_or(Value::Null))
                     .collect::<Vec<_>>();
                 let text_context = self.text_comparison_context_for_expression(sources, expr)?;
                 Ok(evaluate_in_candidates(
@@ -2768,8 +2776,8 @@ impl SelectExecutor {
                     self.execute_subquery_cached(ctx, cache, subquery, Some(sources), Some(row))?;
                 let candidates = subquery_result
                     .rows
-                    .into_iter()
-                    .map(|row| row.into_iter().next().unwrap_or(Value::Null))
+                    .iter()
+                    .map(|row| row.first().cloned().unwrap_or(Value::Null))
                     .collect::<Vec<_>>();
                 let text_context = self.text_comparison_context_for_expression(sources, expr)?;
                 Ok(self.evaluate_in_candidates(probe, candidates, *is_not, text_context))
