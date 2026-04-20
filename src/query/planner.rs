@@ -144,7 +144,7 @@ impl QueryPlanner {
         {
             None
         } else {
-            Some(self.analyze_table_access(&statement.table, &statement.where_clause)?)
+            Some(self.analyze_table_access(&statement.table, &statement.where_clause, &[])? )
         };
         let access_path = analysis
             .as_ref()
@@ -183,7 +183,7 @@ impl QueryPlanner {
         {
             None
         } else {
-            Some(self.analyze_table_access(&statement.table, &statement.where_clause)?)
+            Some(self.analyze_table_access(&statement.table, &statement.where_clause, &[])? )
         };
         let access_path = analysis
             .as_ref()
@@ -310,8 +310,8 @@ impl QueryPlanner {
         }
     }
 
-    fn extract_rowid_lookup(&self, statement: &SelectStatement) -> Option<u64> {
-        let equalities = extract_literal_equalities(statement.where_clause.as_ref()?)?;
+    fn extract_rowid_lookup_where(&self, where_clause: &Option<WhereClause>) -> Option<u64> {
+        let equalities = extract_literal_equalities(where_clause.as_ref()?)?;
         match equalities.get("rowid") {
             Some(Value::Integer(v)) if *v >= 0 => Some(*v as u64),
             _ => None,
@@ -325,7 +325,11 @@ impl QueryPlanner {
         })?;
 
         if bindings.len() == 1 && !statement.has_non_table_source() {
-            return self.analyze_table_access(&primary.table_name, &statement.where_clause);
+            return self.analyze_table_access(
+                &primary.table_name,
+                &statement.where_clause,
+                &statement.columns,
+            );
         }
 
         let estimated_rows = if bindings.len() > 1 || statement.has_non_table_source() {
@@ -367,20 +371,20 @@ impl QueryPlanner {
         &self,
         table_name: &str,
         where_clause: &Option<WhereClause>,
+        select_items: &[SelectItem],
     ) -> Result<SelectAnalysis> {
         let table_name = table_name.to_string();
         let table = self.catalog.get_table_by_name(&table_name).ok_or_else(|| {
             HematiteError::ParseError(format!("Table '{}' not found", table_name))
         })?;
 
-        let synthetic_select = synthetic_table_select(&table_name, where_clause.clone());
-        let rowid_lookup = self.extract_rowid_lookup(&synthetic_select);
+        let rowid_lookup = self.extract_rowid_lookup_where(where_clause);
 
         // Analyze WHERE clause for index usage opportunities
         let usable_indexes = self.analyze_where_clause(where_clause, table)?;
 
         // Analyze column access patterns
-        let accessed_columns = self.analyze_column_access(&synthetic_select.columns, table)?;
+        let accessed_columns = self.analyze_column_access(select_items, table)?;
 
         Ok(SelectAnalysis {
             table_name,
@@ -829,22 +833,5 @@ fn is_equality_join_condition(condition: &Condition) -> bool {
             right,
         } => is_equality_join_condition(left) && is_equality_join_condition(right),
         _ => false,
-    }
-}
-
-fn synthetic_table_select(table_name: &str, where_clause: Option<WhereClause>) -> SelectStatement {
-    SelectStatement {
-        with_clause: Vec::new(),
-        distinct: false,
-        columns: vec![SelectItem::Wildcard],
-        column_aliases: vec![None],
-        from: TableReference::Table(table_name.to_string(), None),
-        where_clause,
-        group_by: Vec::new(),
-        having_clause: None,
-        order_by: Vec::new(),
-        limit: None,
-        offset: None,
-        set_operation: None,
     }
 }
