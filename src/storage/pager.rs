@@ -119,6 +119,7 @@ use std::fs::File;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::time::SystemTime;
 
 pub(crate) use self::savepoint::PagerSnapshot;
 pub use self::state::{JournalMode, PagerState};
@@ -171,6 +172,12 @@ struct WalReadSnapshot {
     state: Arc<VisibleWalState>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WalFileStamp {
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
 fn compact_transaction_free_pages(transaction: &mut WalTransaction) {
     transaction.wal_free_pages.sort_unstable();
     transaction.wal_free_pages.dedup();
@@ -203,6 +210,7 @@ pub struct Pager {
     wal_reader_registration: Option<WalReaderRegistration>,
     wal_read_snapshot: Option<WalReadSnapshot>,
     latest_wal_state: Option<Arc<VisibleWalState>>,
+    latest_wal_file_stamp: Option<WalFileStamp>,
     transaction: Option<PagerTransaction>,
     state: PagerState,
     /// Open handle to the rollback journal file for incremental appending.
@@ -251,6 +259,7 @@ impl Pager {
             wal_reader_registration: None,
             wal_read_snapshot: None,
             latest_wal_state: None,
+            latest_wal_file_stamp: None,
             transaction: None,
             state: PagerState::Open,
             journal_file: None,
@@ -282,6 +291,7 @@ impl Pager {
             wal_reader_registration: None,
             wal_read_snapshot: None,
             latest_wal_state: None,
+            latest_wal_file_stamp: None,
             transaction: None,
             state: PagerState::Open,
             journal_file: None,

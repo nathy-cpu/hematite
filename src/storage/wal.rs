@@ -184,12 +184,12 @@ pub(crate) fn load_visible_state_from_path_with_base<P: AsRef<Path>>(
     };
 
     let metadata_frame_present = page_overrides_btree.contains_key(&STORAGE_METADATA_PAGE_ID);
-    let persisted = if metadata_frame_present {
+    let (free_pages, mut checksums) = if metadata_frame_present {
         let metadata_page_bytes = page_overrides_btree
             .get(&STORAGE_METADATA_PAGE_ID)
             .map(Vec::as_slice)
             .unwrap_or(baseline_metadata_page);
-        match parse_metadata_page(metadata_page_bytes) {
+        let persisted = match parse_metadata_page(metadata_page_bytes) {
             Ok(Some(persisted)) => persisted,
             Ok(None) => {
                 return Err(HematiteError::CorruptedData(
@@ -202,26 +202,26 @@ pub(crate) fn load_visible_state_from_path_with_base<P: AsRef<Path>>(
                     err
                 )))
             }
-        }
+        };
+
+        let mut checksums = baseline_checksums;
+        checksums.extend(persisted.checksums);
+        (persisted.free_pages, checksums)
     } else {
-        PersistedPagerState {
-            journal_mode: JournalMode::Wal,
-            free_pages: baseline_free_pages,
-            checksums: baseline_checksums,
-        }
+        (baseline_free_pages, baseline_checksums)
     };
 
     let visible_next_page_id = next_page_id_for_file_len(file_len);
-    let free_page_set = persisted.free_pages.iter().copied().collect::<HashSet<_>>();
+    let free_page_set = free_pages.iter().copied().collect::<HashSet<_>>();
     page_overrides_btree
         .retain(|page_id, _| *page_id < visible_next_page_id && !free_page_set.contains(page_id));
-
-    let PersistedPagerState {
-        journal_mode: _,
-        free_pages,
-        checksums,
-    } = persisted;
-    let free_page_set = free_pages.iter().copied().collect();
+    checksums
+        .retain(|page_id, _| *page_id < visible_next_page_id && !free_page_set.contains(page_id));
+    for (page_id, bytes) in &page_overrides_btree {
+        if *page_id != STORAGE_METADATA_PAGE_ID {
+            checksums.insert(*page_id, page_checksum(bytes));
+        }
+    }
 
     Ok(Some(VisibleWalState {
         visible_sequence: latest_sequence,
@@ -402,7 +402,22 @@ fn synthesize_v3_frames(
     if base_page.len() != PAGE_SIZE {
         base_page = vec![0; PAGE_SIZE];
     }
-    let metadata_page_bytes = metadata_page::write_pager_metadata(&base_page, &metadata_payload)?;
+    let metadata_page_bytes =
+        match metadata_page::write_pager_metadata(&base_page, &metadata_payload) {
+            Ok(bytes) => bytes,
+            Err(HematiteError::StorageError(ref msg)) if msg.contains("exceeds page size") => {
+                // Full checksum map can outgrow one reserved metadata page in WAL mode.
+                // Keep free-page state, drop persisted checksum payload, reconstruct visible-page
+                // checksums from WAL frames when reloading state.
+                let fallback = PersistedPagerState {
+                    journal_mode: JournalMode::Wal,
+                    free_pages: free_pages.to_vec(),
+                    checksums: HashMap::new(),
+                };
+                metadata_page::write_pager_metadata(&base_page, &fallback.encode(1))?
+            }
+            Err(err) => return Err(err),
+        };
 
     let mut v3_frames = Vec::with_capacity(frames.len() + 1);
     for frame in frames {
@@ -442,6 +457,15 @@ fn parse_metadata_page(bytes: &[u8]) -> Result<Option<PersistedPagerState>> {
 
 fn visible_next_page_id(file_len: u64) -> PageId {
     next_page_id_for_file_len(file_len)
+}
+
+fn page_checksum(bytes: &[u8]) -> u32 {
+    let mut hash: u32 = 0x811C9DC5;
+    for byte in bytes {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(0x01000193);
+    }
+    hash
 }
 
 fn committed_frame_groups(frames: &[V3WalFrame]) -> Vec<Vec<V3WalFrame>> {

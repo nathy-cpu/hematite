@@ -450,6 +450,72 @@ mod pager_tests {
     }
 
     #[test]
+    fn test_pager_wal_commit_handles_large_checksum_metadata() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_wal_commit_large_checksum_metadata");
+        let target_page_id = {
+            let mut pager = Pager::new(test_db.path(), 64)?;
+            let mut target_page_id = None;
+
+            for index in 0..900u32 {
+                let page_id = pager.allocate_page()?;
+                let mut page = Page::new(page_id);
+                page.data[0] = (index % 251) as u8;
+                pager.write_page(page)?;
+                if index == 450 {
+                    target_page_id = Some(page_id);
+                }
+            }
+
+            pager.flush()?;
+            pager.set_journal_mode(JournalMode::Wal)?;
+
+            let target_page_id = target_page_id.expect("target page should be assigned");
+            pager.begin_transaction()?;
+            let mut updated = pager.read_page(target_page_id)?;
+            updated.data[0] = 222;
+            pager.write_page(updated)?;
+            pager.commit_transaction()?;
+            target_page_id
+        };
+
+        let mut reopened = Pager::new(test_db.path(), 64)?;
+        reopened.begin_read()?;
+        assert_eq!(reopened.read_page(target_page_id)?.data[0], 222);
+        reopened.end_read()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_wal_begin_transaction_skips_reload_when_wal_unchanged() -> crate::error::Result<()>
+    {
+        let test_db = TestDbFile::new("_test_pager_wal_begin_transaction_skips_reload");
+        let mut pager = Pager::new(test_db.path(), 16)?;
+        let page_id = pager.allocate_page()?;
+        let mut page = Page::new(page_id);
+        page.data[0] = 7;
+        pager.write_page(page)?;
+        pager.flush()?;
+        pager.set_journal_mode(JournalMode::Wal)?;
+
+        pager.begin_transaction()?;
+        let mut updated = pager.read_page(page_id)?;
+        updated.data[0] = 8;
+        pager.write_page(updated)?;
+        pager.commit_transaction()?;
+
+        let reloads_before = pager.wal_visible_state_reload_count();
+        pager.begin_transaction()?;
+        let reloads_after_begin = pager.wal_visible_state_reload_count();
+        assert_eq!(reloads_after_begin, reloads_before);
+        assert_eq!(pager.read_page(page_id)?.data[0], 8);
+        pager.rollback_transaction()?;
+        let reloads_after_rollback = pager.wal_visible_state_reload_count();
+        assert_eq!(reloads_after_rollback, reloads_after_begin);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_pager_large_transaction_stays_cache_bounded_under_pressure() -> crate::error::Result<()>
     {
         let test_db = TestDbFile::new("_test_pager_large_tx_cache_pressure");
@@ -1337,6 +1403,39 @@ mod pager_tests {
         assert_eq!(reader.cached_page_count(), retained_entries);
         assert_eq!(reader.read_page(page_id)?.data[0], 55);
         reader.end_read()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_wal_begin_read_skips_reload_when_wal_unchanged() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_pager_wal_begin_read_skips_reload");
+
+        let page_id = {
+            let mut pager = Pager::new(test_db.path(), 8)?;
+            pager.set_journal_mode(JournalMode::Wal)?;
+            pager.begin_transaction()?;
+            let page_id = pager.allocate_page()?;
+            let mut page = Page::new(page_id);
+            page.data[0] = 42;
+            pager.write_page(page)?;
+            pager.commit_transaction()?;
+            page_id
+        };
+
+        let mut reader = Pager::new(test_db.path(), 8)?;
+        reader.set_journal_mode(JournalMode::Wal)?;
+
+        reader.begin_read()?;
+        assert_eq!(reader.read_page(page_id)?.data[0], 42);
+        reader.end_read()?;
+
+        let reloads_before = reader.wal_visible_state_reload_count();
+        reader.begin_read()?;
+        let reloads_after_begin = reader.wal_visible_state_reload_count();
+        assert_eq!(reloads_after_begin, reloads_before);
+        assert_eq!(reader.read_page(page_id)?.data[0], 42);
+        reader.end_read()?;
+
         Ok(())
     }
 

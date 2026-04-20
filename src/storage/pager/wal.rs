@@ -31,6 +31,7 @@ impl Pager {
         if journal_mode == JournalMode::Rollback {
             self.remove_wal_file()?;
             self.latest_wal_state = None;
+            self.latest_wal_file_stamp = None;
             self.wal_read_snapshot = None;
         } else {
             self.remove_journal_file()?;
@@ -100,6 +101,7 @@ impl Pager {
         self.file_manager.flush()?;
         self.page_checksums = state.page_checksums.clone();
         self.latest_wal_state = None;
+        self.latest_wal_file_stamp = None;
         self.wal_read_snapshot = None;
         self.cache_mut()?.reset();
         self.remove_wal_file()?;

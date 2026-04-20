@@ -1,4 +1,4 @@
-use super::{JournalMode, Pager};
+use super::{JournalMode, Pager, WalFileStamp};
 use crate::error::Result;
 use crate::storage::journal::{JournalRecord, JournalState, RollbackJournal};
 use crate::storage::journal_v3::{V3JournalHeader, V3JournalRecord, V3JournalState};
@@ -54,14 +54,19 @@ impl Pager {
         }
     }
 
-    pub(super) fn load_persisted_state(&mut self) -> Result<()> {
+    fn read_persisted_state_page(&mut self) -> Result<Option<Page>> {
         self.file_manager.sync_with_disk()?;
         if STORAGE_METADATA_PAGE_ID >= self.file_manager.next_page_id() {
-            return Ok(());
+            return Ok(None);
         }
-        let page = self.file_manager.read_page(STORAGE_METADATA_PAGE_ID)?;
-        if let Some(bytes) = metadata_page::read_pager_metadata(&page.data)? {
-            return self.apply_persisted_state(&bytes);
+        Ok(Some(self.file_manager.read_page(STORAGE_METADATA_PAGE_ID)?))
+    }
+
+    fn apply_persisted_state_page(&mut self, page: Option<&Page>) -> Result<()> {
+        if let Some(page) = page {
+            if let Some(bytes) = metadata_page::read_pager_metadata(&page.data)? {
+                return self.apply_persisted_state(&bytes);
+            }
         }
 
         if let Some(db_path) = &self.database_identity {
@@ -84,6 +89,11 @@ impl Pager {
         Ok(())
     }
 
+    pub(super) fn load_persisted_state(&mut self) -> Result<()> {
+        let page = self.read_persisted_state_page()?;
+        self.apply_persisted_state_page(page.as_ref())
+    }
+
     fn apply_persisted_state(&mut self, contents: &[u8]) -> Result<()> {
         let persisted =
             PersistedPagerState::decode_bytes(contents, Self::CHECKSUM_METADATA_VERSION)?;
@@ -98,11 +108,17 @@ impl Pager {
             return Ok(());
         }
 
-        self.load_persisted_state()?;
+        let metadata_page = self.read_persisted_state_page()?;
+        self.apply_persisted_state_page(metadata_page.as_ref())?;
         if self.journal_mode != JournalMode::Wal {
             self.cache_mut()?.reset();
+            self.latest_wal_state = None;
+            self.latest_wal_file_stamp = None;
+            return Ok(());
         }
-        self.load_latest_wal_state()
+        self.load_latest_wal_state_if_changed(
+            metadata_page.as_ref().map(|page| page.data.as_slice()),
+        )
     }
 
     pub(super) fn snapshot_wal_visible_state(&mut self) -> Result<Arc<VisibleWalState>> {
@@ -118,6 +134,31 @@ impl Pager {
     }
 
     pub(super) fn load_latest_wal_state(&mut self) -> Result<()> {
+        self.load_latest_wal_state_with_base_metadata(None)
+    }
+
+    fn load_latest_wal_state_if_changed(
+        &mut self,
+        baseline_metadata_page: Option<&[u8]>,
+    ) -> Result<()> {
+        if self.journal_mode != JournalMode::Wal {
+            self.latest_wal_state = None;
+            self.latest_wal_file_stamp = None;
+            return Ok(());
+        }
+
+        let stamp = self.current_wal_file_stamp()?;
+        if self.latest_wal_file_stamp == stamp {
+            return Ok(());
+        }
+
+        self.load_latest_wal_state_with_base_metadata(baseline_metadata_page)
+    }
+
+    fn load_latest_wal_state_with_base_metadata(
+        &mut self,
+        baseline_metadata_page: Option<&[u8]>,
+    ) -> Result<()> {
         #[cfg(test)]
         {
             self.wal_visible_state_reload_count =
@@ -125,24 +166,53 @@ impl Pager {
         }
         if self.journal_mode != JournalMode::Wal {
             self.latest_wal_state = None;
+            self.latest_wal_file_stamp = None;
             return Ok(());
         }
 
         let Some(path) = &self.wal_path else {
             self.latest_wal_state = None;
+            self.latest_wal_file_stamp = None;
             return Ok(());
         };
 
-        let metadata_page = self.file_manager.read_page(STORAGE_METADATA_PAGE_ID)?;
+        let wal_file_stamp = self.current_wal_file_stamp()?;
+        let owned_metadata_page;
+        let metadata_page = if let Some(page) = baseline_metadata_page {
+            page
+        } else {
+            owned_metadata_page = self.file_manager.read_page(STORAGE_METADATA_PAGE_ID)?;
+            owned_metadata_page.data.as_slice()
+        };
         self.latest_wal_state = load_visible_state_from_path_with_base(
             path,
             self.file_manager.file_len()?,
             self.file_manager.free_pages().to_vec(),
             self.page_checksums.clone(),
-            &metadata_page.data,
+            metadata_page,
         )?
         .map(Arc::new);
+        self.latest_wal_file_stamp = wal_file_stamp;
         Ok(())
+    }
+
+    fn current_wal_file_stamp(&self) -> Result<Option<WalFileStamp>> {
+        let Some(path) = &self.wal_path else {
+            return Ok(None);
+        };
+
+        match fs::metadata(path) {
+            Ok(metadata) => Ok(Some(WalFileStamp {
+                len: metadata.len(),
+                modified: metadata.modified().ok(),
+            })),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    fn refresh_wal_file_stamp_best_effort(&mut self) {
+        self.latest_wal_file_stamp = self.current_wal_file_stamp().ok().flatten();
     }
 
     fn encoded_persisted_state_page(&mut self) -> Result<Page> {
@@ -536,7 +606,7 @@ impl Pager {
         })?;
         self.cache_mut()?.reset();
         self.page_checksums = transaction.original_checksums;
-        self.load_latest_wal_state()
+        Ok(())
     }
 
     pub(super) fn commit_wal_transaction(&mut self) -> Result<()> {
@@ -606,6 +676,7 @@ impl Pager {
             &frames,
         )?;
         self.latest_wal_state = Some(Arc::new(updated_visible_state));
+        self.refresh_wal_file_stamp_best_effort();
         let committed_view_token = self.cache_view_token();
         let dirty_ids = self.cache_mut()?.dirty_page_ids();
         for page_id in dirty_ids {
