@@ -99,8 +99,12 @@ fn validate_trigger_body(create_trigger: &CreateTriggerStatement, catalog: &Sche
         _ => {}
     }
 
-    let masked_body = mask_trigger_aliases_in_statement(create_trigger.body.as_ref());
-    validate_statement(&masked_body, catalog)
+    if !old_refs && !new_refs {
+        validate_statement(create_trigger.body.as_ref(), catalog)
+    } else {
+        let masked_body = mask_trigger_aliases_in_statement(create_trigger.body.as_ref());
+        validate_statement(&masked_body, catalog)
+    }
 }
 
 fn trigger_body_target_table(statement: &Statement) -> Option<&str> {
@@ -810,7 +814,7 @@ fn validate_select_with_outer_bindings(
             recursive_term.with_clause.push(CommonTableExpression {
                 name: cte.name.clone(),
                 recursive: false,
-                query: Box::new(anchor.clone()),
+                query: Box::new(anchor),
             });
             validate_select(&recursive_term, catalog)?;
         } else {
