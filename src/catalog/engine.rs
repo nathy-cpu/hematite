@@ -82,11 +82,9 @@ pub struct CatalogEngineSnapshot {
     tree_store: ByteTreeStoreSnapshot,
 }
 
-impl CatalogEngineSnapshot {
-    pub(crate) fn into_transaction_baseline(mut self) -> Self {
-        self.tree_store = self.tree_store.into_transaction_baseline();
-        self
-    }
+#[derive(Debug, Clone)]
+pub(crate) struct CatalogEngineTransactionSnapshot {
+    table_metadata: HashMap<String, TableRuntimeMetadata>,
 }
 
 #[derive(Debug)]
@@ -350,6 +348,19 @@ not available yet.",
     pub fn restore_snapshot(&mut self, snapshot: CatalogEngineSnapshot) -> Result<()> {
         self.table_metadata = snapshot.table_metadata;
         self.tree_store.restore_snapshot(snapshot.tree_store)
+    }
+
+    pub(crate) fn transaction_entry_snapshot(&self) -> CatalogEngineTransactionSnapshot {
+        CatalogEngineTransactionSnapshot {
+            table_metadata: self.table_metadata.clone(),
+        }
+    }
+
+    pub(crate) fn restore_transaction_entry_snapshot(
+        &mut self,
+        snapshot: CatalogEngineTransactionSnapshot,
+    ) {
+        self.table_metadata = snapshot.table_metadata;
     }
 
     fn restore_runtime_metadata(&mut self, table_metadata: HashMap<String, TableRuntimeMetadata>) {
