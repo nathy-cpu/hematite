@@ -373,6 +373,26 @@ fn is_lock_busy(err: &std::io::Error) -> bool {
     matches!(err.raw_os_error(), Some(11) | Some(35))
 }
 
+#[cfg(not(unix))]
+fn try_lock_shared(file: &File) -> std::io::Result<()> {
+    Ok(file.try_lock_shared()?)
+}
+
+#[cfg(not(unix))]
+fn try_lock_exclusive(file: &File) -> std::io::Result<()> {
+    Ok(file.try_lock()?)
+}
+
+#[cfg(not(unix))]
+fn unlock_file(file: &File) -> std::io::Result<()> {
+    file.unlock()
+}
+
+#[cfg(not(unix))]
+fn is_lock_busy(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::WouldBlock
+}
+
 #[cfg(unix)]
 const LOCK_SH: i32 = 1;
 #[cfg(unix)]
