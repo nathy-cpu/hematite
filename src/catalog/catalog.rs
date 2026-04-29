@@ -19,9 +19,7 @@
 //! - transaction rollback restores both the schema snapshot and the engine snapshot.
 
 use crate::catalog::column::Column;
-use crate::catalog::engine::{
-    CatalogEngine, CatalogEngineSnapshot, CatalogEngineTransactionSnapshot, CatalogIntegrityReport,
-};
+use crate::catalog::engine::{CatalogEngine, CatalogEngineSnapshot, CatalogIntegrityReport};
 use crate::catalog::ids::TableId;
 use crate::catalog::object::{NamedConstraintKind, Trigger, View};
 use crate::catalog::schema::Schema;
@@ -43,14 +41,6 @@ pub(crate) struct CatalogSnapshot {
     schema_root: u32,
     schema_dirty: bool,
     engine: CatalogEngineSnapshot,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct CatalogTransactionSnapshot {
-    schema: Schema,
-    schema_root: u32,
-    schema_dirty: bool,
-    engine: CatalogEngineTransactionSnapshot,
 }
 
 impl Catalog {
@@ -453,13 +443,13 @@ impl Catalog {
         })
     }
 
-    pub(crate) fn transaction_entry_snapshot(&self) -> CatalogTransactionSnapshot {
-        CatalogTransactionSnapshot {
+    pub(crate) fn transaction_entry_snapshot(&self) -> Result<CatalogSnapshot> {
+        Ok(CatalogSnapshot {
             schema: self.schema.clone(),
             schema_root: self.schema_root,
             schema_dirty: self.schema_dirty,
-            engine: self.engine.transaction_entry_snapshot(),
-        }
+            engine: self.engine.snapshot()?.into_transaction_baseline(),
+        })
     }
 
     pub(crate) fn restore_snapshot(&mut self, snapshot: CatalogSnapshot) -> Result<()> {
@@ -467,16 +457,6 @@ impl Catalog {
         self.schema_root = snapshot.schema_root;
         self.schema_dirty = snapshot.schema_dirty;
         self.engine.restore_snapshot(snapshot.engine)
-    }
-
-    pub(crate) fn restore_transaction_entry_snapshot(
-        &mut self,
-        snapshot: CatalogTransactionSnapshot,
-    ) {
-        self.schema = snapshot.schema;
-        self.schema_root = snapshot.schema_root;
-        self.schema_dirty = snapshot.schema_dirty;
-        self.engine.restore_transaction_entry_snapshot(snapshot.engine);
     }
 
     pub(crate) fn begin_transaction(&mut self) -> Result<()> {

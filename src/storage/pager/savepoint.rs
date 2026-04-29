@@ -17,6 +17,25 @@ pub(crate) enum PagerSnapshot {
     },
 }
 
+impl PagerSnapshot {
+    pub(crate) fn into_transaction_baseline(mut self) -> Self {
+        if let Self::Full {
+            ref mut cache,
+            ref mut transaction,
+            ref mut state,
+            ..
+        } = self
+        {
+            for page_id in cache.dirty_page_ids() {
+                cache.clear_dirty(page_id);
+            }
+            *transaction = None;
+            *state = PagerState::Open;
+        }
+        self
+    }
+}
+
 impl Pager {
     fn clone_dirty_pages(&self) -> Result<Vec<Page>> {
         let mut dirty_pages = Vec::new();

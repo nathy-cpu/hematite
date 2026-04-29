@@ -34,7 +34,7 @@ use crate::query::metadata as query_metadata;
 use crate::query::validation::{projected_column_names, source_column_names, validate_statement};
 use crate::query::{
     Catalog, CatalogEngine, ExecutionContext, JournalMode, MutationEvent, QueryCatalogSnapshot,
-    QueryCatalogTransactionSnapshot, QueryExecutor, QueryPlanner, QueryResult, Schema, Value,
+    QueryExecutor, QueryPlanner, QueryResult, Schema, Value,
 };
 use crate::sql::result::ExecutedStatement;
 use crate::sql::script::{split_script_tokens, ScriptIter};
@@ -43,7 +43,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 #[derive(Debug, Clone)]
 struct ConnectionTransaction {
-    snapshot: QueryCatalogTransactionSnapshot,
+    snapshot: QueryCatalogSnapshot,
     savepoints: Vec<SavepointState>,
 }
 
@@ -55,7 +55,7 @@ struct SavepointState {
 
 #[derive(Debug)]
 struct ImplicitMutation {
-    snapshot: Option<QueryCatalogTransactionSnapshot>,
+    snapshot: Option<QueryCatalogSnapshot>,
 }
 
 impl ImplicitMutation {
@@ -70,7 +70,13 @@ impl ImplicitMutation {
             let _ = catalog_guard.rollback_transaction();
             return Err(err);
         }
-        let snapshot = catalog_guard.transaction_entry_snapshot();
+        let snapshot = match catalog_guard.transaction_entry_snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                let _ = catalog_guard.rollback_transaction();
+                return Err(err);
+            }
+        };
         Ok(Self {
             snapshot: Some(snapshot),
         })
@@ -80,7 +86,7 @@ impl ImplicitMutation {
         if let Some(snapshot) = self.snapshot.take() {
             let mut catalog_guard = connection.lock_catalog()?;
             let _ = catalog_guard.rollback_transaction();
-            catalog_guard.restore_transaction_entry_snapshot(snapshot);
+            catalog_guard.restore_snapshot(snapshot)?;
         }
         Ok(())
     }
@@ -95,7 +101,7 @@ impl ImplicitMutation {
             Ok(()) => Ok(()),
             Err(err) => {
                 let _ = catalog_guard.rollback_transaction();
-                catalog_guard.restore_transaction_entry_snapshot(snapshot);
+                catalog_guard.restore_snapshot(snapshot)?;
                 Err(err)
             }
         }
@@ -1937,7 +1943,13 @@ impl Connection {
             let _ = catalog_guard.rollback_transaction();
             return Err(err);
         }
-        let snapshot = catalog_guard.transaction_entry_snapshot();
+        let snapshot = match catalog_guard.transaction_entry_snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                let _ = catalog_guard.rollback_transaction();
+                return Err(err);
+            }
+        };
         drop(catalog_guard);
         self.transaction = Some(ConnectionTransaction {
             snapshot,
@@ -2578,7 +2590,7 @@ impl Connection {
             Ok(()) => Ok(()),
             Err(err) => {
                 let _ = catalog_guard.rollback_transaction();
-                catalog_guard.restore_transaction_entry_snapshot(state.snapshot);
+                catalog_guard.restore_snapshot(state.snapshot)?;
                 Err(err)
             }
         }
@@ -2588,7 +2600,7 @@ impl Connection {
         let state = self.take_active_transaction("roll back")?;
         let mut catalog_guard = self.lock_catalog()?;
         catalog_guard.rollback_transaction()?;
-        catalog_guard.restore_transaction_entry_snapshot(state.snapshot);
+        catalog_guard.restore_snapshot(state.snapshot)?;
         Ok(())
     }
 }

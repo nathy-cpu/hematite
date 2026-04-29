@@ -11,7 +11,6 @@ pub mod runtime;
 pub(crate) mod validation;
 
 pub(crate) use crate::catalog::catalog::CatalogSnapshot as QueryCatalogSnapshot;
-pub(crate) use crate::catalog::catalog::CatalogTransactionSnapshot as QueryCatalogTransactionSnapshot;
 pub use crate::catalog::{
     Catalog, CatalogEngine, DateTimeValue, DateValue, DecimalValue, IntervalDaySecondValue,
     IntervalYearMonthValue, JournalMode, Schema, TimeValue, TimeWithTimeZoneValue, Value,

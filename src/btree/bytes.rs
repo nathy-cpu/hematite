@@ -69,6 +69,13 @@ pub(crate) struct ByteTreeStoreSnapshot {
     pager: crate::storage::pager::PagerSnapshot,
 }
 
+impl ByteTreeStoreSnapshot {
+    pub(crate) fn into_transaction_baseline(mut self) -> Self {
+        self.pager = self.pager.into_transaction_baseline();
+        self
+    }
+}
+
 impl ByteTreeStore {
     pub const PAGE_SIZE: usize = PAGE_SIZE;
     pub const INVALID_PAGE_ID: PageId = INVALID_PAGE_ID;
@@ -180,29 +187,12 @@ impl ByteTreeStore {
     }
 
     fn run_atomically<T>(&self, operation: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
-        if self.transaction_active()? {
-            let snapshot = self.snapshot()?;
-            match operation(self) {
-                Ok(result) => Ok(result),
-                Err(err) => {
-                    self.restore_snapshot(snapshot)?;
-                    Err(err)
-                }
-            }
-        } else {
-            self.begin_transaction()?;
-            match operation(self) {
-                Ok(result) => match self.commit_transaction() {
-                    Ok(()) => Ok(result),
-                    Err(err) => {
-                        let _ = self.rollback_transaction();
-                        Err(err)
-                    }
-                },
-                Err(err) => {
-                    let _ = self.rollback_transaction();
-                    Err(err)
-                }
+        let snapshot = self.snapshot()?;
+        match operation(self) {
+            Ok(result) => Ok(result),
+            Err(err) => {
+                self.restore_snapshot(snapshot)?;
+                Err(err)
             }
         }
     }
