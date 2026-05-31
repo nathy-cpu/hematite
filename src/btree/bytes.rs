@@ -41,6 +41,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use crate::btree::codec::RawBytesCodec;
 use crate::btree::cursor::BTreeCursor;
 use crate::btree::index::{BTreeIndex, TreeMutation};
+use crate::btree::{BTreeKey, BTreeValue};
 use crate::btree::node::BTreeNode;
 use crate::btree::tree::{
     collect_tree_page_ids, collect_tree_space_stats, reset_tree_pages, BTreeManager, TreeSpaceStats,
@@ -371,18 +372,23 @@ impl ByteTree {
     pub fn insert_with_mutation(&mut self, key: &[u8], value: &[u8]) -> Result<TreeMutation> {
         let encoded_key = key.to_vec();
         self.run_atomically(|tree| {
-            let existing_stored_value = tree.index.search_typed::<RawBytesCodec>(&encoded_key)?;
             let stored_value = {
                 let mut storage = tree.lock_storage()?;
                 materialize_stored_value(&mut storage, value)?
             };
-            let mutation = tree
-                .index
-                .insert_typed_with_mutation::<RawBytesCodec>(&encoded_key, &stored_value)?;
 
-            if let Some(existing_stored_value) = existing_stored_value {
+            // Single-pass insert: insert_replacing_with_mutation returns the
+            // old value (if any) alongside the mutation, eliminating the need
+            // for a separate pre-search traversal.
+            let (mutation, old_value) = tree.index.insert_replacing_with_mutation(
+                BTreeKey::new(encoded_key),
+                BTreeValue::new(stored_value),
+            )?;
+
+            // Free overflow pages from the old value, if present.
+            if let Some(old_stored_value) = old_value {
                 let mut storage = tree.lock_storage()?;
-                free_stored_value_overflow(&mut storage, &existing_stored_value)?;
+                free_stored_value_overflow(&mut storage, old_stored_value.as_bytes())?;
             }
 
             Ok(mutation)
@@ -551,6 +557,25 @@ impl ByteTreeCursor {
 
     pub fn next(&mut self) -> Result<()> {
         self.inner.next()
+    }
+
+    pub fn prev(&mut self) -> Result<()> {
+        self.inner.prev()
+    }
+
+    pub fn last(&mut self) -> Result<()> {
+        self.inner.last()
+    }
+
+    /// Save the cursor position so it can survive tree mutations.
+    /// Call `restore_position()` before continuing to use the cursor.
+    pub fn save_position(&mut self) {
+        self.inner.save_position();
+    }
+
+    /// Restore the cursor to the saved position.
+    pub fn restore_position(&mut self) -> Result<()> {
+        self.inner.restore_position()
     }
 
     pub fn seek(&mut self, key: &[u8]) -> Result<()> {

@@ -30,6 +30,16 @@ pub struct TreeMutation {
     pub root_changed: bool,
 }
 
+/// Internal result from `insert_recursive` that carries both the split
+/// propagation info and any replaced old value.
+#[derive(Debug, Clone)]
+struct InsertResult {
+    /// `Some((split_key, new_page_id))` when the leaf/internal overflowed.
+    split: Option<(BTreeKey, PageId)>,
+    /// The raw value bytes that were replaced, if the key already existed.
+    old_value: Option<BTreeValue>,
+}
+
 pub struct BTreeIndex {
     storage: Arc<RwLock<Pager>>,
     root_page_id: PageId,
@@ -110,13 +120,23 @@ impl BTreeIndex {
         key: BTreeKey,
         value: BTreeValue,
     ) -> Result<TreeMutation> {
+        self.insert_replacing_with_mutation(key, value).map(|(m, _)| m)
+    }
+
+    /// Insert a key/value pair and return both the tree mutation metadata
+    /// AND the old value that was replaced (if the key already existed).
+    ///
+    /// This lets callers avoid a separate pre-search to find the old value,
+    /// eliminating one full tree traversal per upsert.
+    pub fn insert_replacing_with_mutation(
+        &mut self,
+        key: BTreeKey,
+        value: BTreeValue,
+    ) -> Result<(TreeMutation, Option<BTreeValue>)> {
         BTreeNode::validate_key_size(&key)?;
         BTreeNode::validate_value_size(&value)?;
         let original_root_page_id = self.root_page_id;
 
-        // Clone the Arc so we don't hold an immutable borrow of `self` while
-        // acquiring the pager write guard. This avoids borrow conflicts when
-        // `self` needs to be mutated later in this method.
         let storage_arc = Arc::clone(&self.storage);
         let mut pager = storage_arc.write().map_err(|_| {
             crate::error::HematiteError::InternalError(
@@ -126,14 +146,17 @@ impl BTreeIndex {
 
         let result = self.insert_recursive(&mut pager, self.root_page_id, key, value)?;
 
-        if let Some((new_key, new_page_id)) = result {
+        if let Some((new_key, new_page_id)) = result.split {
             self.create_new_root(&mut pager, new_key, new_page_id)?;
         }
 
-        Ok(TreeMutation {
-            root_page_id: self.root_page_id,
-            root_changed: self.root_page_id != original_root_page_id,
-        })
+        Ok((
+            TreeMutation {
+                root_page_id: self.root_page_id,
+                root_changed: self.root_page_id != original_root_page_id,
+            },
+            result.old_value,
+        ))
     }
 
     pub fn insert_typed_with_mutation<C: KeyValueCodec>(
@@ -152,27 +175,34 @@ impl BTreeIndex {
         page_id: PageId,
         key: BTreeKey,
         value: BTreeValue,
-    ) -> Result<Option<(BTreeKey, PageId)>> {
+    ) -> Result<InsertResult> {
         let shared = pager.read_page_shared(page_id)?;
         let mut node = BTreeNode::from_shared_page(shared.clone())?;
 
         match node.node_type {
             NodeType::Leaf => {
-                let mut page = pager.take_page_for_write(shared.id)?;
+                // Fast path: try to capture the old value for in-place update
+                // without a full decode. Use get_value_view() to read the old
+                // bytes before overwriting.
+                if let Some(idx) = node.exact_key_index(&key)? {
+                    let old_value = BTreeValue::new(node.get_value_view(idx)?.to_vec());
+                    let mut page = pager.take_page_for_write(shared.id)?;
 
-                if node.try_update_leaf_in_place(&mut page, &key, &value)? {
-                    pager.write_page(page)?;
-                    return Ok(None);
-                }
+                    if node.try_update_leaf_in_place(&mut page, &key, &value)? {
+                        pager.write_page(page)?;
+                        return Ok(InsertResult {
+                            split: None,
+                            old_value: Some(old_value),
+                        });
+                    }
 
-                if node.try_insert_leaf_in_place(&mut page, &key, &value)? {
-                    pager.write_page(page)?;
-                    return Ok(None);
-                }
-
-                node.decode()?; // Decode to check for existing key or to rewrite
-
-                if let Some(existing_index) = node.keys.iter().position(|k| k == &key) {
+                    // Different-size value: need decode + rebuild.
+                    node.decode()?;
+                    let existing_index = node
+                        .keys
+                        .iter()
+                        .position(|k| k == &key)
+                        .expect("key existence was just confirmed");
                     node.keys.remove(existing_index);
                     node.values.remove(existing_index);
 
@@ -182,12 +212,39 @@ impl BTreeIndex {
                         node.insert_leaf(key, value)?;
                         node.to_page(&mut page)?;
                         pager.write_page(page)?;
-                        return Ok(None);
+                        return Ok(InsertResult {
+                            split: None,
+                            old_value: Some(old_value),
+                        });
                     }
 
                     let (new_key, new_page_id) = node.split_leaf(pager, key, value)?;
-                    return Ok(Some((new_key, new_page_id)));
+                    return Ok(InsertResult {
+                        split: Some((new_key, new_page_id)),
+                        old_value: Some(old_value),
+                    });
                 }
+
+                // New key: no existing value to return.
+                let mut page = pager.take_page_for_write(shared.id)?;
+
+                if node.try_insert_leaf_in_place(&mut page, &key, &value)? {
+                    pager.write_page(page)?;
+                    return Ok(InsertResult {
+                        split: None,
+                        old_value: None,
+                    });
+                }
+
+                // balance_quick: append-optimized split (no decode).
+                if let Some(split) = node.try_split_leaf_quick(pager, key.clone(), value.clone())? {
+                    return Ok(InsertResult {
+                        split: Some(split),
+                        old_value: None,
+                    });
+                }
+
+                node.decode()?;
 
                 if node.keys.len() < crate::btree::node::MAX_KEYS
                     && node.can_insert_key_value(&key, &value)
@@ -195,33 +252,55 @@ impl BTreeIndex {
                     node.insert_leaf(key, value)?;
                     node.to_page(&mut page)?;
                     pager.write_page(page)?;
-                    Ok(None)
+                    Ok(InsertResult {
+                        split: None,
+                        old_value: None,
+                    })
                 } else {
                     let (new_key, new_page_id) = node.split_leaf(pager, key, value)?;
-                    Ok(Some((new_key, new_page_id)))
+                    Ok(InsertResult {
+                        split: Some((new_key, new_page_id)),
+                        old_value: None,
+                    })
                 }
             }
             NodeType::Internal => {
                 let child_page_id = node.find_child(&key)?;
-                let split_result = self.insert_recursive(pager, child_page_id, key, value)?;
+                let child_result = self.insert_recursive(pager, child_page_id, key, value)?;
 
-                if let Some((split_key, split_page_id)) = split_result {
-                    node.decode()?; // Mutation needed
-                    if node.keys.len() < crate::btree::node::MAX_KEYS
-                        && node.can_insert_key_child(&split_key)
-                    {
-                        node.insert_internal(split_key, split_page_id)?;
-                        let mut page = pager.take_page_for_write(shared.id)?;
-                        node.to_page(&mut page)?;
+                if let Some((split_key, split_page_id)) = child_result.split {
+                    // Try in-place insert first (no decode needed).
+                    let mut page = pager.take_page_for_write(shared.id)?;
+                    if node.try_insert_internal_in_place(&mut page, &split_key, split_page_id)? {
                         pager.write_page(page)?;
-                        Ok(None)
+                        Ok(InsertResult {
+                            split: None,
+                            old_value: child_result.old_value,
+                        })
                     } else {
-                        let (new_key, new_page_id) =
-                            node.split_internal(pager, split_key, split_page_id)?;
-                        Ok(Some((new_key, new_page_id)))
+                        // Full decode fallback — page is full, need split.
+                        node.decode()?;
+                        if node.keys.len() < crate::btree::node::MAX_KEYS
+                            && node.can_insert_key_child(&split_key)
+                        {
+                            node.insert_internal(split_key, split_page_id)?;
+                            node.to_page(&mut page)?;
+                            pager.write_page(page)?;
+                            Ok(InsertResult {
+                                split: None,
+                                old_value: child_result.old_value,
+                            })
+                        } else {
+                            let (new_key, new_page_id) =
+                                node.split_internal(pager, split_key, split_page_id)?;
+                            Ok(InsertResult {
+                                split: Some((new_key, new_page_id)),
+                                old_value: child_result.old_value,
+                            })
+                        }
                     }
                 } else {
-                    Ok(None)
+                    Ok(child_result)
                 }
             }
         }

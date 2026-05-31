@@ -15,6 +15,18 @@
 //! - descend again to the leftmost leaf of that subtree.
 //!
 //! The cursor reads nodes through the shared pager but exposes only logical key/value positions.
+//!
+//! ## Cursor State Machine
+//!
+//! ```text
+//! Valid ──next/prev──> Valid
+//!   │                    │
+//!   ├──past-end────> Invalid
+//!   │
+//!   ├──save_position──> RequireSeek ──restore_position──> Valid
+//!   │
+//!   └──error──> Fault
+//! ```
 use std::cell::OnceCell;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 
@@ -23,17 +35,39 @@ use crate::btree::{BTreeKey, BTreeValue, NodeType};
 use crate::error::{HematiteError, Result};
 use crate::storage::{PageId, Pager};
 
+/// Cursor state machine.
+///
+/// Models the lifecycle of a cursor position with respect to tree mutations
+/// and boundary conditions. Modeled after SQLite's BtCursor state flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CursorState {
+    /// Points to a valid entry; key/value access is safe.
+    Valid,
+    /// Does not point to a valid entry (empty tree, past end, before first).
+    Invalid,
+    /// Tree was modified; cursor must be restored from saved key before use.
+    RequireSeek,
+    /// Unrecoverable error occurred; all operations except `first()`/`seek()` will fail.
+    Fault,
+}
+
 #[derive(Debug)]
 pub struct BTreeCursor {
     storage: Arc<RwLock<Pager>>,
     stack: Vec<CursorFrame>,
-    at_end: bool,
+    state: CursorState,
+
+    /// Saved key for RequireSeek restoration.
+    saved_key: Option<Vec<u8>>,
 
     cached_key: OnceCell<BTreeKey>,
     cached_value: OnceCell<BTreeValue>,
 
-    #[cfg(test)]
     root_page_id: PageId,
+
+    /// True when the cursor is known to be at the rightmost entry in the tree.
+    /// Enables fast-path for append-pattern seeks (Change 4: AtLast flag).
+    at_last: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -48,11 +82,12 @@ impl BTreeCursor {
         let mut cursor = Self {
             storage,
             stack: Vec::new(),
-            at_end: false,
+            state: CursorState::Invalid,
+            saved_key: None,
             cached_key: OnceCell::new(),
             cached_value: OnceCell::new(),
-            #[cfg(test)]
             root_page_id,
+            at_last: false,
         };
 
         cursor.seek_to_first(root_page_id)?;
@@ -93,7 +128,7 @@ impl BTreeCursor {
     }
 
     pub fn is_valid(&self) -> bool {
-        !self.at_end && !self.stack.is_empty()
+        matches!(self.state, CursorState::Valid)
     }
 
     #[cfg(test)]
@@ -116,10 +151,45 @@ impl BTreeCursor {
         Some((self.key()?, self.value()?))
     }
 
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub fn save_position(&self) -> Option<BTreeKey> {
-        self.key_view().map(|key| BTreeKey::new(key.to_vec()))
+    /// Save the current cursor position so it can be restored after tree
+    /// mutations. The cursor releases its page references (stack is cleared)
+    /// to allow those pages to be evicted or modified.
+    ///
+    /// After this call the cursor is in `RequireSeek` state and must have
+    /// `restore_position()` called before any further navigation.
+    pub fn save_position(&mut self) {
+        if let Some(key_bytes) = self.key_view() {
+            self.saved_key = Some(key_bytes.to_vec());
+            self.state = CursorState::RequireSeek;
+        } else {
+            self.saved_key = None;
+            self.state = CursorState::Invalid;
+        }
+        // Drop node references so pages can be evicted.
+        self.stack.clear();
+        self.at_last = false;
+        self.invalidate_cache();
+    }
+
+    /// Restore the cursor to the position that was saved with `save_position()`.
+    /// If the saved key still exists, the cursor will point to it. If it was
+    /// deleted, the cursor will point to the next key >= the saved key.
+    pub fn restore_position(&mut self) -> Result<()> {
+        match self.state {
+            CursorState::RequireSeek => {
+                if let Some(key) = self.saved_key.take() {
+                    self.seek_to_key(self.root_page_id, &BTreeKey::new(key))?;
+                } else {
+                    self.state = CursorState::Invalid;
+                }
+                Ok(())
+            }
+            CursorState::Valid => Ok(()),
+            CursorState::Invalid => Ok(()),
+            CursorState::Fault => Err(HematiteError::InternalError(
+                "Cursor is in fault state and cannot be restored".to_string(),
+            )),
+        }
     }
 
     #[cfg(test)]
@@ -130,68 +200,68 @@ impl BTreeCursor {
         )
     }
 
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub fn restore_position(&mut self, saved_position: Option<BTreeKey>) -> Result<()> {
-        if let Some(key) = saved_position {
-            self.seek(&key)
-        } else {
-            self.stack.clear();
-            self.at_end = true;
-            self.invalidate_cache();
-            Ok(())
-        }
-    }
-
     pub fn first(&mut self) -> Result<()> {
-        if self.stack.is_empty() {
-            return Err(HematiteError::InternalError("No root page".to_string()));
-        }
-
-        let root_page_id = self.stack[0].page_id;
+        let root_page_id = self.root_page_id;
+        self.at_last = false;
         self.seek_to_first(root_page_id)
     }
 
     pub fn seek(&mut self, key: &BTreeKey) -> Result<()> {
-        if self.stack.is_empty() {
-            return Err(HematiteError::InternalError("No root page".to_string()));
+        // AtLast fast path: if we're at the rightmost leaf and the target key
+        // is >= current key, check the current leaf page first. This avoids
+        // a full root-to-leaf descent for append-pattern workloads.
+        if self.at_last && self.state == CursorState::Valid {
+            if let Some(current_key) = self.key_view() {
+                if key.as_bytes() >= current_key {
+                    let frame = self.stack.last().unwrap();
+                    let idx = frame.node.lower_bound_index(key)?;
+                    if idx <= frame.node.key_count {
+                        let frame = self.stack.last_mut().unwrap();
+                        frame.index = idx;
+                        if idx >= frame.node.key_count {
+                            self.state = CursorState::Invalid;
+                            self.at_last = false;
+                        }
+                        // else: state stays Valid, at_last stays true
+                        self.invalidate_cache();
+                        return Ok(());
+                    }
+                }
+            }
         }
 
-        let root_page_id = self.stack[0].page_id;
+        let root_page_id = self.root_page_id;
+        self.at_last = false;
         self.seek_to_key(root_page_id, key)
     }
 
-    #[cfg(test)]
     pub fn last(&mut self) -> Result<()> {
-        if self.stack.is_empty() {
-            return Err(HematiteError::InternalError("No root page".to_string()));
-        }
-
-        let root_page_id = self.stack[0].page_id;
-        self.seek_to_last(root_page_id)
+        let root_page_id = self.root_page_id;
+        self.seek_to_last(root_page_id)?;
+        self.at_last = self.state == CursorState::Valid;
+        Ok(())
     }
 
     fn seek_to_first(&mut self, root_page_id: PageId) -> Result<()> {
         self.stack.clear();
-        self.at_end = false;
+        self.state = CursorState::Valid;
         self.traverse_to_leftmost_leaf(root_page_id)?;
         if let Some(last) = self.stack.last() {
             if last.node.key_count == 0 {
-                self.at_end = true;
+                self.state = CursorState::Invalid;
             }
         }
         self.invalidate_cache();
         Ok(())
     }
 
-    #[cfg(test)]
     fn seek_to_last(&mut self, root_page_id: PageId) -> Result<()> {
         self.stack.clear();
-        self.at_end = false;
+        self.state = CursorState::Valid;
         self.traverse_to_rightmost_leaf(root_page_id)?;
         if let Some(last) = self.stack.last() {
             if last.node.key_count == 0 {
-                self.at_end = true;
+                self.state = CursorState::Invalid;
             }
         }
         self.invalidate_cache();
@@ -234,7 +304,11 @@ impl BTreeCursor {
         };
 
         self.stack = frames;
-        self.at_end = at_end;
+        self.state = if at_end {
+            CursorState::Invalid
+        } else {
+            CursorState::Valid
+        };
         self.invalidate_cache();
         Ok(())
     }
@@ -258,15 +332,23 @@ impl BTreeCursor {
         }
 
         // Need to move to next leaf
+        self.at_last = false;
         self.move_to_next_leaf()?;
         self.invalidate_cache();
         Ok(())
     }
 
-    #[cfg(test)]
     pub fn prev(&mut self) -> Result<()> {
-        if self.at_end {
-            self.move_to_last_position()?;
+        if self.state == CursorState::Invalid {
+            if !self.stack.is_empty() {
+                // At end with stack intact — move to last valid position.
+                self.move_to_last_position()?;
+            } else {
+                // Stack was drained (e.g. next() walked past the end).
+                // Re-seek to the rightmost entry from the root.
+                self.seek_to_last(self.root_page_id)?;
+            }
+            self.at_last = false;
             return Ok(());
         }
 
@@ -275,6 +357,8 @@ impl BTreeCursor {
                 "Cursor is invalid".to_string(),
             ));
         }
+
+        self.at_last = false;
 
         let current_frame = self.stack.last_mut().ok_or_else(|| {
             HematiteError::InternalError("B-tree cursor has no current frame".to_string())
@@ -296,7 +380,7 @@ impl BTreeCursor {
         while let Some(_frame) = self.stack.pop() {
             if self.stack.is_empty() {
                 // We're at the root, no more leaves
-                self.at_end = true;
+                self.state = CursorState::Invalid;
                 return Ok(());
             }
 
@@ -316,15 +400,14 @@ impl BTreeCursor {
         }
 
         // No more leaves
-        self.at_end = true;
+        self.state = CursorState::Invalid;
         Ok(())
     }
 
-    #[cfg(test)]
     fn move_to_previous_leaf(&mut self) -> Result<()> {
         while let Some(_frame) = self.stack.pop() {
             if self.stack.is_empty() {
-                self.at_end = true;
+                self.state = CursorState::Invalid;
                 return Ok(());
             }
 
@@ -339,13 +422,12 @@ impl BTreeCursor {
             }
         }
 
-        self.at_end = true;
+        self.state = CursorState::Invalid;
         Ok(())
     }
 
-    #[cfg(test)]
     fn move_to_last_position(&mut self) -> Result<()> {
-        self.at_end = false;
+        self.state = CursorState::Valid;
 
         if let Some(frame) = self.stack.last_mut() {
             if frame.index >= frame.node.key_count {
@@ -396,7 +478,6 @@ impl BTreeCursor {
         Ok(())
     }
 
-    #[cfg(test)]
     fn traverse_to_rightmost_leaf(&mut self, page_id: PageId) -> Result<()> {
         let mut current_page_id = page_id;
         let mut frames = Vec::new();

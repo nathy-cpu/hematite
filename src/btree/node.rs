@@ -641,6 +641,163 @@ impl BTreeNode {
         Ok(true)
     }
 
+    /// balance_quick: Append-optimized leaf split.
+    ///
+    /// When the page is full and the new key is strictly greater than every
+    /// existing key (append pattern), we skip the full decode → redistribute →
+    /// rebuild cycle and instead:
+    /// 1. allocate one fresh leaf page
+    /// 2. write only the new cell into it
+    /// 3. return (split_key, new_page_id) — the original page is untouched
+    ///
+    /// Returns `Ok(None)` when preconditions are not met (caller falls back to
+    /// the full `split_leaf` path).
+    pub fn try_split_leaf_quick(
+        &mut self,
+        storage: &mut Pager,
+        key: BTreeKey,
+        value: BTreeValue,
+    ) -> Result<Option<(BTreeKey, PageId)>> {
+        // Only applicable to leaf nodes.
+        if self.node_type != NodeType::Leaf {
+            return Ok(None);
+        }
+        // Must have at least one existing key to compare against.
+        if self.key_count == 0 {
+            return Ok(None);
+        }
+        // Check append condition: new key must be greater than every existing key.
+        // Uses the lazy zero-copy accessor — no decode required.
+        let last_key_bytes = self.get_key_view(self.key_count - 1)?;
+        if key.as_bytes() <= last_key_bytes {
+            return Ok(None);
+        }
+
+        Self::validate_key_size(&key)?;
+        Self::validate_value_size(&value)?;
+
+        // Allocate a fresh leaf page.
+        let new_page_id = storage.allocate_page()?;
+        let mut new_page = Page::new(new_page_id);
+        // Initialize page bytes as an empty leaf.
+        initialize_page_bytes(&mut new_page, PageKind::LeafTable)?;
+
+        // Write the single new cell into the fresh page.
+        let cell_bytes = encode_leaf_cell(&key, &value);
+        let is_p1 = is_page_one(new_page_id);
+        pf_insert_cell(&mut new_page, is_p1, 0, &cell_bytes)?;
+
+        // The split key for an append is the new key itself (the minimum key of
+        // the right sibling, following the B+ tree convention).
+        let split_key = key;
+
+        storage.write_page(new_page)?;
+        Ok(Some((split_key, new_page_id)))
+    }
+
+    /// Try to insert a separator key + child pointer directly into the page
+    /// bytes of an internal node without a full decode + rebuild cycle.
+    ///
+    /// Internal cell format: `[4-byte left_child][2-byte key_len][key_bytes]`
+    /// The rightmost child is stored in the page header.
+    ///
+    /// When a child at position `pos` splits, the split result is
+    /// `(split_key, new_right_child)`. We insert a new cell at `pos` whose
+    /// left-child pointer is the existing child-at-pos, and then overwrite
+    /// the left-child pointer of the cell that shifted to `pos+1` (or the
+    /// rightmost-child header slot) with `new_right_child`.
+    ///
+    /// Returns `true` if successful, `false` if no space (caller does full
+    /// decode + split_internal).
+    pub fn try_insert_internal_in_place(
+        &mut self,
+        page: &mut Page,
+        key: &BTreeKey,
+        new_child: PageId,
+    ) -> Result<bool> {
+        if self.node_type != NodeType::Internal {
+            return Ok(false);
+        }
+        if self.key_count >= MAX_KEYS {
+            return Ok(false);
+        }
+
+        Self::validate_key_size(key)?;
+
+        let is_p1 = is_page_one(page.id);
+        let old_key_count = self.key_count;
+
+        // Find insertion position (same as insert_internal: upper_bound).
+        let pos = self.upper_bound_index(key)?;
+
+        // Determine the left-child pointer for the new cell.
+        // This is the child pointer that currently occupies position `pos` in
+        // the logical children array.
+        let left_child: PageId = if pos < old_key_count {
+            // Read from the cell currently at `pos` — first 4 bytes are child ptr.
+            let cell_offset = self.cell_offsets[pos] as usize;
+            u32::from_be_bytes([
+                page.data[cell_offset],
+                page.data[cell_offset + 1],
+                page.data[cell_offset + 2],
+                page.data[cell_offset + 3],
+            ])
+        } else {
+            // pos == key_count: the child here is the rightmost child in header.
+            let header = BTreePageHeaderV3::parse(page, is_p1)?;
+            header.rightmost_child.ok_or_else(|| {
+                HematiteError::StorageError(
+                    "Internal page missing rightmost child during in-place insert".to_string(),
+                )
+            })?
+        };
+
+        // Encode the new internal cell: [left_child][key_len][key_bytes]
+        let cell_bytes = encode_internal_cell_raw(left_child, key);
+
+        // Check free space.
+        let needed = cell_bytes.len() + 2; // +2 for the new cell pointer
+        let free = pf_total_free_space(page, is_p1)?;
+        if free < needed {
+            return Ok(false);
+        }
+
+        // Insert the cell at position `pos` (shifts later pointers right).
+        pf_insert_cell(page, is_p1, pos, &cell_bytes)?;
+
+        // After insertion, the cell that was at `pos` is now at `pos + 1`.
+        // Its left-child pointer still holds `left_child` but should be
+        // `new_child` (the right half of the split).
+        let new_header = BTreePageHeaderV3::parse(page, is_p1)?;
+        if (pos + 1) < new_header.cell_count as usize {
+            // Overwrite the first 4 bytes of the shifted cell.
+            let shifted_offset =
+                cell_pointer_from_header(page, &new_header, pos + 1)? as usize;
+            page.data[shifted_offset..shifted_offset + 4]
+                .copy_from_slice(&new_child.to_be_bytes());
+        } else {
+            // The new cell was appended as the last cell; update rightmost child.
+            let header_offset = page_header_offset(page.id);
+            write_u32_be(&mut page.data, header_offset + 8, new_child);
+        }
+
+        // Refresh lazy state (same pattern as try_insert_leaf_in_place).
+        self.raw_page = Some(Arc::new(page.clone()));
+        self.is_decoded = false;
+        self.key_count = new_header.cell_count as usize;
+        let mut offsets = Vec::with_capacity(new_header.cell_count as usize);
+        for i in 0..new_header.cell_count as usize {
+            offsets.push(cell_pointer_from_header(page, &new_header, i)?);
+        }
+        self.cell_offsets = offsets;
+        *self.cell_ranges_cache.borrow_mut() = None;
+        self.payload_len = PAGE_SIZE.saturating_sub(new_header.cell_content_start as usize);
+        self.keys.clear();
+        self.values.clear();
+        self.children.clear();
+        Ok(true)
+    }
+
     #[cfg(test)]
     pub fn search(&self, key: &BTreeKey) -> Result<SearchResult> {
         match self.node_type {
@@ -1163,6 +1320,17 @@ fn leaf_cell_size(key: &BTreeKey, value: &BTreeValue) -> usize {
 
 fn internal_cell_size(key: &BTreeKey) -> usize {
     6 + key.data.len()
+}
+
+/// Encode a raw internal cell: `[4-byte child_page_id][2-byte key_len][key_bytes]`.
+/// Used by `try_insert_internal_in_place` to build a cell directly from raw
+/// components without going through the VecDeque-based decode path.
+fn encode_internal_cell_raw(child: PageId, key: &BTreeKey) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(6 + key.data.len());
+    bytes.extend_from_slice(&child.to_be_bytes());
+    bytes.extend_from_slice(&(key.data.len() as u16).to_be_bytes());
+    bytes.extend_from_slice(&key.data);
+    bytes
 }
 
 fn leaf_cell_ranges(cell: &[u8]) -> Result<((usize, usize), (usize, usize))> {

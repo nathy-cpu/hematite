@@ -77,29 +77,102 @@ Page 1 is special:
 - first 100 bytes are the database header,
 - the remainder is a normal btree page image.
 
+### Database file header (page 1 only, first 100 bytes)
+
+Page 1 is unique: its first 100 bytes are the database file header. The btree page content starts at byte offset 100. The file header layout is defined in `btreeInt.h` lines 56–100:
+
+```
+OFFSET  SIZE  DESCRIPTION
+  0      16   Header string: "SQLite format 3\000"
+ 16       2   Page size in bytes (1 means 65536)
+ 18       1   File format write version
+ 19       1   File format read version
+ 20       1   Reserved bytes per page (unused space at end)
+ 21       1   Max embedded payload fraction (must be 64)
+ 22       1   Min embedded payload fraction (must be 32)
+ 23       1   Min leaf payload fraction (must be 32)
+ 24       4   File change counter
+ 28       4   Database size in pages
+ 32       4   First freelist trunk page
+ 36       4   Total freelist page count
+ 40       4   Schema cookie
+ 44       4   Schema format number
+ 48       4   Default page cache size
+ 52       4   Largest root-page (auto/incr_vacuum)
+ 56       4   Text encoding (1=UTF-8, 2=UTF-16le, 3=UTF-16be)
+ 60       4   User version
+ 64       4   Incremental vacuum mode
+ 68       4   Application-ID
+ 72      20   Reserved for expansion (zeroed)
+ 92       4   Version-valid-for number
+ 96       4   SQLITE_VERSION_NUMBER
+```
+
+All integers are big-endian. The change counter at bytes 24–27 is how other connections detect file modifications and invalidate caches (invariant 9 in `pager.c`).
+
+The fractions at offsets 21–23 are **not tunable at runtime**. They are fixed at 64, 32, 32 and define the overflow split formulas. A Rust port must hardcode these values to maintain file format compatibility.
+
 ### Btree page layout
 
-A btree page has:
+A btree page has four regions (`btreeInt.h` lines 106–164):
 
-1. page header,
-2. cell pointer array,
-3. unallocated gap,
-4. cell content area at the end of the page.
+```
+|----------------|
+| file header    |   100 bytes. Page 1 only.
+|----------------|
+| page header    |   8 bytes for leaves. 12 bytes for interior nodes
+|----------------|
+| cell pointer   |   |  2 bytes per cell. Sorted by key order.
+| array          |   |  Grows downward
+|                |   v
+|----------------|
+| unallocated    |
+| space          |
+|----------------|   ^  Grows upwards
+| cell content   |   |  Arbitrary order interspersed with freeblocks
+| area           |   |  and free space fragments.
+|----------------|
+```
 
-Important properties:
+#### Page header (8 or 12 bytes)
 
-- cell pointers are kept in key order,
-- cell bodies are not required to be in key order,
-- freeblocks inside the cell-content area form a linked list,
-- tiny unusable gaps become "fragments",
-- total fragment bytes are tracked in the page header,
-- defragmentation repacks cells tightly when needed.
+The exact page header byte layout (`btreeInt.h` lines 128–134):
 
-This layout is a big reason SQLite is efficient:
+```
+OFFSET  SIZE  DESCRIPTION
+  0       1   Flags: PTF_INTKEY=0x01, PTF_ZERODATA=0x02,
+              PTF_LEAFDATA=0x04, PTF_LEAF=0x08
+  1       2   Byte offset to the first freeblock (0 = no freeblocks)
+  3       2   Number of cells on this page
+  5       2   Byte offset to first byte of cell content area
+  7       1   Number of fragmented free bytes (max 255)
+  8       4   Right child pointer (Ptr(N)). OMITTED on leaf pages.
+```
 
-- searching mostly touches the cell pointer array and a few cell headers,
-- mutation can often reuse fragmented/freeblock space without full page rebuild,
-- full defragmentation is available but not the common path.
+This means `MemPage.cellOffset` for page 1 is `100 + 8` (leaf) or `100 + 12` (interior). For all other pages it is `8` or `12`.
+
+#### Cell pointer array
+
+Immediately follows the page header. Each entry is 2 bytes, a big-endian offset from the start of the page to a cell body in the content area. Pointers are maintained in key-sorted order. The array grows downward toward the cell content area.
+
+#### Freeblock chain
+
+Unused space within the cell content area forms a singly-linked list of freeblocks. Each freeblock has a 4-byte header (`btreeInt.h` lines 161–163):
+
+```
+SIZE  DESCRIPTION
+  2   Byte offset of the next freeblock (0 = end of chain)
+  2   Total bytes in this freeblock (including this header)
+```
+
+Freeblocks are maintained in ascending address order. A freeblock must be **at least 4 bytes**. Any unused gap of 1–3 bytes cannot be a freeblock and becomes a "fragment". The total fragment count is tracked in byte 7 of the page header and must not exceed 255; if it would, defragmentation is triggered.
+
+#### Why this layout is efficient
+
+- **Searching** mostly touches the cell pointer array and a few cell headers — not the full cell content area.
+- **Mutation** can often reuse freeblock/fragment space without full page rebuild.
+- **Defragmentation** (`defragmentPage()` at `btree.c:1613`) repacks cells contiguously but is not the common path. SQLite has a fast path for pages with ≤2 freeblocks and few fragments that uses `memmove()` with pointer adjustments instead of a full rebuild.
+- The cell pointer array is compact and cache-friendly for binary search.
 
 ### Page type flags and tree flavors
 
@@ -124,73 +197,128 @@ This lets one engine support:
 
 ### Key in-memory structures
 
-#### `BtShared`
+#### `BtShared` (`btreeInt.h:425`)
 
-Represents the shared state for one database file:
+Represents the shared state for one database file. Key fields:
 
-- `Pager *pPager`
-- page-size derived limits like `maxLocal`, `minLocal`, `maxLeaf`, `minLeaf`
-- current page count
-- page 1 handle
-- auto-vacuum configuration
-- schema pointer
-- mutex
-- shared-cache lock state
+- `Pager *pPager` — the page cache/journal engine
+- `BtCursor *pCursor` — linked list of all open cursors
+- `MemPage *pPage1` — permanently-held handle on page 1
+- `u32 pageSize`, `u32 usableSize` — total and usable bytes per page
+- `u16 maxLocal`, `u16 minLocal` — for non-LEAFDATA (index) pages
+- `u16 maxLeaf`, `u16 minLeaf` — for LEAFDATA (table leaf) pages
+- `u8 max1bytePayload` — `min(maxLocal, 127)`, used for fast single-byte cell size detection
+- `u8 autoVacuum`, `u8 incrVacuum` — auto-vacuum configuration
+- `u8 inTransaction` — `TRANS_NONE=0`, `TRANS_READ=1`, `TRANS_WRITE=2`
+- `u16 btsFlags` — boolean flags including:
+  - `BTS_READ_ONLY=0x0001`, `BTS_PAGESIZE_FIXED=0x0002`
+  - `BTS_SECURE_DELETE=0x0004`, `BTS_OVERWRITE=0x0008`
+  - `BTS_FAST_SECURE=0x000c` (combination of delete+overwrite)
+  - `BTS_INITIALLY_EMPTY=0x0010`, `BTS_NO_WAL=0x0020`
+- `u8 *pTmpSpace` — scratch buffer sized to hold one cell (used during insert/balance)
+- `Bitvec *pHasContent` — tracks pages moved to freelist this transaction
 
-This is the "database-wide btree state".
+#### `Btree` (`btreeInt.h:345`)
 
-#### `Btree`
+Represents one connection's handle onto a `BtShared`:
 
-Represents one connection’s handle onto a `BtShared`:
+- `sqlite3 *db` — the owning database connection
+- `BtShared *pBt` — the shared state
+- `u8 inTrans` — per-connection transaction state
+- `u32 iBDataVersion` — combined with pager's `iDataVersion` for cache invalidation
+- `Btree *pNext`, `*pPrev` — linked list of all Btrees sharing the same BtShared
 
-- transaction state,
-- shared-cache participation,
-- connection pointer,
-- per-handle data version adjustment.
+#### `MemPage` (`btreeInt.h:273`)
 
-This is the "connection-facing" wrapper.
+Represents a decoded btree page in memory. This struct is allocated as the "extra" space associated with each pager page. Key fields:
 
-#### `MemPage`
+- `u8 isInit` — **MUST BE FIRST** byte; set when page has been decoded
+- `u8 intKey`, `u8 intKeyLeaf`, `u8 leaf` — page type booleans
+- `Pgno pgno` — page number
+- `u8 hdrOffset` — 100 for page 1, 0 for all others
+- `u8 childPtrSize` — 0 if leaf, 4 if interior
+- `u8 max1bytePayload` — `min(maxLocal, 127)` for fast small-cell detection
+- `u16 maxLocal`, `u16 minLocal` — copied from BtShared based on page type
+- `u16 cellOffset` — byte offset to first cell pointer entry
+- `u16 nCell` — number of cells on this page
+- `int nFree` — free bytes on page (-1 means unknown, computed lazily)
+- `u16 maskPage` — bitmask for page offset bounds checking
+- `u8 nOverflow` — count of overflow cells in `apOvfl[]` (max 4)
+- `u16 aiOvfl[4]` — logical insertion indices for overflow cells
+- `u8 *apOvfl[4]` — pointers to overflow cell bodies
+- `u8 *aData` — raw page bytes from the cache
+- `u8 *aDataEnd` — one past end of entire page (corruption guard)
+- `u8 *aCellIdx` — pointer to cell index area
+- `u8 *aDataOfst` — `aData` for leaves, `aData+4` for interior nodes
+- `u16 (*xCellSize)(MemPage*, u8*)` — page-type-specific cell size function
+- `void (*xParseCell)(MemPage*, u8*, CellInfo*)` — page-type-specific cell parser
 
-Represents a decoded btree page in memory. It contains:
+The `xCellSize` and `xParseCell` function pointers are set during `btreeInitPage()` based on the page flags. SQLite provides three concrete variants (`btree.c:1228–1240`):
 
-- flags like `leaf`, `intKey`, `intKeyLeaf`,
-- page number,
-- header offset,
-- child pointer size,
-- cell offset,
-- free space count,
-- number of cells,
-- `aData` pointer to raw page bytes,
-- `xCellSize` and `xParseCell` function pointers for page-type-specific cell decoding,
-- temporary overflow-cell arrays for pages that became overfull during mutation.
+| Page type | `xParseCell` function | `xCellSize` function |
+|---|---|---|
+| Table leaf (`intKeyLeaf`) | `btreeParseCellPtr()` | `cellSizePtr()` |
+| Table interior (`intKey && !leaf`) | `btreeParseCellPtrNoPayload()` | `cellSizePtrNoPayload()` — always `4 + varint_size(key)` |
+| Index (leaf or interior) | `btreeParseCellPtrIndex()` | `cellSizePtr()` |
 
-This is a key performance choice: SQLite caches page-derived metadata in `MemPage` instead of repeatedly re-decoding raw bytes.
+This dispatch-by-function-pointer avoids branching in hot loops. A Rust port should use enum dispatch or separate generic implementations — **not** runtime `match` on every cell access.
 
-#### `BtCursor`
+#### `BtCursor` (`btreeInt.h:531`)
 
-A cursor stores:
+A cursor stores full navigation state. Key fields:
 
-- current state (`VALID`, `INVALID`, `SKIPNEXT`, `REQUIRESEEK`, `FAULT`),
-- a stack of ancestor pages,
-- current page and cell index,
-- cached parsed cell info,
-- cached overflow-page list,
-- saved key/rowid for restoration.
+- `u8 eState` — cursor validity state (see below)
+- `u8 curFlags` — optimization flags bitmap (see below)
+- `u8 curPagerFlags` — flags passed to `sqlite3PagerGet()`
+- `int skipNext` — direction for SKIPNEXT, or error code for FAULT
+- `Pgno *aOverflow` — lazily-cached overflow page number array
+- `void *pKey` — saved key for REQUIRESEEK restoration
+- `i64 nKey` — saved key size or last integer key
+- `CellInfo info` — cached parse of the current cell
+- `Pgno pgnoRoot` — root page of this tree
+- `i8 iPage` — current depth in the ancestor stack
+- `u16 ix` — cell index on current page
+- `u16 aiIdx[BTCURSOR_MAX_DEPTH-1]` — cell indices on ancestor pages
+- `MemPage *pPage` — current page
+- `MemPage *apPage[BTCURSOR_MAX_DEPTH-1]` — ancestor page stack
 
-SQLite’s cursor is stateful and heavily optimized for repeated nearby operations.
+`BTCURSOR_MAX_DEPTH` is 20, computed from max db size of 2³¹ pages with minimum fanout.
 
-#### `CellInfo`
+**Cursor states** (`btreeInt.h:600–604`):
 
-Decoded cell summary:
+| Value | Name | Meaning |
+|---|---|---|
+| 0 | `CURSOR_VALID` | Points to a valid entry; `getPayload()` is safe |
+| 1 | `CURSOR_INVALID` | Does not point to a valid entry (empty table, not yet positioned) |
+| 2 | `CURSOR_SKIPNEXT` | Valid, but next `Next()`/`Prev()` is a no-op (used after delete) |
+| 3 | `CURSOR_REQUIRESEEK` | Table was modified; cursor must be restored from saved key |
+| 4 | `CURSOR_FAULT` | Unrecoverable error; `skipNext` holds the error code |
 
-- key or payload size,
-- payload pointer,
-- total payload length,
-- locally stored payload length,
-- total on-page cell size.
+**Cursor flags** (`btreeInt.h:562–568`):
 
-This is how SQLite avoids fully decoding record payloads during navigation.
+| Value | Name | Meaning |
+|---|---|---|
+| `0x01` | `BTCF_WriteFlag` | Write cursor (can modify) |
+| `0x02` | `BTCF_ValidNKey` | `info.nKey` is valid (avoids re-parse) |
+| `0x04` | `BTCF_ValidOvfl` | `aOverflow` cache is valid |
+| `0x08` | `BTCF_AtLast` | Cursor is at the rightmost entry (append fast path) |
+| `0x10` | `BTCF_Incrblob` | Incremental blob I/O handle |
+| `0x20` | `BTCF_Multiple` | Other cursors may exist on same btree |
+| `0x40` | `BTCF_Pinned` | Cursor is busy and cannot be moved |
+
+`BTCF_AtLast` is the flag that powers the "stay-on-last" optimization for append-heavy rowid workloads. `BTCF_ValidOvfl` prevents re-walking overflow chains. These flags are a major reason SQLite's cursor is fast for repeated nearby operations.
+
+#### `CellInfo` (`btreeInt.h:480`)
+
+Decoded cell summary (14 bytes):
+
+- `i64 nKey` — the integer key for INTKEY tables, or total payload size for index tables
+- `u8 *pPayload` — pointer to the start of locally-stored payload
+- `u32 nPayload` — total payload bytes (local + overflow)
+- `u16 nLocal` — bytes of payload stored on this page
+- `u16 nSize` — total on-page cell size (including child pointer, varints, local payload, overflow pointer)
+
+This is how SQLite avoids fully decoding record payloads during navigation. The cursor caches `CellInfo` so repeated access to the same cell doesn't re-parse.
 
 ### Cell formats
 
@@ -211,20 +339,49 @@ Important consequence:
 
 SQLite does not simply store `min(page_free, payload)` bytes locally.
 
-It uses carefully chosen formulas:
+The limits are derived from page size and the fixed fractions in the file header (`btreeInt.h:204–213`):
 
-- `maxLocal = ((usableSize - 12) * 64 / 255) - 23`
-- `minLocal = ((usableSize - 12) * 32 / 255) - 23`
-- `maxLeaf = usableSize - 35`
-- `minLeaf = ((usableSize - 12) * 32 / 255) - 23`
+```c
+// For table leaf pages (LEAFDATA):
+maxLocal = (usableSize - 12) * 64 / 255 - 23;  // max payload bytes on-page
+minLocal = (usableSize - 12) * 32 / 255 - 23;  // min guaranteed on-page
 
-When payload exceeds local capacity, SQLite chooses a local payload size that:
+// For index pages (non-LEAFDATA):
+maxLocal = (usableSize - 12) * 64 / 255 - 23;  // same formula
+minLocal = (usableSize - 12) * 32 / 255 - 23;  // same formula
 
-- stays between `minLocal` and `maxLocal`,
-- minimizes wasted space on overflow pages,
-- is stable as part of the file format.
+// Table leaf has different limits:
+maxLeaf = usableSize - 35;                      // most of the page
+minLeaf = (usableSize - 12) * 32 / 255 - 23;   // same minLocal
+```
 
-The overflow split logic is one of the details a Rust port should copy exactly if it wants SQLite-compatible behavior and good space utilization.
+For a default 4096-byte page with no reserved bytes (`usableSize = 4096`):
+
+| Value | Formula result |
+|---|---|
+| `maxLocal` | `(4084 * 64 / 255) - 23 = 1002` |
+| `minLocal` | `(4084 * 32 / 255) - 23 = 489` |
+| `maxLeaf` | `4096 - 35 = 4061` |
+| `minLeaf` | `489` |
+
+The **actual split algorithm** is in `btreePayloadToLocal()` (`btree.c:1213–1226`):
+
+```c
+static int btreePayloadToLocal(MemPage *pPage, i64 nPayload){
+    int maxLocal = pPage->maxLocal;
+    if( nPayload <= maxLocal ){
+        return (int)nPayload;              // fits entirely — store all locally
+    } else {
+        int minLocal = pPage->minLocal;
+        int surplus = minLocal + (nPayload - minLocal) % (usableSize - 4);
+        return (surplus <= maxLocal) ? surplus : minLocal;
+    }
+}
+```
+
+The `(usableSize - 4)` term is the capacity of each overflow page (one page minus 4-byte next pointer). The modulo ensures the **last** overflow page isn't nearly empty — overflow pages stay as full as possible. If the resulting surplus still fits within `maxLocal`, use it; otherwise fall back to `minLocal`.
+
+A Rust port must implement this formula **exactly** for file-format compatibility.
 
 ### Overflow chains
 
@@ -349,48 +506,41 @@ SQLite uses the predecessor from the subtree below the deleted interior cell. Th
 
 ### Balancing
 
-SQLite has three balancing modes:
+SQLite has three balancing modes. The `balance()` dispatcher (`btree.c:9113–9226`) chooses between them:
 
-#### `balance_quick()`
+#### `balance_quick()` (`btree.c:7992–8086`)
 
-Special-case optimization for append-at-rightmost-leaf:
+Special-case for append-at-rightmost-leaf. Activated when a page has exactly **one overflow cell** and it is the **rightmost child** of its parent. Steps:
 
-- allocate a new right sibling,
-- move only the overflow cell there,
-- insert one divider into the parent.
+1. Allocate new page, zero it with same flags (`PTF_INTKEY|PTF_LEAFDATA|PTF_LEAF`)
+2. Move the single overflow cell into the new page via `rebuildPage()`
+3. Extract the largest key from original page's rightmost cell (walking two varints)
+4. Build divider cell: `[4-byte-page-num][varint-key]` in a 13-byte `pSpace` buffer
+5. Insert divider into parent, set parent's right-child pointer to new page
 
-This is a huge practical win for append-heavy rowid inserts. A Rust MVP that always does full sibling redistribution will usually benchmark much worse.
+This is a **huge win** for autoincrement / append-heavy workloads. A Rust port that always does full sibling redistribution will be 3–10x slower on bulk insert.
 
-#### `balance_nonroot()`
+#### `balance_nonroot()` (`btree.c:8230–8631`)
 
-General case for overfull or underfull non-root pages:
+General case (~900 lines). Four phases:
 
-- choose target page plus up to two siblings,
-- remove divider cells from parent,
-- gather cells from siblings and dividers,
-- repartition into nearly full pages,
-- rebuild pages,
-- update parent dividers,
-- free or allocate sibling pages if necessary.
+**Phase 1 — Gather siblings** (lines 8285–8370): Choose target page + up to 2 siblings (`NB=3` max). Remove divider cells from parent into `apDiv[]` scratch buffer.
 
-This routine is the heart of SQLite’s btree maintenance.
+**Phase 2 — Build cell array** (lines 8394–8507): Flatten all cells from all siblings + divider cells into a `CellArray` (`apCell[]`/`szCell[]`). For leaves, strip 4-byte child pointers from dividers.
 
-Key traits:
+**Phase 3 — Compute boundaries** (lines 8509–8631): Calculate `usableSpace = usableSize - 12 + leafCorrection`. Left-biased pack (fill left-to-right), then right-to-left equalization pass. For bulk loads (`bBulk=1`), equalization is **skipped** to keep rightmost page sparse.
 
-- it balances by bytes, not just by cell count,
-- it may change sibling count,
-- it handles both overflow and underflow,
-- it cooperates with auto-vacuum pointer-map updates,
-- it assumes rollback will clean up if anything fails mid-way.
+**Phase 4 — Rebuild pages** (lines 8648–8960): Reuse old page slots, sort page numbers ascending for sequential disk I/O, use `editPage()` for incremental edits or `rebuildPage()` for full reconstruction. Insert new divider cells into parent. Update auto-vacuum pointer maps.
 
-#### `balance_deeper()`
+Key traits: balances by **bytes** not cell count; may change sibling count; handles both overflow and underflow; assumes rollback cleans up failures.
 
-Used when the root itself overflows:
+#### `balance_deeper()` (`btree.c:9075–9111`)
+
+When the root overflows:
 
 - allocate a new child page,
-- copy current root contents into child,
-- empty the root,
-- make the root an interior page pointing to the child,
+- copy root contents to child via `copyNodeContent()`,
+- make root an interior page pointing to child,
 - then continue balancing below.
 
 This avoids changing the root page number, which is critical because root page numbers are stable identifiers for tables and indexes.
@@ -490,78 +640,137 @@ These invariants are the contract the entire storage engine is built around.
 
 ### Pager state machine
 
-Important states:
+The pager has 7 states, defined at `pager.c:351–357`:
 
-- `PAGER_OPEN`
-- `PAGER_READER`
-- `PAGER_WRITER_LOCKED`
-- `PAGER_WRITER_CACHEMOD`
-- `PAGER_WRITER_DBMOD`
-- `PAGER_WRITER_FINISHED`
-- `PAGER_ERROR`
+```c
+#define PAGER_OPEN                  0
+#define PAGER_READER                1
+#define PAGER_WRITER_LOCKED         2
+#define PAGER_WRITER_CACHEMOD       3
+#define PAGER_WRITER_DBMOD          4
+#define PAGER_WRITER_FINISHED       5
+#define PAGER_ERROR                 6
+```
 
-This is not bookkeeping fluff. It encodes what is already safe and what is not.
+The state diagram (from `pager.c:139–154`):
 
-Examples:
+```
+                       OPEN <------+------+
+                         |         |      |
+                         V         |      |
+          +---------> READER-------+      |
+          |              |                |
+          |              V                |
+          |<------WRITER_LOCKED------> ERROR
+          |              |                ^
+          |              V                |
+          |<-----WRITER_CACHEMOD-------->|
+          |              |                |
+          |              V                |
+          |<------WRITER_DBMOD---------->|
+          |              |                |
+          |              V                |
+          +<-----WRITER_FINISHED-------->+
+```
 
-- `WRITER_LOCKED`
-  lock acquired, but no page content modified yet.
+**State transitions with exact function names** (`pager.c:157–169`):
 
-- `WRITER_CACHEMOD`
-  cache changed, journal header written, database file not yet changed.
+| From | To | Function |
+|---|---|---|
+| `OPEN` | `READER` | `sqlite3PagerSharedLock()` |
+| `READER` | `OPEN` | `pager_unlock()` |
+| `READER` | `WRITER_LOCKED` | `sqlite3PagerBegin()` |
+| `WRITER_LOCKED` | `WRITER_CACHEMOD` | `pager_open_journal()` |
+| `WRITER_CACHEMOD` | `WRITER_DBMOD` | `syncJournal()` |
+| `WRITER_DBMOD` | `WRITER_FINISHED` | `sqlite3PagerCommitPhaseOne()` |
+| `WRITER_*` | `READER` | `pager_end_transaction()` |
+| `WRITER_*` | `ERROR` | `pager_error()` |
+| `ERROR` | `OPEN` | `pager_unlock()` |
 
-- `WRITER_DBMOD`
-  journal synced, database file may now be written.
+**Per-state invariants** (from `pager.c:172–336`):
 
-- `ERROR`
-  cache may be inconsistent; further access must fail until state is discarded.
+- **`OPEN`**: No lock held. Database size unknown. Nothing can be read or written.
+- **`READER`**: SHARED lock held. `dbSize` is valid. WAL connection open if WAL mode. No hot-journal exists.
+- **`WRITER_LOCKED`**: RESERVED (or EXCLUSIVE) lock held. No modifications to cache or database. `dbSize`, `dbOrigSize`, `dbFileSize` are all valid. Journal may or may not be open but nothing written.
+- **`WRITER_CACHEMOD`**: Journal file opened, first header written but **not synced**. Cache contents modified. Database file on disk is **unchanged**.
+- **`WRITER_DBMOD`**: Journal **synced to disk**. Database file may now be written. EXCLUSIVE lock held.
+- **`WRITER_FINISHED`**: All writing and syncing complete. Only journal finalization remains for commit.
+- **`ERROR`**: IO error left cache in unknown state. All access returns error. Recovers to `OPEN` when all references are dropped.
 
-For Rust, modeling pager state as an enum with explicit transitions will pay off immediately.
+**Critical insight for crash safety**: The transition from `WRITER_CACHEMOD` to `WRITER_DBMOD` requires syncing the journal. This sync is the "point of no return" — after it, if the process crashes, the journal contains enough information to restore the database to its pre-transaction state. **No database write happens before this sync.** WAL connections never enter `WRITER_DBMOD` or `WRITER_FINISHED` states.
+
+For Rust, modeling pager state as an enum with explicit transitions will pay off immediately. Each state should be a separate enum variant that enforces what operations are legal at compile time.
 
 ### Core pager data structures
 
 #### `Pager`
 
-Tracks:
+The `Pager` struct (`pager.c:619–706`) is organized into two sections:
 
-- state and lock level,
-- journal mode,
-- sync policy,
-- db size at different times (`dbSize`, `dbOrigSize`, `dbFileSize`),
-- dirty/journal bookkeeping bitvecs,
-- savepoint array,
-- change-counter tracking,
-- page cache,
-- WAL handle if used.
+**Configuration (fixed or rarely changed):**
+- `sqlite3_vfs *pVfs` — VFS implementation for I/O
+- `u8 exclusiveMode`, `u8 journalMode` — locking and journal strategy
+- `u8 useJournal`, `u8 noSync`, `u8 fullSync`, `u8 extraSync` — sync policy
+- `u8 tempFile`, `u8 readOnly`, `u8 memDb` — database type flags
+- `i64 pageSize` — bytes per page
+- `i16 nReserve` — unused bytes at end of each page
+- `u32 sectorSize` — assumed disk sector size for rollback
+- `Pgno mxPgno` — maximum allowed database page number
+- `char *zFilename`, `*zJournal`, `*zWal` — file paths
+- `int (*xBusyHandler)(void*)` — busy retry callback
+- `PCache *pPCache` — the page cache object
 
-#### `PgHdr`
+**Runtime state (changes during operation):**
+- `u8 eState` — the state machine value (0–6)
+- `u8 eLock` — current file lock (`NO_LOCK`..`EXCLUSIVE_LOCK`, or `UNKNOWN_LOCK`)
+- `u8 changeCountDone` — prevents redundant change-counter updates
+- `u8 doNotSpill` — bitfield: `SPILLFLAG_OFF=0x01`, `SPILLFLAG_ROLLBACK=0x02`, `SPILLFLAG_NOSYNC=0x04`
+- `Pgno dbSize` — current logical page count
+- `Pgno dbOrigSize` — page count at transaction start (for rollback sizing)
+- `Pgno dbFileSize` — page count on disk (for truncation decisions)
+- `int errCode` — error code when in `PAGER_ERROR` state
+- `Bitvec *pInJournal` — 1 bit per page: is this page already journaled?
+- `sqlite3_file *fd`, `*jfd`, `*sjfd` — file handles for db, journal, sub-journal
+- `i64 journalOff` — current write position in journal file
+- `PagerSavepoint *aSavepoint` — array of savepoint states
+- `u32 iDataVersion` — incremented on every content change (cache invalidation)
+- `Wal *pWal` — WAL handle (if WAL mode)
 
-Represents one cached page:
+#### `PgHdr` (`pcache.h`)
 
-- raw data pointer,
-- extra area,
-- page number,
-- dirty/writeable/sync-needed flags,
-- refcount,
-- dirty-list links.
+Represents one cached page. Key fields:
 
-Important flags:
+- `sqlite3_pcache_page *pPage` — the underlying cache storage
+- `void *pData` — pointer to raw page data
+- `void *pExtra` — MemPage struct lives here (BTree's extension)
+- `Pgno pgno` — page number
+- `Pager *pPager` — owning pager
+- `u16 flags` — state flags (see below)
+- `i64 nRef` — reference count
+- `PgHdr *pDirtyNext`, `*pDirtyPrev` — dirty list links
 
-- `PGHDR_DIRTY`
-- `PGHDR_WRITEABLE`
-- `PGHDR_NEED_SYNC`
-- `PGHDR_DONT_WRITE`
-- `PGHDR_MMAP`
+**Page flags** (`pcache.h:42–53`):
 
-#### `PCache`
+| Value | Name | Meaning |
+|---|---|---|
+| `0x002` | `PGHDR_CLEAN` | Page has not been modified |
+| `0x004` | `PGHDR_DIRTY` | Page has been modified |
+| `0x008` | `PGHDR_WRITEABLE` | Journal copy exists; safe to write in-memory |
+| `0x010` | `PGHDR_NEED_SYNC` | Journal must be synced before page can be written to db |
+| `0x020` | `PGHDR_DONT_WRITE` | Do not write content to db (e.g., never-read page) |
+| `0x040` | `PGHDR_MMAP` | Page is memory-mapped, not cache-managed |
+
+The `PGHDR_NEED_SYNC` flag is critical for crash safety: it prevents the pager from writing a dirty page to the database file until the journal containing the original page content has been synced. This is how invariant (1) from `pager.c` is enforced — a page is never overwritten unless its original content is safely on disk.
+
+#### `PCache` (`pcache.h`)
 
 Maintains:
 
 - dirty list in LRU order,
-- a `pSynced` pointer to help choose spill candidates,
+- a `pSynced` pointer to efficiently find spill candidates that don't need a journal sync,
 - cache size and spill thresholds,
 - reference counts,
-- pluggable backend storage.
+- pluggable backend storage (`sqlite3_pcache_methods2`).
 
 ### Transaction begin
 

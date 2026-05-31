@@ -138,6 +138,22 @@ impl<C: KeyValueCodec> TypedTreeCursor<C> {
         self.bytes.next()
     }
 
+    pub fn prev(&mut self) -> Result<()> {
+        self.bytes.prev()
+    }
+
+    pub fn last(&mut self) -> Result<()> {
+        self.bytes.last()
+    }
+
+    pub fn save_position(&mut self) {
+        self.bytes.save_position();
+    }
+
+    pub fn restore_position(&mut self) -> Result<()> {
+        self.bytes.restore_position()
+    }
+
     pub fn seek(&mut self, key: &C::Key) -> Result<()> {
         let encoded_key = C::encode_key(key)?;
         self.bytes.seek(&encoded_key)
