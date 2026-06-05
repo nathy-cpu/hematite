@@ -4,6 +4,8 @@
 //! semantics-preserving transformation that makes later planning cheaper
 //! or enables better access paths.
 
+#![allow(dead_code)]
+
 use crate::parser::ast::*;
 use crate::parser::LiteralValue;
 
@@ -156,35 +158,36 @@ fn promote_having_to_where(select: &mut SelectStatement) {
     }
 }
 
-fn condition_depends_only_on(cond: &Condition, allowed_columns: &[String]) -> bool {
+fn condition_depends_only_on(cond: &Expression, allowed_columns: &[String]) -> bool {
     match cond {
-        Condition::Comparison { left, right, .. } => {
+        Expression::Comparison { left, right, .. } => {
             expr_depends_only_on(left, allowed_columns)
                 && expr_depends_only_on(right, allowed_columns)
         }
-        Condition::NullCheck { expr, .. } => expr_depends_only_on(expr, allowed_columns),
-        Condition::InList { expr, values, .. } => {
+        Expression::NullCheck { expr, .. } => expr_depends_only_on(expr, allowed_columns),
+        Expression::InList { expr, values, .. } => {
             expr_depends_only_on(expr, allowed_columns)
                 && values.iter().all(|v| expr_depends_only_on(v, allowed_columns))
         }
-        Condition::Between {
+        Expression::Between {
             expr, lower, upper, ..
         } => {
             expr_depends_only_on(expr, allowed_columns)
                 && expr_depends_only_on(lower, allowed_columns)
                 && expr_depends_only_on(upper, allowed_columns)
         }
-        Condition::Like { expr, pattern, .. } => {
+        Expression::Like { expr, pattern, .. } => {
             expr_depends_only_on(expr, allowed_columns)
                 && expr_depends_only_on(pattern, allowed_columns)
         }
-        Condition::Not(inner) => condition_depends_only_on(inner, allowed_columns),
-        Condition::Logical { left, right, .. } => {
+        Expression::UnaryNot(inner) => condition_depends_only_on(inner, allowed_columns),
+        Expression::Logical { left, right, .. } => {
             condition_depends_only_on(left, allowed_columns)
                 && condition_depends_only_on(right, allowed_columns)
         }
         // Subqueries are never safe to promote.
-        Condition::Exists { .. } | Condition::InSubquery { .. } => false,
+        Expression::Exists { .. } | Expression::InSubquery { .. } => false,
+        other => expr_depends_only_on(other, allowed_columns),
     }
 }
 
@@ -272,51 +275,55 @@ pub(crate) fn propagate_constants_in_where(where_clause: &mut Option<WhereClause
     }
 }
 
-fn extract_column_literal_eq(cond: &Condition) -> Option<(String, LiteralValue)> {
+fn extract_column_literal_eq(cond: &Expression) -> Option<(String, LiteralValue)> {
     match cond {
-        Condition::Comparison {
-            left: Expression::Column(col),
+        Expression::Comparison {
+            left,
             operator: ComparisonOperator::Equal,
-            right: Expression::Literal(lit),
-        } => Some((col.clone(), lit.clone())),
-        Condition::Comparison {
-            left: Expression::Literal(lit),
-            operator: ComparisonOperator::Equal,
-            right: Expression::Column(col),
-        } => Some((col.clone(), lit.clone())),
+            right,
+        } => match (left.as_ref(), right.as_ref()) {
+            (Expression::Column(col), Expression::Literal(lit)) => {
+                Some((col.clone(), lit.clone()))
+            }
+            (Expression::Literal(lit), Expression::Column(col)) => {
+                Some((col.clone(), lit.clone()))
+            }
+            _ => None,
+        },
         _ => None,
     }
 }
 
-fn substitute_in_condition(cond: &mut Condition, subs: &[(String, LiteralValue)]) -> bool {
+fn substitute_in_condition(cond: &mut Expression, subs: &[(String, LiteralValue)]) -> bool {
     match cond {
-        Condition::Comparison { left, right, .. } => {
+        Expression::Comparison { left, right, .. } => {
             let a = substitute_in_expr(left, subs);
             let b = substitute_in_expr(right, subs);
             a || b
         }
-        Condition::Between { expr, lower, upper, .. } => {
+        Expression::Between { expr, lower, upper, .. } => {
             substitute_in_expr(expr, subs)
                 | substitute_in_expr(lower, subs)
                 | substitute_in_expr(upper, subs)
         }
-        Condition::InList { expr, values, .. } => {
+        Expression::InList { expr, values, .. } => {
             let mut c = substitute_in_expr(expr, subs);
             for v in values {
                 c |= substitute_in_expr(v, subs);
             }
             c
         }
-        Condition::Like { expr, pattern, .. } => {
+        Expression::Like { expr, pattern, .. } => {
             substitute_in_expr(expr, subs) | substitute_in_expr(pattern, subs)
         }
-        Condition::NullCheck { expr, .. } => substitute_in_expr(expr, subs),
-        Condition::Not(inner) => substitute_in_condition(inner, subs),
-        Condition::Logical { left, right, .. } => {
+        Expression::NullCheck { expr, .. } => substitute_in_expr(expr, subs),
+        Expression::UnaryNot(inner) => substitute_in_condition(inner, subs),
+        Expression::Logical { left, right, .. } => {
             substitute_in_condition(left, subs) | substitute_in_condition(right, subs)
         }
-        Condition::InSubquery { expr, .. } => substitute_in_expr(expr, subs),
-        Condition::Exists { .. } => false,
+        Expression::InSubquery { expr, .. } => substitute_in_expr(expr, subs),
+        Expression::Exists { .. } => false,
+        other => substitute_in_expr(other, subs),
     }
 }
 
@@ -401,20 +408,20 @@ fn decompose_between_in_where(where_clause: &mut Option<WhereClause>) {
     wc.conditions.extend(extra);
 }
 
-fn decompose_between(cond: &Condition) -> Option<(Condition, Condition)> {
+fn decompose_between(cond: &Expression) -> Option<(Expression, Expression)> {
     match cond {
-        Condition::Between {
+        Expression::Between {
             expr,
             lower,
             upper,
             is_not: false,
         } => Some((
-            Condition::Comparison {
+            Expression::Comparison {
                 left: expr.clone(),
                 operator: ComparisonOperator::GreaterThanOrEqual,
                 right: lower.clone(),
             },
-            Condition::Comparison {
+            Expression::Comparison {
                 left: expr.clone(),
                 operator: ComparisonOperator::LessThanOrEqual,
                 right: upper.clone(),
@@ -438,15 +445,15 @@ fn convert_or_to_in_in_where(where_clause: &mut Option<WhereClause>) {
     }
 }
 
-fn try_convert_or_to_in(cond: &mut Condition) {
+fn try_convert_or_to_in(cond: &mut Expression) {
     // Recurse into nested Logical nodes first.
-    if let Condition::Logical { left, right, operator: LogicalOperator::And } = cond {
+    if let Expression::Logical { left, right, operator: LogicalOperator::And } = cond {
         try_convert_or_to_in(left);
         try_convert_or_to_in(right);
         return;
     }
 
-    if !matches!(cond, Condition::Logical { operator: LogicalOperator::Or, .. }) {
+    if !matches!(cond, Expression::Logical { operator: LogicalOperator::Or, .. }) {
         return;
     }
 
@@ -460,40 +467,47 @@ fn try_convert_or_to_in(cond: &mut Condition) {
 
     // Check: all branches are `col = literal` on the same column.
     let first_col = match &branches[0] {
-        Condition::Comparison {
-            left: Expression::Column(col),
+        Expression::Comparison {
+            left,
             operator: ComparisonOperator::Equal,
-            right: Expression::Literal(_),
-        } => col.clone(),
+            right,
+        } => match (left.as_ref(), right.as_ref()) {
+            (Expression::Column(col), Expression::Literal(_)) => col.clone(),
+            _ => return,
+        },
         _ => return,
     };
 
     let mut values = Vec::new();
     for branch in &branches {
         match branch {
-            Condition::Comparison {
-                left: Expression::Column(col),
+            Expression::Comparison {
+                left,
                 operator: ComparisonOperator::Equal,
-                right: Expression::Literal(lit),
-            } if SelectStatement::column_reference_name(col)
-                == SelectStatement::column_reference_name(&first_col) =>
-            {
-                values.push(Expression::Literal(lit.clone()));
-            }
+                right,
+            } => match (left.as_ref(), right.as_ref()) {
+                (Expression::Column(col), Expression::Literal(lit))
+                    if SelectStatement::column_reference_name(col)
+                        == SelectStatement::column_reference_name(&first_col) =>
+                {
+                    values.push(Expression::Literal(lit.clone()));
+                }
+                _ => return,
+            },
             _ => return,
         }
     }
 
-    *cond = Condition::InList {
-        expr: Expression::Column(first_col),
+    *cond = Expression::InList {
+        expr: Box::new(Expression::Column(first_col)),
         values,
         is_not: false,
     };
 }
 
-fn collect_or_branches<'a>(cond: &'a Condition, out: &mut Vec<&'a Condition>) {
+fn collect_or_branches<'a>(cond: &'a Expression, out: &mut Vec<&'a Expression>) {
     match cond {
-        Condition::Logical {
+        Expression::Logical {
             left,
             operator: LogicalOperator::Or,
             right,
@@ -588,15 +602,15 @@ pub(crate) struct ExistsToJoinResult {
     /// The alias for the joined table.
     pub join_alias: Option<String>,
     /// The subquery's WHERE conditions to merge into the outer WHERE.
-    pub join_conditions: Vec<Condition>,
+    pub join_conditions: Vec<Expression>,
 }
 
 /// Try to convert an EXISTS in the WHERE clause to a join. Returns the
 /// conversion result if successful. The caller is responsible for splicing
 /// the result into the outer query.
-pub(crate) fn try_exists_to_join(cond: &Condition) -> Option<ExistsToJoinResult> {
+pub(crate) fn try_exists_to_join(cond: &Expression) -> Option<ExistsToJoinResult> {
     let (subquery, is_not) = match cond {
-        Condition::Exists { subquery, is_not } => (subquery, *is_not),
+        Expression::Exists { subquery, is_not } => (subquery, *is_not),
         _ => return None,
     };
 
@@ -683,15 +697,15 @@ mod tests {
     fn test_constant_propagation() {
         let mut wc = Some(WhereClause {
             conditions: vec![
-                Condition::Comparison {
-                    left: col("a"),
+                Expression::Comparison {
+                    left: Box::new(col("a")),
                     operator: ComparisonOperator::Equal,
-                    right: int(5),
+                    right: Box::new(int(5)),
                 },
-                Condition::Comparison {
-                    left: col("b"),
+                Expression::Comparison {
+                    left: Box::new(col("b")),
                     operator: ComparisonOperator::Equal,
-                    right: col("a"),
+                    right: Box::new(col("a")),
                 },
             ],
         });
@@ -699,18 +713,21 @@ mod tests {
         let conditions = &wc.unwrap().conditions;
         // Second condition should now be b = 5
         match &conditions[1] {
-            Condition::Comparison { right: Expression::Literal(LiteralValue::Integer(5)), .. } => {}
-            other => panic!("Expected b = 5, got {other:?}"),
+            Expression::Comparison { right, .. } => match right.as_ref() {
+                Expression::Literal(LiteralValue::Integer(5)) => {}
+                other => panic!("Expected b = 5, got {other:?}"),
+            },
+            other => panic!("Expected Comparison, got {other:?}"),
         }
     }
 
     #[test]
     fn test_between_decomposition() {
         let mut wc = Some(WhereClause {
-            conditions: vec![Condition::Between {
-                expr: col("x"),
-                lower: int(10),
-                upper: int(20),
+            conditions: vec![Expression::Between {
+                expr: Box::new(col("x")),
+                lower: Box::new(int(10)),
+                upper: Box::new(int(20)),
                 is_not: false,
             }],
         });
@@ -721,30 +738,30 @@ mod tests {
 
     #[test]
     fn test_or_to_in() {
-        let mut cond = Condition::Logical {
-            left: Box::new(Condition::Comparison {
-                left: col("x"),
+        let mut cond = Expression::Logical {
+            left: Box::new(Expression::Comparison {
+                left: Box::new(col("x")),
                 operator: ComparisonOperator::Equal,
-                right: int(1),
+                right: Box::new(int(1)),
             }),
             operator: LogicalOperator::Or,
-            right: Box::new(Condition::Logical {
-                left: Box::new(Condition::Comparison {
-                    left: col("x"),
+            right: Box::new(Expression::Logical {
+                left: Box::new(Expression::Comparison {
+                    left: Box::new(col("x")),
                     operator: ComparisonOperator::Equal,
-                    right: int(2),
+                    right: Box::new(int(2)),
                 }),
                 operator: LogicalOperator::Or,
-                right: Box::new(Condition::Comparison {
-                    left: col("x"),
+                right: Box::new(Expression::Comparison {
+                    left: Box::new(col("x")),
                     operator: ComparisonOperator::Equal,
-                    right: int(3),
+                    right: Box::new(int(3)),
                 }),
             }),
         };
         try_convert_or_to_in(&mut cond);
         match &cond {
-            Condition::InList { values, .. } => assert_eq!(values.len(), 3),
+            Expression::InList { values, .. } => assert_eq!(values.len(), 3),
             other => panic!("Expected InList, got {other:?}"),
         }
     }
@@ -754,10 +771,10 @@ mod tests {
         let mut select = make_select(None);
         select.group_by = vec![col("category")];
         select.having_clause = Some(WhereClause {
-            conditions: vec![Condition::Comparison {
-                left: col("category"),
+            conditions: vec![Expression::Comparison {
+                left: Box::new(col("category")),
                 operator: ComparisonOperator::Equal,
-                right: Expression::Literal(LiteralValue::Text("A".to_string())),
+                right: Box::new(Expression::Literal(LiteralValue::Text("A".to_string()))),
             }],
         });
         promote_having_to_where(&mut select);

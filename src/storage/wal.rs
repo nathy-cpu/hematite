@@ -3,7 +3,7 @@ use crate::storage::metadata_page;
 use crate::storage::pager::JournalMode;
 use crate::storage::pager_metadata::PersistedPagerState;
 use crate::storage::{
-    file_len_for_next_page_id, next_page_id_for_file_len, PageId, FIRST_ALLOCATABLE_PAGE_ID,
+    file_len_for_next_page_id, next_page_id_for_file_len, PageId,
     PAGE_SIZE, STORAGE_METADATA_PAGE_ID,
 };
 #[cfg(test)]
@@ -103,18 +103,7 @@ impl VisibleWalState {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn apply_record(&self, record: &WalRecord) -> Result<Self> {
-        let mut next = self.clone();
-        next.apply_committed_delta(
-            record.sequence,
-            record.file_len,
-            record.free_pages.clone(),
-            record.checksums.iter().copied().collect(),
-            &record.frames,
-        )?;
-        Ok(next)
-    }
+
 
     pub fn apply_committed_delta(
         &mut self,
@@ -189,14 +178,7 @@ impl VisibleWalState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WalRecord {
-    pub sequence: u64,
-    pub file_len: u64,
-    pub free_pages: Vec<PageId>,
-    pub checksums: Vec<(PageId, u32)>,
-    pub frames: Vec<WalFrame>,
-}
+
 
 pub(crate) fn append_committed_frames_to_path<P: AsRef<Path>>(
     path: P,
@@ -293,141 +275,7 @@ pub(crate) fn load_visible_state_from_path_with_base<P: AsRef<Path>>(
     }))
 }
 
-impl WalRecord {
-    #[cfg(test)]
-    pub fn encode_file(records: &[Self]) -> Result<Vec<u8>> {
-        let header = WalHeader::default();
-        let mut metadata_page = vec![0; PAGE_SIZE];
-        let mut frames = Vec::new();
-        for record in records {
-            let record_frames = synthesize_committed_frames(
-                record.sequence,
-                next_page_id_for_file_len(record.file_len),
-                &record.free_pages,
-                &record.checksums.iter().copied().collect(),
-                &metadata_page,
-                &record.frames,
-            )?;
-            if let Some(frame) = record_frames
-                .iter()
-                .find(|frame| frame.page_id == STORAGE_METADATA_PAGE_ID)
-            {
-                metadata_page = frame.data.clone();
-            }
-            frames.extend(record_frames);
-        }
 
-        WalFile { header, frames }.encode()
-    }
-
-    #[allow(dead_code)]
-    pub fn decode_file(bytes: &[u8]) -> Result<Vec<Self>> {
-        let wal = WalFile::decode(bytes)?;
-        let mut records = Vec::new();
-        let mut metadata_page = vec![0; PAGE_SIZE];
-        for v3_frames in committed_frame_groups(&wal.frames) {
-            let sequence = v3_frames[0].commit_sequence;
-            let mut database_page_count = 0;
-            let mut record_frames = Vec::new();
-            for frame in &v3_frames {
-                database_page_count = database_page_count.max(frame.database_page_count);
-                if frame.page_id == STORAGE_METADATA_PAGE_ID {
-                    metadata_page = frame.data.clone();
-                    continue;
-                }
-                record_frames.push(WalFrame::new(frame.page_id, frame.data.clone()));
-            }
-
-            let persisted = parse_metadata_page(&metadata_page)?.ok_or_else(|| {
-                HematiteError::CorruptedData(
-                    "Committed WAL metadata frame is missing pager metadata".to_string(),
-                )
-            })?;
-
-            let mut checksums = persisted.checksums.into_iter().collect::<Vec<_>>();
-            checksums.sort_by_key(|(page_id, _)| *page_id);
-
-            records.push(Self {
-                sequence,
-                file_len: file_len_for_next_page_id(database_page_count),
-                free_pages: persisted.free_pages,
-                checksums,
-                frames: record_frames,
-            });
-        }
-
-        Self::validate_records(&records)?;
-        Ok(records)
-    }
-
-    #[allow(dead_code)]
-    pub fn append_to_path<P: AsRef<Path>>(path: P, record: &Self) -> Result<()> {
-        append_committed_frames_to_path(
-            path,
-            record.sequence,
-            next_page_id_for_file_len(record.file_len),
-            &record.free_pages,
-            &record.checksums.iter().copied().collect(),
-            &vec![0; PAGE_SIZE],
-            &record.frames,
-        )
-    }
-
-    #[allow(dead_code)]
-    pub fn load_visible_state_from_path<P: AsRef<Path>>(
-        path: P,
-    ) -> Result<Option<VisibleWalState>> {
-        load_visible_state_from_path_with_base(
-            path,
-            file_len_for_next_page_id(FIRST_ALLOCATABLE_PAGE_ID),
-            Vec::new(),
-            HashMap::new(),
-            &vec![0; PAGE_SIZE],
-        )
-    }
-
-    #[allow(dead_code)]
-    pub fn visible_state_from_records(records: &[Self]) -> Option<VisibleWalState> {
-        let mut visible_state: Option<VisibleWalState> = None;
-        for record in records {
-            visible_state = Some(match &visible_state {
-                Some(state) => state.apply_record(record).ok()?,
-                None => VisibleWalState::from_database_state(
-                    file_len_for_next_page_id(FIRST_ALLOCATABLE_PAGE_ID),
-                    Vec::new(),
-                    HashMap::new(),
-                )
-                .apply_record(record)
-                .ok()?,
-            });
-        }
-        visible_state
-    }
-
-    #[allow(dead_code)]
-    fn validate_records(records: &[Self]) -> Result<()> {
-        let mut previous_sequence = 0u64;
-        for record in records {
-            if record.sequence <= previous_sequence {
-                return Err(HematiteError::StorageError(
-                    "WAL sequences must increase strictly".to_string(),
-                ));
-            }
-            previous_sequence = record.sequence;
-
-            let mut seen_frames = HashSet::new();
-            for frame in &record.frames {
-                if !seen_frames.insert(frame.page_id) {
-                    return Err(HematiteError::StorageError(format!(
-                        "WAL record {} contains duplicate frame for page {}",
-                        record.sequence, frame.page_id
-                    )));
-                }
-            }
-        }
-        Ok(())
-    }
-}
 
 fn existing_or_default_header(path: &Path) -> Result<WalHeader> {
     Ok(WalFile::load_header_from_path(path)?.unwrap_or_default())

@@ -103,34 +103,25 @@ mod cache_tests {
         let mut cache = PageCache::new(2);
         cache.put(Page::new(1));
 
-        cache.pin(1);
         cache.mark_dirty(1);
         cache.mark_journaled(1);
         cache.mark_need_sync(1);
-        cache.set_dont_write(1, true);
 
         let meta = cache.meta(1).expect("page metadata should exist");
-        assert_eq!(meta.manual_pin_count, 1);
         assert!(meta.dirty);
         assert!(meta.writeable);
         assert!(meta.journaled);
         assert!(meta.need_sync);
-        assert!(meta.dont_write);
         assert!(meta.dirty_sequence.is_some());
-        assert_eq!(cache.pin_count(1), 1);
 
-        cache.unpin(1);
         cache.clear_dirty(1);
 
         let meta = cache.meta(1).expect("page metadata should still exist");
-        assert_eq!(meta.manual_pin_count, 0);
         assert!(!meta.dirty);
         assert!(!meta.writeable);
         assert!(!meta.journaled);
         assert!(!meta.need_sync);
-        assert!(!meta.dont_write);
         assert!(meta.dirty_sequence.is_none());
-        assert_eq!(cache.pin_count(1), 0);
     }
 
     #[test]
@@ -153,7 +144,7 @@ mod fault_tests {
     use super::super::{Pager, PagerState};
     use crate::error::Result;
     use crate::storage::types::{Page, DB_HEADER_PAGE_ID, FIRST_ALLOCATABLE_PAGE_ID};
-    use crate::storage::wal::{WalFrame, WalRecord};
+    use crate::storage::wal::WalFrame;
     use crate::storage::JournalMode;
     use crate::test_utils::TestDbFile;
     use std::fs;
@@ -426,18 +417,16 @@ mod fault_tests {
 
         pinned_reader.end_read()?;
 
-        let partial_tail = WalRecord::encode_file(&[WalRecord {
-            sequence: 2,
-            file_len: crate::storage::file_len_for_next_page_id(page_id + 1),
-            free_pages: vec![],
-            checksums: vec![(page_id, 123)],
-            frames: vec![WalFrame::new(
-                page_id,
-                vec![42u8; crate::storage::PAGE_SIZE],
-            )],
-        }])?;
+        let header = crate::storage::wal::WalHeader::default();
+        let frame = WalFrame::committed(
+            page_id,
+            page_id + 1,
+            2,
+            vec![42u8; crate::storage::PAGE_SIZE],
+        );
+        let partial_tail = frame.encode(&header)?;
         let mut wal_bytes = fs::read(&wal_path)?;
-        wal_bytes.extend_from_slice(&partial_tail[24..partial_tail.len() - 17]);
+        wal_bytes.extend_from_slice(&partial_tail[..partial_tail.len() - 17]);
         fs::write(&wal_path, wal_bytes)?;
 
         let mut reopened = Pager::new(&test_db, 10)?;

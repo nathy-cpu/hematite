@@ -162,10 +162,10 @@ mod executor_tests {
             column_aliases: vec![None],
             from: TableReference::Table("users".to_string(), None),
             where_clause: Some(WhereClause {
-                conditions: vec![Condition::Comparison {
-                    left: Expression::Column("email".to_string()),
+                conditions: vec![Expression::Comparison {
+                    left: Box::new(Expression::Column("email".to_string())),
                     operator: ComparisonOperator::Equal,
-                    right: Expression::Literal(LiteralValue::Text("b@example.com".to_string())),
+                    right: Box::new(Expression::Literal(LiteralValue::Text("b@example.com".to_string()))),
                 }],
             }),
             group_by: Vec::new(),
@@ -253,10 +253,10 @@ mod executor_tests {
             column_aliases: vec![None],
             from: TableReference::Table("users".to_string(), None),
             where_clause: Some(WhereClause {
-                conditions: vec![Condition::Comparison {
-                    left: Expression::Column("id".to_string()),
+                conditions: vec![Expression::Comparison {
+                    left: Box::new(Expression::Column("id".to_string())),
                     operator: ComparisonOperator::Equal,
-                    right: Expression::Literal(LiteralValue::Integer(2)),
+                    right: Box::new(Expression::Literal(LiteralValue::Integer(2))),
                 }],
             }),
             group_by: Vec::new(),
@@ -317,10 +317,10 @@ mod executor_tests {
             column_aliases: vec![None],
             from: TableReference::Table("users".to_string(), None),
             where_clause: Some(WhereClause {
-                conditions: vec![Condition::Comparison {
-                    left: Expression::Column("rowid".to_string()),
+                conditions: vec![Expression::Comparison {
+                    left: Box::new(Expression::Column("rowid".to_string())),
                     operator: ComparisonOperator::Equal,
-                    right: Expression::Literal(LiteralValue::Integer(rowid_1 as i128)),
+                    right: Box::new(Expression::Literal(LiteralValue::Integer(rowid_1 as i128))),
                 }],
             }),
             group_by: Vec::new(),
@@ -444,10 +444,10 @@ mod executor_tests {
             target_binding: None,
             source: None,
             where_clause: Some(WhereClause {
-                conditions: vec![Condition::Comparison {
-                    left: Expression::Column("id".to_string()),
+                conditions: vec![Expression::Comparison {
+                    left: Box::new(Expression::Column("id".to_string())),
                     operator: ComparisonOperator::Equal,
-                    right: Expression::Literal(LiteralValue::Integer(2)),
+                    right: Box::new(Expression::Literal(LiteralValue::Integer(2))),
                 }],
             }),
         };
@@ -528,10 +528,10 @@ mod executor_tests {
                 value: Expression::Literal(LiteralValue::Text("Bobby".to_string())),
             }],
             where_clause: Some(WhereClause {
-                conditions: vec![Condition::Comparison {
-                    left: Expression::Column("id".to_string()),
+                conditions: vec![Expression::Comparison {
+                    left: Box::new(Expression::Column("id".to_string())),
                     operator: ComparisonOperator::Equal,
-                    right: Expression::Literal(LiteralValue::Integer(2)),
+                    right: Box::new(Expression::Literal(LiteralValue::Integer(2))),
                 }],
             }),
         };
@@ -615,10 +615,10 @@ mod executor_tests {
                 },
             ],
             where_clause: Some(WhereClause {
-                conditions: vec![Condition::Comparison {
-                    left: Expression::Column("id".to_string()),
+                conditions: vec![Expression::Comparison {
+                    left: Box::new(Expression::Column("id".to_string())),
                     operator: ComparisonOperator::Equal,
-                    right: Expression::Literal(LiteralValue::Integer(1)),
+                    right: Box::new(Expression::Literal(LiteralValue::Integer(1))),
                 }],
             }),
         };
@@ -1067,10 +1067,10 @@ mod planner_tests {
             column_aliases: vec![None],
             from: TableReference::Table("users".to_string(), None),
             where_clause: Some(WhereClause {
-                conditions: vec![Condition::Comparison {
-                    left: Expression::Column("id".to_string()),
+                conditions: vec![Expression::Comparison {
+                    left: Box::new(Expression::Column("id".to_string())),
                     operator: ComparisonOperator::Equal,
-                    right: Expression::Literal(LiteralValue::Integer(1)),
+                    right: Box::new(Expression::Literal(LiteralValue::Integer(1))),
                 }],
             }),
             group_by: Vec::new(),
@@ -1135,10 +1135,10 @@ mod planner_tests {
             column_aliases: vec![None],
             from: TableReference::Table("users".to_string(), None),
             where_clause: Some(WhereClause {
-                conditions: vec![Condition::Comparison {
-                    left: Expression::Column("email".to_string()),
+                conditions: vec![Expression::Comparison {
+                    left: Box::new(Expression::Column("email".to_string())),
                     operator: ComparisonOperator::Equal,
-                    right: Expression::Literal(LiteralValue::Text("a@example.com".to_string())),
+                    right: Box::new(Expression::Literal(LiteralValue::Text("a@example.com".to_string()))),
                 }],
             }),
             group_by: Vec::new(),
@@ -1212,10 +1212,10 @@ mod planner_tests {
                     "posts".to_string(),
                     Some("p".to_string()),
                 )),
-                on: Condition::Comparison {
-                    left: Expression::Column("u.id".to_string()),
+                on: Expression::Comparison {
+                    left: Box::new(Expression::Column("u.id".to_string())),
                     operator: ComparisonOperator::Equal,
-                    right: Expression::Column("p.user_id".to_string()),
+                    right: Box::new(Expression::Column("p.user_id".to_string())),
                 },
             },
             where_clause: None,
@@ -1261,10 +1261,10 @@ mod planner_tests {
             target_binding: None,
             source: None,
             where_clause: Some(WhereClause {
-                conditions: vec![Condition::Comparison {
-                    left: Expression::Column("id".to_string()),
+                conditions: vec![Expression::Comparison {
+                    left: Box::new(Expression::Column("id".to_string())),
                     operator: ComparisonOperator::Equal,
-                    right: Expression::Literal(LiteralValue::Integer(1)),
+                    right: Box::new(Expression::Literal(LiteralValue::Integer(1))),
                 }],
             }),
         };
@@ -1307,10 +1307,10 @@ mod planner_tests {
                 value: Expression::Literal(LiteralValue::Text("Updated".to_string())),
             }],
             where_clause: Some(WhereClause {
-                conditions: vec![Condition::Comparison {
-                    left: Expression::Column("id".to_string()),
+                conditions: vec![Expression::Comparison {
+                    left: Box::new(Expression::Column("id".to_string())),
                     operator: ComparisonOperator::Equal,
-                    right: Expression::Literal(LiteralValue::Integer(1)),
+                    right: Box::new(Expression::Literal(LiteralValue::Integer(1))),
                 }],
             }),
         };
@@ -1375,10 +1375,10 @@ mod planner_tests {
                 "teams".to_string(),
                 Some("t".to_string()),
             )),
-            on: Condition::Comparison {
-                left: Expression::Column("u.team_id".to_string()),
+            on: Expression::Comparison {
+                left: Box::new(Expression::Column("u.team_id".to_string())),
                 operator: ComparisonOperator::Equal,
-                right: Expression::Column("t.id".to_string()),
+                right: Box::new(Expression::Column("t.id".to_string())),
             },
         };
 
@@ -1444,17 +1444,17 @@ mod planner_tests {
             column_aliases: vec![None],
             from: TableReference::Table("edges".to_string(), None),
             where_clause: Some(WhereClause {
-                conditions: vec![Condition::Logical {
-                    left: Box::new(Condition::Comparison {
-                        left: Expression::Column("src".to_string()),
+                conditions: vec![Expression::Logical {
+                    left: Box::new(Expression::Comparison {
+                        left: Box::new(Expression::Column("src".to_string())),
                         operator: ComparisonOperator::Equal,
-                        right: Expression::Literal(LiteralValue::Integer(1)),
+                        right: Box::new(Expression::Literal(LiteralValue::Integer(1))),
                     }),
                     operator: LogicalOperator::And,
-                    right: Box::new(Condition::Comparison {
-                        left: Expression::Column("dst".to_string()),
+                    right: Box::new(Expression::Comparison {
+                        left: Box::new(Expression::Column("dst".to_string())),
                         operator: ComparisonOperator::Equal,
-                        right: Expression::Literal(LiteralValue::Integer(2)),
+                        right: Box::new(Expression::Literal(LiteralValue::Integer(2))),
                     }),
                 }],
             }),
@@ -1514,17 +1514,17 @@ mod planner_tests {
             column_aliases: vec![None],
             from: TableReference::Table("memberships".to_string(), None),
             where_clause: Some(WhereClause {
-                conditions: vec![Condition::Logical {
-                    left: Box::new(Condition::Comparison {
-                        left: Expression::Column("user_id".to_string()),
+                conditions: vec![Expression::Logical {
+                    left: Box::new(Expression::Comparison {
+                        left: Box::new(Expression::Column("user_id".to_string())),
                         operator: ComparisonOperator::Equal,
-                        right: Expression::Literal(LiteralValue::Integer(10)),
+                        right: Box::new(Expression::Literal(LiteralValue::Integer(10))),
                     }),
                     operator: LogicalOperator::And,
-                    right: Box::new(Condition::Comparison {
-                        left: Expression::Column("org_id".to_string()),
+                    right: Box::new(Expression::Comparison {
+                        left: Box::new(Expression::Column("org_id".to_string())),
                         operator: ComparisonOperator::Equal,
-                        right: Expression::Literal(LiteralValue::Integer(20)),
+                        right: Box::new(Expression::Literal(LiteralValue::Integer(20))),
                     }),
                 }],
             }),
@@ -1597,15 +1597,15 @@ mod planner_tests {
             from: TableReference::Table("users".to_string(), None),
             where_clause: Some(WhereClause {
                 conditions: vec![
-                    Condition::Comparison {
-                        left: Expression::Column("email".to_string()),
+                    Expression::Comparison {
+                        left: Box::new(Expression::Column("email".to_string())),
                         operator: ComparisonOperator::Equal,
-                        right: Expression::Literal(LiteralValue::Text("a@example.com".to_string())),
+                        right: Box::new(Expression::Literal(LiteralValue::Text("a@example.com".to_string()))),
                     },
-                    Condition::Comparison {
-                        left: Expression::Column("active".to_string()),
+                    Expression::Comparison {
+                        left: Box::new(Expression::Column("active".to_string())),
                         operator: ComparisonOperator::Equal,
-                        right: Expression::Literal(LiteralValue::Boolean(true)),
+                        right: Box::new(Expression::Literal(LiteralValue::Boolean(true))),
                     },
                 ],
             }),
@@ -1687,10 +1687,10 @@ mod planner_tests {
             from: TableReference::InnerJoin {
                 left: Box::new(TableReference::Table("users".to_string(), None)),
                 right: Box::new(TableReference::Table("posts".to_string(), None)),
-                on: Condition::Comparison {
-                    left: Expression::Column("users.id".to_string()),
+                on: Expression::Comparison {
+                    left: Box::new(Expression::Column("users.id".to_string())),
                     operator: ComparisonOperator::Equal,
-                    right: Expression::Column("posts.user_id".to_string()),
+                    right: Box::new(Expression::Column("posts.user_id".to_string())),
                 },
             },
             where_clause: None,
@@ -1751,10 +1751,10 @@ mod planner_tests {
             column_aliases: vec![None],
             from: TableReference::Table("users".to_string(), None),
             where_clause: Some(WhereClause {
-                conditions: vec![Condition::Comparison {
-                    left: Expression::Column("rowid".to_string()),
+                conditions: vec![Expression::Comparison {
+                    left: Box::new(Expression::Column("rowid".to_string())),
                     operator: ComparisonOperator::Equal,
-                    right: Expression::Literal(LiteralValue::Integer(7)),
+                    right: Box::new(Expression::Literal(LiteralValue::Integer(7))),
                 }],
             }),
             group_by: Vec::new(),
@@ -1775,10 +1775,10 @@ mod planner_tests {
             target_binding: None,
             source: None,
             where_clause: Some(WhereClause {
-                conditions: vec![Condition::Comparison {
-                    left: Expression::Column("id".to_string()),
+                conditions: vec![Expression::Comparison {
+                    left: Box::new(Expression::Column("id".to_string())),
                     operator: ComparisonOperator::Equal,
-                    right: Expression::Literal(LiteralValue::Integer(1)),
+                    right: Box::new(Expression::Literal(LiteralValue::Integer(1))),
                 }],
             }),
         }))?;
@@ -1816,10 +1816,10 @@ mod planner_tests {
             column_aliases: vec![None],
             from: TableReference::Table("users".to_string(), None),
             where_clause: Some(WhereClause {
-                conditions: vec![Condition::Comparison {
-                    left: Expression::Column("rowid".to_string()),
+                conditions: vec![Expression::Comparison {
+                    left: Box::new(Expression::Column("rowid".to_string())),
                     operator: ComparisonOperator::Equal,
-                    right: Expression::Literal(LiteralValue::Integer(7)),
+                    right: Box::new(Expression::Literal(LiteralValue::Integer(7))),
                 }],
             }),
             group_by: Vec::new(),
@@ -1867,16 +1867,16 @@ mod planner_tests {
             column_aliases: vec![None],
             from: TableReference::Table("users".to_string(), None),
             where_clause: Some(WhereClause {
-                conditions: vec![Condition::Logical {
-                    left: Box::new(Condition::Comparison {
-                        left: Expression::Column("rowid".to_string()),
+                conditions: vec![Expression::Logical {
+                    left: Box::new(Expression::Comparison {
+                        left: Box::new(Expression::Column("rowid".to_string())),
                         operator: ComparisonOperator::Equal,
-                        right: Expression::Literal(LiteralValue::Integer(7)),
+                        right: Box::new(Expression::Literal(LiteralValue::Integer(7))),
                     }),
                     operator: LogicalOperator::And,
-                    right: Box::new(Condition::Like {
-                        expr: Expression::Column("name".to_string()),
-                        pattern: Expression::Literal(LiteralValue::Text("A%".to_string())),
+                    right: Box::new(Expression::Like {
+                        expr: Box::new(Expression::Column("name".to_string())),
+                        pattern: Box::new(Expression::Literal(LiteralValue::Text("A%".to_string()))),
                         is_not: false,
                     }),
                 }],
@@ -1926,17 +1926,17 @@ mod planner_tests {
             column_aliases: vec![None],
             from: TableReference::Table("users".to_string(), None),
             where_clause: Some(WhereClause {
-                conditions: vec![Condition::Logical {
-                    left: Box::new(Condition::Comparison {
-                        left: Expression::Column("id".to_string()),
+                conditions: vec![Expression::Logical {
+                    left: Box::new(Expression::Comparison {
+                        left: Box::new(Expression::Column("id".to_string())),
                         operator: ComparisonOperator::Equal,
-                        right: Expression::Literal(LiteralValue::Integer(1)),
+                        right: Box::new(Expression::Literal(LiteralValue::Integer(1))),
                     }),
                     operator: LogicalOperator::And,
-                    right: Box::new(Condition::Comparison {
-                        left: Expression::Column("name".to_string()),
+                    right: Box::new(Expression::Comparison {
+                        left: Box::new(Expression::Column("name".to_string())),
                         operator: ComparisonOperator::GreaterThan,
-                        right: Expression::Literal(LiteralValue::Text("A".to_string())),
+                        right: Box::new(Expression::Literal(LiteralValue::Text("A".to_string()))),
                     }),
                 }],
             }),

@@ -48,6 +48,7 @@ pub(crate) enum CursorState {
     /// Tree was modified; cursor must be restored from saved key before use.
     RequireSeek,
     /// Unrecoverable error occurred; all operations except `first()`/`seek()` will fail.
+    #[allow(dead_code)]
     Fault,
 }
 
@@ -72,6 +73,7 @@ pub struct BTreeCursor {
 
 #[derive(Debug, Clone)]
 struct CursorFrame {
+    #[allow(dead_code)]
     page_id: PageId,
     node: BTreeNode,
     index: usize,

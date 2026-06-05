@@ -471,7 +471,7 @@ impl Table {
     fn rewrite_check_constraints(&mut self, old_name: &str, new_name: &str) -> Result<()> {
         for constraint in &mut self.check_constraints {
             let mut condition =
-                crate::parser::parser::parse_condition_fragment(&constraint.expression_sql)?;
+                crate::parser::parser::parse_expression_fragment(&constraint.expression_sql)?;
             condition.rename_column_references(old_name, new_name, Some(&self.name));
             constraint.expression_sql = condition.to_sql();
         }

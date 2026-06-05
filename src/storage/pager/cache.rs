@@ -4,12 +4,10 @@ use std::sync::Arc;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CachedPageMeta {
-    pub(crate) manual_pin_count: usize,
     pub(crate) dirty: bool,
     pub(crate) writeable: bool,
     pub(crate) journaled: bool,
     pub(crate) need_sync: bool,
-    pub(crate) dont_write: bool,
     pub(crate) dirty_sequence: Option<u64>,
     pub(crate) view_token: u64,
 }
@@ -55,13 +53,7 @@ impl PageCache {
             synced_head: None,
         }
     }
-
-    #[allow(dead_code)]
-    pub(crate) fn capacity(&self) -> usize {
-        self.capacity
-    }
-
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn get(&mut self, page_id: PageId) -> Option<Arc<Page>> {
         self.get_for_view(page_id, 0)
     }
@@ -76,6 +68,7 @@ impl PageCache {
         })
     }
 
+    #[allow(dead_code)]
     pub(crate) fn get_for_view(&mut self, page_id: PageId, view_token: u64) -> Option<Arc<Page>> {
         let page = self.peek_for_view(page_id, view_token);
         if page.is_some() {
@@ -91,8 +84,8 @@ impl PageCache {
     pub(crate) fn put_with_view(&mut self, page: Page, view_token: u64) {
         self.put_shared_with_view(Arc::new(page), view_token);
     }
-
     #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn put_shared(&mut self, page: Arc<Page>) {
         self.put_shared_with_view(page, 0);
     }
@@ -220,7 +213,6 @@ impl PageCache {
             meta.writeable = false;
             meta.journaled = false;
             meta.need_sync = false;
-            meta.dont_write = false;
             meta.dirty_sequence = None;
         }
     }
@@ -244,23 +236,6 @@ impl PageCache {
 
     pub(crate) fn dirty_count(&self) -> usize {
         self.dirty_len
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn pin(&mut self, page_id: PageId) {
-        self.ensure_entry(page_id);
-        self.entries
-            .get_mut(&page_id)
-            .expect("entry should exist")
-            .meta
-            .manual_pin_count += 1;
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn unpin(&mut self, page_id: PageId) {
-        if let Some(meta) = self.entries.get_mut(&page_id).map(|entry| &mut entry.meta) {
-            meta.manual_pin_count = meta.manual_pin_count.saturating_sub(1);
-        }
     }
 
     #[allow(dead_code)]
@@ -315,16 +290,6 @@ impl PageCache {
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn set_dont_write(&mut self, page_id: PageId, dont_write: bool) {
-        self.ensure_entry(page_id);
-        self.entries
-            .get_mut(&page_id)
-            .expect("entry should exist")
-            .meta
-            .dont_write = dont_write;
-    }
-
     fn touch(&mut self, page_id: PageId) {
         if self.lru_head == Some(page_id) || !self.entries.contains_key(&page_id) {
             return;
@@ -376,13 +341,12 @@ impl PageCache {
         let mut candidates = Vec::new();
         let mut current = self.synced_head;
         while let Some(page_id) = current {
-            let entry = self.entries.get(&page_id).expect("dirty entry should exist");
+            let entry = self
+                .entries
+                .get(&page_id)
+                .expect("dirty entry should exist");
             // synced_head guarantees !need_sync, but we still verify.
-            if !entry.meta.need_sync
-                && entry.meta.journaled
-                && !entry.meta.dont_write
-                && Self::entry_pin_count(entry) == 0
-            {
+            if !entry.meta.need_sync && entry.meta.journaled && Self::entry_pin_count(entry) == 0 {
                 candidates.push(page_id);
             }
             current = entry.dirty_next;
@@ -407,8 +371,7 @@ impl PageCache {
     }
 
     fn entry_pin_count(entry: &CachedPageEntry) -> usize {
-        let shared_pin_count = Arc::strong_count(&entry.page).saturating_sub(1);
-        entry.meta.manual_pin_count + shared_pin_count
+        Arc::strong_count(&entry.page).saturating_sub(1)
     }
 
     fn ensure_entry(&mut self, page_id: PageId) {
@@ -556,10 +519,7 @@ impl PageCache {
     /// with `need_sync = false`, and set it as `synced_head`. If none is found,
     /// `synced_head` is set to `None`.
     fn advance_synced_head_from(&mut self, page_id: PageId) {
-        let next = self
-            .entries
-            .get(&page_id)
-            .and_then(|e| e.dirty_next);
+        let next = self.entries.get(&page_id).and_then(|e| e.dirty_next);
         self.advance_synced_head_from_next(next);
     }
 

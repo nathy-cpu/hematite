@@ -25,10 +25,6 @@
 //! logic in tests and in the real database.
 
 use crate::error::Result;
-use crate::storage::format::{
-    bootstrap_database_page_one, detect_format_generation, DatabaseHeaderV3, FormatGeneration,
-    PageKind,
-};
 use crate::storage::free_list::FreeList;
 use crate::storage::{
     file_len_for_next_page_id, next_page_id_for_file_len, Page, PageId, DB_HEADER_PAGE_ID,
@@ -150,38 +146,7 @@ impl FileManager {
         Page::from_bytes(page_id, data)
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn detect_format_generation(&self) -> Result<Option<FormatGeneration>> {
-        let len = self.len()? as usize;
-        if len == 0 {
-            return Ok(None);
-        }
 
-        let probe_len = len.min(PAGE_SIZE);
-        let bytes = self.read_region(0, probe_len)?;
-        Ok(detect_format_generation(&bytes))
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn bootstrap_v3_database(
-        &mut self,
-        header: &DatabaseHeaderV3,
-        root_page_kind: PageKind,
-    ) -> Result<()> {
-        let page_one = bootstrap_database_page_one(header, root_page_kind)?;
-        self.truncate_to(PAGE_SIZE as u64)?;
-        self.write_region(0, &page_one)?;
-        self.next_page_id = 2;
-        self.free_list.replace(Vec::new());
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn read_region(&self, offset: u64, len: usize) -> Result<Vec<u8>> {
-        let mut bytes = vec![0u8; len];
-        self.read_exact_at(offset, &mut bytes)?;
-        Ok(bytes)
-    }
 
     pub fn write_page(&mut self, page: &Page) -> Result<()> {
         let offset = Self::page_offset(page.id)?;
@@ -192,12 +157,7 @@ impl FileManager {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn write_region(&mut self, offset: u64, bytes: &[u8]) -> Result<()> {
-        self.seek(SeekFrom::Start(offset))?;
-        self.write_all(bytes)?;
-        Ok(())
-    }
+
 
     pub fn allocate_page(&mut self) -> Result<PageId> {
         // Try to reuse a free page first
@@ -268,10 +228,7 @@ impl FileManager {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn truncate_to(&mut self, len: u64) -> Result<()> {
-        self.set_len(len)
-    }
+
 
     pub(crate) fn next_page_id(&self) -> u32 {
         self.next_page_id

@@ -84,6 +84,7 @@ impl BTreePageHeaderV3 {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn initialize_btree_page(
     page: &mut Page,
     kind: PageKind,
@@ -133,6 +134,7 @@ pub(crate) fn initialize_btree_page(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn cell_pointer(page: &Page, is_page_one: bool, index: usize) -> Result<u16> {
     let header = BTreePageHeaderV3::parse(page, is_page_one)?;
     if index >= header.cell_count as usize {
@@ -147,6 +149,7 @@ pub(crate) fn cell_pointer(page: &Page, is_page_one: bool, index: usize) -> Resu
     ))
 }
 
+#[cfg(test)]
 pub(crate) fn set_rightmost_child(page: &mut Page, is_page_one: bool, child: u32) -> Result<()> {
     let header = BTreePageHeaderV3::parse(page, is_page_one)?;
     if !header.kind.is_interior() {

@@ -147,13 +147,13 @@ fn statement_references_prefixed_alias(
                 expression_references_prefixed_alias(&assignment.value, alias, seen_subqueries)
             }) || update.where_clause.as_ref().is_some_and(|where_clause| {
                 where_clause.conditions.iter().any(|condition| {
-                    condition_references_prefixed_alias(condition, alias, seen_subqueries)
+                    expression_references_prefixed_alias(condition, alias, seen_subqueries)
                 })
             })
         }
         Statement::Delete(delete) => delete.where_clause.as_ref().is_some_and(|where_clause| {
             where_clause.conditions.iter().any(|condition| {
-                condition_references_prefixed_alias(condition, alias, seen_subqueries)
+                expression_references_prefixed_alias(condition, alias, seen_subqueries)
             })
         }),
         _ => false,
@@ -194,12 +194,12 @@ fn select_references_prefixed_alias(
         .any(|expr| expression_references_prefixed_alias(expr, alias, seen_subqueries))
         || select.where_clause.as_ref().is_some_and(|where_clause| {
             where_clause.conditions.iter().any(|condition| {
-                condition_references_prefixed_alias(condition, alias, seen_subqueries)
+                expression_references_prefixed_alias(condition, alias, seen_subqueries)
             })
         })
         || select.having_clause.as_ref().is_some_and(|having_clause| {
             having_clause.conditions.iter().any(|condition| {
-                condition_references_prefixed_alias(condition, alias, seen_subqueries)
+                expression_references_prefixed_alias(condition, alias, seen_subqueries)
             })
         })
         || table_reference_references_prefixed_alias(&select.from, alias, seen_subqueries)
@@ -232,53 +232,8 @@ fn table_reference_references_prefixed_alias(
         | TableReference::FullOuterJoin { left, right, on } => {
             table_reference_references_prefixed_alias(left, alias, seen_subqueries)
                 || table_reference_references_prefixed_alias(right, alias, seen_subqueries)
-                || condition_references_prefixed_alias(on, alias, seen_subqueries)
+                || expression_references_prefixed_alias(on, alias, seen_subqueries)
         }
-    }
-}
-
-fn condition_references_prefixed_alias(
-    condition: &Condition,
-    alias: &str,
-    seen_subqueries: &mut HashSet<*const SelectStatement>,
-) -> bool {
-    match condition {
-        Condition::Comparison { left, right, .. } => {
-            expression_references_prefixed_alias(left, alias, seen_subqueries)
-                || expression_references_prefixed_alias(right, alias, seen_subqueries)
-        }
-        Condition::Logical { left, right, .. } => {
-            condition_references_prefixed_alias(left, alias, seen_subqueries)
-                || condition_references_prefixed_alias(right, alias, seen_subqueries)
-        }
-        Condition::InList { expr, values, .. } => {
-            expression_references_prefixed_alias(expr, alias, seen_subqueries)
-                || values.iter().any(|value| {
-                    expression_references_prefixed_alias(value, alias, seen_subqueries)
-                })
-        }
-        Condition::InSubquery { expr, subquery, .. } => {
-            expression_references_prefixed_alias(expr, alias, seen_subqueries)
-                || select_references_prefixed_alias(subquery, alias, seen_subqueries)
-        }
-        Condition::Between {
-            expr, lower, upper, ..
-        } => {
-            expression_references_prefixed_alias(expr, alias, seen_subqueries)
-                || expression_references_prefixed_alias(lower, alias, seen_subqueries)
-                || expression_references_prefixed_alias(upper, alias, seen_subqueries)
-        }
-        Condition::Like { expr, pattern, .. } => {
-            expression_references_prefixed_alias(expr, alias, seen_subqueries)
-                || expression_references_prefixed_alias(pattern, alias, seen_subqueries)
-        }
-        Condition::Exists { subquery, .. } => {
-            select_references_prefixed_alias(subquery, alias, seen_subqueries)
-        }
-        Condition::NullCheck { expr, .. } => {
-            expression_references_prefixed_alias(expr, alias, seen_subqueries)
-        }
-        Condition::Not(inner) => condition_references_prefixed_alias(inner, alias, seen_subqueries),
     }
 }
 
@@ -505,22 +460,22 @@ fn mask_trigger_aliases_in_table_reference(table_reference: &TableReference) -> 
         TableReference::InnerJoin { left, right, on } => TableReference::InnerJoin {
             left: Box::new(mask_trigger_aliases_in_table_reference(left)),
             right: Box::new(mask_trigger_aliases_in_table_reference(right)),
-            on: mask_trigger_aliases_in_condition(on),
+            on: mask_trigger_aliases_in_expression(on),
         },
         TableReference::LeftJoin { left, right, on } => TableReference::LeftJoin {
             left: Box::new(mask_trigger_aliases_in_table_reference(left)),
             right: Box::new(mask_trigger_aliases_in_table_reference(right)),
-            on: mask_trigger_aliases_in_condition(on),
+            on: mask_trigger_aliases_in_expression(on),
         },
         TableReference::RightJoin { left, right, on } => TableReference::RightJoin {
             left: Box::new(mask_trigger_aliases_in_table_reference(left)),
             right: Box::new(mask_trigger_aliases_in_table_reference(right)),
-            on: mask_trigger_aliases_in_condition(on),
+            on: mask_trigger_aliases_in_expression(on),
         },
         TableReference::FullOuterJoin { left, right, on } => TableReference::FullOuterJoin {
             left: Box::new(mask_trigger_aliases_in_table_reference(left)),
             right: Box::new(mask_trigger_aliases_in_table_reference(right)),
-            on: mask_trigger_aliases_in_condition(on),
+            on: mask_trigger_aliases_in_expression(on),
         },
     }
 }
@@ -530,81 +485,8 @@ fn mask_trigger_aliases_in_where_clause(where_clause: &WhereClause) -> WhereClau
         conditions: where_clause
             .conditions
             .iter()
-            .map(mask_trigger_aliases_in_condition)
+            .map(mask_trigger_aliases_in_expression)
             .collect(),
-    }
-}
-
-fn mask_trigger_aliases_in_condition(condition: &Condition) -> Condition {
-    match condition {
-        Condition::Comparison {
-            left,
-            operator,
-            right,
-        } => Condition::Comparison {
-            left: mask_trigger_aliases_in_expression(left),
-            operator: operator.clone(),
-            right: mask_trigger_aliases_in_expression(right),
-        },
-        Condition::InList {
-            expr,
-            values,
-            is_not,
-        } => Condition::InList {
-            expr: mask_trigger_aliases_in_expression(expr),
-            values: values
-                .iter()
-                .map(mask_trigger_aliases_in_expression)
-                .collect(),
-            is_not: *is_not,
-        },
-        Condition::InSubquery {
-            expr,
-            subquery,
-            is_not,
-        } => Condition::InSubquery {
-            expr: mask_trigger_aliases_in_expression(expr),
-            subquery: Box::new(mask_trigger_aliases_in_select(subquery)),
-            is_not: *is_not,
-        },
-        Condition::Between {
-            expr,
-            lower,
-            upper,
-            is_not,
-        } => Condition::Between {
-            expr: mask_trigger_aliases_in_expression(expr),
-            lower: mask_trigger_aliases_in_expression(lower),
-            upper: mask_trigger_aliases_in_expression(upper),
-            is_not: *is_not,
-        },
-        Condition::Like {
-            expr,
-            pattern,
-            is_not,
-        } => Condition::Like {
-            expr: mask_trigger_aliases_in_expression(expr),
-            pattern: mask_trigger_aliases_in_expression(pattern),
-            is_not: *is_not,
-        },
-        Condition::Exists { subquery, is_not } => Condition::Exists {
-            subquery: Box::new(mask_trigger_aliases_in_select(subquery)),
-            is_not: *is_not,
-        },
-        Condition::NullCheck { expr, is_not } => Condition::NullCheck {
-            expr: mask_trigger_aliases_in_expression(expr),
-            is_not: *is_not,
-        },
-        Condition::Not(inner) => Condition::Not(Box::new(mask_trigger_aliases_in_condition(inner))),
-        Condition::Logical {
-            left,
-            operator,
-            right,
-        } => Condition::Logical {
-            left: Box::new(mask_trigger_aliases_in_condition(left)),
-            operator: operator.clone(),
-            right: Box::new(mask_trigger_aliases_in_condition(right)),
-        },
     }
 }
 
@@ -837,7 +719,7 @@ fn validate_select_with_outer_bindings(
     }) || select
         .having_clause
         .as_ref()
-        .is_some_and(|having| having.conditions.iter().any(condition_contains_aggregate));
+        .is_some_and(|having| having.conditions.iter().any(expression_contains_aggregate));
     let has_window = select
         .columns
         .iter()
@@ -918,7 +800,7 @@ fn validate_select_with_outer_bindings(
 
     if let Some(where_clause) = &select.where_clause {
         for condition in &where_clause.conditions {
-            validate_condition_with_bindings(
+            validate_expression_with_bindings(
                 select,
                 condition,
                 catalog,
@@ -1135,7 +1017,7 @@ fn validate_update(update: &UpdateStatement, catalog: &Schema) -> Result<()> {
 
     if let Some(where_clause) = &update.where_clause {
         for condition in &where_clause.conditions {
-            validate_condition(&scope, condition, catalog, &scope.from, &[])?;
+            validate_expression(&scope, condition, catalog, &scope.from, &[])?;
         }
     }
 
@@ -1247,7 +1129,7 @@ fn validate_delete(delete: &DeleteStatement, catalog: &Schema) -> Result<()> {
 
     if let Some(where_clause) = &delete.where_clause {
         for condition in &where_clause.conditions {
-            validate_condition(&scope, condition, catalog, &scope.from, &[])?;
+            validate_expression(&scope, condition, catalog, &scope.from, &[])?;
         }
     }
 
@@ -1635,7 +1517,7 @@ fn validate_table_reference(
         | TableReference::FullOuterJoin { left, right, on } => {
             validate_table_reference(select, catalog, left, local_bindings, outer_bindings)?;
             validate_table_reference(select, catalog, right, local_bindings, outer_bindings)?;
-            validate_condition_with_bindings(
+            validate_expression_with_bindings(
                 select,
                 on,
                 catalog,
@@ -1645,180 +1527,6 @@ fn validate_table_reference(
             )
         }
     }
-}
-
-fn validate_condition(
-    select: &SelectStatement,
-    condition: &Condition,
-    catalog: &Schema,
-    from: &TableReference,
-    outer_bindings: &[SourceBinding],
-) -> Result<()> {
-    let local_bindings = collect_source_bindings(select, catalog, from)?;
-    validate_condition_with_bindings(select, condition, catalog, from, &local_bindings, outer_bindings)
-}
-
-fn validate_condition_with_bindings(
-    select: &SelectStatement,
-    condition: &Condition,
-    catalog: &Schema,
-    from: &TableReference,
-    local_bindings: &[SourceBinding],
-    outer_bindings: &[SourceBinding],
-) -> Result<()> {
-    match condition {
-        Condition::Comparison { left, right, .. } => {
-            validate_expression_with_bindings(
-                select,
-                left,
-                catalog,
-                from,
-                local_bindings,
-                outer_bindings,
-            )?;
-            validate_expression_with_bindings(
-                select,
-                right,
-                catalog,
-                from,
-                local_bindings,
-                outer_bindings,
-            )?;
-        }
-        Condition::InList { expr, values, .. } => {
-            validate_expression_with_bindings(
-                select,
-                expr,
-                catalog,
-                from,
-                local_bindings,
-                outer_bindings,
-            )?;
-            for value in values {
-                validate_expression_with_bindings(
-                    select,
-                    value,
-                    catalog,
-                    from,
-                    local_bindings,
-                    outer_bindings,
-                )?;
-            }
-        }
-        Condition::InSubquery { expr, subquery, .. } => {
-            validate_expression_with_bindings(
-                select,
-                expr,
-                catalog,
-                from,
-                local_bindings,
-                outer_bindings,
-            )?;
-            validate_select_with_outer_bindings(
-                subquery,
-                catalog,
-                &combined_outer_bindings(local_bindings, outer_bindings),
-            )?;
-            if subquery.columns.len() != 1 {
-                return Err(HematiteError::ParseError(
-                    "Subquery predicates require exactly one selected column".to_string(),
-                ));
-            }
-        }
-        Condition::Between {
-            expr, lower, upper, ..
-        } => {
-            validate_expression_with_bindings(
-                select,
-                expr,
-                catalog,
-                from,
-                local_bindings,
-                outer_bindings,
-            )?;
-            validate_expression_with_bindings(
-                select,
-                lower,
-                catalog,
-                from,
-                local_bindings,
-                outer_bindings,
-            )?;
-            validate_expression_with_bindings(
-                select,
-                upper,
-                catalog,
-                from,
-                local_bindings,
-                outer_bindings,
-            )?;
-        }
-        Condition::Like { expr, pattern, .. } => {
-            validate_expression_with_bindings(
-                select,
-                expr,
-                catalog,
-                from,
-                local_bindings,
-                outer_bindings,
-            )?;
-            validate_expression_with_bindings(
-                select,
-                pattern,
-                catalog,
-                from,
-                local_bindings,
-                outer_bindings,
-            )?;
-        }
-        Condition::Exists { subquery, .. } => {
-            validate_select_with_outer_bindings(
-                subquery,
-                catalog,
-                &combined_outer_bindings(local_bindings, outer_bindings),
-            )?;
-        }
-        Condition::NullCheck { expr, .. } => {
-            validate_expression_with_bindings(
-                select,
-                expr,
-                catalog,
-                from,
-                local_bindings,
-                outer_bindings,
-            )?;
-        }
-        Condition::Not(condition) => {
-            validate_condition_with_bindings(
-                select,
-                condition,
-                catalog,
-                from,
-                local_bindings,
-                outer_bindings,
-            )?;
-        }
-        Condition::Logical { left, right, .. } => {
-            validate_condition_with_bindings(
-                select,
-                left,
-                catalog,
-                from,
-                local_bindings,
-                outer_bindings,
-            )?;
-            validate_condition_with_bindings(
-                select,
-                right,
-                catalog,
-                from,
-                local_bindings,
-                outer_bindings,
-            )?;
-        }
-    }
-
-    Ok(())
 }
 
 fn validate_expression(
@@ -2543,7 +2251,7 @@ fn validate_drop_column(alter: &AlterStatement, catalog: &Schema, column_name: &
     }
     for constraint in &table.check_constraints {
         let condition =
-            crate::parser::parser::parse_condition_fragment(&constraint.expression_sql)?;
+            crate::parser::parser::parse_expression_fragment(&constraint.expression_sql)?;
         if condition.references_column(column_name, Some(&table.name)) {
             return Err(HematiteError::ParseError(format!(
                 "Cannot drop column '{}' because it is used by a CHECK constraint",
@@ -2605,7 +2313,7 @@ fn expression_contains_aggregate(expr: &Expression) -> bool {
                     where_clause
                         .conditions
                         .iter()
-                        .any(condition_contains_aggregate)
+                        .any(expression_contains_aggregate)
                 })
         }
         Expression::Between {
@@ -2623,56 +2331,13 @@ fn expression_contains_aggregate(expr: &Expression) -> bool {
                 where_clause
                     .conditions
                     .iter()
-                    .any(condition_contains_aggregate)
+                    .any(expression_contains_aggregate)
             })
         }
         Expression::Column(_)
         | Expression::Literal(_)
         | Expression::IntervalLiteral { .. }
         | Expression::Parameter(_) => false,
-    }
-}
-
-fn condition_contains_aggregate(condition: &Condition) -> bool {
-    match condition {
-        Condition::Comparison { left, right, .. } => {
-            expression_contains_aggregate(left) || expression_contains_aggregate(right)
-        }
-        Condition::InList { expr, values, .. } => {
-            expression_contains_aggregate(expr) || values.iter().any(expression_contains_aggregate)
-        }
-        Condition::InSubquery { expr, subquery, .. } => {
-            expression_contains_aggregate(expr)
-                || subquery.where_clause.as_ref().is_some_and(|where_clause| {
-                    where_clause
-                        .conditions
-                        .iter()
-                        .any(condition_contains_aggregate)
-                })
-        }
-        Condition::Between {
-            expr, lower, upper, ..
-        } => {
-            expression_contains_aggregate(expr)
-                || expression_contains_aggregate(lower)
-                || expression_contains_aggregate(upper)
-        }
-        Condition::Like { expr, pattern, .. } => {
-            expression_contains_aggregate(expr) || expression_contains_aggregate(pattern)
-        }
-        Condition::Exists { subquery, .. } => {
-            subquery.where_clause.as_ref().is_some_and(|where_clause| {
-                where_clause
-                    .conditions
-                    .iter()
-                    .any(condition_contains_aggregate)
-            })
-        }
-        Condition::NullCheck { expr, .. } => expression_contains_aggregate(expr),
-        Condition::Not(condition) => condition_contains_aggregate(condition),
-        Condition::Logical { left, right, .. } => {
-            condition_contains_aggregate(left) || condition_contains_aggregate(right)
-        }
     }
 }
 

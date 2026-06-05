@@ -1,6 +1,7 @@
+#![allow(dead_code)]
 use crate::catalog::Value;
 use crate::parser::ast::{
-    ComparisonOperator, Condition, Expression, LogicalOperator, SelectStatement, WhereClause,
+    ComparisonOperator, Expression, LogicalOperator, SelectStatement, WhereClause,
 };
 use crate::parser::LiteralValue;
 use crate::query::logest::LogEst;
@@ -20,16 +21,16 @@ pub(crate) fn extract_literal_equalities(
 }
 
 fn collect_literal_equalities(
-    condition: &Condition,
+    condition: &Expression,
     equalities: &mut HashMap<String, Value>,
 ) -> bool {
     match condition {
-        Condition::Comparison {
+        Expression::Comparison {
             left,
             operator: ComparisonOperator::Equal,
             right,
         } => {
-            let (column_name, value) = match (left, right) {
+            let (column_name, value) = match (left.as_ref(), right.as_ref()) {
                 (Expression::Column(column_name), Expression::Literal(value)) => (
                     SelectStatement::column_reference_name(column_name),
                     lower_literal_value(value),
@@ -49,7 +50,7 @@ fn collect_literal_equalities(
                 }
             }
         }
-        Condition::Logical {
+        Expression::Logical {
             left,
             operator: LogicalOperator::And,
             right,
@@ -87,7 +88,7 @@ pub(crate) enum TermOperator {
 #[derive(Debug, Clone)]
 pub(crate) struct WhereTerm {
     /// The original (or synthesized) condition.
-    pub condition: Condition,
+    pub condition: Expression,
     /// Classified operator.
     pub op: TermOperator,
     /// The column this term constrains (if single-column).
@@ -142,9 +143,9 @@ pub(crate) fn analyse_where(where_clause: &WhereClause) -> Vec<WhereTerm> {
     terms
 }
 
-fn flatten_and_tree(cond: &Condition, out: &mut Vec<WhereTerm>) {
+fn flatten_and_tree(cond: &Expression, out: &mut Vec<WhereTerm>) {
     match cond {
-        Condition::Logical {
+        Expression::Logical {
             left,
             operator: LogicalOperator::And,
             right,
@@ -168,9 +169,9 @@ fn flatten_and_tree(cond: &Condition, out: &mut Vec<WhereTerm>) {
     }
 }
 
-fn classify_condition(cond: &Condition) -> TermOperator {
+fn classify_condition(cond: &Expression) -> TermOperator {
     match cond {
-        Condition::Comparison { operator, .. } => match operator {
+        Expression::Comparison { operator, .. } => match operator {
             ComparisonOperator::Equal => TermOperator::Eq,
             ComparisonOperator::NotEqual => TermOperator::Ne,
             ComparisonOperator::LessThan => TermOperator::Lt,
@@ -178,22 +179,22 @@ fn classify_condition(cond: &Condition) -> TermOperator {
             ComparisonOperator::GreaterThan => TermOperator::Gt,
             ComparisonOperator::GreaterThanOrEqual => TermOperator::Ge,
         },
-        Condition::InList { .. } | Condition::InSubquery { .. } => TermOperator::In,
-        Condition::NullCheck { is_not: false, .. } => TermOperator::IsNull,
-        Condition::NullCheck { is_not: true, .. } => TermOperator::IsNotNull,
-        Condition::Between { .. } => TermOperator::Between,
-        Condition::Like { .. } => TermOperator::Like,
+        Expression::InList { .. } | Expression::InSubquery { .. } => TermOperator::In,
+        Expression::NullCheck { is_not: false, .. } => TermOperator::IsNull,
+        Expression::NullCheck { is_not: true, .. } => TermOperator::IsNotNull,
+        Expression::Between { .. } => TermOperator::Between,
+        Expression::Like { .. } => TermOperator::Like,
         _ => TermOperator::Other,
     }
 }
 
-fn extract_condition_column_info(cond: &Condition) -> (Option<String>, Option<String>) {
+fn extract_condition_column_info(cond: &Expression) -> (Option<String>, Option<String>) {
     match cond {
-        Condition::Comparison { left, .. } => extract_column_info_from_expr(left),
-        Condition::InList { expr, .. }
-        | Condition::Between { expr, .. }
-        | Condition::Like { expr, .. }
-        | Condition::NullCheck { expr, .. } => extract_column_info_from_expr(expr),
+        Expression::Comparison { left, .. } => extract_column_info_from_expr(left),
+        Expression::InList { expr, .. }
+        | Expression::Between { expr, .. }
+        | Expression::Like { expr, .. }
+        | Expression::NullCheck { expr, .. } => extract_column_info_from_expr(expr),
         _ => (None, None),
     }
 }
@@ -208,7 +209,7 @@ fn extract_column_info_from_expr(expr: &Expression) -> (Option<String>, Option<S
     }
 }
 
-fn extract_column_info(cond: &Condition) -> (Option<String>, Option<String>) {
+fn extract_column_info(cond: &Expression) -> (Option<String>, Option<String>) {
     extract_condition_column_info(cond)
 }
 
@@ -229,35 +230,38 @@ fn estimate_selectivity(op: TermOperator) -> LogEst {
 }
 
 /// Commute `literal op column` → `column op' column` where applicable.
-fn try_commute(cond: &Condition) -> Option<Condition> {
+fn try_commute(cond: &Expression) -> Option<Expression> {
     match cond {
-        Condition::Comparison {
-            left: left @ Expression::Literal(_),
+        Expression::Comparison {
+            left,
             operator,
-            right: right @ Expression::Column(_),
-        } => {
-            let commuted_op = match operator {
-                ComparisonOperator::Equal => ComparisonOperator::Equal,
-                ComparisonOperator::NotEqual => ComparisonOperator::NotEqual,
-                ComparisonOperator::LessThan => ComparisonOperator::GreaterThan,
-                ComparisonOperator::LessThanOrEqual => ComparisonOperator::GreaterThanOrEqual,
-                ComparisonOperator::GreaterThan => ComparisonOperator::LessThan,
-                ComparisonOperator::GreaterThanOrEqual => ComparisonOperator::LessThanOrEqual,
-            };
-            Some(Condition::Comparison {
-                left: right.clone(),
-                operator: commuted_op,
-                right: left.clone(),
-            })
-        }
+            right,
+        } => match (left.as_ref(), right.as_ref()) {
+            (left_inner @ Expression::Literal(_), right_inner @ Expression::Column(_)) => {
+                let commuted_op = match operator {
+                    ComparisonOperator::Equal => ComparisonOperator::Equal,
+                    ComparisonOperator::NotEqual => ComparisonOperator::NotEqual,
+                    ComparisonOperator::LessThan => ComparisonOperator::GreaterThan,
+                    ComparisonOperator::LessThanOrEqual => ComparisonOperator::GreaterThanOrEqual,
+                    ComparisonOperator::GreaterThan => ComparisonOperator::LessThan,
+                    ComparisonOperator::GreaterThanOrEqual => ComparisonOperator::LessThanOrEqual,
+                };
+                Some(Expression::Comparison {
+                    left: Box::new(right_inner.clone()),
+                    operator: commuted_op,
+                    right: Box::new(left_inner.clone()),
+                })
+            }
+            _ => None,
+        },
         _ => None,
     }
 }
 
 /// Generate range terms from LIKE prefix patterns.
-fn generate_like_prefix_ranges(cond: &Condition) -> Vec<WhereTerm> {
+fn generate_like_prefix_ranges(cond: &Expression) -> Vec<WhereTerm> {
     let (expr, pattern, is_not) = match cond {
-        Condition::Like {
+        Expression::Like {
             expr,
             pattern,
             is_not,
@@ -269,7 +273,7 @@ fn generate_like_prefix_ranges(cond: &Condition) -> Vec<WhereTerm> {
         return Vec::new();
     }
 
-    let prefix = match pattern {
+    let prefix = match pattern.as_ref() {
         Expression::Literal(LiteralValue::Text(s)) => extract_like_prefix(s),
         _ => return Vec::new(),
     };
@@ -283,14 +287,14 @@ fn generate_like_prefix_ranges(cond: &Condition) -> Vec<WhereTerm> {
     }
 
     let mut result = Vec::new();
-    let (col, tbl) = extract_column_info_from_expr(expr);
+    let (col, tbl) = extract_column_info_from_expr(expr.as_ref());
 
     // Lower bound: x >= prefix
     result.push(WhereTerm {
-        condition: Condition::Comparison {
+        condition: Expression::Comparison {
             left: expr.clone(),
             operator: ComparisonOperator::GreaterThanOrEqual,
-            right: Expression::Literal(LiteralValue::Text(prefix.clone())),
+            right: Box::new(Expression::Literal(LiteralValue::Text(prefix.clone()))),
         },
         op: TermOperator::Ge,
         column: col.clone(),
@@ -302,10 +306,10 @@ fn generate_like_prefix_ranges(cond: &Condition) -> Vec<WhereTerm> {
     // Upper bound: x < prefix_next
     if let Some(upper_str) = increment_string(&prefix) {
         result.push(WhereTerm {
-            condition: Condition::Comparison {
+            condition: Expression::Comparison {
                 left: expr.clone(),
                 operator: ComparisonOperator::LessThan,
-                right: Expression::Literal(LiteralValue::Text(upper_str)),
+                right: Box::new(Expression::Literal(LiteralValue::Text(upper_str))),
             },
             op: TermOperator::Lt,
             column: col,
@@ -355,36 +359,31 @@ fn generate_transitive_equalities(terms: &[WhereTerm]) -> Vec<WhereTerm> {
             continue;
         }
         match &term.condition {
-            Condition::Comparison {
-                left: Expression::Column(a),
+            Expression::Comparison {
+                left,
                 operator: ComparisonOperator::Equal,
-                right: Expression::Literal(lit),
-            } => {
-                col_literals.push((
-                    SelectStatement::column_reference_name(a).to_string(),
-                    lit.clone(),
-                ));
-            }
-            Condition::Comparison {
-                left: Expression::Literal(lit),
-                operator: ComparisonOperator::Equal,
-                right: Expression::Column(a),
-            } => {
-                col_literals.push((
-                    SelectStatement::column_reference_name(a).to_string(),
-                    lit.clone(),
-                ));
-            }
-            Condition::Comparison {
-                left: Expression::Column(a),
-                operator: ComparisonOperator::Equal,
-                right: Expression::Column(b),
-            } => {
-                col_col_eqs.push((
-                    SelectStatement::column_reference_name(a).to_string(),
-                    SelectStatement::column_reference_name(b).to_string(),
-                ));
-            }
+                right,
+            } => match (left.as_ref(), right.as_ref()) {
+                (Expression::Column(a), Expression::Literal(lit)) => {
+                    col_literals.push((
+                        SelectStatement::column_reference_name(a).to_string(),
+                        lit.clone(),
+                    ));
+                }
+                (Expression::Literal(lit), Expression::Column(a)) => {
+                    col_literals.push((
+                        SelectStatement::column_reference_name(a).to_string(),
+                        lit.clone(),
+                    ));
+                }
+                (Expression::Column(a), Expression::Column(b)) => {
+                    col_col_eqs.push((
+                        SelectStatement::column_reference_name(a).to_string(),
+                        SelectStatement::column_reference_name(b).to_string(),
+                    ));
+                }
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -404,10 +403,10 @@ fn generate_transitive_equalities(terms: &[WhereTerm]) -> Vec<WhereTerm> {
                 let already_exists = col_literals.iter().any(|(c, _)| c == target_col);
                 if !already_exists {
                     result.push(WhereTerm {
-                        condition: Condition::Comparison {
-                            left: Expression::Column(target_col.clone()),
+                        condition: Expression::Comparison {
+                            left: Box::new(Expression::Column(target_col.clone())),
                             operator: ComparisonOperator::Equal,
-                            right: Expression::Literal(lit.clone()),
+                            right: Box::new(Expression::Literal(lit.clone())),
                         },
                         op: TermOperator::Eq,
                         column: Some(target_col.clone()),
@@ -439,15 +438,15 @@ mod tests {
     fn test_where_term_analysis_basic() {
         let wc = WhereClause {
             conditions: vec![
-                Condition::Comparison {
-                    left: col("id"),
+                Expression::Comparison {
+                    left: Box::new(col("id")),
                     operator: ComparisonOperator::Equal,
-                    right: int(5),
+                    right: Box::new(int(5)),
                 },
-                Condition::Comparison {
-                    left: col("age"),
+                Expression::Comparison {
+                    left: Box::new(col("age")),
                     operator: ComparisonOperator::GreaterThan,
-                    right: int(18),
+                    right: Box::new(int(18)),
                 },
             ],
         };
@@ -461,10 +460,10 @@ mod tests {
     #[test]
     fn test_commuted_comparison() {
         let wc = WhereClause {
-            conditions: vec![Condition::Comparison {
-                left: int(5),
+            conditions: vec![Expression::Comparison {
+                left: Box::new(int(5)),
                 operator: ComparisonOperator::LessThan,
-                right: col("x"),
+                right: Box::new(col("x")),
             }],
         };
         let terms = analyse_where(&wc);
@@ -476,9 +475,9 @@ mod tests {
     #[test]
     fn test_like_prefix_ranges() {
         let wc = WhereClause {
-            conditions: vec![Condition::Like {
-                expr: col("name"),
-                pattern: Expression::Literal(LiteralValue::Text("abc%".to_string())),
+            conditions: vec![Expression::Like {
+                expr: Box::new(col("name")),
+                pattern: Box::new(Expression::Literal(LiteralValue::Text("abc%".to_string()))),
                 is_not: false,
             }],
         };
@@ -493,15 +492,15 @@ mod tests {
     fn test_transitive_equality() {
         let wc = WhereClause {
             conditions: vec![
-                Condition::Comparison {
-                    left: col("a"),
+                Expression::Comparison {
+                    left: Box::new(col("a")),
                     operator: ComparisonOperator::Equal,
-                    right: col("b"),
+                    right: Box::new(col("b")),
                 },
-                Condition::Comparison {
-                    left: col("b"),
+                Expression::Comparison {
+                    left: Box::new(col("b")),
                     operator: ComparisonOperator::Equal,
-                    right: int(5),
+                    right: Box::new(int(5)),
                 },
             ],
         };

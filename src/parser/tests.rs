@@ -95,10 +95,10 @@ mod ast_tests {
             column_aliases: vec![None],
             from: TableReference::Table("users".to_string(), None),
             where_clause: Some(WhereClause {
-                conditions: vec![Condition::Comparison {
-                    left: Expression::Column("missing".to_string()),
+                conditions: vec![Expression::Comparison {
+                    left: Box::new(Expression::Column("missing".to_string())),
                     operator: ComparisonOperator::Equal,
-                    right: Expression::Literal(LiteralValue::Integer(1)),
+                    right: Box::new(Expression::Literal(LiteralValue::Integer(1))),
                 }],
             }),
             group_by: Vec::new(),
@@ -1075,7 +1075,7 @@ mod parser_tests {
         assert_eq!(where_clause.conditions.len(), 1);
         assert!(matches!(
             &where_clause.conditions[0],
-            Condition::InList { is_not: false, values, .. } if values.len() == 2
+            Expression::InList { is_not: false, values, .. } if values.len() == 2
         ));
         Ok(())
     }
@@ -1087,7 +1087,7 @@ mod parser_tests {
         assert_eq!(where_clause.conditions.len(), 1);
         assert!(matches!(
             &where_clause.conditions[0],
-            Condition::Between { is_not: false, .. }
+            Expression::Between { is_not: false, .. }
         ));
         Ok(())
     }
@@ -1099,7 +1099,7 @@ mod parser_tests {
         assert_eq!(where_clause.conditions.len(), 1);
         assert!(matches!(
             &where_clause.conditions[0],
-            Condition::Like { is_not: false, .. }
+            Expression::Like { is_not: false, .. }
         ));
         Ok(())
     }
@@ -1109,7 +1109,7 @@ mod parser_tests {
         let select = parse_select("SELECT id FROM users WHERE NOT (id = 1 OR id = 2);")?;
         let where_clause = select.where_clause.expect("missing WHERE clause");
         assert_eq!(where_clause.conditions.len(), 1);
-        assert!(matches!(&where_clause.conditions[0], Condition::Not(_)));
+        assert!(matches!(&where_clause.conditions[0], Expression::UnaryNot(_)));
         Ok(())
     }
 
@@ -1127,10 +1127,10 @@ mod parser_tests {
         let where_clause = select.where_clause.expect("missing WHERE clause");
         assert!(matches!(
             &where_clause.conditions[0],
-            Condition::Comparison {
-                left: Expression::UnaryMinus(_),
+            Expression::Comparison {
+                left,
                 ..
-            }
+            } if matches!(left.as_ref(), Expression::UnaryMinus(_))
         ));
         Ok(())
     }
@@ -1251,7 +1251,7 @@ mod parser_tests {
         let where_clause = select.where_clause.expect("missing WHERE clause");
         assert!(matches!(
             &where_clause.conditions[0],
-            Condition::Comparison {
+            Expression::Comparison {
                 operator: ComparisonOperator::NotEqual,
                 ..
             }
@@ -1444,15 +1444,15 @@ mod parser_tests {
         assert_eq!(where_clause.conditions.len(), 1);
 
         match &where_clause.conditions[0] {
-            Condition::Logical {
+            Expression::Logical {
                 left,
                 operator: LogicalOperator::Or,
                 right,
             } => {
-                assert!(matches!(**left, Condition::Comparison { .. }));
+                assert!(matches!(**left, Expression::Comparison { .. }));
                 assert!(matches!(
                     **right,
-                    Condition::Logical {
+                    Expression::Logical {
                         operator: LogicalOperator::And,
                         ..
                     }
@@ -1486,19 +1486,19 @@ mod parser_tests {
         assert_eq!(where_clause.conditions.len(), 1);
 
         match &where_clause.conditions[0] {
-            Condition::Logical {
+            Expression::Logical {
                 left,
                 operator: LogicalOperator::And,
                 right,
             } => {
                 assert!(matches!(
                     **left,
-                    Condition::Logical {
+                    Expression::Logical {
                         operator: LogicalOperator::Or,
                         ..
                     }
                 ));
-                assert!(matches!(**right, Condition::Comparison { .. }));
+                assert!(matches!(**right, Expression::Comparison { .. }));
             }
             other => panic!("Expected AND condition at the root, found {:?}", other),
         }
@@ -1607,7 +1607,7 @@ mod parser_tests {
         assert_eq!(where_clause.conditions.len(), 1);
         assert!(matches!(
             where_clause.conditions[0],
-            Condition::NullCheck { is_not: false, .. }
+            Expression::NullCheck { is_not: false, .. }
         ));
         Ok(())
     }
@@ -2097,12 +2097,13 @@ mod parser_tests {
                     TableReference::Table(name, Some(alias)) if name == "posts" && alias == "p"
                 ));
                 assert!(matches!(
-                    on,
-                    Condition::Comparison {
-                        left: Expression::Column(left),
+                    &on,
+                    Expression::Comparison {
+                        left,
                         operator: ComparisonOperator::Equal,
-                        right: Expression::Column(right),
-                    } if left == "u.id" && right == "p.user_id"
+                        right,
+                    } if matches!(left.as_ref(), Expression::Column(l) if l == "u.id")
+                      && matches!(right.as_ref(), Expression::Column(r) if r == "p.user_id")
                 ));
             }
             other => panic!("Expected inner join source tree, found {:?}", other),
@@ -2122,13 +2123,13 @@ mod parser_tests {
         );
         assert!(matches!(
             &select.where_clause.as_ref().expect("missing WHERE clause").conditions[0],
-            Condition::Logical { left, operator: LogicalOperator::Or, right }
+            Expression::Logical { left, operator: LogicalOperator::Or, right }
             if matches!(
                 &**left,
-                Condition::InSubquery { is_not: false, .. }
+                Expression::InSubquery { is_not: false, .. }
             ) && matches!(
                 &**right,
-                Condition::Exists { is_not: false, .. }
+                Expression::Exists { is_not: false, .. }
             )
         ));
 
@@ -2243,12 +2244,13 @@ mod parser_tests {
                     TableReference::Table(name, Some(alias)) if name == "posts" && alias == "p"
                 ));
                 assert!(matches!(
-                    on,
-                    Condition::Comparison {
-                        left: Expression::Column(left),
+                    &on,
+                    Expression::Comparison {
+                        left,
                         operator: ComparisonOperator::Equal,
-                        right: Expression::Column(right),
-                    } if left == "u.id" && right == "p.user_id"
+                        right,
+                    } if matches!(left.as_ref(), Expression::Column(l) if l == "u.id")
+                      && matches!(right.as_ref(), Expression::Column(r) if r == "p.user_id")
                 ));
             }
             other => panic!("Expected left join source tree, found {:?}", other),
@@ -2387,7 +2389,7 @@ mod parser_tests {
 
 mod perf_baseline_tests {
     use crate::error::Result;
-    use crate::parser::parser::parse_condition_fragment;
+    use crate::parser::parser::parse_expression_fragment;
     use crate::parser::{tokenize_sql, Parser};
     use crate::sql::script::split_script_tokens;
     use std::time::{Duration, Instant};
@@ -2489,9 +2491,9 @@ mod perf_baseline_tests {
     #[ignore]
     fn baseline_check_condition_fragment_parse() -> Result<()> {
         let sql = "(score BETWEEN 1 AND 100 AND (status = 'ACTIVE' OR status = 'PENDING')) OR (expires_at IS NULL AND retries < 3)";
-        let _ = parse_condition_fragment(sql)?;
+        let _ = parse_expression_fragment(sql)?;
         let elapsed = measure("baseline_check_condition_fragment_parse", 5_000, || {
-            parse_condition_fragment(sql).expect("condition fragment should parse");
+            parse_expression_fragment(sql).expect("condition fragment should parse");
         });
         eprintln!("condition fragment bytes={}", sql.len());
         assert!(elapsed > Duration::ZERO);

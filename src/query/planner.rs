@@ -727,7 +727,7 @@ impl QueryPlanner {
         statement: &SelectStatement,
         left: &TableReference,
         right: &TableReference,
-        on: Option<&Condition>,
+        on: Option<&Expression>,
         preserve_left_rows: bool,
     ) -> usize {
         let left_rows = self.estimate_complex_source_rows(statement, left).max(1);
@@ -843,14 +843,18 @@ impl QueryPlanner {
     }
 }
 
-fn is_equality_join_condition(condition: &Condition) -> bool {
+fn is_equality_join_condition(condition: &Expression) -> bool {
     match condition {
-        Condition::Comparison {
-            left: Expression::Column(_),
+        Expression::Comparison {
+            left,
             operator: ComparisonOperator::Equal,
-            right: Expression::Column(_),
-        } => true,
-        Condition::Logical {
+            right,
+        } if matches!(left.as_ref(), Expression::Column(_))
+            && matches!(right.as_ref(), Expression::Column(_)) =>
+        {
+            true
+        }
+        Expression::Logical {
             left,
             operator: LogicalOperator::And,
             right,

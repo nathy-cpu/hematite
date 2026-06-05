@@ -17,7 +17,6 @@
 //! This is the generic data-structure half of the future fork point.
 
 pub mod bytes;
-pub(crate) mod cell_format;
 pub mod codec;
 pub(crate) mod cursor;
 pub(crate) mod index;

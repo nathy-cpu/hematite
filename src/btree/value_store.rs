@@ -36,9 +36,6 @@ pub const MAX_LOCAL_PAYLOAD: usize = (PAGE_SIZE - 12) * 64 / 255 - 23;
 /// For 4096-byte pages: (4096 - 12) * 32 / 255 - 23 = 489.
 pub const MIN_LOCAL_PAYLOAD: usize = (PAGE_SIZE - 12) * 32 / 255 - 23;
 
-/// Backward-compatible alias — tests and external code may reference this.
-pub const STORED_VALUE_LOCAL_CAPACITY: usize = MAX_LOCAL_PAYLOAD;
-
 /// Compute how many bytes of `total_payload_len` should be stored locally in
 /// the leaf cell, following SQLite's `btreePayloadToLocal()` algorithm.
 ///

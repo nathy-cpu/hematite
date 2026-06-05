@@ -45,135 +45,12 @@ mod wal_tests {
     use crate::storage::file_len_for_next_page_id;
     use crate::storage::metadata_page;
     use crate::storage::wal::{
-        load_visible_state_from_path_with_base, VisibleWalState, WalFile, WalFrame, WalHeader,
-        WalRecord,
+        load_visible_state_from_path_with_base, WalFile, WalFrame, WalHeader,
     };
     use crate::storage::{PAGE_SIZE, STORAGE_METADATA_PAGE_ID};
     use crate::test_utils::TestDbFile;
     use std::collections::HashMap;
     use std::fs;
-
-    #[test]
-    fn test_wal_record_file_roundtrip() -> crate::error::Result<()> {
-        let first = WalRecord {
-            sequence: 1,
-            file_len: file_len_for_next_page_id(3),
-            free_pages: vec![9, 12],
-            checksums: vec![(2, 11), (4, 22)],
-            frames: vec![WalFrame::new(2, vec![7u8; crate::storage::PAGE_SIZE])],
-        };
-        let second = WalRecord {
-            sequence: 2,
-            file_len: file_len_for_next_page_id(4),
-            free_pages: vec![12],
-            checksums: vec![(2, 33), (4, 44)],
-            frames: vec![WalFrame::new(4, vec![9u8; crate::storage::PAGE_SIZE])],
-        };
-
-        let encoded = WalRecord::encode_file(&[first.clone(), second.clone()])?;
-        let decoded = WalRecord::decode_file(&encoded)?;
-        assert_eq!(decoded, vec![first, second]);
-        Ok(())
-    }
-
-    #[test]
-    fn test_wal_decode_ignores_truncated_tail_record() -> crate::error::Result<()> {
-        let record = WalRecord {
-            sequence: 1,
-            file_len: file_len_for_next_page_id(2),
-            free_pages: vec![8],
-            checksums: vec![(2, 99)],
-            frames: vec![WalFrame::new(2, vec![5u8; crate::storage::PAGE_SIZE])],
-        };
-
-        let mut encoded = WalRecord::encode_file(&[record.clone()])?;
-        let mut partial_tail = WalRecord::encode_file(&[WalRecord {
-            sequence: 2,
-            file_len: file_len_for_next_page_id(3),
-            free_pages: vec![],
-            checksums: vec![(2, 100)],
-            frames: vec![WalFrame::new(3, vec![6u8; crate::storage::PAGE_SIZE])],
-        }])?;
-        partial_tail.truncate(partial_tail.len() - 17);
-        encoded.extend_from_slice(&partial_tail[24..]);
-
-        let decoded = WalRecord::decode_file(&encoded)?;
-        assert_eq!(decoded, vec![record]);
-        Ok(())
-    }
-
-    #[test]
-    fn test_wal_decode_rejects_record_checksum_mismatch() {
-        let record = WalRecord {
-            sequence: 1,
-            file_len: file_len_for_next_page_id(2),
-            free_pages: vec![],
-            checksums: vec![(2, 99)],
-            frames: vec![WalFrame::new(2, vec![5u8; crate::storage::PAGE_SIZE])],
-        };
-
-        let mut encoded = WalRecord::encode_file(&[record]).unwrap();
-        let last = encoded.len() - 1;
-        encoded[last] ^= 0xFF;
-
-        let err = WalRecord::decode_file(&encoded).unwrap_err();
-        assert!(err.to_string().contains("checksum mismatch"));
-    }
-
-    #[test]
-    fn test_wal_visible_state_discards_frames_for_pages_freed_later() -> crate::error::Result<()> {
-        let live_page_id = 2;
-        let freed_page_id = 3;
-
-        let first = WalRecord {
-            sequence: 1,
-            file_len: file_len_for_next_page_id(4),
-            free_pages: vec![],
-            checksums: vec![(live_page_id, 11), (freed_page_id, 22)],
-            frames: vec![
-                WalFrame::new(live_page_id, vec![7u8; crate::storage::PAGE_SIZE]),
-                WalFrame::new(freed_page_id, vec![9u8; crate::storage::PAGE_SIZE]),
-            ],
-        };
-        let second = WalRecord {
-            sequence: 2,
-            file_len: file_len_for_next_page_id(4),
-            free_pages: vec![freed_page_id],
-            checksums: vec![(live_page_id, 33)],
-            frames: vec![WalFrame::new(
-                live_page_id,
-                vec![5u8; crate::storage::PAGE_SIZE],
-            )],
-        };
-
-        let state = WalRecord::visible_state_from_records(&[first, second])
-            .expect("visible state should exist for committed WAL records");
-        assert_eq!(state.visible_sequence, 2);
-        assert_eq!(state.page_overrides.get(&live_page_id).unwrap()[0], 5);
-        assert!(!state.page_overrides.contains_key(&freed_page_id));
-        Ok(())
-    }
-
-    #[test]
-    fn test_wal_visible_state_apply_record_rejects_non_increasing_sequences() {
-        let state = VisibleWalState::from_database_state(
-            file_len_for_next_page_id(3),
-            Vec::new(),
-            HashMap::new(),
-        );
-        let err = state
-            .apply_record(&WalRecord {
-                sequence: 0,
-                file_len: file_len_for_next_page_id(3),
-                free_pages: vec![],
-                checksums: vec![],
-                frames: vec![],
-            })
-            .unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("WAL sequences must increase strictly"));
-    }
 
     #[test]
     fn test_wal_visible_state_rejects_malformed_committed_metadata_frame(
@@ -214,7 +91,9 @@ mod pager_tests {
     use crate::storage::journal::{JournalRecord, JournalState, RollbackJournal};
     use crate::storage::pager::Pager;
     use crate::storage::pager_metadata::PersistedPagerState;
-    use crate::storage::wal::{WalFile, WalFrame, WalHeader, WalRecord};
+    use crate::storage::wal::{
+        load_visible_state_from_path_with_base, WalFile, WalFrame, WalHeader,
+    };
     use crate::storage::{
         metadata_page, JournalMode, Page, DB_HEADER_PAGE_ID, PAGE_SIZE, STORAGE_METADATA_PAGE_ID,
     };
@@ -1237,8 +1116,14 @@ mod pager_tests {
         second_writer.write_page(updated_page)?;
         second_writer.commit_transaction()?;
 
-        let state = WalRecord::load_visible_state_from_path(&wal_path)?
-            .expect("WAL state should exist after committed transactions");
+        let state = load_visible_state_from_path_with_base(
+            &wal_path,
+            crate::storage::file_len_for_next_page_id(3),
+            Vec::new(),
+            HashMap::new(),
+            &vec![0u8; PAGE_SIZE],
+        )?
+        .expect("WAL state should exist after committed transactions");
         assert_eq!(state.visible_sequence, 2);
 
         pinned_reader.end_read()?;
@@ -1266,16 +1151,27 @@ mod pager_tests {
             page_id
         };
 
+        let metadata_page = {
+            let pager = Pager::new(test_db.path(), 8)?;
+            pager
+                .read_page(crate::storage::STORAGE_METADATA_PAGE_ID)?
+                .data
+                .to_vec()
+        };
         let mut wal_page = vec![0u8; crate::storage::PAGE_SIZE];
         wal_page[0] = 20;
-        let wal_record = WalRecord {
-            sequence: 1,
-            file_len: crate::storage::file_len_for_next_page_id(4),
-            free_pages: vec![],
-            checksums: vec![(page_id, checksum_for_test(&wal_page))],
-            frames: vec![WalFrame::new(page_id, wal_page)],
+        let frame = WalFrame::committed(page_id, 4, 1, wal_page);
+        let metadata_frame = WalFrame::committed(
+            crate::storage::STORAGE_METADATA_PAGE_ID,
+            4,
+            1,
+            metadata_page,
+        );
+        let wal = WalFile {
+            header: WalHeader::default(),
+            frames: vec![frame, metadata_frame],
         };
-        fs::write(&wal_path, WalRecord::encode_file(&[wal_record])?)?;
+        fs::write(&wal_path, wal.encode()?)?;
 
         let mut reader = Pager::new(test_db.path(), 8)?;
         reader.begin_read()?;
@@ -1302,16 +1198,27 @@ mod pager_tests {
             page_id
         };
 
+        let metadata_page = {
+            let pager = Pager::new(test_db.path(), 8)?;
+            pager
+                .read_page(crate::storage::STORAGE_METADATA_PAGE_ID)?
+                .data
+                .to_vec()
+        };
         let mut first_wal_page = vec![0u8; crate::storage::PAGE_SIZE];
         first_wal_page[0] = 20;
-        let first_record = WalRecord {
-            sequence: 1,
-            file_len: crate::storage::file_len_for_next_page_id(4),
-            free_pages: vec![],
-            checksums: vec![(page_id, checksum_for_test(&first_wal_page))],
-            frames: vec![WalFrame::new(page_id, first_wal_page)],
+        let frame1 = WalFrame::committed(page_id, 4, 1, first_wal_page);
+        let metadata_frame_1 = WalFrame::committed(
+            crate::storage::STORAGE_METADATA_PAGE_ID,
+            4,
+            1,
+            metadata_page.clone(),
+        );
+        let wal1 = WalFile {
+            header: WalHeader::default(),
+            frames: vec![frame1.clone(), metadata_frame_1.clone()],
         };
-        fs::write(&wal_path, WalRecord::encode_file(&[first_record.clone()])?)?;
+        fs::write(&wal_path, wal1.encode()?)?;
 
         let mut first_reader = Pager::new(test_db.path(), 8)?;
         first_reader.begin_read()?;
@@ -1319,17 +1226,18 @@ mod pager_tests {
 
         let mut second_wal_page = vec![0u8; crate::storage::PAGE_SIZE];
         second_wal_page[0] = 30;
-        let second_record = WalRecord {
-            sequence: 2,
-            file_len: crate::storage::file_len_for_next_page_id(4),
-            free_pages: vec![],
-            checksums: vec![(page_id, checksum_for_test(&second_wal_page))],
-            frames: vec![WalFrame::new(page_id, second_wal_page)],
+        let frame2 = WalFrame::committed(page_id, 4, 2, second_wal_page);
+        let metadata_frame_2 = WalFrame::committed(
+            crate::storage::STORAGE_METADATA_PAGE_ID,
+            4,
+            2,
+            metadata_page,
+        );
+        let wal2 = WalFile {
+            header: WalHeader::default(),
+            frames: vec![frame1, metadata_frame_1, frame2, metadata_frame_2],
         };
-        fs::write(
-            &wal_path,
-            WalRecord::encode_file(&[first_record, second_record])?,
-        )?;
+        fs::write(&wal_path, wal2.encode()?)?;
 
         let mut second_reader = Pager::new(test_db.path(), 8)?;
         second_reader.begin_read()?;
@@ -1786,16 +1694,27 @@ mod pager_tests {
             page_id
         };
 
+        let metadata_page = {
+            let pager = Pager::new(test_db.path(), 8)?;
+            pager
+                .read_page(crate::storage::STORAGE_METADATA_PAGE_ID)?
+                .data
+                .to_vec()
+        };
         let mut wal_page = vec![0u8; crate::storage::PAGE_SIZE];
         wal_page[0] = 99;
-        let wal_record = WalRecord {
-            sequence: 1,
-            file_len: crate::storage::file_len_for_next_page_id(4),
-            free_pages: vec![],
-            checksums: vec![(page_id, checksum_for_test(&wal_page))],
-            frames: vec![WalFrame::new(page_id, wal_page)],
+        let frame = WalFrame::committed(page_id, 4, 1, wal_page);
+        let metadata_frame = WalFrame::committed(
+            crate::storage::STORAGE_METADATA_PAGE_ID,
+            4,
+            1,
+            metadata_page,
+        );
+        let wal = WalFile {
+            header: WalHeader::default(),
+            frames: vec![frame, metadata_frame],
         };
-        fs::write(&wal_path, WalRecord::encode_file(&[wal_record])?)?;
+        fs::write(&wal_path, wal.encode()?)?;
 
         let pager = Pager::new(test_db.path(), 8)?;
         let report = pager.validate_integrity()?;
@@ -3305,60 +3224,6 @@ mod serialization_tests {
 
 mod file_manager_tests {
     use crate::storage::file_manager::FileManager;
-    use crate::storage::format::{DatabaseHeaderV3, FormatGeneration, PageKind};
-
-    #[test]
-    fn raw_region_io_roundtrips_in_memory() {
-        let mut manager = FileManager::new_in_memory().unwrap();
-        manager.write_region(17, b"hematite").unwrap();
-
-        let bytes = manager.read_region(17, 8).unwrap();
-        assert_eq!(bytes, b"hematite");
-    }
-
-    #[test]
-    fn raw_region_write_grows_in_memory_backend() {
-        let mut manager = FileManager::new_in_memory().unwrap();
-        manager.write_region(128, b"db").unwrap();
-
-        assert!(manager.file_len().unwrap() >= 130);
-        assert_eq!(manager.read_region(128, 2).unwrap(), b"db");
-    }
-
-    #[test]
-    fn truncate_to_shrinks_in_memory_backend() {
-        let mut manager = FileManager::new_in_memory().unwrap();
-        manager.write_region(256, b"pager").unwrap();
-        manager.truncate_to(64).unwrap();
-
-        assert_eq!(manager.file_len().unwrap(), 64);
-    }
-
-    #[test]
-    fn detect_format_generation_recognizes_v3_files() {
-        let mut manager = FileManager::new_in_memory().unwrap();
-        manager
-            .bootstrap_v3_database(&DatabaseHeaderV3::default(), PageKind::LeafTable)
-            .unwrap();
-
-        assert_eq!(
-            manager.detect_format_generation().unwrap(),
-            Some(FormatGeneration::V3)
-        );
-    }
-
-    #[test]
-    fn bootstrap_v3_database_writes_page_one_image() {
-        let mut manager = FileManager::new_in_memory().unwrap();
-        manager
-            .bootstrap_v3_database(&DatabaseHeaderV3::default(), PageKind::LeafTable)
-            .unwrap();
-
-        let page_one = manager.read_region(0, 4096).unwrap();
-        assert_eq!(&page_one[..16], b"Hematite format3");
-        assert_eq!(page_one[100], PageKind::LeafTable as u8);
-        assert_eq!(manager.file_len().unwrap(), 4096);
-    }
 
     #[test]
     fn deallocate_reserved_pages_are_rejected() {
@@ -3377,46 +3242,7 @@ mod file_manager_tests {
 }
 
 mod format_tests {
-    use crate::storage::format::{
-        bootstrap_database_page_one, choose_local_payload_size, decode_varint,
-        detect_format_generation, encode_varint, max_local_payload, min_local_payload,
-        usable_space, DatabaseHeaderV3, FormatGeneration, PageKind, DATABASE_HEADER_SIZE,
-    };
-
-    #[test]
-    fn v3_database_header_roundtrip() {
-        let header = DatabaseHeaderV3 {
-            page_count: 17,
-            schema_root_page: 5,
-            next_table_id: 42,
-            user_version: 99,
-            ..DatabaseHeaderV3::default()
-        };
-
-        let encoded = header.encode();
-        assert_eq!(encoded.len(), DATABASE_HEADER_SIZE);
-        assert_eq!(DatabaseHeaderV3::decode(&encoded).unwrap(), header);
-    }
-
-    #[test]
-    fn v3_database_header_rejects_corrupted_checksum() {
-        let header = DatabaseHeaderV3::default();
-        let mut encoded = header.encode();
-        encoded[24] ^= 0xFF;
-
-        let err = DatabaseHeaderV3::decode(&encoded).unwrap_err();
-        assert!(err.to_string().contains("checksum mismatch"));
-    }
-
-    #[test]
-    fn format_detection_recognizes_v3_header() {
-        let header = DatabaseHeaderV3::default();
-        let encoded = header.encode();
-        assert_eq!(
-            detect_format_generation(&encoded),
-            Some(FormatGeneration::V3)
-        );
-    }
+    use crate::storage::format::PageKind;
 
     #[test]
     fn page_kind_roundtrip() {
@@ -3431,47 +3257,6 @@ mod format_tests {
         ] {
             assert_eq!(PageKind::from_byte(kind as u8).unwrap(), kind);
         }
-    }
-
-    #[test]
-    fn sqlite_style_local_payload_bounds_hold() {
-        let usable = usable_space(4096, 0);
-        let min_local = min_local_payload(usable);
-        let max_local = max_local_payload(usable);
-        assert!(min_local < max_local);
-
-        let local = choose_local_payload_size(usable, 10_000);
-        assert!(local >= min_local);
-        assert!(local <= max_local);
-    }
-
-    #[test]
-    fn varint_roundtrip_examples() {
-        for value in [
-            0,
-            1,
-            127,
-            128,
-            255,
-            16_384,
-            u32::MAX as u64,
-            u64::from(u32::MAX) + 1,
-        ] {
-            let encoded = encode_varint(value);
-            let (decoded, used) = decode_varint(&encoded).unwrap();
-            assert_eq!(decoded, value);
-            assert_eq!(used, encoded.len());
-        }
-    }
-
-    #[test]
-    fn bootstrap_page_one_writes_header_and_root_page_header() {
-        let header = DatabaseHeaderV3::default();
-        let page = bootstrap_database_page_one(&header, PageKind::LeafTable).unwrap();
-
-        assert_eq!(&page[..DATABASE_HEADER_SIZE], &header.encode());
-        assert_eq!(page[100], PageKind::LeafTable as u8);
-        assert_eq!(u16::from_be_bytes([page[105], page[106]]), 4096);
     }
 }
 

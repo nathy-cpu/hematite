@@ -150,7 +150,7 @@ impl QueryOptimizer {
         Ok(())
     }
 
-    fn optimize_conditions(&self, conditions: &mut Vec<Condition>) -> Result<()> {
+    fn optimize_conditions(&self, conditions: &mut Vec<Expression>) -> Result<()> {
         for condition in conditions {
             self.optimize_condition(condition)?;
         }
@@ -158,48 +158,51 @@ impl QueryOptimizer {
         Ok(())
     }
 
-    fn optimize_condition(&self, condition: &mut Condition) -> Result<()> {
+    fn optimize_condition(&self, condition: &mut Expression) -> Result<()> {
         match condition {
-            Condition::Comparison { left, right, .. } => {
+            Expression::Comparison { left, right, .. } => {
                 self.optimize_expression(left)?;
                 self.optimize_expression(right)?;
             }
-            Condition::Between {
+            Expression::Between {
                 expr, lower, upper, ..
             } => {
                 self.optimize_expression(expr)?;
                 self.optimize_expression(lower)?;
                 self.optimize_expression(upper)?;
             }
-            Condition::InList { expr, values, .. } => {
+            Expression::InList { expr, values, .. } => {
                 self.optimize_expression(expr)?;
                 for value in values {
                     self.optimize_expression(value)?;
                 }
             }
-            Condition::InSubquery { expr, subquery, .. } => {
+            Expression::InSubquery { expr, subquery, .. } => {
                 self.optimize_expression(expr)?;
                 self.optimize_select(subquery)?;
             }
-            Condition::Exists { subquery, .. } => {
+            Expression::Exists { subquery, .. } => {
                 self.optimize_select(subquery)?;
             }
-            Condition::Like { expr, pattern, .. } => {
+            Expression::Like { expr, pattern, .. } => {
                 self.optimize_expression(expr)?;
                 self.optimize_expression(pattern)?;
             }
-            Condition::NullCheck { expr, .. } => {
+            Expression::NullCheck { expr, .. } => {
                 self.optimize_expression(expr)?;
             }
-            Condition::Not(inner) => {
+            Expression::UnaryNot(inner) => {
                 self.optimize_condition(inner)?;
-                if let Condition::Not(double_inner) = inner.as_ref() {
+                if let Expression::UnaryNot(double_inner) = inner.as_ref() {
                     *condition = *double_inner.clone();
                 }
             }
-            Condition::Logical { left, right, .. } => {
+            Expression::Logical { left, right, .. } => {
                 self.optimize_condition(left)?;
                 self.optimize_condition(right)?;
+            }
+            other => {
+                self.optimize_expression(other)?;
             }
         }
 

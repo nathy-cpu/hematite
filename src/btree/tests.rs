@@ -1366,63 +1366,7 @@ mod mod_tests {
     }
 }
 
-mod cell_format_tests {
-    use crate::btree::cell_format::{
-        table_leaf_local_payload_size, TableInteriorCell, TableLeafCell,
-    };
 
-    #[test]
-    fn table_leaf_cell_roundtrips_without_overflow() {
-        let payload = b"hello world".to_vec();
-        let cell = TableLeafCell::from_payload(7, &payload, None, 4096).unwrap();
-        let encoded = cell.encode(4096).unwrap();
-        let (decoded, used) = TableLeafCell::decode(&encoded, 4096).unwrap();
-
-        assert_eq!(used, encoded.len());
-        assert_eq!(decoded.rowid, 7);
-        assert_eq!(decoded.payload_size, payload.len());
-        assert_eq!(decoded.local_payload, payload);
-        assert_eq!(decoded.overflow_page_id, None);
-    }
-
-    #[test]
-    fn table_leaf_cell_roundtrips_with_overflow_pointer() {
-        let payload = vec![0xAA; 10_000];
-        let expected_local = table_leaf_local_payload_size(4096, payload.len());
-        let cell = TableLeafCell::from_payload(99, &payload, Some(44), 4096).unwrap();
-        let encoded = cell.encode(4096).unwrap();
-        let (decoded, used) = TableLeafCell::decode(&encoded, 4096).unwrap();
-
-        assert_eq!(used, encoded.len());
-        assert_eq!(decoded.rowid, 99);
-        assert_eq!(decoded.payload_size, payload.len());
-        assert_eq!(decoded.local_payload.len(), expected_local);
-        assert_eq!(decoded.overflow_page_id, Some(44));
-        assert_eq!(decoded.local_payload, payload[..expected_local]);
-    }
-
-    #[test]
-    fn table_leaf_cell_rejects_missing_overflow_pointer() {
-        let payload = vec![0x11; 10_000];
-        let error = TableLeafCell::from_payload(3, &payload, None, 4096).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("table leaf payload requires an overflow page id"));
-    }
-
-    #[test]
-    fn table_interior_cell_roundtrip() {
-        let cell = TableInteriorCell {
-            left_child_page_id: 12,
-            rowid: 55,
-        };
-        let encoded = cell.encode().unwrap();
-        let (decoded, used) = TableInteriorCell::decode(&encoded).unwrap();
-
-        assert_eq!(used, encoded.len());
-        assert_eq!(decoded, cell);
-    }
-}
 
 mod page_format_tests {
     use crate::btree::page_format::{
@@ -1519,8 +1463,8 @@ mod index_extra_tests {
     };
     use crate::btree::tree::BTreeManager;
     use crate::btree::{BTreeKey, BTreeValue};
-    use crate::storage::format::{DatabaseHeaderV3, PageKind, DATABASE_HEADER_SIZE};
-    use crate::storage::{Page, Pager, PAGE_SIZE};
+    use crate::storage::format::PageKind;
+    use crate::storage::{Page, Pager};
     use std::sync::{Arc, RwLock};
 
     #[test]
@@ -1560,10 +1504,9 @@ mod index_extra_tests {
 
         {
             let mut pg = storage.write().unwrap();
-            let db_header = DatabaseHeaderV3::default();
-            let header_bytes = db_header.encode();
+            let db_header = crate::catalog::header::DatabaseHeader::new(1);
             let mut page0 = Page::new(0);
-            page0.data[..DATABASE_HEADER_SIZE].copy_from_slice(&header_bytes);
+            db_header.serialize(&mut page0.data).unwrap();
             pg.write_page(page0).unwrap();
 
             let right = pg.allocate_page().unwrap();
@@ -1576,8 +1519,8 @@ mod index_extra_tests {
         {
             let pg_read = storage.read().unwrap();
             let page0 = pg_read.read_page(0).expect("read page0");
-            let header = DatabaseHeaderV3::decode(&page0.data).expect("db header decode");
-            assert_eq!(header.page_size as usize, PAGE_SIZE);
+            let header = crate::catalog::header::DatabaseHeader::deserialize(&page0.data).expect("db header decode");
+            assert_eq!(header.version, crate::catalog::header::DatabaseHeader::CURRENT_VERSION);
             let _bt_header = crate::btree::page_format::BTreePageHeaderV3::parse(&page0, true)
                 .expect("b-tree header parse");
         }
@@ -1590,10 +1533,9 @@ mod index_extra_tests {
 
         {
             let mut pg = storage.write().unwrap();
-            let db_header = DatabaseHeaderV3::default();
-            let header_bytes = db_header.encode();
+            let db_header = crate::catalog::header::DatabaseHeader::new(1);
             let mut page0 = Page::new(0);
-            page0.data[..DATABASE_HEADER_SIZE].copy_from_slice(&header_bytes);
+            db_header.serialize(&mut page0.data).unwrap();
             pg.write_page(page0).unwrap();
         }
 
@@ -1634,7 +1576,7 @@ mod index_extra_tests {
         {
             let pg_read = storage.read().unwrap();
             let page0 = pg_read.read_page(0).expect("read page0");
-            let _header = DatabaseHeaderV3::decode(&page0.data).expect("db header");
+            let _header = crate::catalog::header::DatabaseHeader::deserialize(&page0.data).expect("db header");
         }
     }
 
@@ -1670,7 +1612,7 @@ mod index_extra_tests {
 
 mod value_store_tests {
     use crate::btree::value_store::{
-        StoredValueLayout, STORED_VALUE_HEADER_SIZE, STORED_VALUE_LOCAL_CAPACITY,
+        StoredValueLayout, STORED_VALUE_HEADER_SIZE, MAX_LOCAL_PAYLOAD,
     };
     use crate::storage::INVALID_PAGE_ID;
 
@@ -1687,9 +1629,9 @@ mod value_store_tests {
 
     #[test]
     fn test_stored_value_layout_overflow_roundtrip() -> crate::error::Result<()> {
-        let local_payload = vec![0xAB; STORED_VALUE_LOCAL_CAPACITY];
+        let local_payload = vec![0xAB; MAX_LOCAL_PAYLOAD];
         let layout = StoredValueLayout::new_overflow(
-            STORED_VALUE_LOCAL_CAPACITY + 123,
+            MAX_LOCAL_PAYLOAD + 123,
             local_payload.clone(),
             77,
         )?;
@@ -2003,7 +1945,7 @@ mod tree_tests {
 
         let err = BTreeNode::from_page_decoded(page).unwrap_err();
         assert!(
-            err.to_string().contains("Unknown v3 page kind byte")
+            err.to_string().contains("Unknown page kind byte")
                 || err.to_string().contains("Unsupported B-tree page kind")
         );
 

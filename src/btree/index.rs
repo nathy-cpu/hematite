@@ -115,6 +115,7 @@ impl BTreeIndex {
         }
     }
 
+    #[allow(dead_code)]
     pub fn insert_with_mutation(
         &mut self,
         key: BTreeKey,
@@ -159,6 +160,7 @@ impl BTreeIndex {
         ))
     }
 
+    #[allow(dead_code)]
     pub fn insert_typed_with_mutation<C: KeyValueCodec>(
         &mut self,
         key: &C::Key,

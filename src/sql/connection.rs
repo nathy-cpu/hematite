@@ -24,7 +24,7 @@
 
 use crate::error::{HematiteError, Result};
 use crate::parser::ast::{
-    ColumnDefinition, Condition, CreateStatement, CreateViewStatement, Expression, InsertSource,
+    ColumnDefinition, CreateStatement, CreateViewStatement, Expression, InsertSource,
     InsertStatement, SelectIntoStatement, SelectStatement, Statement, TableReference, TriggerEvent,
     WhereClause,
 };
@@ -596,7 +596,7 @@ impl Connection {
                 right,
                 mut on,
             } => {
-                Self::expand_views_in_condition(&mut on, schema)?;
+                Self::expand_views_in_expression(&mut on, schema)?;
                 Ok(TableReference::InnerJoin {
                     left: Box::new(Self::expand_views_in_table_reference(
                         *left, select, schema,
@@ -612,7 +612,7 @@ impl Connection {
                 right,
                 mut on,
             } => {
-                Self::expand_views_in_condition(&mut on, schema)?;
+                Self::expand_views_in_expression(&mut on, schema)?;
                 Ok(TableReference::LeftJoin {
                     left: Box::new(Self::expand_views_in_table_reference(
                         *left, select, schema,
@@ -628,7 +628,7 @@ impl Connection {
                 right,
                 mut on,
             } => {
-                Self::expand_views_in_condition(&mut on, schema)?;
+                Self::expand_views_in_expression(&mut on, schema)?;
                 Ok(TableReference::RightJoin {
                     left: Box::new(Self::expand_views_in_table_reference(
                         *left, select, schema,
@@ -644,7 +644,7 @@ impl Connection {
                 right,
                 mut on,
             } => {
-                Self::expand_views_in_condition(&mut on, schema)?;
+                Self::expand_views_in_expression(&mut on, schema)?;
                 Ok(TableReference::FullOuterJoin {
                     left: Box::new(Self::expand_views_in_table_reference(
                         *left, select, schema,
@@ -660,17 +660,9 @@ impl Connection {
 
     fn expand_views_in_where_clause(where_clause: &mut WhereClause, schema: &Schema) -> Result<()> {
         for condition in &mut where_clause.conditions {
-            Self::expand_views_in_condition(condition, schema)?;
+            Self::expand_views_in_expression(condition, schema)?;
         }
         Ok(())
-    }
-
-    fn expand_views_in_condition(condition: &mut Condition, schema: &Schema) -> Result<()> {
-        let mut expand = |subquery: &mut SelectStatement| -> Result<()> {
-            *subquery = Self::expand_views_in_select(subquery.clone(), schema)?;
-            Ok(())
-        };
-        Self::rewrite_nested_subqueries_in_condition(condition, &mut expand)
     }
 
     fn expand_views_in_expression(expr: &mut Expression, schema: &Schema) -> Result<()> {
@@ -745,7 +737,7 @@ impl Connection {
 
         if let Some(where_clause) = &mut select.where_clause {
             for condition in &mut where_clause.conditions {
-                Self::rewrite_where_aliases_in_condition(
+                Self::rewrite_where_aliases_in_expression(
                     condition,
                     &alias_map,
                     &source_columns,
@@ -760,7 +752,7 @@ impl Connection {
 
         if let Some(having_clause) = &mut select.having_clause {
             for condition in &mut having_clause.conditions {
-                Self::rewrite_nested_select_aliases_in_condition(condition, schema)?;
+                Self::rewrite_nested_select_aliases_in_expression(condition, schema)?;
             }
         }
 
@@ -789,20 +781,10 @@ impl Connection {
             | TableReference::FullOuterJoin { left, right, on } => {
                 Self::rewrite_select_aliases_in_table_reference(left, schema)?;
                 Self::rewrite_select_aliases_in_table_reference(right, schema)?;
-                Self::rewrite_nested_select_aliases_in_condition(on, schema)
+                Self::rewrite_nested_select_aliases_in_expression(on, schema)
             }
             TableReference::Table(_, _) => Ok(()),
         }
-    }
-
-    fn rewrite_nested_select_aliases_in_condition(
-        condition: &mut Condition,
-        schema: &Schema,
-    ) -> Result<()> {
-        let mut rewrite = |subquery: &mut SelectStatement| {
-            Self::rewrite_select_aliases_in_select(subquery, schema)
-        };
-        Self::rewrite_nested_subqueries_in_condition(condition, &mut rewrite)
     }
 
     fn rewrite_nested_select_aliases_in_expression(
@@ -813,54 +795,6 @@ impl Connection {
             Self::rewrite_select_aliases_in_select(subquery, schema)
         };
         Self::rewrite_nested_subqueries_in_expression(expr, &mut rewrite)
-    }
-
-    fn rewrite_nested_subqueries_in_condition<F>(
-        condition: &mut Condition,
-        on_subquery: &mut F,
-    ) -> Result<()>
-    where
-        F: FnMut(&mut SelectStatement) -> Result<()>,
-    {
-        match condition {
-            Condition::Comparison { left, right, .. } => {
-                Self::rewrite_nested_subqueries_in_expression(left, on_subquery)?;
-                Self::rewrite_nested_subqueries_in_expression(right, on_subquery)?;
-            }
-            Condition::InList { expr, values, .. } => {
-                Self::rewrite_nested_subqueries_in_expression(expr, on_subquery)?;
-                for value in values {
-                    Self::rewrite_nested_subqueries_in_expression(value, on_subquery)?;
-                }
-            }
-            Condition::InSubquery { expr, subquery, .. } => {
-                Self::rewrite_nested_subqueries_in_expression(expr, on_subquery)?;
-                on_subquery(subquery)?;
-            }
-            Condition::Between {
-                expr, lower, upper, ..
-            } => {
-                Self::rewrite_nested_subqueries_in_expression(expr, on_subquery)?;
-                Self::rewrite_nested_subqueries_in_expression(lower, on_subquery)?;
-                Self::rewrite_nested_subqueries_in_expression(upper, on_subquery)?;
-            }
-            Condition::Like { expr, pattern, .. } => {
-                Self::rewrite_nested_subqueries_in_expression(expr, on_subquery)?;
-                Self::rewrite_nested_subqueries_in_expression(pattern, on_subquery)?;
-            }
-            Condition::Exists { subquery, .. } => on_subquery(subquery)?,
-            Condition::NullCheck { expr, .. } => {
-                Self::rewrite_nested_subqueries_in_expression(expr, on_subquery)?;
-            }
-            Condition::Not(inner) => {
-                Self::rewrite_nested_subqueries_in_condition(inner, on_subquery)?
-            }
-            Condition::Logical { left, right, .. } => {
-                Self::rewrite_nested_subqueries_in_condition(left, on_subquery)?;
-                Self::rewrite_nested_subqueries_in_condition(right, on_subquery)?;
-            }
-        }
-        Ok(())
     }
 
     fn rewrite_nested_subqueries_in_expression<F>(
@@ -955,122 +889,6 @@ impl Connection {
             aliases.insert(alias.clone(), replacement);
         }
         aliases
-    }
-
-    fn rewrite_where_aliases_in_condition(
-        condition: &mut Condition,
-        aliases: &HashMap<String, Expression>,
-        source_columns: &HashSet<String>,
-        active_aliases: &mut HashSet<String>,
-    ) -> Result<()> {
-        match condition {
-            Condition::Comparison { left, right, .. } => {
-                Self::rewrite_where_aliases_in_expression(
-                    left,
-                    aliases,
-                    source_columns,
-                    active_aliases,
-                )?;
-                Self::rewrite_where_aliases_in_expression(
-                    right,
-                    aliases,
-                    source_columns,
-                    active_aliases,
-                )?;
-            }
-            Condition::InList { expr, values, .. } => {
-                Self::rewrite_where_aliases_in_expression(
-                    expr,
-                    aliases,
-                    source_columns,
-                    active_aliases,
-                )?;
-                for value in values {
-                    Self::rewrite_where_aliases_in_expression(
-                        value,
-                        aliases,
-                        source_columns,
-                        active_aliases,
-                    )?;
-                }
-            }
-            Condition::InSubquery { expr, .. } => {
-                Self::rewrite_where_aliases_in_expression(
-                    expr,
-                    aliases,
-                    source_columns,
-                    active_aliases,
-                )?;
-            }
-            Condition::Between {
-                expr, lower, upper, ..
-            } => {
-                Self::rewrite_where_aliases_in_expression(
-                    expr,
-                    aliases,
-                    source_columns,
-                    active_aliases,
-                )?;
-                Self::rewrite_where_aliases_in_expression(
-                    lower,
-                    aliases,
-                    source_columns,
-                    active_aliases,
-                )?;
-                Self::rewrite_where_aliases_in_expression(
-                    upper,
-                    aliases,
-                    source_columns,
-                    active_aliases,
-                )?;
-            }
-            Condition::Like { expr, pattern, .. } => {
-                Self::rewrite_where_aliases_in_expression(
-                    expr,
-                    aliases,
-                    source_columns,
-                    active_aliases,
-                )?;
-                Self::rewrite_where_aliases_in_expression(
-                    pattern,
-                    aliases,
-                    source_columns,
-                    active_aliases,
-                )?;
-            }
-            Condition::Exists { .. } => {}
-            Condition::NullCheck { expr, .. } => {
-                Self::rewrite_where_aliases_in_expression(
-                    expr,
-                    aliases,
-                    source_columns,
-                    active_aliases,
-                )?;
-            }
-            Condition::Not(inner) => {
-                Self::rewrite_where_aliases_in_condition(
-                    inner,
-                    aliases,
-                    source_columns,
-                    active_aliases,
-                )?;
-            }
-            Condition::Logical { left, right, .. } => {
-                Self::rewrite_where_aliases_in_condition(
-                    left,
-                    aliases,
-                    source_columns,
-                    active_aliases,
-                )?;
-                Self::rewrite_where_aliases_in_condition(
-                    right,
-                    aliases,
-                    source_columns,
-                    active_aliases,
-                )?;
-            }
-        }
-        Ok(())
     }
 
     fn rewrite_where_aliases_in_expression(
@@ -2198,22 +2016,22 @@ fn substitute_table_reference_bindings(
         TableReference::InnerJoin { left, right, on } => TableReference::InnerJoin {
             left: Box::new(substitute_table_reference_bindings(*left, bindings)),
             right: Box::new(substitute_table_reference_bindings(*right, bindings)),
-            on: substitute_condition_bindings(on, bindings),
+            on: substitute_expression_bindings(on, bindings),
         },
         TableReference::LeftJoin { left, right, on } => TableReference::LeftJoin {
             left: Box::new(substitute_table_reference_bindings(*left, bindings)),
             right: Box::new(substitute_table_reference_bindings(*right, bindings)),
-            on: substitute_condition_bindings(on, bindings),
+            on: substitute_expression_bindings(on, bindings),
         },
         TableReference::RightJoin { left, right, on } => TableReference::RightJoin {
             left: Box::new(substitute_table_reference_bindings(*left, bindings)),
             right: Box::new(substitute_table_reference_bindings(*right, bindings)),
-            on: substitute_condition_bindings(on, bindings),
+            on: substitute_expression_bindings(on, bindings),
         },
         TableReference::FullOuterJoin { left, right, on } => TableReference::FullOuterJoin {
             left: Box::new(substitute_table_reference_bindings(*left, bindings)),
             right: Box::new(substitute_table_reference_bindings(*right, bindings)),
-            on: substitute_condition_bindings(on, bindings),
+            on: substitute_expression_bindings(on, bindings),
         },
     }
 }
@@ -2226,86 +2044,8 @@ fn substitute_where_clause_bindings(
         conditions: where_clause
             .conditions
             .into_iter()
-            .map(|condition| substitute_condition_bindings(condition, bindings))
+            .map(|condition| substitute_expression_bindings(condition, bindings))
             .collect(),
-    }
-}
-
-fn substitute_condition_bindings(
-    condition: Condition,
-    bindings: &HashMap<String, crate::parser::types::LiteralValue>,
-) -> Condition {
-    match condition {
-        Condition::Comparison {
-            left,
-            operator,
-            right,
-        } => Condition::Comparison {
-            left: substitute_expression_bindings(left, bindings),
-            operator,
-            right: substitute_expression_bindings(right, bindings),
-        },
-        Condition::InList {
-            expr,
-            values,
-            is_not,
-        } => Condition::InList {
-            expr: substitute_expression_bindings(expr, bindings),
-            values: values
-                .into_iter()
-                .map(|expr| substitute_expression_bindings(expr, bindings))
-                .collect(),
-            is_not,
-        },
-        Condition::InSubquery {
-            expr,
-            subquery,
-            is_not,
-        } => Condition::InSubquery {
-            expr: substitute_expression_bindings(expr, bindings),
-            subquery: Box::new(substitute_select_bindings(*subquery, bindings)),
-            is_not,
-        },
-        Condition::Between {
-            expr,
-            lower,
-            upper,
-            is_not,
-        } => Condition::Between {
-            expr: substitute_expression_bindings(expr, bindings),
-            lower: substitute_expression_bindings(lower, bindings),
-            upper: substitute_expression_bindings(upper, bindings),
-            is_not,
-        },
-        Condition::Like {
-            expr,
-            pattern,
-            is_not,
-        } => Condition::Like {
-            expr: substitute_expression_bindings(expr, bindings),
-            pattern: substitute_expression_bindings(pattern, bindings),
-            is_not,
-        },
-        Condition::Exists { subquery, is_not } => Condition::Exists {
-            subquery: Box::new(substitute_select_bindings(*subquery, bindings)),
-            is_not,
-        },
-        Condition::NullCheck { expr, is_not } => Condition::NullCheck {
-            expr: substitute_expression_bindings(expr, bindings),
-            is_not,
-        },
-        Condition::Not(condition) => Condition::Not(Box::new(substitute_condition_bindings(
-            *condition, bindings,
-        ))),
-        Condition::Logical {
-            left,
-            operator,
-            right,
-        } => Condition::Logical {
-            left: Box::new(substitute_condition_bindings(*left, bindings)),
-            operator,
-            right: Box::new(substitute_condition_bindings(*right, bindings)),
-        },
     }
 }
 

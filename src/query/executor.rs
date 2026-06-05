@@ -159,29 +159,6 @@ struct CorrelatedScope {
 
 type SubqueryCache = HashMap<usize, Arc<QueryResult>>;
 
-fn evaluate_case_expression<FBool, FExpr>(
-    branches: &[CaseWhenClause],
-    else_expr: Option<&Expression>,
-    mut eval_bool: FBool,
-    mut eval_expr: FExpr,
-) -> Result<Value>
-where
-    FBool: FnMut(&Expression) -> Result<Option<bool>>,
-    FExpr: FnMut(&Expression) -> Result<Value>,
-{
-    for branch in branches {
-        match eval_bool(&branch.condition)? {
-            Some(true) => return eval_expr(&branch.result),
-            Some(false) | None => {}
-        }
-    }
-
-    match else_expr {
-        Some(else_expr) => eval_expr(else_expr),
-        None => Ok(Value::Null),
-    }
-}
-
 fn evaluate_expression_list<FExpr>(
     expressions: &[Expression],
     mut eval_expr: FExpr,
@@ -265,9 +242,9 @@ where
     ))
 }
 
-fn conditions_match_with<FEval>(conditions: &[Condition], mut eval_condition: FEval) -> Result<bool>
+fn conditions_match_with<FEval>(conditions: &[Expression], mut eval_condition: FEval) -> Result<bool>
 where
-    FEval: FnMut(&Condition) -> Result<Option<bool>>,
+    FEval: FnMut(&Expression) -> Result<Option<bool>>,
 {
     for condition in conditions {
         if eval_condition(condition)? != Some(true) {
@@ -459,92 +436,12 @@ impl SelectExecutor {
         expr: &Expression,
         row: &[Value],
     ) -> Result<Value> {
-        match expr {
-            Expression::Literal(value) => Ok(lower_literal_value(value)),
-            Expression::IntervalLiteral { value, qualifier } => match qualifier {
-                IntervalQualifier::YearToMonth => Ok(Value::IntervalYearMonth(
-                    IntervalYearMonthValue::parse(value)?,
-                )),
-                IntervalQualifier::DayToSecond => Ok(Value::IntervalDaySecond(
-                    IntervalDaySecondValue::parse(value)?,
-                )),
-            },
-            Expression::Parameter(index) => Err(HematiteError::ParseError(format!(
-                "Unbound parameter {} reached execution",
-                index + 1
-            ))),
-            Expression::Cast { expr, target_type } => cast_value_to_type(
-                self.evaluate_expression(ctx, cache, sources, expr, row)?,
-                lower_type_name(target_type.clone()),
-            ),
-            Expression::Case {
-                branches,
-                else_expr,
-            } => {
-                for branch in branches {
-                    match self.evaluate_boolean_expression(
-                        ctx,
-                        cache,
-                        sources,
-                        &branch.condition,
-                        row,
-                    )? {
-                        Some(true) => {
-                            return self.evaluate_expression(
-                                ctx,
-                                cache,
-                                sources,
-                                &branch.result,
-                                row,
-                            )
-                        }
-                        Some(false) | None => {}
-                    }
-                }
-
-                match else_expr {
-                    Some(else_expr) => {
-                        self.evaluate_expression(ctx, cache, sources, else_expr, row)
-                    }
-                    None => Ok(Value::Null),
-                }
-            }
-            Expression::AggregateCall { .. } => Err(HematiteError::ParseError(
-                "Aggregate expressions can only be evaluated in grouped query contexts".to_string(),
-            )),
-            Expression::ScalarFunctionCall { function, args } => {
-                evaluate_scalar_function_call(*function, args, |expr| {
-                    self.evaluate_expression(ctx, cache, sources, expr, row)
-                })
-            }
-            Expression::ScalarSubquery(subquery) => {
-                self.execute_scalar_subquery_cached(ctx, cache, subquery, Some(sources), Some(row))
-            }
-            Expression::Column(name) => self.resolve_column_value(sources, name, row),
-            Expression::UnaryMinus(expr) => {
-                negate_numeric_value(self.evaluate_expression(ctx, cache, sources, expr, row)?)
-            }
-            Expression::UnaryNot(_)
-            | Expression::Comparison { .. }
-            | Expression::InList { .. }
-            | Expression::InSubquery { .. }
-            | Expression::Between { .. }
-            | Expression::Like { .. }
-            | Expression::Exists { .. }
-            | Expression::NullCheck { .. }
-            | Expression::Logical { .. } => Ok(nullable_bool_to_value(
-                self.evaluate_boolean_expression(ctx, cache, sources, expr, row)?,
-            )),
-            Expression::Binary {
-                left,
-                operator,
-                right,
-            } => {
-                let left = self.evaluate_expression(ctx, cache, sources, left, row)?;
-                let right = self.evaluate_expression(ctx, cache, sources, right, row)?;
-                self.evaluate_arithmetic(operator, left, right)
-            }
-        }
+        let resolver = StandardResolver {
+            executor: self,
+            sources,
+            row,
+        };
+        evaluate_expression_generic(ctx, cache, expr, &resolver)
     }
 
     fn evaluate_boolean_expression(
@@ -555,117 +452,12 @@ impl SelectExecutor {
         expr: &Expression,
         row: &[Value],
     ) -> Result<Option<bool>> {
-        match expr {
-            Expression::Comparison {
-                left,
-                operator,
-                right,
-            } => {
-                let left_val = self.evaluate_expression(ctx, cache, sources, left, row)?;
-                let right_val = self.evaluate_expression(ctx, cache, sources, right, row)?;
-                let text_context = self.merged_text_comparison_context(sources, left, right)?;
-                Ok(self.compare_values(&left_val, operator, &right_val, text_context))
-            }
-            Expression::InList {
-                expr,
-                values,
-                is_not,
-            } => evaluate_in_list_predicate(expr, values, *is_not, None, |value_expr| {
-                self.evaluate_expression(ctx, cache, sources, value_expr, row)
-            }),
-            Expression::InSubquery {
-                expr,
-                subquery,
-                is_not,
-            } => {
-                let probe = self.evaluate_expression(ctx, cache, sources, expr, row)?;
-                let subquery_result =
-                    self.execute_subquery_cached(ctx, cache, subquery, Some(sources), Some(row))?;
-                let candidates = subquery_result
-                    .rows
-                    .iter()
-                    .map(|row| row.first().cloned().unwrap_or(Value::Null))
-                    .collect::<Vec<_>>();
-                Ok(self.evaluate_in_candidates(probe, candidates, *is_not, None))
-            }
-            Expression::Between {
-                expr,
-                lower,
-                upper,
-                is_not,
-            } => evaluate_between_predicate(
-                expr,
-                lower,
-                upper,
-                *is_not,
-                self.text_comparison_context_for_expression(sources, expr)?,
-                |value_expr| self.evaluate_expression(ctx, cache, sources, value_expr, row),
-            ),
-            Expression::Like {
-                expr,
-                pattern,
-                is_not,
-            } => evaluate_like_predicate(
-                expr,
-                pattern,
-                *is_not,
-                self.text_comparison_context_for_expression(sources, expr)?,
-                |value_expr| self.evaluate_expression(ctx, cache, sources, value_expr, row),
-            ),
-            Expression::Exists { subquery, is_not } => {
-                let subquery_result =
-                    self.execute_subquery_cached(ctx, cache, subquery, Some(sources), Some(row))?;
-                let exists = !subquery_result.rows.is_empty();
-                Ok(Some(if *is_not { !exists } else { exists }))
-            }
-            Expression::NullCheck { expr, is_not } => {
-                let value = self.evaluate_expression(ctx, cache, sources, expr, row)?;
-                let is_null = value.is_null();
-                Ok(Some(if *is_not { !is_null } else { is_null }))
-            }
-            Expression::UnaryNot(expr) => Ok(self
-                .evaluate_boolean_expression(ctx, cache, sources, expr, row)?
-                .map(|value| !value)),
-            Expression::Logical {
-                left,
-                operator,
-                right,
-            } => {
-                let left_result =
-                    self.evaluate_boolean_expression(ctx, cache, sources, left, row)?;
-                match operator {
-                    LogicalOperator::And => short_circuit_and(left_result, || {
-                        self.evaluate_boolean_expression(ctx, cache, sources, right, row)
-                    }),
-                    LogicalOperator::Or => short_circuit_or(left_result, || {
-                        self.evaluate_boolean_expression(ctx, cache, sources, right, row)
-                    }),
-                }
-            }
-            _ => coerce_value_to_nullable_bool(
-                self.evaluate_expression(ctx, cache, sources, expr, row)?,
-                "Boolean expression",
-            ),
-        }
-    }
-
-    fn evaluate_arithmetic(
-        &self,
-        operator: &ArithmeticOperator,
-        left: Value,
-        right: Value,
-    ) -> Result<Value> {
-        evaluate_arithmetic_values(operator, left, right)
-    }
-
-    fn compare_values(
-        &self,
-        left_val: &Value,
-        operator: &ComparisonOperator,
-        right_val: &Value,
-        text_context: Option<TextComparisonContext>,
-    ) -> Option<bool> {
-        compare_condition_values(left_val, operator, right_val, text_context)
+        let resolver = StandardResolver {
+            executor: self,
+            sources,
+            row,
+        };
+        evaluate_boolean_expression_generic(ctx, cache, expr, &resolver)
     }
 
     fn like_matches(pattern: &str, text: &str) -> bool {
@@ -715,16 +507,6 @@ impl SelectExecutor {
 
         // If we've consumed the whole pattern, it's a match.
         pi == pchars.len()
-    }
-
-    fn evaluate_in_candidates(
-        &self,
-        probe: Value,
-        candidates: impl IntoIterator<Item = Value>,
-        is_not: bool,
-        text_context: Option<TextComparisonContext>,
-    ) -> Option<bool> {
-        evaluate_in_candidates(probe, candidates, is_not, text_context)
     }
 
     fn execute_subquery(
@@ -835,47 +617,50 @@ impl SelectExecutor {
         &self,
         ctx: &ExecutionContext<'_>,
         from: &TableReference,
-        condition: &mut Condition,
+        condition: &mut Expression,
         scopes: &[CorrelatedScope],
     ) -> Result<()> {
         match condition {
-            Condition::Comparison { left, right, .. } => {
+            Expression::Comparison { left, right, .. } => {
                 self.bind_expression_outer_references(ctx, from, left, scopes)?;
                 self.bind_expression_outer_references(ctx, from, right, scopes)?;
             }
-            Condition::InList { expr, values, .. } => {
+            Expression::InList { expr, values, .. } => {
                 self.bind_expression_outer_references(ctx, from, expr, scopes)?;
                 for value in values {
                     self.bind_expression_outer_references(ctx, from, value, scopes)?;
                 }
             }
-            Condition::InSubquery { expr, subquery, .. } => {
+            Expression::InSubquery { expr, subquery, .. } => {
                 self.bind_expression_outer_references(ctx, from, expr, scopes)?;
                 self.bind_select_outer_references(ctx, subquery, scopes)?;
             }
-            Condition::Between {
+            Expression::Between {
                 expr, lower, upper, ..
             } => {
                 self.bind_expression_outer_references(ctx, from, expr, scopes)?;
                 self.bind_expression_outer_references(ctx, from, lower, scopes)?;
                 self.bind_expression_outer_references(ctx, from, upper, scopes)?;
             }
-            Condition::Like { expr, pattern, .. } => {
+            Expression::Like { expr, pattern, .. } => {
                 self.bind_expression_outer_references(ctx, from, expr, scopes)?;
                 self.bind_expression_outer_references(ctx, from, pattern, scopes)?;
             }
-            Condition::Exists { subquery, .. } => {
+            Expression::Exists { subquery, .. } => {
                 self.bind_select_outer_references(ctx, subquery, scopes)?;
             }
-            Condition::NullCheck { expr, .. } => {
+            Expression::NullCheck { expr, .. } => {
                 self.bind_expression_outer_references(ctx, from, expr, scopes)?;
             }
-            Condition::Not(inner) => {
+            Expression::UnaryNot(inner) => {
                 self.bind_condition_outer_references(ctx, from, inner, scopes)?;
             }
-            Condition::Logical { left, right, .. } => {
+            Expression::Logical { left, right, .. } => {
                 self.bind_condition_outer_references(ctx, from, left, scopes)?;
                 self.bind_condition_outer_references(ctx, from, right, scopes)?;
+            }
+            other => {
+                self.bind_expression_outer_references(ctx, from, other, scopes)?;
             }
         }
 
@@ -1058,133 +843,6 @@ impl SelectExecutor {
             .unwrap_or(Value::Null))
     }
 
-    fn evaluate_condition(
-        &self,
-        ctx: &mut ExecutionContext<'_>,
-        cache: &mut SubqueryCache,
-        sources: &[ResolvedSource],
-        condition: &Condition,
-        row: &[Value],
-    ) -> Result<Option<bool>> {
-        match condition {
-            Condition::Comparison {
-                left,
-                operator,
-                right,
-            } => {
-                let left_val = self.evaluate_expression(ctx, cache, sources, left, row)?;
-                let right_val = self.evaluate_expression(ctx, cache, sources, right, row)?;
-                let text_context = self.merged_text_comparison_context(sources, left, right)?;
-                Ok(self.compare_values(&left_val, operator, &right_val, text_context))
-            }
-            Condition::InList {
-                expr,
-                values,
-                is_not,
-            } => {
-                let probe = self.evaluate_expression(ctx, cache, sources, expr, row)?;
-                let candidates = values
-                    .iter()
-                    .map(|value_expr| {
-                        self.evaluate_expression(ctx, cache, sources, value_expr, row)
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                let text_context = self.text_comparison_context_for_expression(sources, expr)?;
-                Ok(self.evaluate_in_candidates(probe, candidates, *is_not, text_context))
-            }
-            Condition::InSubquery {
-                expr,
-                subquery,
-                is_not,
-            } => {
-                let probe = self.evaluate_expression(ctx, cache, sources, expr, row)?;
-                let subquery_result =
-                    self.execute_subquery_cached(ctx, cache, subquery, Some(sources), Some(row))?;
-                let candidates = subquery_result
-                    .rows
-                    .iter()
-                    .map(|row| row.first().cloned().unwrap_or(Value::Null))
-                    .collect::<Vec<_>>();
-                let text_context = self.text_comparison_context_for_expression(sources, expr)?;
-                Ok(self.evaluate_in_candidates(probe, candidates, *is_not, text_context))
-            }
-            Condition::Between {
-                expr,
-                lower,
-                upper,
-                is_not,
-            } => {
-                let value = self.evaluate_expression(ctx, cache, sources, expr, row)?;
-                let lower_value = self.evaluate_expression(ctx, cache, sources, lower, row)?;
-                let upper_value = self.evaluate_expression(ctx, cache, sources, upper, row)?;
-
-                if value.is_null() || lower_value.is_null() || upper_value.is_null() {
-                    return Ok(None);
-                }
-
-                let text_context = self.text_comparison_context_for_expression(sources, expr)?;
-                let lower_ok = sql_partial_cmp(&value, &lower_value, text_context)
-                    .map(|ordering| !ordering.is_lt());
-                let upper_ok = sql_partial_cmp(&value, &upper_value, text_context)
-                    .map(|ordering| !ordering.is_gt());
-
-                match (lower_ok, upper_ok) {
-                    (Some(true), Some(true)) => Ok(Some(!is_not)),
-                    (Some(_), Some(_)) => Ok(Some(*is_not)),
-                    _ => Ok(None),
-                }
-            }
-            Condition::Like {
-                expr,
-                pattern,
-                is_not,
-            } => {
-                let value = self.evaluate_expression(ctx, cache, sources, expr, row)?;
-                let pattern_value = self.evaluate_expression(ctx, cache, sources, pattern, row)?;
-                let text_context = self.text_comparison_context_for_expression(sources, expr)?;
-
-                match (value, pattern_value) {
-                    (Value::Text(text), Value::Text(pattern)) => {
-                        let matched = like_matches_with_context(&pattern, &text, text_context);
-                        Ok(Some(if *is_not { !matched } else { matched }))
-                    }
-                    (left, right) if left.is_null() || right.is_null() => Ok(None),
-                    _ => Ok(None),
-                }
-            }
-            Condition::Exists { subquery, is_not } => {
-                let subquery_result =
-                    self.execute_subquery_cached(ctx, cache, subquery, Some(sources), Some(row))?;
-                let exists = !subquery_result.rows.is_empty();
-                Ok(Some(if *is_not { !exists } else { exists }))
-            }
-            Condition::NullCheck { expr, is_not } => {
-                let value = self.evaluate_expression(ctx, cache, sources, expr, row)?;
-                let is_null = value.is_null();
-                Ok(Some(if *is_not { !is_null } else { is_null }))
-            }
-            Condition::Not(condition) => Ok(self
-                .evaluate_condition(ctx, cache, sources, condition, row)?
-                .map(|value| !value)),
-            Condition::Logical {
-                left,
-                operator,
-                right,
-            } => {
-                let left_result = self.evaluate_condition(ctx, cache, sources, left, row)?;
-
-                match operator {
-                    LogicalOperator::And => short_circuit_and(left_result, || {
-                        self.evaluate_condition(ctx, cache, sources, right, row)
-                    }),
-                    LogicalOperator::Or => short_circuit_or(left_result, || {
-                        self.evaluate_condition(ctx, cache, sources, right, row)
-                    }),
-                }
-            }
-        }
-    }
-
     fn project_row(
         &self,
         ctx: &mut ExecutionContext<'_>,
@@ -1304,7 +962,7 @@ impl SelectExecutor {
         sources: &[ResolvedSource],
         left_rows: &[Vec<Value>],
         right_rows: &[Vec<Value>],
-        on: Option<&Condition>,
+        on: Option<&Expression>,
         rows: &mut Vec<Vec<Value>>,
     ) -> Result<()> {
         let push_matches = |outer_rows: &[Vec<Value>],
@@ -1350,7 +1008,7 @@ impl SelectExecutor {
         outer_rows: &[Vec<Value>],
         inner_rows: &[Vec<Value>],
         outer_is_left: bool,
-        predicate: &Condition,
+        predicate: &Expression,
         rows: &mut Vec<Vec<Value>>,
     ) -> Result<()> {
         let mut subquery_cache = SubqueryCache::new();
@@ -1361,7 +1019,7 @@ impl SelectExecutor {
                 } else {
                     self.combine_join_rows(inner_row, outer_row)
                 };
-                if self.evaluate_condition(
+                if self.evaluate_boolean_expression(
                     ctx,
                     &mut subquery_cache,
                     sources,
@@ -1679,7 +1337,7 @@ impl SelectExecutor {
                     let mut matched = false;
                     for right_row in &right_rows {
                         let combined = self.combine_join_rows(left_row, right_row);
-                        if self.evaluate_condition(
+                        if self.evaluate_boolean_expression(
                             ctx,
                             &mut subquery_cache,
                             &sources,
@@ -1709,7 +1367,7 @@ impl SelectExecutor {
                     let mut matched = false;
                     for left_row in &left_rows {
                         let combined = self.combine_join_rows(left_row, right_row);
-                        if self.evaluate_condition(
+                        if self.evaluate_boolean_expression(
                             ctx,
                             &mut subquery_cache,
                             &sources,
@@ -1741,7 +1399,7 @@ impl SelectExecutor {
                     let mut matched = false;
                     for (index, right_row) in right_rows.iter().enumerate() {
                         let combined = self.combine_join_rows(left_row, right_row);
-                        if self.evaluate_condition(
+                        if self.evaluate_boolean_expression(
                             ctx,
                             &mut subquery_cache,
                             &sources,
@@ -2359,180 +2017,6 @@ impl SelectExecutor {
         });
     }
 
-    fn evaluate_projected_expression(
-        &self,
-        ctx: &mut ExecutionContext<'_>,
-        cache: &mut SubqueryCache,
-        sources: &[ResolvedSource],
-        expr: &Expression,
-        row: &[Value],
-        output_columns: &[String],
-        group_rows: &[Vec<Value>],
-    ) -> Result<Value> {
-        match expr {
-            Expression::Literal(value) => Ok(lower_literal_value(value)),
-            Expression::IntervalLiteral { value, qualifier } => match qualifier {
-                IntervalQualifier::YearToMonth => Ok(Value::IntervalYearMonth(
-                    IntervalYearMonthValue::parse(value)?,
-                )),
-                IntervalQualifier::DayToSecond => Ok(Value::IntervalDaySecond(
-                    IntervalDaySecondValue::parse(value)?,
-                )),
-            },
-            Expression::Parameter(index) => Err(HematiteError::ParseError(format!(
-                "Unbound parameter {} reached execution",
-                index + 1
-            ))),
-            Expression::Cast { expr, target_type } => cast_value_to_type(
-                self.evaluate_projected_expression(
-                    ctx,
-                    cache,
-                    sources,
-                    expr,
-                    row,
-                    output_columns,
-                    group_rows,
-                )?,
-                lower_type_name(target_type.clone()),
-            ),
-            Expression::Case {
-                branches,
-                else_expr,
-            } => {
-                for branch in branches {
-                    match self.evaluate_projected_boolean_expression(
-                        ctx,
-                        cache,
-                        sources,
-                        &branch.condition,
-                        row,
-                        output_columns,
-                        group_rows,
-                    )? {
-                        Some(true) => {
-                            return self.evaluate_projected_expression(
-                                ctx,
-                                cache,
-                                sources,
-                                &branch.result,
-                                row,
-                                output_columns,
-                                group_rows,
-                            )
-                        }
-                        Some(false) | None => {}
-                    }
-                }
-
-                match else_expr {
-                    Some(else_expr) => self.evaluate_projected_expression(
-                        ctx,
-                        cache,
-                        sources,
-                        else_expr,
-                        row,
-                        output_columns,
-                        group_rows,
-                    ),
-                    None => Ok(Value::Null),
-                }
-            }
-            Expression::ScalarSubquery(subquery) => {
-                self.execute_scalar_subquery_cached(ctx, cache, subquery, Some(sources), Some(row))
-            }
-            Expression::AggregateCall { function, target } => self
-                .evaluate_aggregate_value(sources, *function, target, group_rows)?
-                .ok_or_else(|| {
-                    HematiteError::InternalError(
-                        "Aggregate expression evaluation produced no value".to_string(),
-                    )
-                }),
-            Expression::ScalarFunctionCall { function, args } => {
-                evaluate_scalar_function_call(*function, args, |expr| {
-                    self.evaluate_projected_expression(
-                        ctx,
-                        cache,
-                        sources,
-                        expr,
-                        row,
-                        output_columns,
-                        group_rows,
-                    )
-                })
-            }
-            Expression::Column(name) => {
-                let index = self
-                    .result_column_index(output_columns, name)
-                    .ok_or_else(|| {
-                        HematiteError::ParseError(format!(
-                            "HAVING column '{}' does not match any grouped output column or alias",
-                            name
-                        ))
-                    })?;
-                row.get(index).cloned().ok_or_else(|| {
-                    HematiteError::InternalError(format!(
-                        "Grouped output row is missing column index {} for '{}'",
-                        index, name
-                    ))
-                })
-            }
-            Expression::UnaryMinus(expr) => {
-                negate_numeric_value(self.evaluate_projected_expression(
-                    ctx,
-                    cache,
-                    sources,
-                    expr,
-                    row,
-                    output_columns,
-                    group_rows,
-                )?)
-            }
-            Expression::UnaryNot(_)
-            | Expression::Comparison { .. }
-            | Expression::InList { .. }
-            | Expression::InSubquery { .. }
-            | Expression::Between { .. }
-            | Expression::Like { .. }
-            | Expression::Exists { .. }
-            | Expression::NullCheck { .. }
-            | Expression::Logical { .. } => Ok(nullable_bool_to_value(
-                self.evaluate_projected_boolean_expression(
-                    ctx,
-                    cache,
-                    sources,
-                    expr,
-                    row,
-                    output_columns,
-                    group_rows,
-                )?,
-            )),
-            Expression::Binary {
-                left,
-                operator,
-                right,
-            } => self.evaluate_arithmetic(
-                operator,
-                self.evaluate_projected_expression(
-                    ctx,
-                    cache,
-                    sources,
-                    left,
-                    row,
-                    output_columns,
-                    group_rows,
-                )?,
-                self.evaluate_projected_expression(
-                    ctx,
-                    cache,
-                    sources,
-                    right,
-                    row,
-                    output_columns,
-                    group_rows,
-                )?,
-            ),
-        }
-    }
 
     fn evaluate_projected_boolean_expression(
         &self,
@@ -2544,462 +2028,14 @@ impl SelectExecutor {
         output_columns: &[String],
         group_rows: &[Vec<Value>],
     ) -> Result<Option<bool>> {
-        match expr {
-            Expression::Comparison {
-                left,
-                operator,
-                right,
-            } => {
-                let left_val = self.evaluate_projected_expression(
-                    ctx,
-                    cache,
-                    sources,
-                    left,
-                    row,
-                    output_columns,
-                    group_rows,
-                )?;
-                let right_val = self.evaluate_projected_expression(
-                    ctx,
-                    cache,
-                    sources,
-                    right,
-                    row,
-                    output_columns,
-                    group_rows,
-                )?;
-                let text_context = self.merged_text_comparison_context(sources, left, right)?;
-                Ok(compare_condition_values(
-                    &left_val,
-                    operator,
-                    &right_val,
-                    text_context,
-                ))
-            }
-            Expression::InList {
-                expr,
-                values,
-                is_not,
-            } => evaluate_in_list_predicate(
-                expr,
-                values,
-                *is_not,
-                self.text_comparison_context_for_expression(sources, expr)?,
-                |value_expr| {
-                    self.evaluate_projected_expression(
-                        ctx,
-                        cache,
-                        sources,
-                        value_expr,
-                        row,
-                        output_columns,
-                        group_rows,
-                    )
-                },
-            ),
-            Expression::InSubquery {
-                expr,
-                subquery,
-                is_not,
-            } => {
-                let probe = self.evaluate_projected_expression(
-                    ctx,
-                    cache,
-                    sources,
-                    expr,
-                    row,
-                    output_columns,
-                    group_rows,
-                )?;
-                let subquery_result =
-                    self.execute_subquery_cached(ctx, cache, subquery, Some(sources), Some(row))?;
-                let candidates = subquery_result
-                    .rows
-                    .iter()
-                    .map(|row| row.first().cloned().unwrap_or(Value::Null))
-                    .collect::<Vec<_>>();
-                let text_context = self.text_comparison_context_for_expression(sources, expr)?;
-                Ok(evaluate_in_candidates(
-                    probe,
-                    candidates,
-                    *is_not,
-                    text_context,
-                ))
-            }
-            Expression::Between {
-                expr,
-                lower,
-                upper,
-                is_not,
-            } => evaluate_between_predicate(
-                expr,
-                lower,
-                upper,
-                *is_not,
-                self.text_comparison_context_for_expression(sources, expr)?,
-                |value_expr| {
-                    self.evaluate_projected_expression(
-                        ctx,
-                        cache,
-                        sources,
-                        value_expr,
-                        row,
-                        output_columns,
-                        group_rows,
-                    )
-                },
-            ),
-            Expression::Like {
-                expr,
-                pattern,
-                is_not,
-            } => evaluate_like_predicate(
-                expr,
-                pattern,
-                *is_not,
-                self.text_comparison_context_for_expression(sources, expr)?,
-                |value_expr| {
-                    self.evaluate_projected_expression(
-                        ctx,
-                        cache,
-                        sources,
-                        value_expr,
-                        row,
-                        output_columns,
-                        group_rows,
-                    )
-                },
-            ),
-            Expression::Exists { subquery, is_not } => {
-                let subquery_result =
-                    self.execute_subquery_cached(ctx, cache, subquery, Some(sources), Some(row))?;
-                let exists = !subquery_result.rows.is_empty();
-                Ok(Some(if *is_not { !exists } else { exists }))
-            }
-            Expression::NullCheck { expr, is_not } => {
-                let value = self.evaluate_projected_expression(
-                    ctx,
-                    cache,
-                    sources,
-                    expr,
-                    row,
-                    output_columns,
-                    group_rows,
-                )?;
-                let is_null = value.is_null();
-                Ok(Some(if *is_not { !is_null } else { is_null }))
-            }
-            Expression::UnaryNot(expr) => Ok(self
-                .evaluate_projected_boolean_expression(
-                    ctx,
-                    cache,
-                    sources,
-                    expr,
-                    row,
-                    output_columns,
-                    group_rows,
-                )?
-                .map(|value| !value)),
-            Expression::Logical {
-                left,
-                operator,
-                right,
-            } => {
-                let left_result = self.evaluate_projected_boolean_expression(
-                    ctx,
-                    cache,
-                    sources,
-                    left,
-                    row,
-                    output_columns,
-                    group_rows,
-                )?;
-                match operator {
-                    LogicalOperator::And => short_circuit_and(left_result, || {
-                        self.evaluate_projected_boolean_expression(
-                            ctx,
-                            cache,
-                            sources,
-                            right,
-                            row,
-                            output_columns,
-                            group_rows,
-                        )
-                    }),
-                    LogicalOperator::Or => short_circuit_or(left_result, || {
-                        self.evaluate_projected_boolean_expression(
-                            ctx,
-                            cache,
-                            sources,
-                            right,
-                            row,
-                            output_columns,
-                            group_rows,
-                        )
-                    }),
-                }
-            }
-            _ => coerce_value_to_nullable_bool(
-                self.evaluate_projected_expression(
-                    ctx,
-                    cache,
-                    sources,
-                    expr,
-                    row,
-                    output_columns,
-                    group_rows,
-                )?,
-                "Boolean expression",
-            ),
-        }
-    }
-
-    fn evaluate_projected_condition(
-        &self,
-        ctx: &mut ExecutionContext<'_>,
-        cache: &mut SubqueryCache,
-        sources: &[ResolvedSource],
-        condition: &Condition,
-        row: &[Value],
-        output_columns: &[String],
-        group_rows: &[Vec<Value>],
-    ) -> Result<Option<bool>> {
-        match condition {
-            Condition::Comparison {
-                left,
-                operator,
-                right,
-            } => {
-                let left_val = self.evaluate_projected_expression(
-                    ctx,
-                    cache,
-                    sources,
-                    left,
-                    row,
-                    output_columns,
-                    group_rows,
-                )?;
-                let right_val = self.evaluate_projected_expression(
-                    ctx,
-                    cache,
-                    sources,
-                    right,
-                    row,
-                    output_columns,
-                    group_rows,
-                )?;
-                let text_context = self.merged_text_comparison_context(sources, left, right)?;
-                Ok(self.compare_values(&left_val, operator, &right_val, text_context))
-            }
-            Condition::InList {
-                expr,
-                values,
-                is_not,
-            } => {
-                let probe = self.evaluate_projected_expression(
-                    ctx,
-                    cache,
-                    sources,
-                    expr,
-                    row,
-                    output_columns,
-                    group_rows,
-                )?;
-                let candidates = values
-                    .iter()
-                    .map(|value_expr| {
-                        self.evaluate_projected_expression(
-                            ctx,
-                            cache,
-                            sources,
-                            value_expr,
-                            row,
-                            output_columns,
-                            group_rows,
-                        )
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                let text_context = self.text_comparison_context_for_expression(sources, expr)?;
-                Ok(self.evaluate_in_candidates(probe, candidates, *is_not, text_context))
-            }
-            Condition::InSubquery {
-                expr,
-                subquery,
-                is_not,
-            } => {
-                let probe = self.evaluate_projected_expression(
-                    ctx,
-                    cache,
-                    sources,
-                    expr,
-                    row,
-                    output_columns,
-                    group_rows,
-                )?;
-                let subquery_result =
-                    self.execute_subquery_cached(ctx, cache, subquery, Some(sources), Some(row))?;
-                let candidates = subquery_result
-                    .rows
-                    .iter()
-                    .map(|row| row.first().cloned().unwrap_or(Value::Null))
-                    .collect::<Vec<_>>();
-                let text_context = self.text_comparison_context_for_expression(sources, expr)?;
-                Ok(self.evaluate_in_candidates(probe, candidates, *is_not, text_context))
-            }
-            Condition::Between {
-                expr,
-                lower,
-                upper,
-                is_not,
-            } => {
-                let value = self.evaluate_projected_expression(
-                    ctx,
-                    cache,
-                    sources,
-                    expr,
-                    row,
-                    output_columns,
-                    group_rows,
-                )?;
-                let lower_value = self.evaluate_projected_expression(
-                    ctx,
-                    cache,
-                    sources,
-                    lower,
-                    row,
-                    output_columns,
-                    group_rows,
-                )?;
-                let upper_value = self.evaluate_projected_expression(
-                    ctx,
-                    cache,
-                    sources,
-                    upper,
-                    row,
-                    output_columns,
-                    group_rows,
-                )?;
-
-                if value.is_null() || lower_value.is_null() || upper_value.is_null() {
-                    return Ok(None);
-                }
-
-                let text_context = self.text_comparison_context_for_expression(sources, expr)?;
-                let lower_ok = sql_partial_cmp(&value, &lower_value, text_context)
-                    .map(|ordering| !ordering.is_lt());
-                let upper_ok = sql_partial_cmp(&value, &upper_value, text_context)
-                    .map(|ordering| !ordering.is_gt());
-
-                match (lower_ok, upper_ok) {
-                    (Some(true), Some(true)) => Ok(Some(!is_not)),
-                    (Some(_), Some(_)) => Ok(Some(*is_not)),
-                    _ => Ok(None),
-                }
-            }
-            Condition::Like {
-                expr,
-                pattern,
-                is_not,
-            } => {
-                let value = self.evaluate_projected_expression(
-                    ctx,
-                    cache,
-                    sources,
-                    expr,
-                    row,
-                    output_columns,
-                    group_rows,
-                )?;
-                let pattern_value = self.evaluate_projected_expression(
-                    ctx,
-                    cache,
-                    sources,
-                    pattern,
-                    row,
-                    output_columns,
-                    group_rows,
-                )?;
-
-                match (value, pattern_value) {
-                    (Value::Text(text), Value::Text(pattern)) => {
-                        let matched = Self::like_matches(&pattern, &text);
-                        Ok(Some(if *is_not { !matched } else { matched }))
-                    }
-                    (left, right) if left.is_null() || right.is_null() => Ok(None),
-                    _ => Ok(None),
-                }
-            }
-            Condition::Exists { subquery, is_not } => {
-                let subquery_result =
-                    self.execute_subquery_cached(ctx, cache, subquery, Some(sources), Some(row))?;
-                let exists = !subquery_result.rows.is_empty();
-                Ok(Some(if *is_not { !exists } else { exists }))
-            }
-            Condition::NullCheck { expr, is_not } => {
-                let value = self.evaluate_projected_expression(
-                    ctx,
-                    cache,
-                    sources,
-                    expr,
-                    row,
-                    output_columns,
-                    group_rows,
-                )?;
-                let is_null = value.is_null();
-                Ok(Some(if *is_not { !is_null } else { is_null }))
-            }
-            Condition::Not(condition) => Ok(self
-                .evaluate_projected_condition(
-                    ctx,
-                    cache,
-                    sources,
-                    condition,
-                    row,
-                    output_columns,
-                    group_rows,
-                )?
-                .map(|value| !value)),
-            Condition::Logical {
-                left,
-                operator,
-                right,
-            } => {
-                let left_result = self.evaluate_projected_condition(
-                    ctx,
-                    cache,
-                    sources,
-                    left,
-                    row,
-                    output_columns,
-                    group_rows,
-                )?;
-
-                match operator {
-                    LogicalOperator::And => short_circuit_and(left_result, || {
-                        self.evaluate_projected_condition(
-                            ctx,
-                            cache,
-                            sources,
-                            right,
-                            row,
-                            output_columns,
-                            group_rows,
-                        )
-                    }),
-                    LogicalOperator::Or => short_circuit_or(left_result, || {
-                        self.evaluate_projected_condition(
-                            ctx,
-                            cache,
-                            sources,
-                            right,
-                            row,
-                            output_columns,
-                            group_rows,
-                        )
-                    }),
-                }
-            }
-        }
+        let resolver = ProjectedResolver {
+            executor: self,
+            sources,
+            row,
+            output_columns,
+            group_rows,
+        };
+        evaluate_boolean_expression_generic(ctx, cache, expr, &resolver)
     }
 
     fn project_grouped_row(
@@ -3201,11 +2237,11 @@ impl SelectExecutor {
         ctx: &mut ExecutionContext<'_>,
         cache: &mut SubqueryCache,
         sources: &[ResolvedSource],
-        conditions: &[Condition],
+        conditions: &[Expression],
         row: &[Value],
     ) -> Result<bool> {
         conditions_match_with(conditions, |condition| {
-            self.evaluate_condition(ctx, cache, sources, condition, row)
+            self.evaluate_boolean_expression(ctx, cache, sources, condition, row)
         })
     }
 
@@ -3214,13 +2250,13 @@ impl SelectExecutor {
         ctx: &mut ExecutionContext<'_>,
         cache: &mut SubqueryCache,
         sources: &[ResolvedSource],
-        conditions: &[Condition],
+        conditions: &[Expression],
         row: &[Value],
         output_columns: &[String],
         group_rows: &[Vec<Value>],
     ) -> Result<bool> {
         conditions_match_with(conditions, |condition| {
-            self.evaluate_projected_condition(
+            self.evaluate_projected_boolean_expression(
                 ctx,
                 cache,
                 sources,
@@ -3359,141 +2395,14 @@ impl InsertExecutor {
         Self { statement }
     }
 
-    fn evaluate_value_expression(&self, expr: &Expression) -> Result<Value> {
-        match expr {
-            Expression::Literal(value) => Ok(lower_literal_value(value)),
-            Expression::IntervalLiteral { value, qualifier } => match qualifier {
-                IntervalQualifier::YearToMonth => Ok(Value::IntervalYearMonth(
-                    IntervalYearMonthValue::parse(value)?,
-                )),
-                IntervalQualifier::DayToSecond => Ok(Value::IntervalDaySecond(
-                    IntervalDaySecondValue::parse(value)?,
-                )),
-            },
-            Expression::Parameter(index) => Err(HematiteError::ParseError(format!(
-                "Unbound parameter {} reached execution",
-                index + 1
-            ))),
-            Expression::Cast { expr, target_type } => cast_value_to_type(
-                self.evaluate_value_expression(expr)?,
-                lower_type_name(target_type.clone()),
-            ),
-            Expression::Case {
-                branches,
-                else_expr,
-            } => evaluate_case_expression(
-                branches,
-                else_expr.as_deref(),
-                |condition| self.evaluate_boolean_value_expression(condition),
-                |expr| self.evaluate_value_expression(expr),
-            ),
-            Expression::ScalarSubquery(_) => Err(HematiteError::ParseError(
-                "INSERT expressions cannot use scalar subqueries".to_string(),
-            )),
-            Expression::AggregateCall { .. } => Err(HematiteError::ParseError(
-                "INSERT expressions cannot use aggregate functions".to_string(),
-            )),
-            Expression::ScalarFunctionCall { function, args } => {
-                evaluate_scalar_function_call(*function, args, |expr| {
-                    self.evaluate_value_expression(expr)
-                })
-            }
-            Expression::UnaryMinus(expr) => {
-                negate_numeric_value(self.evaluate_value_expression(expr)?)
-            }
-            Expression::UnaryNot(_)
-            | Expression::Comparison { .. }
-            | Expression::InList { .. }
-            | Expression::InSubquery { .. }
-            | Expression::Between { .. }
-            | Expression::Like { .. }
-            | Expression::Exists { .. }
-            | Expression::NullCheck { .. }
-            | Expression::Logical { .. } => Ok(nullable_bool_to_value(
-                self.evaluate_boolean_value_expression(expr)?,
-            )),
-            Expression::Binary {
-                left,
-                operator,
-                right,
-            } => evaluate_arithmetic_values(
-                operator,
-                self.evaluate_value_expression(left)?,
-                self.evaluate_value_expression(right)?,
-            ),
-            Expression::Column(name) => Err(HematiteError::ParseError(format!(
-                "INSERT expressions cannot reference column '{}'",
-                name
-            ))),
-        }
-    }
-
-    fn evaluate_boolean_value_expression(&self, expr: &Expression) -> Result<Option<bool>> {
-        match expr {
-            Expression::Comparison {
-                left,
-                operator,
-                right,
-            } => {
-                let left_val = self.evaluate_value_expression(left)?;
-                let right_val = self.evaluate_value_expression(right)?;
-                Ok(compare_condition_values(
-                    &left_val, operator, &right_val, None,
-                ))
-            }
-            Expression::InList {
-                expr,
-                values,
-                is_not,
-            } => evaluate_in_list_predicate(expr, values, *is_not, None, |value_expr| {
-                self.evaluate_value_expression(value_expr)
-            }),
-            Expression::InSubquery { .. } => Err(HematiteError::ParseError(
-                "INSERT expressions cannot use subqueries in boolean expressions".to_string(),
-            )),
-            Expression::Between {
-                expr,
-                lower,
-                upper,
-                is_not,
-            } => evaluate_between_predicate(expr, lower, upper, *is_not, None, |value_expr| {
-                self.evaluate_value_expression(value_expr)
-            }),
-            Expression::Like {
-                expr,
-                pattern,
-                is_not,
-            } => evaluate_like_predicate(expr, pattern, *is_not, None, |value_expr| {
-                self.evaluate_value_expression(value_expr)
-            }),
-            Expression::Exists { .. } => Err(HematiteError::ParseError(
-                "INSERT expressions cannot use EXISTS in boolean expressions".to_string(),
-            )),
-            Expression::NullCheck { expr, is_not } => {
-                let value = self.evaluate_value_expression(expr)?;
-                let is_null = value.is_null();
-                Ok(Some(if *is_not { !is_null } else { is_null }))
-            }
-            Expression::UnaryNot(expr) => Ok(self
-                .evaluate_boolean_value_expression(expr)?
-                .map(|value| !value)),
-            Expression::Logical {
-                left,
-                operator,
-                right,
-            } => {
-                let left_result = self.evaluate_boolean_value_expression(left)?;
-                let right_result = self.evaluate_boolean_value_expression(right)?;
-                Ok(match operator {
-                    LogicalOperator::And => logical_and_values(left_result, right_result),
-                    LogicalOperator::Or => logical_or_values(left_result, right_result),
-                })
-            }
-            _ => coerce_value_to_nullable_bool(
-                self.evaluate_value_expression(expr)?,
-                "Boolean expression",
-            ),
-        }
+    fn evaluate_value_expression(
+        &self,
+        ctx: &mut ExecutionContext<'_>,
+        cache: &mut SubqueryCache,
+        expr: &Expression,
+    ) -> Result<Value> {
+        let resolver = InsertResolver;
+        evaluate_expression_generic(ctx, cache, expr, &resolver)
     }
 
     fn ensure_primary_key_is_unique(
@@ -3694,9 +2603,14 @@ impl InsertExecutor {
         Ok(row)
     }
 
-    fn evaluate_value_row(&self, row: &[Expression]) -> Result<Vec<Value>> {
+    fn evaluate_value_row(
+        &self,
+        ctx: &mut ExecutionContext<'_>,
+        cache: &mut SubqueryCache,
+        row: &[Expression],
+    ) -> Result<Vec<Value>> {
         row.iter()
-            .map(|expr| self.evaluate_value_expression(expr))
+            .map(|expr| self.evaluate_value_expression(ctx, cache, expr))
             .collect()
     }
 }
@@ -3708,10 +2622,11 @@ impl QueryExecutor for InsertExecutor {
         let table = catalog_table(ctx, &self.statement.table)?;
         let column_positions = build_insert_column_positions(&table, &self.statement.columns)?;
 
+        let mut cache = SubqueryCache::new();
         let input_rows = match &self.statement.source {
             InsertSource::Values(rows) => rows
                 .iter()
-                .map(|row| self.evaluate_value_row(row))
+                .map(|row| self.evaluate_value_row(ctx, &mut cache, row))
                 .collect::<Result<Vec<_>>>()?,
             InsertSource::Select(select) => {
                 let planner = QueryPlanner::new(ctx.catalog.clone())
@@ -5059,14 +3974,6 @@ fn make_float_value(data_type: &DataType, value: f64) -> Value {
     }
 }
 
-fn float_type_name(data_type: &DataType) -> &'static str {
-    match data_type {
-        DataType::Float32 => "FLOAT32",
-        DataType::Float => "FLOAT",
-        _ => unreachable!("non-float type used for float naming"),
-    }
-}
-
 fn coerce_enum_value(value: Value, variants: &[String], label: &str) -> Result<Value> {
     let value = match value {
         Value::Enum(value) | Value::Text(value) => value,
@@ -5309,8 +4216,8 @@ fn validate_check_constraints(
 
     for constraint in &table.check_constraints {
         let condition =
-            crate::parser::parser::parse_condition_fragment(&constraint.expression_sql)?;
-        let result = constraint_executor.evaluate_condition(
+            crate::parser::parser::parse_expression_fragment(&constraint.expression_sql)?;
+        let result = constraint_executor.evaluate_boolean_expression(
             ctx,
             &mut subquery_cache,
             &sources,
@@ -6028,6 +4935,15 @@ fn evaluate_exact_numeric_arithmetic(
     }
 }
 
+fn signed_integral_rhs(operator: &ArithmeticOperator, right: &Value) -> Option<i64> {
+    let val = integral_rhs(right)?;
+    match operator {
+        ArithmeticOperator::Add => Some(val),
+        ArithmeticOperator::Subtract => val.checked_neg(),
+        _ => None,
+    }
+}
+
 fn evaluate_temporal_arithmetic(
     operator: &ArithmeticOperator,
     left: &Value,
@@ -6076,13 +4992,8 @@ fn evaluate_temporal_arithmetic(
             Ok(Some(Value::Date(DateValue::from_days_since_epoch(result))))
         }
         (Value::Date(left), right) => {
-            let Some(days) = integral_rhs(right) else {
+            let Some(delta) = signed_integral_rhs(operator, right) else {
                 return Ok(None);
-            };
-            let delta = match operator {
-                ArithmeticOperator::Add => days,
-                ArithmeticOperator::Subtract => -days,
-                _ => return Ok(None),
             };
             let result = left.days_since_epoch() as i64 + delta;
             let result = i32::try_from(result).map_err(|_| {
@@ -6108,13 +5019,8 @@ fn evaluate_temporal_arithmetic(
             )))
         }
         (Value::DateTime(left), right) => {
-            let Some(seconds) = integral_rhs(right) else {
+            let Some(delta) = signed_integral_rhs(operator, right) else {
                 return Ok(None);
-            };
-            let delta = match operator {
-                ArithmeticOperator::Add => seconds,
-                ArithmeticOperator::Subtract => -seconds,
-                _ => return Ok(None),
             };
             Ok(Some(Value::DateTime(
                 DateTimeValue::from_seconds_since_epoch(left.seconds_since_epoch() + delta),
@@ -6135,13 +5041,8 @@ fn evaluate_temporal_arithmetic(
             ))))
         }
         (Value::Time(left), right) => {
-            let Some(seconds) = integral_rhs(right) else {
+            let Some(delta) = signed_integral_rhs(operator, right) else {
                 return Ok(None);
-            };
-            let delta = match operator {
-                ArithmeticOperator::Add => seconds,
-                ArithmeticOperator::Subtract => -seconds,
-                _ => return Ok(None),
             };
             Ok(Some(Value::Time(TimeValue::from_seconds_since_midnight(
                 add_wrapped_seconds(left.seconds_since_midnight(), delta),
@@ -6157,13 +5058,8 @@ fn evaluate_temporal_arithmetic(
             )))
         }
         (Value::TimeWithTimeZone(left), right) => {
-            let Some(seconds) = integral_rhs(right) else {
+            let Some(delta) = signed_integral_rhs(operator, right) else {
                 return Ok(None);
-            };
-            let delta = match operator {
-                ArithmeticOperator::Add => seconds,
-                ArithmeticOperator::Subtract => -seconds,
-                _ => return Ok(None),
             };
             Ok(Some(Value::TimeWithTimeZone(
                 TimeWithTimeZoneValue::from_parts(
@@ -6444,265 +5340,221 @@ fn minimal_unsigned_value(value: u128) -> Value {
     }
 }
 
-fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
-    match (data_type.clone(), value) {
-        (_, Value::Null) => Ok(Value::Null),
-        (DataType::Int8, Value::Integer(value)) => i8::try_from(value)
-            .map(|_| Value::Integer(value))
-            .map_err(|_| {
-                HematiteError::ParseError("Cannot CAST out-of-range INT AS INT8".to_string())
-            }),
-        (DataType::Int8, Value::Blob(bytes)) => decode_signed_blob(&bytes, 1, "INT8")
-            .and_then(|value| {
-                i8::try_from(value)
-                    .map_err(|_| HematiteError::ParseError("Cannot CAST blob AS INT8".to_string()))
-            })
-            .map(|value| Value::Integer(value as i32)),
-        (DataType::Int16, Value::Integer(value)) => i16::try_from(value)
-            .map(|_| Value::Integer(value))
-            .map_err(|_| {
-                HematiteError::ParseError("Cannot CAST out-of-range INT AS INT16".to_string())
-            }),
-        (DataType::Int16, Value::Blob(bytes)) => decode_signed_blob(&bytes, 2, "INT16")
-            .and_then(|value| {
-                i16::try_from(value)
-                    .map_err(|_| HematiteError::ParseError("Cannot CAST blob AS INT16".to_string()))
-            })
-            .map(|value| Value::Integer(value as i32)),
-        (DataType::Int, Value::Integer(value)) => Ok(Value::Integer(value)),
-        (DataType::Int, Value::BigInt(value)) => {
-            i32::try_from(value).map(Value::Integer).map_err(|_| {
-                HematiteError::ParseError("Cannot CAST out-of-range INT64 AS INT".to_string())
-            })
+fn cast_out_of_range_error(source: &Value, target_name: &str) -> HematiteError {
+    if matches!(source, Value::Blob(_)) {
+        HematiteError::ParseError(format!("Cannot CAST blob AS {}", target_name))
+    } else {
+        HematiteError::ParseError(format!(
+            "Cannot CAST out-of-range {} AS {}",
+            source.data_type().name(),
+            target_name
+        ))
+    }
+}
+
+fn value_to_i128(value: &Value, width: usize, type_name: &str) -> Result<i128> {
+    match value {
+        Value::Integer(v) => Ok(*v as i128),
+        Value::BigInt(v) => Ok(*v as i128),
+        Value::Int128(v) => Ok(*v),
+        Value::UInteger(v) => Ok(*v as i128),
+        Value::UBigInt(v) => Ok(*v as i128),
+        Value::UInt128(v) => {
+            i128::try_from(*v).map_err(|_| cast_out_of_range_error(value, type_name))
         }
-        (DataType::Int, Value::Int128(value)) => {
-            i32::try_from(value).map(Value::Integer).map_err(|_| {
-                HematiteError::ParseError("Cannot CAST out-of-range INT128 AS INT".to_string())
-            })
+        Value::Float32(v) => Ok(*v as i128),
+        Value::Float(v) => Ok(*v as i128),
+        Value::Boolean(true) => Ok(1),
+        Value::Boolean(false) => Ok(0),
+        Value::Text(v) => v.parse::<i128>().map_err(|_| {
+            HematiteError::ParseError(format!("Cannot CAST '{}' AS {}", v, type_name))
+        }),
+        Value::Blob(bytes) => decode_signed_blob(bytes, width, type_name),
+        _ => Err(HematiteError::ParseError(format!(
+            "Cannot CAST '{:?}' AS {}",
+            value, type_name
+        ))),
+    }
+}
+
+fn value_to_u128(value: &Value, width: usize, type_name: &str) -> Result<u128> {
+    match value {
+        Value::Integer(v) => {
+            u128::try_from(*v).map_err(|_| cast_out_of_range_error(value, type_name))
         }
-        (DataType::Int, Value::Float32(value)) => Ok(Value::Integer(value as i32)),
-        (DataType::Int, Value::Float(value)) => Ok(Value::Integer(value as i32)),
-        (DataType::Int, Value::Boolean(true)) => Ok(Value::Integer(1)),
-        (DataType::Int, Value::Boolean(false)) => Ok(Value::Integer(0)),
-        (DataType::Int, Value::Text(value)) => value
-            .parse::<i32>()
-            .map(Value::Integer)
-            .map_err(|_| HematiteError::ParseError(format!("Cannot CAST '{}' AS INT", value))),
-        (DataType::Int, Value::Blob(bytes)) => decode_signed_blob(&bytes, 4, "INT")
-            .and_then(|value| {
-                i32::try_from(value)
-                    .map_err(|_| HematiteError::ParseError("Cannot CAST blob AS INT".to_string()))
-            })
-            .map(Value::Integer),
-        (DataType::Int64, Value::Integer(value)) => Ok(Value::BigInt(value as i64)),
-        (DataType::Int64, Value::BigInt(value)) => Ok(Value::BigInt(value)),
-        (DataType::Int64, Value::Int128(value)) => {
-            i64::try_from(value).map(Value::BigInt).map_err(|_| {
-                HematiteError::ParseError("Cannot CAST out-of-range INT128 AS INT64".to_string())
-            })
+        Value::BigInt(v) => {
+            u128::try_from(*v).map_err(|_| cast_out_of_range_error(value, type_name))
         }
-        (DataType::Int64, Value::Float32(value)) => Ok(Value::BigInt(value as i64)),
-        (DataType::Int64, Value::Float(value)) => Ok(Value::BigInt(value as i64)),
-        (DataType::Int64, Value::Boolean(true)) => Ok(Value::BigInt(1)),
-        (DataType::Int64, Value::Boolean(false)) => Ok(Value::BigInt(0)),
-        (DataType::Int64, Value::Text(value)) => value
-            .parse::<i64>()
-            .map(Value::BigInt)
-            .map_err(|_| HematiteError::ParseError(format!("Cannot CAST '{}' AS INT64", value))),
-        (DataType::Int64, Value::Blob(bytes)) => decode_signed_blob(&bytes, 8, "INT64")
-            .and_then(|value| {
-                i64::try_from(value)
-                    .map_err(|_| HematiteError::ParseError("Cannot CAST blob AS INT64".to_string()))
-            })
-            .map(Value::BigInt),
-        (DataType::Int128, Value::Integer(value)) => Ok(Value::Int128(value as i128)),
-        (DataType::Int128, Value::BigInt(value)) => Ok(Value::Int128(value as i128)),
-        (DataType::Int128, Value::Int128(value)) => Ok(Value::Int128(value)),
-        (DataType::Int128, Value::Float32(value)) => Ok(Value::Int128(value as i128)),
-        (DataType::Int128, Value::Float(value)) => Ok(Value::Int128(value as i128)),
-        (DataType::Int128, Value::Boolean(true)) => Ok(Value::Int128(1)),
-        (DataType::Int128, Value::Boolean(false)) => Ok(Value::Int128(0)),
-        (DataType::Int128, Value::Text(value)) => value
-            .parse::<i128>()
-            .map(Value::Int128)
-            .map_err(|_| HematiteError::ParseError(format!("Cannot CAST '{}' AS INT128", value))),
-        (DataType::Int128, Value::Blob(bytes)) => {
-            decode_signed_blob(&bytes, 16, "INT128").map(Value::Int128)
+        Value::Int128(v) => {
+            u128::try_from(*v).map_err(|_| cast_out_of_range_error(value, type_name))
         }
-        (DataType::UInt8, Value::Integer(value)) if value >= 0 => u8::try_from(value)
-            .map(|value| Value::UInteger(value as u32))
-            .map_err(|_| {
-                HematiteError::ParseError("Cannot CAST out-of-range INT AS UINT8".to_string())
-            }),
-        (DataType::UInt8, Value::Blob(bytes)) => decode_unsigned_blob(&bytes, 1, "UINT8")
-            .and_then(|value| {
-                u8::try_from(value)
-                    .map_err(|_| HematiteError::ParseError("Cannot CAST blob AS UINT8".to_string()))
-            })
-            .map(|value| Value::UInteger(value as u32)),
-        (DataType::UInt16, Value::Integer(value)) if value >= 0 => u16::try_from(value)
-            .map(|value| Value::UInteger(value as u32))
-            .map_err(|_| {
-                HematiteError::ParseError("Cannot CAST out-of-range INT AS UINT16".to_string())
-            }),
-        (DataType::UInt16, Value::Blob(bytes)) => decode_unsigned_blob(&bytes, 2, "UINT16")
-            .and_then(|value| {
-                u16::try_from(value).map_err(|_| {
-                    HematiteError::ParseError("Cannot CAST blob AS UINT16".to_string())
-                })
-            })
-            .map(|value| Value::UInteger(value as u32)),
-        (DataType::UInt, Value::Integer(value)) if value >= 0 => Ok(Value::UInteger(value as u32)),
-        (DataType::UInt, Value::BigInt(value)) if value >= 0 => {
-            u32::try_from(value).map(Value::UInteger).map_err(|_| {
-                HematiteError::ParseError("Cannot CAST out-of-range INT64 AS UINT".to_string())
-            })
-        }
-        (DataType::UInt, Value::Int128(value)) if value >= 0 => {
-            u32::try_from(value).map(Value::UInteger).map_err(|_| {
-                HematiteError::ParseError("Cannot CAST out-of-range INT128 AS UINT".to_string())
-            })
-        }
-        (DataType::UInt, Value::UInteger(value)) => Ok(Value::UInteger(value)),
-        (DataType::UInt, Value::UBigInt(value)) => {
-            u32::try_from(value).map(Value::UInteger).map_err(|_| {
-                HematiteError::ParseError("Cannot CAST out-of-range UINT64 AS UINT".to_string())
-            })
-        }
-        (DataType::UInt, Value::UInt128(value)) => {
-            u32::try_from(value).map(Value::UInteger).map_err(|_| {
-                HematiteError::ParseError("Cannot CAST out-of-range UINT128 AS UINT".to_string())
-            })
-        }
-        (DataType::UInt, Value::Float32(value)) if value >= 0.0 => {
-            Ok(Value::UInteger(value as u32))
-        }
-        (DataType::UInt, Value::Float(value)) if value >= 0.0 => Ok(Value::UInteger(value as u32)),
-        (DataType::UInt, Value::Boolean(true)) => Ok(Value::UInteger(1)),
-        (DataType::UInt, Value::Boolean(false)) => Ok(Value::UInteger(0)),
-        (DataType::UInt, Value::Text(value)) => value
-            .parse::<u32>()
-            .map(Value::UInteger)
-            .map_err(|_| HematiteError::ParseError(format!("Cannot CAST '{}' AS UINT", value))),
-        (DataType::UInt, Value::Blob(bytes)) => decode_unsigned_blob(&bytes, 4, "UINT")
-            .and_then(|value| {
-                u32::try_from(value)
-                    .map_err(|_| HematiteError::ParseError("Cannot CAST blob AS UINT".to_string()))
-            })
-            .map(Value::UInteger),
-        (DataType::UInt64, Value::Integer(value)) if value >= 0 => Ok(Value::UBigInt(value as u64)),
-        (DataType::UInt64, Value::BigInt(value)) if value >= 0 => Ok(Value::UBigInt(value as u64)),
-        (DataType::UInt64, Value::Int128(value)) if value >= 0 => {
-            u64::try_from(value).map(Value::UBigInt).map_err(|_| {
-                HematiteError::ParseError("Cannot CAST out-of-range INT128 AS UINT64".to_string())
-            })
-        }
-        (DataType::UInt64, Value::UInteger(value)) => Ok(Value::UBigInt(value as u64)),
-        (DataType::UInt64, Value::UBigInt(value)) => Ok(Value::UBigInt(value)),
-        (DataType::UInt64, Value::UInt128(value)) => {
-            u64::try_from(value).map(Value::UBigInt).map_err(|_| {
-                HematiteError::ParseError("Cannot CAST out-of-range UINT128 AS UINT64".to_string())
-            })
-        }
-        (DataType::UInt64, Value::Float32(value)) if value >= 0.0 => {
-            Ok(Value::UBigInt(value as u64))
-        }
-        (DataType::UInt64, Value::Float(value)) if value >= 0.0 => Ok(Value::UBigInt(value as u64)),
-        (DataType::UInt64, Value::Boolean(true)) => Ok(Value::UBigInt(1)),
-        (DataType::UInt64, Value::Boolean(false)) => Ok(Value::UBigInt(0)),
-        (DataType::UInt64, Value::Text(value)) => value
-            .parse::<u64>()
-            .map(Value::UBigInt)
-            .map_err(|_| HematiteError::ParseError(format!("Cannot CAST '{}' AS UINT64", value))),
-        (DataType::UInt64, Value::Blob(bytes)) => decode_unsigned_blob(&bytes, 8, "UINT64")
-            .and_then(|value| {
-                u64::try_from(value).map_err(|_| {
-                    HematiteError::ParseError("Cannot CAST blob AS UINT64".to_string())
-                })
-            })
-            .map(Value::UBigInt),
-        (DataType::UInt128, Value::Integer(value)) if value >= 0 => {
-            Ok(Value::UInt128(value as u128))
-        }
-        (DataType::UInt128, Value::BigInt(value)) if value >= 0 => {
-            Ok(Value::UInt128(value as u128))
-        }
-        (DataType::UInt128, Value::Int128(value)) if value >= 0 => {
-            Ok(Value::UInt128(value as u128))
-        }
-        (DataType::UInt128, Value::UInteger(value)) => Ok(Value::UInt128(value as u128)),
-        (DataType::UInt128, Value::UBigInt(value)) => Ok(Value::UInt128(value as u128)),
-        (DataType::UInt128, Value::UInt128(value)) => Ok(Value::UInt128(value)),
-        (DataType::UInt128, Value::Float32(value)) if value >= 0.0 => {
-            Ok(Value::UInt128(value as u128))
-        }
-        (DataType::UInt128, Value::Float(value)) if value >= 0.0 => {
-            Ok(Value::UInt128(value as u128))
-        }
-        (DataType::UInt128, Value::Boolean(true)) => Ok(Value::UInt128(1)),
-        (DataType::UInt128, Value::Boolean(false)) => Ok(Value::UInt128(0)),
-        (DataType::UInt128, Value::Text(value)) => value
-            .parse::<u128>()
-            .map(Value::UInt128)
-            .map_err(|_| HematiteError::ParseError(format!("Cannot CAST '{}' AS UINT128", value))),
-        (DataType::UInt128, Value::Blob(bytes)) => {
-            decode_unsigned_blob(&bytes, 16, "UINT128").map(Value::UInt128)
-        }
-        (DataType::Text, value) => cast_value_to_text_string(value).map(Value::Text),
-        (DataType::Char(length), value) => {
-            coerce_char_value(cast_value_to_text_string(value)?, length, "CAST")
-        }
-        (DataType::VarChar(length), value) => {
-            coerce_varchar_value(cast_value_to_text_string(value)?, length, "CAST")
-        }
-        (DataType::Binary(length), value) => coerce_binary_value(value, length, "CAST", true),
-        (DataType::VarBinary(length), value) => coerce_binary_value(value, length, "CAST", false),
-        (DataType::Enum(values), value) => coerce_enum_value(value, &values, "CAST"),
-        (DataType::Boolean, Value::Boolean(value)) => Ok(Value::Boolean(value)),
-        (DataType::Boolean, Value::Integer(value)) => Ok(Value::Boolean(value != 0)),
-        (DataType::Boolean, Value::BigInt(value)) => Ok(Value::Boolean(value != 0)),
-        (DataType::Boolean, Value::Int128(value)) => Ok(Value::Boolean(value != 0)),
-        (DataType::Boolean, Value::UInteger(value)) => Ok(Value::Boolean(value != 0)),
-        (DataType::Boolean, Value::UBigInt(value)) => Ok(Value::Boolean(value != 0)),
-        (DataType::Boolean, Value::UInt128(value)) => Ok(Value::Boolean(value != 0)),
-        (DataType::Boolean, Value::Float32(value)) => Ok(Value::Boolean(value != 0.0)),
-        (DataType::Boolean, Value::Float(value)) => Ok(Value::Boolean(value != 0.0)),
-        (DataType::Boolean, Value::Text(value)) => match value.to_ascii_uppercase().as_str() {
-            "TRUE" | "1" => Ok(Value::Boolean(true)),
-            "FALSE" | "0" => Ok(Value::Boolean(false)),
-            _ => Err(HematiteError::ParseError(format!(
-                "Cannot CAST '{}' AS BOOLEAN",
-                value
-            ))),
-        },
-        (data_type @ (DataType::Float32 | DataType::Float), Value::Text(value)) => value
-            .parse::<f64>()
-            .map(|value| make_float_value(&data_type, value))
-            .map_err(|_| {
-                HematiteError::ParseError(format!(
-                    "Cannot CAST '{}' AS {}",
-                    value,
-                    float_type_name(&data_type)
-                ))
-            }),
-        (data_type @ (DataType::Float32 | DataType::Float), Value::Boolean(true)) => {
-            Ok(make_float_value(&data_type, 1.0))
-        }
-        (data_type @ (DataType::Float32 | DataType::Float), Value::Boolean(false)) => {
-            Ok(make_float_value(&data_type, 0.0))
-        }
-        (data_type @ (DataType::Float32 | DataType::Float), value) => {
-            if let Some(number) = numeric_value_as_f64(&value) {
-                Ok(make_float_value(&data_type, number))
+        Value::UInteger(v) => Ok(*v as u128),
+        Value::UBigInt(v) => Ok(*v as u128),
+        Value::UInt128(v) => Ok(*v),
+        Value::Float32(v) => {
+            if *v >= 0.0 {
+                Ok(*v as u128)
             } else {
-                Err(HematiteError::ParseError(format!(
-                    "Cannot CAST '{:?}' AS {}",
-                    value,
-                    float_type_name(&data_type)
-                )))
+                Err(cast_out_of_range_error(value, type_name))
             }
         }
-        (DataType::Decimal { precision, scale }, value) => {
+        Value::Float(v) => {
+            if *v >= 0.0 {
+                Ok(*v as u128)
+            } else {
+                Err(cast_out_of_range_error(value, type_name))
+            }
+        }
+        Value::Boolean(true) => Ok(1),
+        Value::Boolean(false) => Ok(0),
+        Value::Text(v) => v.parse::<u128>().map_err(|_| {
+            HematiteError::ParseError(format!("Cannot CAST '{}' AS {}", v, type_name))
+        }),
+        Value::Blob(bytes) => decode_unsigned_blob(bytes, width, type_name),
+        _ => Err(HematiteError::ParseError(format!(
+            "Cannot CAST '{:?}' AS {}",
+            value, type_name
+        ))),
+    }
+}
+
+fn value_to_f64(value: &Value, type_name: &str) -> Result<f64> {
+    match value {
+        Value::Integer(v) => Ok(*v as f64),
+        Value::BigInt(v) => Ok(*v as f64),
+        Value::Int128(v) => Ok(*v as f64),
+        Value::UInteger(v) => Ok(*v as f64),
+        Value::UBigInt(v) => Ok(*v as f64),
+        Value::UInt128(v) => Ok(*v as f64),
+        Value::Float32(v) => Ok(*v as f64),
+        Value::Float(v) => Ok(*v),
+        Value::Boolean(true) => Ok(1.0),
+        Value::Boolean(false) => Ok(0.0),
+        Value::Text(v) => v.parse::<f64>().map_err(|_| {
+            HematiteError::ParseError(format!("Cannot CAST '{}' AS {}", v, type_name))
+        }),
+        _ => Err(HematiteError::ParseError(format!(
+            "Cannot CAST '{:?}' AS {}",
+            value, type_name
+        ))),
+    }
+}
+
+fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
+    if value.is_null() {
+        return Ok(Value::Null);
+    }
+    match data_type.clone() {
+        DataType::Int8 => {
+            let val = value_to_i128(&value, 1, "INT8")?;
+            if !(i8::MIN as i128..=i8::MAX as i128).contains(&val) {
+                return Err(cast_out_of_range_error(&value, "INT8"));
+            }
+            Ok(Value::Integer(val as i32))
+        }
+        DataType::Int16 => {
+            let val = value_to_i128(&value, 2, "INT16")?;
+            if !(i16::MIN as i128..=i16::MAX as i128).contains(&val) {
+                return Err(cast_out_of_range_error(&value, "INT16"));
+            }
+            Ok(Value::Integer(val as i32))
+        }
+        DataType::Int => {
+            let val = value_to_i128(&value, 4, "INT")?;
+            if !(i32::MIN as i128..=i32::MAX as i128).contains(&val) {
+                return Err(cast_out_of_range_error(&value, "INT"));
+            }
+            Ok(Value::Integer(val as i32))
+        }
+        DataType::Int64 => {
+            let val = value_to_i128(&value, 8, "INT64")?;
+            if !(i64::MIN as i128..=i64::MAX as i128).contains(&val) {
+                return Err(cast_out_of_range_error(&value, "INT64"));
+            }
+            Ok(Value::BigInt(val as i64))
+        }
+        DataType::Int128 => {
+            let val = value_to_i128(&value, 16, "INT128")?;
+            Ok(Value::Int128(val))
+        }
+        DataType::UInt8 => {
+            let val = value_to_u128(&value, 1, "UINT8")?;
+            if val > u8::MAX as u128 {
+                return Err(cast_out_of_range_error(&value, "UINT8"));
+            }
+            Ok(Value::UInteger(val as u32))
+        }
+        DataType::UInt16 => {
+            let val = value_to_u128(&value, 2, "UINT16")?;
+            if val > u16::MAX as u128 {
+                return Err(cast_out_of_range_error(&value, "UINT16"));
+            }
+            Ok(Value::UInteger(val as u32))
+        }
+        DataType::UInt => {
+            let val = value_to_u128(&value, 4, "UINT")?;
+            if val > u32::MAX as u128 {
+                return Err(cast_out_of_range_error(&value, "UINT"));
+            }
+            Ok(Value::UInteger(val as u32))
+        }
+        DataType::UInt64 => {
+            let val = value_to_u128(&value, 8, "UINT64")?;
+            if val > u64::MAX as u128 {
+                return Err(cast_out_of_range_error(&value, "UINT64"));
+            }
+            Ok(Value::UBigInt(val as u64))
+        }
+        DataType::UInt128 => {
+            let val = value_to_u128(&value, 16, "UINT128")?;
+            Ok(Value::UInt128(val))
+        }
+        DataType::Float32 => {
+            let val = value_to_f64(&value, "FLOAT32")?;
+            Ok(Value::Float32(val as f32))
+        }
+        DataType::Float => {
+            let val = value_to_f64(&value, "FLOAT")?;
+            Ok(Value::Float(val))
+        }
+        DataType::Boolean => match value {
+            Value::Boolean(v) => Ok(Value::Boolean(v)),
+            Value::Float32(v) => Ok(Value::Boolean(v != 0.0)),
+            Value::Float(v) => Ok(Value::Boolean(v != 0.0)),
+            Value::Text(v) => match v.to_ascii_uppercase().as_str() {
+                "TRUE" | "1" => Ok(Value::Boolean(true)),
+                "FALSE" | "0" => Ok(Value::Boolean(false)),
+                _ => Err(HematiteError::ParseError(format!("Cannot CAST '{}' AS BOOLEAN", v))),
+            },
+            other if matches!(
+                other,
+                Value::Integer(_)
+                    | Value::BigInt(_)
+                    | Value::Int128(_)
+                    | Value::UInteger(_)
+                    | Value::UBigInt(_)
+                    | Value::UInt128(_)
+            ) => {
+                let is_zero = match other {
+                    Value::Integer(v) => v == 0,
+                    Value::BigInt(v) => v == 0,
+                    Value::Int128(v) => v == 0,
+                    Value::UInteger(v) => v == 0,
+                    Value::UBigInt(v) => v == 0,
+                    Value::UInt128(v) => v == 0,
+                    _ => unreachable!(),
+                };
+                Ok(Value::Boolean(!is_zero))
+            }
+            _ => Err(HematiteError::ParseError(format!("Cannot CAST '{:?}' AS BOOLEAN", value))),
+        },
+        DataType::Text => cast_value_to_text_string(value).map(Value::Text),
+        DataType::Char(length) => coerce_char_value(cast_value_to_text_string(value)?, length, "CAST"),
+        DataType::VarChar(length) => coerce_varchar_value(cast_value_to_text_string(value)?, length, "CAST"),
+        DataType::Binary(length) => coerce_binary_value(value, length, "CAST", true),
+        DataType::VarBinary(length) => coerce_binary_value(value, length, "CAST", false),
+        DataType::Enum(variants) => coerce_enum_value(value, &variants, "CAST"),
+        DataType::Decimal { precision, scale } => {
             let decimal = coerce_decimal_value(value)?;
             if !decimal.fits_precision_scale(precision, scale) {
                 return Err(HematiteError::ParseError(format!(
@@ -6712,39 +5564,43 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
             }
             Ok(Value::Decimal(decimal))
         }
-        (DataType::Blob, Value::Blob(value)) => Ok(Value::Blob(value)),
-        (DataType::Blob, Value::Text(value)) => Ok(Value::Blob(value.into_bytes())),
-        (DataType::Blob, Value::Integer(value)) => Ok(Value::Blob(value.to_le_bytes().to_vec())),
-        (DataType::Blob, Value::BigInt(value)) => Ok(Value::Blob(value.to_le_bytes().to_vec())),
-        (DataType::Blob, Value::Int128(value)) => Ok(Value::Blob(value.to_le_bytes().to_vec())),
-        (DataType::Blob, Value::UInteger(value)) => Ok(Value::Blob(value.to_le_bytes().to_vec())),
-        (DataType::Blob, Value::UBigInt(value)) => Ok(Value::Blob(value.to_le_bytes().to_vec())),
-        (DataType::Blob, Value::UInt128(value)) => Ok(Value::Blob(value.to_le_bytes().to_vec())),
-        (DataType::Date, Value::Date(value)) => Ok(Value::Date(value)),
-        (DataType::Date, Value::Text(value)) => Ok(Value::Date(validate_date_string(&value)?)),
-        (DataType::Time, Value::Time(value)) => Ok(Value::Time(value)),
-        (DataType::Time, Value::Text(value)) => Ok(Value::Time(validate_time_string(&value)?)),
-        (DataType::DateTime, Value::DateTime(value)) => Ok(Value::DateTime(value)),
-        (DataType::DateTime, Value::Text(value)) => {
-            Ok(Value::DateTime(validate_datetime_string(&value)?))
-        }
-        (DataType::TimeWithTimeZone, Value::TimeWithTimeZone(value)) => {
-            Ok(Value::TimeWithTimeZone(value))
-        }
-        (DataType::TimeWithTimeZone, Value::Text(value)) => Ok(Value::TimeWithTimeZone(
-            validate_time_with_time_zone_string(&value)?,
-        )),
-        (DataType::IntervalYearMonth, value) => Ok(Value::IntervalYearMonth(
+        DataType::Blob => match value {
+            Value::Blob(v) => Ok(Value::Blob(v)),
+            Value::Text(v) => Ok(Value::Blob(v.into_bytes())),
+            Value::Integer(v) => Ok(Value::Blob(v.to_le_bytes().to_vec())),
+            Value::BigInt(v) => Ok(Value::Blob(v.to_le_bytes().to_vec())),
+            Value::Int128(v) => Ok(Value::Blob(v.to_le_bytes().to_vec())),
+            Value::UInteger(v) => Ok(Value::Blob(v.to_le_bytes().to_vec())),
+            Value::UBigInt(v) => Ok(Value::Blob(v.to_le_bytes().to_vec())),
+            Value::UInt128(v) => Ok(Value::Blob(v.to_le_bytes().to_vec())),
+            _ => Err(HematiteError::ParseError(format!("Cannot CAST '{:?}' AS BLOB", value))),
+        },
+        DataType::Date => match value {
+            Value::Date(v) => Ok(Value::Date(v)),
+            Value::Text(v) => Ok(Value::Date(validate_date_string(&v)?)),
+            _ => Err(HematiteError::ParseError(format!("Cannot CAST '{:?}' AS DATE", value))),
+        },
+        DataType::Time => match value {
+            Value::Time(v) => Ok(Value::Time(v)),
+            Value::Text(v) => Ok(Value::Time(validate_time_string(&v)?)),
+            _ => Err(HematiteError::ParseError(format!("Cannot CAST '{:?}' AS TIME", value))),
+        },
+        DataType::DateTime => match value {
+            Value::DateTime(v) => Ok(Value::DateTime(v)),
+            Value::Text(v) => Ok(Value::DateTime(validate_datetime_string(&v)?)),
+            _ => Err(HematiteError::ParseError(format!("Cannot CAST '{:?}' AS DATETIME", value))),
+        },
+        DataType::TimeWithTimeZone => match value {
+            Value::TimeWithTimeZone(v) => Ok(Value::TimeWithTimeZone(v)),
+            Value::Text(v) => Ok(Value::TimeWithTimeZone(validate_time_with_time_zone_string(&v)?)),
+            _ => Err(HematiteError::ParseError(format!("Cannot CAST '{:?}' AS TIME WITH TIME ZONE", value))),
+        },
+        DataType::IntervalYearMonth => Ok(Value::IntervalYearMonth(
             IntervalYearMonthValue::parse(&cast_value_to_text_string(value)?)?,
         )),
-        (DataType::IntervalDaySecond, value) => Ok(Value::IntervalDaySecond(
+        DataType::IntervalDaySecond => Ok(Value::IntervalDaySecond(
             IntervalDaySecondValue::parse(&cast_value_to_text_string(value)?)?,
         )),
-        (data_type, value) => Err(HematiteError::ParseError(format!(
-            "Cannot CAST {:?} AS {}",
-            value,
-            data_type.name()
-        ))),
     }
 }
 
@@ -7117,12 +5973,10 @@ fn evaluate_round(args: Vec<Value>) -> Result<Value> {
 
     match value {
         Value::Null => Ok(Value::Null),
-        Value::Integer(value) => round_integer(value, precision),
-        Value::BigInt(value) => round_bigint(value, precision),
-        Value::Int128(value) => round_int128(value, precision),
-        Value::UInteger(value) => round_uinteger(value, precision),
-        Value::UBigInt(value) => round_ubigint(value, precision),
-        Value::UInt128(value) => round_uint128(value, precision),
+        value @ (Value::Integer(_) | Value::BigInt(_) | Value::Int128(_)
+               | Value::UInteger(_) | Value::UBigInt(_) | Value::UInt128(_)) => {
+            round_integral_value(value, precision)
+        }
         Value::Float32(value) => Ok(Value::Float32(round_float(value as f64, precision) as f32)),
         Value::Float(value) => Ok(Value::Float(round_float(value, precision))),
         value => Err(HematiteError::ParseError(format!(
@@ -7729,82 +6583,56 @@ fn evaluate_power(args: Vec<Value>) -> Result<Value> {
     Ok(Value::Float(value))
 }
 
-fn round_integer(value: i32, precision: i32) -> Result<Value> {
+fn round_integral_value(value: Value, precision: i32) -> Result<Value> {
     if precision >= 0 {
-        return Ok(Value::Integer(value));
+        return Ok(value);
     }
-
-    let rounded = round_float(value as f64, precision);
-    let rounded = i32::try_from(rounded as i64)
-        .map_err(|_| HematiteError::ParseError("ROUND overflowed INT".to_string()))?;
-    Ok(Value::Integer(rounded))
-}
-
-fn round_bigint(value: i64, precision: i32) -> Result<Value> {
-    if precision >= 0 {
-        return Ok(Value::BigInt(value));
+    let rounded = match &value {
+        Value::Integer(v) => round_float(*v as f64, precision),
+        Value::BigInt(v) => round_float(*v as f64, precision),
+        Value::Int128(v) => round_float(*v as f64, precision),
+        Value::UInteger(v) => round_float(*v as f64, precision),
+        Value::UBigInt(v) => round_float(*v as f64, precision),
+        Value::UInt128(v) => round_float(*v as f64, precision),
+        _ => unreachable!("round_integral_value called with non-integral"),
+    };
+    match value {
+        Value::Integer(_) => {
+            let r = i32::try_from(rounded as i64)
+                .map_err(|_| HematiteError::ParseError("ROUND overflowed INT".to_string()))?;
+            Ok(Value::Integer(r))
+        }
+        Value::BigInt(_) => {
+            let r = i64::try_from(rounded as i128)
+                .map_err(|_| HematiteError::ParseError("ROUND overflowed INT64".to_string()))?;
+            Ok(Value::BigInt(r))
+        }
+        Value::Int128(_) => {
+            if !rounded.is_finite() || rounded < i128::MIN as f64 || rounded > i128::MAX as f64 {
+                return Err(HematiteError::ParseError("ROUND overflowed INT128".to_string()));
+            }
+            Ok(Value::Int128(rounded as i128))
+        }
+        Value::UInteger(_) => {
+            if rounded < 0.0 || rounded > u32::MAX as f64 {
+                return Err(HematiteError::ParseError("ROUND overflowed UINT".to_string()));
+            }
+            Ok(Value::UInteger(rounded as u32))
+        }
+        Value::UBigInt(_) => {
+            if rounded < 0.0 || rounded > u64::MAX as f64 {
+                return Err(HematiteError::ParseError("ROUND overflowed UINT64".to_string()));
+            }
+            Ok(Value::UBigInt(rounded as u64))
+        }
+        Value::UInt128(_) => {
+            if !rounded.is_finite() || rounded < 0.0 || rounded > u128::MAX as f64 {
+                return Err(HematiteError::ParseError("ROUND overflowed UINT128".to_string()));
+            }
+            Ok(Value::UInt128(rounded as u128))
+        }
+        _ => unreachable!(),
     }
-
-    let rounded = round_float(value as f64, precision);
-    let rounded = i64::try_from(rounded as i128)
-        .map_err(|_| HematiteError::ParseError("ROUND overflowed INT64".to_string()))?;
-    Ok(Value::BigInt(rounded))
-}
-
-fn round_int128(value: i128, precision: i32) -> Result<Value> {
-    if precision >= 0 {
-        return Ok(Value::Int128(value));
-    }
-
-    let rounded = round_float(value as f64, precision);
-    if !rounded.is_finite() || rounded < i128::MIN as f64 || rounded > i128::MAX as f64 {
-        return Err(HematiteError::ParseError(
-            "ROUND overflowed INT128".to_string(),
-        ));
-    }
-    Ok(Value::Int128(rounded as i128))
-}
-
-fn round_uinteger(value: u32, precision: i32) -> Result<Value> {
-    if precision >= 0 {
-        return Ok(Value::UInteger(value));
-    }
-
-    let rounded = round_float(value as f64, precision);
-    if rounded < 0.0 || rounded > u32::MAX as f64 {
-        return Err(HematiteError::ParseError(
-            "ROUND overflowed UINT".to_string(),
-        ));
-    }
-    Ok(Value::UInteger(rounded as u32))
-}
-
-fn round_ubigint(value: u64, precision: i32) -> Result<Value> {
-    if precision >= 0 {
-        return Ok(Value::UBigInt(value));
-    }
-
-    let rounded = round_float(value as f64, precision);
-    if rounded < 0.0 || rounded > u64::MAX as f64 {
-        return Err(HematiteError::ParseError(
-            "ROUND overflowed UINT64".to_string(),
-        ));
-    }
-    Ok(Value::UBigInt(rounded as u64))
-}
-
-fn round_uint128(value: u128, precision: i32) -> Result<Value> {
-    if precision >= 0 {
-        return Ok(Value::UInt128(value));
-    }
-
-    let rounded = round_float(value as f64, precision);
-    if !rounded.is_finite() || rounded < 0.0 || rounded > u128::MAX as f64 {
-        return Err(HematiteError::ParseError(
-            "ROUND overflowed UINT128".to_string(),
-        ));
-    }
-    Ok(Value::UInt128(rounded as u128))
 }
 
 fn round_float(value: f64, precision: i32) -> f64 {
@@ -8258,5 +7086,431 @@ impl QueryExecutor for DropIndexExecutor {
             columns: Vec::new(),
             rows: Vec::new(),
         })
+    }
+}
+
+trait ColumnResolver {
+    fn resolve_column(&self, name: &str) -> Result<Value>;
+    fn resolve_aggregate(
+        &self,
+        function: AggregateFunction,
+        target: &AggregateTarget,
+    ) -> Result<Value>;
+    fn execute_scalar_subquery(
+        &self,
+        ctx: &mut ExecutionContext<'_>,
+        cache: &mut SubqueryCache,
+        subquery: &SelectStatement,
+    ) -> Result<Value>;
+    fn execute_subquery(
+        &self,
+        ctx: &mut ExecutionContext<'_>,
+        cache: &mut SubqueryCache,
+        subquery: &SelectStatement,
+    ) -> Result<Arc<QueryResult>>;
+    fn text_comparison_context_for_expression(
+        &self,
+        _expr: &Expression,
+    ) -> Result<Option<TextComparisonContext>> {
+        Ok(None)
+    }
+    fn merged_text_comparison_context(
+        &self,
+        _left: &Expression,
+        _right: &Expression,
+    ) -> Result<Option<TextComparisonContext>> {
+        Ok(None)
+    }
+}
+
+struct StandardResolver<'a> {
+    executor: &'a SelectExecutor,
+    sources: &'a [ResolvedSource],
+    row: &'a [Value],
+}
+
+impl<'a> ColumnResolver for StandardResolver<'a> {
+    fn resolve_column(&self, name: &str) -> Result<Value> {
+        self.executor.resolve_column_value(self.sources, name, self.row)
+    }
+
+    fn resolve_aggregate(
+        &self,
+        _function: AggregateFunction,
+        _target: &AggregateTarget,
+    ) -> Result<Value> {
+        Err(HematiteError::ParseError(
+            "Aggregate expressions can only be evaluated in grouped query contexts".to_string(),
+        ))
+    }
+
+    fn execute_scalar_subquery(
+        &self,
+        ctx: &mut ExecutionContext<'_>,
+        cache: &mut SubqueryCache,
+        subquery: &SelectStatement,
+    ) -> Result<Value> {
+        self.executor.execute_scalar_subquery_cached(
+            ctx,
+            cache,
+            subquery,
+            Some(self.sources),
+            Some(self.row),
+        )
+    }
+
+    fn execute_subquery(
+        &self,
+        ctx: &mut ExecutionContext<'_>,
+        cache: &mut SubqueryCache,
+        subquery: &SelectStatement,
+    ) -> Result<Arc<QueryResult>> {
+        self.executor.execute_subquery_cached(
+            ctx,
+            cache,
+            subquery,
+            Some(self.sources),
+            Some(self.row),
+        )
+    }
+
+    fn text_comparison_context_for_expression(
+        &self,
+        expr: &Expression,
+    ) -> Result<Option<TextComparisonContext>> {
+        self.executor.text_comparison_context_for_expression(self.sources, expr)
+    }
+
+    fn merged_text_comparison_context(
+        &self,
+        left: &Expression,
+        right: &Expression,
+    ) -> Result<Option<TextComparisonContext>> {
+        self.executor.merged_text_comparison_context(self.sources, left, right)
+    }
+}
+
+struct ProjectedResolver<'a> {
+    executor: &'a SelectExecutor,
+    sources: &'a [ResolvedSource],
+    row: &'a [Value],
+    output_columns: &'a [String],
+    group_rows: &'a [Vec<Value>],
+}
+
+impl<'a> ColumnResolver for ProjectedResolver<'a> {
+    fn resolve_column(&self, name: &str) -> Result<Value> {
+        let index = self
+            .executor
+            .result_column_index(self.output_columns, name)
+            .ok_or_else(|| {
+                HematiteError::ParseError(format!(
+                    "HAVING column '{}' does not match any grouped output column or alias",
+                    name
+                ))
+            })?;
+        self.row.get(index).cloned().ok_or_else(|| {
+            HematiteError::InternalError(format!(
+                "Grouped output row is missing column index {} for '{}'",
+                index, name
+            ))
+        })
+    }
+
+    fn resolve_aggregate(
+        &self,
+        function: AggregateFunction,
+        target: &AggregateTarget,
+    ) -> Result<Value> {
+        self.executor
+            .evaluate_aggregate_value(self.sources, function, target, self.group_rows)?
+            .ok_or_else(|| {
+                HematiteError::InternalError(
+                    "Aggregate expression evaluation produced no value".to_string(),
+                )
+            })
+    }
+
+    fn execute_scalar_subquery(
+        &self,
+        ctx: &mut ExecutionContext<'_>,
+        cache: &mut SubqueryCache,
+        subquery: &SelectStatement,
+    ) -> Result<Value> {
+        self.executor.execute_scalar_subquery_cached(
+            ctx,
+            cache,
+            subquery,
+            Some(self.sources),
+            Some(self.row),
+        )
+    }
+
+    fn execute_subquery(
+        &self,
+        ctx: &mut ExecutionContext<'_>,
+        cache: &mut SubqueryCache,
+        subquery: &SelectStatement,
+    ) -> Result<Arc<QueryResult>> {
+        self.executor.execute_subquery_cached(
+            ctx,
+            cache,
+            subquery,
+            Some(self.sources),
+            Some(self.row),
+        )
+    }
+
+    fn text_comparison_context_for_expression(
+        &self,
+        expr: &Expression,
+    ) -> Result<Option<TextComparisonContext>> {
+        self.executor.text_comparison_context_for_expression(self.sources, expr)
+    }
+
+    fn merged_text_comparison_context(
+        &self,
+        left: &Expression,
+        right: &Expression,
+    ) -> Result<Option<TextComparisonContext>> {
+        self.executor.merged_text_comparison_context(self.sources, left, right)
+    }
+}
+
+struct InsertResolver;
+
+impl ColumnResolver for InsertResolver {
+    fn resolve_column(&self, name: &str) -> Result<Value> {
+        Err(HematiteError::ParseError(format!(
+            "INSERT expressions cannot reference column '{}'",
+            name
+        )))
+    }
+    fn resolve_aggregate(
+        &self,
+        _function: AggregateFunction,
+        _target: &AggregateTarget,
+    ) -> Result<Value> {
+        Err(HematiteError::ParseError(
+            "INSERT expressions cannot use aggregate functions".to_string(),
+        ))
+    }
+    fn execute_scalar_subquery(
+        &self,
+        _ctx: &mut ExecutionContext<'_>,
+        _cache: &mut SubqueryCache,
+        _subquery: &SelectStatement,
+    ) -> Result<Value> {
+        Err(HematiteError::ParseError(
+            "INSERT expressions cannot use scalar subqueries".to_string(),
+        ))
+    }
+    fn execute_subquery(
+        &self,
+        _ctx: &mut ExecutionContext<'_>,
+        _cache: &mut SubqueryCache,
+        _subquery: &SelectStatement,
+    ) -> Result<Arc<QueryResult>> {
+        Err(HematiteError::ParseError(
+            "INSERT expressions cannot use subqueries in boolean expressions".to_string(),
+        ))
+    }
+}
+
+fn evaluate_expression_generic<R: ColumnResolver>(
+    ctx: &mut ExecutionContext<'_>,
+    cache: &mut SubqueryCache,
+    expr: &Expression,
+    resolver: &R,
+) -> Result<Value> {
+    match expr {
+        Expression::Literal(value) => Ok(lower_literal_value(value)),
+        Expression::IntervalLiteral { value, qualifier } => match qualifier {
+            IntervalQualifier::YearToMonth => Ok(Value::IntervalYearMonth(
+                IntervalYearMonthValue::parse(value)?,
+            )),
+            IntervalQualifier::DayToSecond => Ok(Value::IntervalDaySecond(
+                IntervalDaySecondValue::parse(value)?,
+            )),
+        },
+        Expression::Parameter(index) => Err(HematiteError::ParseError(format!(
+            "Unbound parameter {} reached execution",
+            index + 1
+        ))),
+        Expression::Cast { expr, target_type } => cast_value_to_type(
+            evaluate_expression_generic(ctx, cache, expr, resolver)?,
+            lower_type_name(target_type.clone()),
+        ),
+        Expression::Case {
+            branches,
+            else_expr,
+        } => {
+            for branch in branches {
+                match evaluate_boolean_expression_generic(
+                    ctx,
+                    cache,
+                    &branch.condition,
+                    resolver,
+                )? {
+                    Some(true) => {
+                        return evaluate_expression_generic(
+                            ctx,
+                            cache,
+                            &branch.result,
+                            resolver,
+                        )
+                    }
+                    Some(false) | None => {}
+                }
+            }
+
+            match else_expr {
+                Some(else_expr) => {
+                    evaluate_expression_generic(ctx, cache, else_expr, resolver)
+                }
+                None => Ok(Value::Null),
+            }
+        }
+        Expression::AggregateCall { function, target } => {
+            resolver.resolve_aggregate(*function, target)
+        }
+        Expression::ScalarFunctionCall { function, args } => {
+            evaluate_scalar_function_call(*function, args, |expr| {
+                evaluate_expression_generic(ctx, cache, expr, resolver)
+            })
+        }
+        Expression::ScalarSubquery(subquery) => {
+            resolver.execute_scalar_subquery(ctx, cache, subquery)
+        }
+        Expression::Column(name) => resolver.resolve_column(name),
+        Expression::UnaryMinus(expr) => {
+            negate_numeric_value(evaluate_expression_generic(ctx, cache, expr, resolver)?)
+        }
+        Expression::UnaryNot(_)
+        | Expression::Comparison { .. }
+        | Expression::InList { .. }
+        | Expression::InSubquery { .. }
+        | Expression::Between { .. }
+        | Expression::Like { .. }
+        | Expression::Exists { .. }
+        | Expression::NullCheck { .. }
+        | Expression::Logical { .. } => Ok(nullable_bool_to_value(
+            evaluate_boolean_expression_generic(ctx, cache, expr, resolver)?,
+        )),
+        Expression::Binary {
+            left,
+            operator,
+            right,
+        } => {
+            let left = evaluate_expression_generic(ctx, cache, left, resolver)?;
+            let right = evaluate_expression_generic(ctx, cache, right, resolver)?;
+            evaluate_arithmetic_values(operator, left, right)
+        }
+    }
+}
+
+fn evaluate_boolean_expression_generic<R: ColumnResolver>(
+    ctx: &mut ExecutionContext<'_>,
+    cache: &mut SubqueryCache,
+    expr: &Expression,
+    resolver: &R,
+) -> Result<Option<bool>> {
+    match expr {
+        Expression::Comparison {
+            left,
+            operator,
+            right,
+        } => {
+            let left_val = evaluate_expression_generic(ctx, cache, left, resolver)?;
+            let right_val = evaluate_expression_generic(ctx, cache, right, resolver)?;
+            let text_context = resolver.merged_text_comparison_context(left, right)?;
+            Ok(compare_condition_values(&left_val, operator, &right_val, text_context))
+        }
+        Expression::InList {
+            expr,
+            values,
+            is_not,
+        } => evaluate_in_list_predicate(
+            expr,
+            values,
+            *is_not,
+            resolver.text_comparison_context_for_expression(expr)?,
+            |value_expr| evaluate_expression_generic(ctx, cache, value_expr, resolver),
+        ),
+        Expression::InSubquery {
+            expr,
+            subquery,
+            is_not,
+        } => {
+            let probe = evaluate_expression_generic(ctx, cache, expr, resolver)?;
+            let subquery_result = resolver.execute_subquery(ctx, cache, subquery)?;
+            let candidates = subquery_result
+                .rows
+                .iter()
+                .map(|row| row.first().cloned().unwrap_or(Value::Null))
+                .collect::<Vec<_>>();
+            let text_context = resolver.text_comparison_context_for_expression(expr)?;
+            Ok(evaluate_in_candidates(probe, candidates, *is_not, text_context))
+        }
+        Expression::Between {
+            expr,
+            lower,
+            upper,
+            is_not,
+        } => evaluate_between_predicate(
+            expr,
+            lower,
+            upper,
+            *is_not,
+            resolver.text_comparison_context_for_expression(expr)?,
+            |value_expr| evaluate_expression_generic(ctx, cache, value_expr, resolver),
+        ),
+        Expression::Like {
+            expr,
+            pattern,
+            is_not,
+        } => evaluate_like_predicate(
+            expr,
+            pattern,
+            *is_not,
+            resolver.text_comparison_context_for_expression(expr)?,
+            |value_expr| evaluate_expression_generic(ctx, cache, value_expr, resolver),
+        ),
+        Expression::Exists { subquery, is_not } => {
+            let subquery_result = resolver.execute_subquery(ctx, cache, subquery)?;
+            let exists = !subquery_result.rows.is_empty();
+            Ok(Some(if *is_not { !exists } else { exists }))
+        }
+        Expression::NullCheck { expr, is_not } => {
+            let value = evaluate_expression_generic(ctx, cache, expr, resolver)?;
+            let is_null = value.is_null();
+            Ok(Some(if *is_not { !is_null } else { is_null }))
+        }
+        Expression::UnaryNot(expr) => Ok(evaluate_boolean_expression_generic(
+            ctx,
+            cache,
+            expr,
+            resolver,
+        )?
+        .map(|value| !value)),
+        Expression::Logical {
+            left,
+            operator,
+            right,
+        } => {
+            let left_result = evaluate_boolean_expression_generic(ctx, cache, left, resolver)?;
+            match operator {
+                LogicalOperator::And => short_circuit_and(left_result, || {
+                    evaluate_boolean_expression_generic(ctx, cache, right, resolver)
+                }),
+                LogicalOperator::Or => short_circuit_or(left_result, || {
+                    evaluate_boolean_expression_generic(ctx, cache, right, resolver)
+                }),
+            }
+        }
+        _ => coerce_value_to_nullable_bool(
+            evaluate_expression_generic(ctx, cache, expr, resolver)?,
+            "Boolean expression",
+        ),
     }
 }

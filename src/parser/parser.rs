@@ -615,7 +615,7 @@ impl Parser {
                     self.consume_token(&Token::Join)?;
                     let right = self.parse_table_reference()?;
                     self.consume_token(&Token::On)?;
-                    let on = self.parse_or_condition()?;
+                    let on = self.parse_or_expression()?;
                     from = TableReference::InnerJoin {
                         left: Box::new(from),
                         right: Box::new(right),
@@ -627,7 +627,7 @@ impl Parser {
                     self.consume_token(&Token::Join)?;
                     let right = self.parse_table_reference()?;
                     self.consume_token(&Token::On)?;
-                    let on = self.parse_or_condition()?;
+                    let on = self.parse_or_expression()?;
                     from = TableReference::InnerJoin {
                         left: Box::new(from),
                         right: Box::new(right),
@@ -642,7 +642,7 @@ impl Parser {
                     self.consume_token(&Token::Join)?;
                     let right = self.parse_table_reference()?;
                     self.consume_token(&Token::On)?;
-                    let on = self.parse_or_condition()?;
+                    let on = self.parse_or_expression()?;
                     from = TableReference::LeftJoin {
                         left: Box::new(from),
                         right: Box::new(right),
@@ -657,7 +657,7 @@ impl Parser {
                     self.consume_token(&Token::Join)?;
                     let right = self.parse_table_reference()?;
                     self.consume_token(&Token::On)?;
-                    let on = self.parse_or_condition()?;
+                    let on = self.parse_or_expression()?;
                     from = TableReference::RightJoin {
                         left: Box::new(from),
                         right: Box::new(right),
@@ -672,7 +672,7 @@ impl Parser {
                     self.consume_token(&Token::Join)?;
                     let right = self.parse_table_reference()?;
                     self.consume_token(&Token::On)?;
-                    let on = self.parse_or_condition()?;
+                    let on = self.parse_or_expression()?;
                     from = TableReference::FullOuterJoin {
                         left: Box::new(from),
                         right: Box::new(right),
@@ -688,9 +688,7 @@ impl Parser {
 
     fn parse_where_clause(&mut self) -> Result<WhereClause> {
         self.consume_token(&Token::Where)?;
-
-        let conditions = self.parse_conditions()?;
-
+        let conditions = vec![self.parse_or_expression()?];
         Ok(WhereClause { conditions })
     }
 
@@ -744,7 +742,7 @@ impl Parser {
 
     fn parse_having_clause(&mut self) -> Result<WhereClause> {
         self.consume_token(&Token::Having)?;
-        let conditions = self.parse_conditions()?;
+        let conditions = vec![self.parse_or_expression()?];
         Ok(WhereClause { conditions })
     }
 
@@ -777,195 +775,6 @@ impl Parser {
                 clause_name, token
             ))),
         }
-    }
-
-    fn parse_conditions(&mut self) -> Result<Vec<Condition>> {
-        Ok(vec![self.parse_or_condition()?])
-    }
-
-    fn parse_or_condition(&mut self) -> Result<Condition> {
-        let mut condition = self.parse_and_condition()?;
-
-        while matches!(self.peek_token(), Ok(&Token::Or)) {
-            self.consume_token(&Token::Or)?;
-            let right = self.parse_and_condition()?;
-            condition = Condition::Logical {
-                left: Box::new(condition),
-                operator: LogicalOperator::Or,
-                right: Box::new(right),
-            };
-        }
-
-        Ok(condition)
-    }
-
-    fn parse_and_condition(&mut self) -> Result<Condition> {
-        let mut condition = self.parse_primary_condition()?;
-
-        while matches!(self.peek_token(), Ok(&Token::And)) {
-            self.consume_token(&Token::And)?;
-            let right = self.parse_primary_condition()?;
-            condition = Condition::Logical {
-                left: Box::new(condition),
-                operator: LogicalOperator::And,
-                right: Box::new(right),
-            };
-        }
-
-        Ok(condition)
-    }
-
-    fn parse_primary_condition(&mut self) -> Result<Condition> {
-        if self.peek_token()? == &Token::Not {
-            self.consume_token(&Token::Not)?;
-            if self.peek_token()? == &Token::Exists {
-                self.consume_token(&Token::Exists)?;
-                return self.parse_exists_condition(true);
-            }
-            return Ok(Condition::Not(Box::new(self.parse_primary_condition()?)));
-        }
-
-        if self.peek_token()? == &Token::Exists {
-            self.consume_token(&Token::Exists)?;
-            return self.parse_exists_condition(false);
-        }
-
-        if self.peek_token()? == &Token::LeftParen {
-            self.consume_token(&Token::LeftParen)?;
-            let condition = self.parse_or_condition()?;
-            self.consume_token(&Token::RightParen)?;
-            Ok(condition)
-        } else {
-            self.parse_condition()
-        }
-    }
-
-    fn parse_condition(&mut self) -> Result<Condition> {
-        let left = self.parse_value_expression()?;
-
-        if matches!(self.peek_token(), Ok(&Token::Not)) {
-            self.consume_token(&Token::Not)?;
-            if matches!(self.peek_token(), Ok(&Token::In)) {
-                self.consume_token(&Token::In)?;
-                return self.parse_in_list_condition(left, true);
-            }
-            if matches!(self.peek_token(), Ok(&Token::Like)) {
-                self.consume_token(&Token::Like)?;
-                return self.parse_like_condition(left, true);
-            }
-            if matches!(self.peek_token(), Ok(&Token::Between)) {
-                self.consume_token(&Token::Between)?;
-                return self.parse_between_condition(left, true);
-            }
-            return Err(HematiteError::ParseError(
-                "Expected IN, LIKE, or BETWEEN after NOT in predicate".to_string(),
-            ));
-        }
-
-        if matches!(self.peek_token(), Ok(&Token::In)) {
-            self.consume_token(&Token::In)?;
-            return self.parse_in_list_condition(left, false);
-        }
-
-        if matches!(self.peek_token(), Ok(&Token::Between)) {
-            self.consume_token(&Token::Between)?;
-            return self.parse_between_condition(left, false);
-        }
-
-        if matches!(self.peek_token(), Ok(&Token::Like)) {
-            self.consume_token(&Token::Like)?;
-            return self.parse_like_condition(left, false);
-        }
-
-        if matches!(self.peek_token(), Ok(&Token::Is)) {
-            self.consume_token(&Token::Is)?;
-            let is_not = if matches!(self.peek_token(), Ok(&Token::Not)) {
-                self.consume_token(&Token::Not)?;
-                true
-            } else {
-                false
-            };
-            self.consume_token(&Token::Null)?;
-            return Ok(Condition::NullCheck { expr: left, is_not });
-        }
-
-        let operator = self.parse_comparison_operator()?;
-
-        let right = self.parse_value_expression()?;
-
-        Ok(Condition::Comparison {
-            left,
-            operator,
-            right,
-        })
-    }
-
-    fn parse_in_list_condition(&mut self, expr: Expression, is_not: bool) -> Result<Condition> {
-        self.consume_token(&Token::LeftParen)?;
-        if matches!(self.peek_token(), Ok(&Token::Select | Token::With)) {
-            let subquery = self.parse_query_statement(false, false)?.0;
-            self.consume_token(&Token::RightParen)?;
-            return Ok(Condition::InSubquery {
-                expr,
-                subquery: Box::new(subquery),
-                is_not,
-            });
-        }
-
-        let mut values = Vec::new();
-
-        loop {
-            values.push(self.parse_expression()?);
-            if matches!(self.peek_token(), Ok(&Token::Comma)) {
-                self.consume_token(&Token::Comma)?;
-                continue;
-            }
-            break;
-        }
-
-        if values.is_empty() {
-            return Err(HematiteError::ParseError(
-                "IN list must contain at least one expression".to_string(),
-            ));
-        }
-
-        self.consume_token(&Token::RightParen)?;
-        Ok(Condition::InList {
-            expr,
-            values,
-            is_not,
-        })
-    }
-
-    fn parse_exists_condition(&mut self, is_not: bool) -> Result<Condition> {
-        self.consume_token(&Token::LeftParen)?;
-        let subquery = self.parse_query_statement(false, false)?.0;
-        self.consume_token(&Token::RightParen)?;
-        Ok(Condition::Exists {
-            subquery: Box::new(subquery),
-            is_not,
-        })
-    }
-
-    fn parse_between_condition(&mut self, expr: Expression, is_not: bool) -> Result<Condition> {
-        let lower = self.parse_value_expression()?;
-        self.consume_token(&Token::And)?;
-        let upper = self.parse_value_expression()?;
-        Ok(Condition::Between {
-            expr,
-            lower,
-            upper,
-            is_not,
-        })
-    }
-
-    fn parse_like_condition(&mut self, expr: Expression, is_not: bool) -> Result<Condition> {
-        let pattern = self.parse_value_expression()?;
-        Ok(Condition::Like {
-            expr,
-            pattern,
-            is_not,
-        })
     }
 
     fn parse_expression(&mut self) -> Result<Expression> {
@@ -2309,9 +2118,9 @@ impl Parser {
         Ok(None)
     }
 
-    fn parse_parenthesized_condition(&mut self) -> Result<Condition> {
+    fn parse_parenthesized_condition(&mut self) -> Result<Expression> {
         self.consume_token(&Token::LeftParen)?;
-        let condition = self.parse_or_condition()?;
+        let condition = self.parse_or_expression()?;
         self.consume_token(&Token::RightParen)?;
         Ok(condition)
     }
@@ -2760,9 +2569,9 @@ pub fn parse_sql_statement(sql: &str) -> Result<Statement> {
     parser.parse()
 }
 
-pub fn parse_condition_fragment(sql: &str) -> Result<Condition> {
+pub fn parse_expression_fragment(sql: &str) -> Result<Expression> {
     let mut parser = Parser::new(tokenize_sql(sql)?);
-    let condition = parser.parse_or_condition()?;
+    let condition = parser.parse_or_expression()?;
     if parser.position != parser.tokens.len() {
         return Err(HematiteError::ParseError(
             "Unexpected trailing tokens in CHECK constraint".to_string(),
