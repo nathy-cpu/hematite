@@ -68,7 +68,7 @@ impl PageCache {
         })
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn get_for_view(&mut self, page_id: PageId, view_token: u64) -> Option<Arc<Page>> {
         let page = self.peek_for_view(page_id, view_token);
         if page.is_some() {
@@ -83,11 +83,6 @@ impl PageCache {
 
     pub(crate) fn put_with_view(&mut self, page: Page, view_token: u64) {
         self.put_shared_with_view(Arc::new(page), view_token);
-    }
-    #[allow(dead_code)]
-    #[cfg(test)]
-    pub(crate) fn put_shared(&mut self, page: Arc<Page>) {
-        self.put_shared_with_view(page, 0);
     }
 
     pub(crate) fn put_shared_with_view(&mut self, page: Arc<Page>, view_token: u64) {
