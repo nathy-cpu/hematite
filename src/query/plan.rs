@@ -1,5 +1,6 @@
 //! Query plan structures and access-path descriptions.
 
+use crate::query::logest::LogEst;
 use crate::parser::ast::AggregateFunction;
 use crate::parser::ast::{
     AlterStatement, CreateIndexStatement, CreateStatement, DeleteStatement, DropIndexStatement,
@@ -9,7 +10,7 @@ use crate::parser::ast::{
 pub struct QueryPlan {
     pub node: PlanNode,
     pub program: ExecutionProgram,
-    pub estimated_cost: f64,
+    pub estimated_cost: LogEst,
     pub select_analysis: Option<SelectAnalysis>,
 }
 
@@ -172,7 +173,7 @@ pub struct IndexUsage {
     pub column_id: crate::catalog::ColumnId,
     pub index_type: IndexType,
     pub index_name: Option<String>,
-    pub selectivity: f64,
+    pub selectivity: LogEst,
 }
 
 #[derive(Debug, Clone)]

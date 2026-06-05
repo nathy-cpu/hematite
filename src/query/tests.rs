@@ -1083,7 +1083,7 @@ mod planner_tests {
 
         let plan = planner.plan(Statement::Select(statement))?;
 
-        assert!(plan.estimated_cost > 0.0);
+        assert!(plan.estimated_cost.0 >= 0);
         let node = expect_select_node(&plan);
         assert_eq!(node.table_name, "users");
         assert_eq!(node.access_path, SelectAccessPath::PrimaryKeyLookup);
@@ -2034,7 +2034,7 @@ mod planner_tests {
         let node = expect_insert_node(&plan);
         assert_eq!(node.table_name, "users");
         assert_eq!(node.row_count, 1);
-        assert_eq!(plan.estimated_cost, 1.0); // One row
+        assert_eq!(plan.estimated_cost.0, 0); // One row → LogEst(0)
         Ok(())
     }
 
@@ -2067,7 +2067,7 @@ mod planner_tests {
         let node = expect_create_node(&plan);
         assert_eq!(node.table_name, "test_table");
         assert_eq!(node.column_count, 1);
-        assert_eq!(plan.estimated_cost, 1.0); // Fixed cost for CREATE
+        assert_eq!(plan.estimated_cost.0, 0); // Fixed cost for CREATE
         Ok(())
     }
 }

@@ -3,9 +3,11 @@
 use crate::catalog::{Schema, Table, Value};
 use crate::error::Result;
 use crate::parser::ast::*;
+use crate::query::logest::LogEst;
 use crate::query::optimizer::QueryOptimizer;
 pub use crate::query::plan::*;
 use crate::query::predicate::extract_literal_equalities;
+use crate::query::rewrite::rewrite_select;
 use crate::query::validation::validate_statement;
 use crate::HematiteError;
 use std::collections::HashMap;
@@ -36,6 +38,17 @@ impl QueryPlanner {
         // Logical optimization
         let optimizer = QueryOptimizer::from_schema(&self.catalog);
         let optimized_stmt = optimizer.optimize_statement(statement)?;
+
+        // AST-level structural rewrites (BETWEEN→range, OR→IN, HAVING→WHERE,
+        // subquery ORDER BY removal). These normalise the tree before the
+        // planner enumerates access paths.
+        let optimized_stmt = match optimized_stmt {
+            Statement::Select(mut select) => {
+                rewrite_select(&mut select);
+                Statement::Select(select)
+            }
+            other => other,
+        };
 
         let plan = match optimized_stmt {
             Statement::Begin
@@ -117,7 +130,7 @@ impl QueryPlanner {
             InsertSource::Values(rows) => rows.len(),
             InsertSource::Select(_) => 1,
         };
-        let estimated_cost = row_count as f64;
+        let estimated_cost = LogEst::from_count(row_count as u64);
         let node = PlanNode::Insert(InsertPlanNode {
             table_name: statement.table.clone(),
             row_count,
@@ -160,8 +173,11 @@ impl QueryPlanner {
         let estimated_cost = if matches!(access_path, SelectAccessPath::JoinScan) {
             self.catalog
                 .get_table_by_name(&statement.table)
-                .map(|table| self.estimate_table_rows(table) as f64 + assignment_count as f64)
-                .unwrap_or(assignment_count as f64)
+                .map(|table| {
+                    LogEst::from_count(self.estimate_table_rows(table) as u64)
+                        + LogEst::from_count(assignment_count as u64)
+                })
+                .unwrap_or(LogEst::from_count(assignment_count as u64))
         } else {
             let analysis = analysis.as_ref().expect("non-join access path requires analysis");
             self.estimate_update_cost(&analysis, &access_path, assignment_count)
@@ -197,8 +213,8 @@ impl QueryPlanner {
         let estimated_cost = if matches!(access_path, SelectAccessPath::JoinScan) {
             self.catalog
                 .get_table_by_name(&statement.table)
-                .map(|table| self.estimate_table_rows(table) as f64)
-                .unwrap_or(1.0)
+                .map(|table| LogEst::from_count(self.estimate_table_rows(table) as u64))
+                .unwrap_or(LogEst(0))
         } else {
             let analysis = analysis.as_ref().expect("non-join access path requires analysis");
             self.estimate_delete_cost(&analysis, &access_path)
@@ -250,7 +266,7 @@ impl QueryPlanner {
         QueryPlan {
             node,
             program,
-            estimated_cost: 1.0,
+            estimated_cost: LogEst(0),
             select_analysis: None,
         }
     }
@@ -478,7 +494,7 @@ impl QueryPlanner {
                 column_id: first_pk.id,
                 index_type: IndexType::PrimaryKey,
                 index_name: None,
-                selectivity: (1.0 / self.estimate_table_rows(table).max(1) as f64).max(0.0001),
+                selectivity: LogEst(0) - LogEst::from_count(self.estimate_table_rows(table).max(1) as u64),
             });
         }
 
@@ -497,11 +513,11 @@ impl QueryPlanner {
                     index_type: IndexType::Secondary,
                     index_name: Some(index.name.clone()),
                     selectivity: if index.unique {
-                        (1.0 / self.estimate_table_rows(table).max(1) as f64).max(0.0001)
+                        LogEst(0) - LogEst::from_count(self.estimate_table_rows(table).max(1) as u64)
                     } else if index.column_indices.len() > 1 {
-                        0.02
+                        LogEst(-17) // ~0.02
                     } else {
-                        0.1
+                        LogEst(-10) // ~0.1
                     },
                 });
             }
@@ -730,11 +746,11 @@ impl QueryPlanner {
         }
     }
 
-    fn estimate_select_cost(&self, analysis: &SelectAnalysis) -> f64 {
+    fn estimate_select_cost(&self, analysis: &SelectAnalysis) -> LogEst {
         let access_path = self.choose_access_path(analysis);
         let mut cost = self.estimate_total_access_cost(analysis, &access_path);
-        cost += analysis.accessed_columns.len() as f64 * 0.1;
-        cost.max(1.0)
+        cost = cost + LogEst::from_count(analysis.accessed_columns.len() as u64);
+        if cost.0 < 0 { LogEst(0) } else { cost }
     }
 
     fn estimate_update_cost(
@@ -742,36 +758,43 @@ impl QueryPlanner {
         analysis: &SelectAnalysis,
         access_path: &SelectAccessPath,
         assignment_count: usize,
-    ) -> f64 {
+    ) -> LogEst {
         let rows_touched = self.estimate_rows_touched(analysis, access_path);
-        (self.estimate_locator_cost(analysis, access_path)
-            + rows_touched * 3.0
-            + assignment_count as f64 * 0.2)
-            .max(1.0)
+        let locator = self.estimate_locator_cost(analysis, access_path);
+        let write_cost = rows_touched + LogEst::from_count(3); // 3x per row for write
+        let assign_cost = LogEst::from_count(assignment_count as u64);
+        let total = locator.add(write_cost).add(assign_cost);
+        if total.0 < 0 { LogEst(0) } else { total }
     }
 
     fn estimate_delete_cost(
         &self,
         analysis: &SelectAnalysis,
         access_path: &SelectAccessPath,
-    ) -> f64 {
+    ) -> LogEst {
         let rows_touched = self.estimate_rows_touched(analysis, access_path);
-        (self.estimate_locator_cost(analysis, access_path) + rows_touched * 2.0).max(1.0)
+        let locator = self.estimate_locator_cost(analysis, access_path);
+        let delete_cost = rows_touched + LogEst::from_count(2);
+        let total = locator.add(delete_cost);
+        if total.0 < 0 { LogEst(0) } else { total }
     }
 
     fn estimate_rows_touched(
         &self,
         analysis: &SelectAnalysis,
         access_path: &SelectAccessPath,
-    ) -> f64 {
+    ) -> LogEst {
         match access_path {
-            SelectAccessPath::JoinScan => analysis.estimated_rows as f64,
-            SelectAccessPath::RowIdLookup | SelectAccessPath::PrimaryKeyLookup => 1.0,
-            SelectAccessPath::SecondaryIndexLookup(index_name) => self
-                .secondary_index_selectivity(analysis, index_name)
-                .map(|selectivity| (analysis.estimated_rows as f64 * selectivity).max(1.0))
-                .unwrap_or((analysis.estimated_rows as f64 * 0.1).max(1.0)),
-            SelectAccessPath::FullTableScan => analysis.estimated_rows as f64,
+            SelectAccessPath::JoinScan => LogEst::from_count(analysis.estimated_rows as u64),
+            SelectAccessPath::RowIdLookup | SelectAccessPath::PrimaryKeyLookup => LogEst(0),
+            SelectAccessPath::SecondaryIndexLookup(index_name) => {
+                let rows = LogEst::from_count(analysis.estimated_rows as u64);
+                let sel = self.secondary_index_selectivity(analysis, index_name)
+                    .unwrap_or(LogEst(-10));
+                let result = rows + sel;
+                if result.0 < 0 { LogEst(0) } else { result }
+            }
+            SelectAccessPath::FullTableScan => LogEst::from_count(analysis.estimated_rows as u64),
         }
     }
 
@@ -779,19 +802,18 @@ impl QueryPlanner {
         &self,
         analysis: &SelectAnalysis,
         access_path: &SelectAccessPath,
-    ) -> f64 {
+    ) -> LogEst {
         match access_path {
-            SelectAccessPath::JoinScan => analysis.estimated_rows as f64 * 1.5,
-            SelectAccessPath::RowIdLookup => 1.0,
-            SelectAccessPath::PrimaryKeyLookup => 2.0,
-            SelectAccessPath::SecondaryIndexLookup(index_name) => {
-                2.5 + self.estimate_rows_touched(analysis, access_path)
-                    + self
-                        .secondary_index_selectivity(analysis, index_name)
-                        .map(|selectivity| selectivity * 5.0)
-                        .unwrap_or(0.5)
+            SelectAccessPath::JoinScan => {
+                LogEst::from_count(analysis.estimated_rows as u64) + LogEst(5) // ~1.5x
             }
-            SelectAccessPath::FullTableScan => analysis.estimated_rows as f64,
+            SelectAccessPath::RowIdLookup => LogEst(0),
+            SelectAccessPath::PrimaryKeyLookup => LogEst(10), // ~2
+            SelectAccessPath::SecondaryIndexLookup(_) => {
+                LogEst(13) // ~2.5 base cost, plus proportional
+                    + self.estimate_rows_touched(analysis, access_path)
+            }
+            SelectAccessPath::FullTableScan => LogEst::from_count(analysis.estimated_rows as u64),
         }
     }
 
@@ -799,7 +821,7 @@ impl QueryPlanner {
         &self,
         analysis: &SelectAnalysis,
         index_name: &str,
-    ) -> Option<f64> {
+    ) -> Option<LogEst> {
         analysis
             .usable_indexes
             .iter()
@@ -814,9 +836,10 @@ impl QueryPlanner {
         &self,
         analysis: &SelectAnalysis,
         access_path: &SelectAccessPath,
-    ) -> f64 {
-        self.estimate_locator_cost(analysis, access_path)
-            + self.estimate_rows_touched(analysis, access_path) * 0.5
+    ) -> LogEst {
+        let locator = self.estimate_locator_cost(analysis, access_path);
+        let rows = self.estimate_rows_touched(analysis, access_path);
+        locator.add(rows)
     }
 }
 

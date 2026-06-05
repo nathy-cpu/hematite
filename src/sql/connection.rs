@@ -1338,7 +1338,7 @@ impl Connection {
                 ],
                 vec![
                     Value::Text("estimated_cost".to_string()),
-                    Value::Text(format!("{:.2}", plan.estimated_cost)),
+                    Value::Text(format!("{}", plan.estimated_cost)),
                 ],
             ],
         })
