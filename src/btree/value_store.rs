@@ -20,16 +20,45 @@
 use crate::error::{HematiteError, Result};
 use crate::storage::overflow::{
     free_overflow_chain, read_overflow_chain_cached_with_cache, write_overflow_chain,
-    OverflowReadCache,
+    OverflowReadCache, OVERFLOW_PAYLOAD_CAPACITY,
 };
-use crate::storage::{Pager, INVALID_PAGE_ID};
-
-use super::node::MAX_VALUE_SIZE;
+use crate::storage::{Pager, INVALID_PAGE_ID, PAGE_SIZE};
 
 pub const STORED_VALUE_INLINE_TAG: u8 = 0;
 pub const STORED_VALUE_OVERFLOW_TAG: u8 = 1;
 pub const STORED_VALUE_HEADER_SIZE: usize = 11;
-pub const STORED_VALUE_LOCAL_CAPACITY: usize = MAX_VALUE_SIZE - STORED_VALUE_HEADER_SIZE;
+
+/// Maximum bytes of payload stored locally in a leaf cell (SQLite-style formula).
+/// For 4096-byte pages: (4096 - 12) * 64 / 255 - 23 = 1001.
+pub const MAX_LOCAL_PAYLOAD: usize = (PAGE_SIZE - 12) * 64 / 255 - 23;
+
+/// Minimum bytes of payload stored locally when overflow is needed.
+/// For 4096-byte pages: (4096 - 12) * 32 / 255 - 23 = 489.
+pub const MIN_LOCAL_PAYLOAD: usize = (PAGE_SIZE - 12) * 32 / 255 - 23;
+
+/// Backward-compatible alias — tests and external code may reference this.
+pub const STORED_VALUE_LOCAL_CAPACITY: usize = MAX_LOCAL_PAYLOAD;
+
+/// Compute how many bytes of `total_payload_len` should be stored locally in
+/// the leaf cell, following SQLite's `btreePayloadToLocal()` algorithm.
+///
+/// The formula ensures that overflow pages are kept as full as possible:
+/// - If the entire payload fits in `MAX_LOCAL_PAYLOAD`, store it all locally.
+/// - Otherwise, compute a `surplus` that aligns with the overflow page capacity
+///   so that the last overflow page absorbs any slack.
+pub fn local_payload_size(total_payload_len: usize) -> usize {
+    if total_payload_len <= MAX_LOCAL_PAYLOAD {
+        return total_payload_len;
+    }
+    let overflow_usable = OVERFLOW_PAYLOAD_CAPACITY;
+    let surplus = MIN_LOCAL_PAYLOAD
+        + (total_payload_len - MIN_LOCAL_PAYLOAD) % overflow_usable;
+    if surplus <= MAX_LOCAL_PAYLOAD {
+        surplus
+    } else {
+        MIN_LOCAL_PAYLOAD
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredValueLayout {
@@ -40,11 +69,11 @@ pub struct StoredValueLayout {
 
 impl StoredValueLayout {
     pub fn new_inline(payload: &[u8]) -> Result<Self> {
-        if payload.len() > STORED_VALUE_LOCAL_CAPACITY {
+        if payload.len() > MAX_LOCAL_PAYLOAD {
             return Err(HematiteError::StorageError(format!(
-                "Inline payload length {} exceeds local capacity {}",
+                "Inline payload length {} exceeds max local capacity {}",
                 payload.len(),
-                STORED_VALUE_LOCAL_CAPACITY
+                MAX_LOCAL_PAYLOAD
             )));
         }
 
@@ -60,11 +89,11 @@ impl StoredValueLayout {
         local_payload: Vec<u8>,
         overflow_first_page: u32,
     ) -> Result<Self> {
-        if local_payload.len() > STORED_VALUE_LOCAL_CAPACITY {
+        if local_payload.len() > MAX_LOCAL_PAYLOAD {
             return Err(HematiteError::StorageError(format!(
-                "Local payload length {} exceeds local capacity {}",
+                "Local payload length {} exceeds max local capacity {}",
                 local_payload.len(),
-                STORED_VALUE_LOCAL_CAPACITY
+                MAX_LOCAL_PAYLOAD
             )));
         }
         if local_payload.len() > total_len {
@@ -93,11 +122,11 @@ impl StoredValueLayout {
     }
 
     pub fn encode(&self) -> Result<Vec<u8>> {
-        if self.local_payload.len() > STORED_VALUE_LOCAL_CAPACITY {
+        if self.local_payload.len() > MAX_LOCAL_PAYLOAD {
             return Err(HematiteError::StorageError(format!(
-                "Local payload length {} exceeds local capacity {}",
+                "Local payload length {} exceeds max local capacity {}",
                 self.local_payload.len(),
-                STORED_VALUE_LOCAL_CAPACITY
+                MAX_LOCAL_PAYLOAD
             )));
         }
         if self.local_payload.len() > self.total_len as usize {
@@ -134,7 +163,7 @@ impl StoredValueLayout {
         let local_len = u16::from_le_bytes([bytes[5], bytes[6]]) as usize;
         let overflow_first_page = u32::from_le_bytes([bytes[7], bytes[8], bytes[9], bytes[10]]);
 
-        if local_len > STORED_VALUE_LOCAL_CAPACITY {
+        if local_len > MAX_LOCAL_PAYLOAD {
             return Err(HematiteError::CorruptedData(
                 "Stored value local payload exceeds local capacity".to_string(),
             ));
@@ -173,12 +202,15 @@ impl StoredValueLayout {
 }
 
 pub fn materialize_stored_value(storage: &mut Pager, logical_value: &[u8]) -> Result<Vec<u8>> {
-    if logical_value.len() <= STORED_VALUE_LOCAL_CAPACITY {
+    let local_size = local_payload_size(logical_value.len());
+
+    if local_size >= logical_value.len() {
+        // Entire payload fits locally — no overflow needed.
         return StoredValueLayout::new_inline(logical_value)?.encode();
     }
 
-    let local_payload = logical_value[..STORED_VALUE_LOCAL_CAPACITY].to_vec();
-    let overflow_payload = &logical_value[STORED_VALUE_LOCAL_CAPACITY..];
+    let local_payload = logical_value[..local_size].to_vec();
+    let overflow_payload = &logical_value[local_size..];
     let overflow_first_page =
         write_overflow_chain(storage, overflow_payload)?.ok_or_else(|| {
             HematiteError::StorageError(

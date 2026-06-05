@@ -34,6 +34,11 @@ pub(crate) struct PageCache {
     dirty_tail: Option<PageId>,
     dirty_len: usize,
     next_dirty_sequence: u64,
+    /// Points to the first dirty-list entry whose `need_sync` is false.
+    /// Used by `spillable_candidates()` to skip entries that still need
+    /// a journal sync, turning spill-candidate lookup from O(n) to O(k)
+    /// where k is the number of synced dirty pages.
+    synced_head: Option<PageId>,
 }
 
 impl PageCache {
@@ -47,6 +52,7 @@ impl PageCache {
             dirty_tail: None,
             dirty_len: 0,
             next_dirty_sequence: 0,
+            synced_head: None,
         }
     }
 
@@ -162,6 +168,7 @@ impl PageCache {
         self.dirty_tail = None;
         self.dirty_len = 0;
         self.next_dirty_sequence = 0;
+        self.synced_head = None;
     }
 
     pub(crate) fn mark_dirty(&mut self, page_id: PageId) {
@@ -184,6 +191,18 @@ impl PageCache {
         meta.writeable = true;
         if !was_dirty {
             self.attach_dirty_tail(page_id);
+            // If the page enters the dirty list with need_sync already false
+            // (e.g. re-dirtied after a spill, or dirtied when the journal has
+            // already been synced), register it with synced_head so
+            // spillable_candidates() can find it.
+            let needs_sync = self
+                .entries
+                .get(&page_id)
+                .map(|e| e.meta.need_sync)
+                .unwrap_or(true);
+            if !needs_sync {
+                self.maybe_update_synced_head(page_id);
+            }
         }
     }
 
@@ -257,16 +276,36 @@ impl PageCache {
     #[allow(dead_code)]
     pub(crate) fn mark_need_sync(&mut self, page_id: PageId) {
         self.ensure_entry(page_id);
+        let was_synced = self
+            .entries
+            .get(&page_id)
+            .map(|e| !e.meta.need_sync)
+            .unwrap_or(false);
         self.entries
             .get_mut(&page_id)
             .expect("entry should exist")
             .meta
             .need_sync = true;
+        // If the page was the synced_head and is now marked as needing sync,
+        // advance synced_head to the next dirty entry that doesn't need sync.
+        if was_synced && self.synced_head == Some(page_id) {
+            self.advance_synced_head_from(page_id);
+        }
     }
 
     pub(crate) fn clear_need_sync(&mut self, page_id: PageId) {
+        let was_needing_sync = self
+            .entries
+            .get(&page_id)
+            .map(|e| e.meta.need_sync && e.meta.dirty)
+            .unwrap_or(false);
         if let Some(entry) = self.entries.get_mut(&page_id) {
             entry.meta.need_sync = false;
+        }
+        // If this page just became synced and is on the dirty list,
+        // it may be the new synced_head if it appears earlier than the current one.
+        if was_needing_sync {
+            self.maybe_update_synced_head(page_id);
         }
     }
 
@@ -329,20 +368,24 @@ impl PageCache {
     /// Returns pages that are dirty but have already been journaled, are not pinned,
     /// and do not require a journal sync — making them safe to spill (write through)
     /// to the database file to reclaim cache space.
+    ///
+    /// Uses the `synced_head` pointer to start iteration from the first dirty entry
+    /// known to not need a journal sync, skipping all need-sync entries (O(k) instead
+    /// of O(n) where k = synced dirty pages).
     pub(crate) fn spillable_candidates(&self) -> Vec<PageId> {
         let mut candidates = Vec::new();
-        let mut current = self.lru_tail;
+        let mut current = self.synced_head;
         while let Some(page_id) = current {
-            let entry = self.entries.get(&page_id).expect("lru entry should exist");
-            if entry.meta.dirty
+            let entry = self.entries.get(&page_id).expect("dirty entry should exist");
+            // synced_head guarantees !need_sync, but we still verify.
+            if !entry.meta.need_sync
                 && entry.meta.journaled
-                && !entry.meta.need_sync
                 && !entry.meta.dont_write
                 && Self::entry_pin_count(entry) == 0
             {
                 candidates.push(page_id);
             }
-            current = entry.lru_prev;
+            current = entry.dirty_next;
         }
         candidates
     }
@@ -473,6 +516,19 @@ impl PageCache {
         if !was_dirty {
             return;
         }
+        // If the detached page is the synced_head, advance it.
+        if self.synced_head == Some(page_id) {
+            self.synced_head = next.and_then(|nid| {
+                self.entries
+                    .get(&nid)
+                    .filter(|e| !e.meta.need_sync)
+                    .map(|_| nid)
+            });
+            // If the immediate next page needs sync, find the real next synced page.
+            if self.synced_head.is_none() && next.is_some() {
+                self.advance_synced_head_from_next(next);
+            }
+        }
         match prev {
             Some(prev_id) => {
                 if let Some(entry) = self.entries.get_mut(&prev_id) {
@@ -494,5 +550,73 @@ impl PageCache {
             entry.dirty_next = None;
         }
         self.dirty_len = self.dirty_len.saturating_sub(1);
+    }
+
+    /// Walk forward from `page_id` through the dirty list to find the next entry
+    /// with `need_sync = false`, and set it as `synced_head`. If none is found,
+    /// `synced_head` is set to `None`.
+    fn advance_synced_head_from(&mut self, page_id: PageId) {
+        let next = self
+            .entries
+            .get(&page_id)
+            .and_then(|e| e.dirty_next);
+        self.advance_synced_head_from_next(next);
+    }
+
+    /// Walk forward from `start` through the dirty list to find the first entry
+    /// with `need_sync = false`.
+    fn advance_synced_head_from_next(&mut self, start: Option<PageId>) {
+        let mut cursor = start;
+        while let Some(pid) = cursor {
+            if let Some(entry) = self.entries.get(&pid) {
+                if !entry.meta.need_sync {
+                    self.synced_head = Some(pid);
+                    return;
+                }
+                cursor = entry.dirty_next;
+            } else {
+                break;
+            }
+        }
+        self.synced_head = None;
+    }
+
+    /// If `page_id` is on the dirty list and its `need_sync` is now false,
+    /// check whether it should become the new `synced_head` (i.e., it appears
+    /// earlier in the dirty list than the current synced_head, or there is no
+    /// current synced_head).
+    fn maybe_update_synced_head(&mut self, page_id: PageId) {
+        let is_dirty = self
+            .entries
+            .get(&page_id)
+            .map(|e| e.meta.dirty && !e.meta.need_sync)
+            .unwrap_or(false);
+        if !is_dirty {
+            return;
+        }
+
+        let Some(current_head) = self.synced_head else {
+            // No synced_head yet — this page is the first.
+            self.synced_head = Some(page_id);
+            return;
+        };
+
+        // Check if page_id appears before current_head in the dirty list
+        // by comparing dirty_sequence numbers (lower = earlier in list).
+        let page_seq = self
+            .entries
+            .get(&page_id)
+            .and_then(|e| e.meta.dirty_sequence);
+        let head_seq = self
+            .entries
+            .get(&current_head)
+            .and_then(|e| e.meta.dirty_sequence);
+
+        match (page_seq, head_seq) {
+            (Some(ps), Some(hs)) if ps < hs => {
+                self.synced_head = Some(page_id);
+            }
+            _ => {}
+        }
     }
 }

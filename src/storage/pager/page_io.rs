@@ -138,7 +138,10 @@ impl Pager {
                 }
             }
         }
-        if self.transaction.is_some() {
+        // Advance state from WriterLocked → WriterCacheMod on first cache
+        // modification.  Skip if we have already advanced to WriterDbMod
+        // (e.g. after a spill) — going backward would be an illegal transition.
+        if self.transaction.is_some() && self.state != PagerState::WriterDbMod {
             self.transition_state(PagerState::WriterCacheMod)?;
         }
 
@@ -161,6 +164,16 @@ impl Pager {
             self.apply_rollback_space_overlay_if_needed()?;
         }
         let candidates = self.cache_read()?.spillable_candidates();
+        if candidates.is_empty() {
+            return Ok(());
+        }
+        // Transition to WriterDbMod before writing pages to the database file.
+        // The journal has been synced, so it is now safe to modify the db file.
+        // WriterCacheMod → WriterDbMod and WriterDbMod → WriterDbMod are both
+        // valid transitions, so this is safe to call unconditionally.
+        if self.transaction.is_some() {
+            self.transition_state(PagerState::WriterDbMod)?;
+        }
         for page_id in candidates {
             // Skip metadata page — it must be written last during flush.
             if page_id == STORAGE_METADATA_PAGE_ID {
