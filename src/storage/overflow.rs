@@ -330,6 +330,7 @@ pub(crate) fn read_overflow_chain_cached_with_cache(
 /// range are not touched at all.
 ///
 /// `total_len` is the full logical payload length (used for bounds checking).
+#[allow(dead_code)]
 pub(crate) fn read_overflow_slice(
     storage: &Pager,
     first_page: Option<PageId>,
@@ -414,6 +415,7 @@ pub(crate) fn read_overflow_slice(
 /// Cached variant of `read_overflow_slice`. If the `OverflowReadCache` already
 /// has the page ID list, skips directly to the target page via index lookup
 /// (O(1) seek instead of O(k) chain walk).
+#[allow(dead_code)]
 pub(crate) fn read_overflow_slice_cached(
     storage: &Pager,
     first_page: Option<PageId>,
