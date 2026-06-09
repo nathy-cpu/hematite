@@ -91,7 +91,11 @@ fn can_remove_subquery_order(sub: &SelectStatement) -> bool {
         return false;
     }
     // Cannot remove if window functions are used (ordering affects window output).
-    if sub.columns.iter().any(|c| matches!(c, SelectItem::Window { .. })) {
+    if sub
+        .columns
+        .iter()
+        .any(|c| matches!(c, SelectItem::Window { .. }))
+    {
         return false;
     }
     // Cannot remove from compound queries (UNION etc).
@@ -167,7 +171,9 @@ fn condition_depends_only_on(cond: &Expression, allowed_columns: &[String]) -> b
         Expression::NullCheck { expr, .. } => expr_depends_only_on(expr, allowed_columns),
         Expression::InList { expr, values, .. } => {
             expr_depends_only_on(expr, allowed_columns)
-                && values.iter().all(|v| expr_depends_only_on(v, allowed_columns))
+                && values
+                    .iter()
+                    .all(|v| expr_depends_only_on(v, allowed_columns))
         }
         Expression::Between {
             expr, lower, upper, ..
@@ -198,9 +204,9 @@ fn expr_depends_only_on(expr: &Expression, allowed_columns: &[String]) -> bool {
         }
         Expression::Column(name) => {
             let col = SelectStatement::column_reference_name(name);
-            allowed_columns.iter().any(|c| {
-                SelectStatement::column_reference_name(c) == col
-            })
+            allowed_columns
+                .iter()
+                .any(|c| SelectStatement::column_reference_name(c) == col)
         }
         Expression::Binary { left, right, .. }
         | Expression::Comparison { left, right, .. }
@@ -208,14 +214,17 @@ fn expr_depends_only_on(expr: &Expression, allowed_columns: &[String]) -> bool {
             expr_depends_only_on(left, allowed_columns)
                 && expr_depends_only_on(right, allowed_columns)
         }
-        Expression::UnaryMinus(inner) | Expression::UnaryNot(inner) | Expression::Cast { expr: inner, .. } => {
-            expr_depends_only_on(inner, allowed_columns)
-        }
-        Expression::ScalarFunctionCall { args, .. } => {
-            args.iter().all(|a| expr_depends_only_on(a, allowed_columns))
-        }
+        Expression::UnaryMinus(inner)
+        | Expression::UnaryNot(inner)
+        | Expression::Cast { expr: inner, .. } => expr_depends_only_on(inner, allowed_columns),
+        Expression::ScalarFunctionCall { args, .. } => args
+            .iter()
+            .all(|a| expr_depends_only_on(a, allowed_columns)),
         Expression::NullCheck { expr, .. } => expr_depends_only_on(expr, allowed_columns),
-        Expression::Case { branches, else_expr } => {
+        Expression::Case {
+            branches,
+            else_expr,
+        } => {
             branches.iter().all(|b| {
                 expr_depends_only_on(&b.condition, allowed_columns)
                     && expr_depends_only_on(&b.result, allowed_columns)
@@ -225,9 +234,13 @@ fn expr_depends_only_on(expr: &Expression, allowed_columns: &[String]) -> bool {
         }
         Expression::InList { expr, values, .. } => {
             expr_depends_only_on(expr, allowed_columns)
-                && values.iter().all(|v| expr_depends_only_on(v, allowed_columns))
+                && values
+                    .iter()
+                    .all(|v| expr_depends_only_on(v, allowed_columns))
         }
-        Expression::Between { expr, lower, upper, .. } => {
+        Expression::Between {
+            expr, lower, upper, ..
+        } => {
             expr_depends_only_on(expr, allowed_columns)
                 && expr_depends_only_on(lower, allowed_columns)
                 && expr_depends_only_on(upper, allowed_columns)
@@ -282,12 +295,8 @@ fn extract_column_literal_eq(cond: &Expression) -> Option<(String, LiteralValue)
             operator: ComparisonOperator::Equal,
             right,
         } => match (left.as_ref(), right.as_ref()) {
-            (Expression::Column(col), Expression::Literal(lit)) => {
-                Some((col.clone(), lit.clone()))
-            }
-            (Expression::Literal(lit), Expression::Column(col)) => {
-                Some((col.clone(), lit.clone()))
-            }
+            (Expression::Column(col), Expression::Literal(lit)) => Some((col.clone(), lit.clone())),
+            (Expression::Literal(lit), Expression::Column(col)) => Some((col.clone(), lit.clone())),
             _ => None,
         },
         _ => None,
@@ -301,7 +310,9 @@ fn substitute_in_condition(cond: &mut Expression, subs: &[(String, LiteralValue)
             let b = substitute_in_expr(right, subs);
             a || b
         }
-        Expression::Between { expr, lower, upper, .. } => {
+        Expression::Between {
+            expr, lower, upper, ..
+        } => {
             substitute_in_expr(expr, subs)
                 | substitute_in_expr(lower, subs)
                 | substitute_in_expr(upper, subs)
@@ -345,9 +356,9 @@ fn substitute_in_expr(expr: &mut Expression, subs: &[(String, LiteralValue)]) ->
         | Expression::Logical { left, right, .. } => {
             substitute_in_expr(left, subs) | substitute_in_expr(right, subs)
         }
-        Expression::UnaryMinus(inner) | Expression::UnaryNot(inner) | Expression::Cast { expr: inner, .. } => {
-            substitute_in_expr(inner, subs)
-        }
+        Expression::UnaryMinus(inner)
+        | Expression::UnaryNot(inner)
+        | Expression::Cast { expr: inner, .. } => substitute_in_expr(inner, subs),
         Expression::ScalarFunctionCall { args, .. } => {
             let mut c = false;
             for a in args {
@@ -355,7 +366,10 @@ fn substitute_in_expr(expr: &mut Expression, subs: &[(String, LiteralValue)]) ->
             }
             c
         }
-        Expression::Case { branches, else_expr } => {
+        Expression::Case {
+            branches,
+            else_expr,
+        } => {
             let mut c = false;
             for b in branches {
                 c |= substitute_in_expr(&mut b.condition, subs);
@@ -367,21 +381,32 @@ fn substitute_in_expr(expr: &mut Expression, subs: &[(String, LiteralValue)]) ->
             c
         }
         Expression::NullCheck { expr: inner, .. } => substitute_in_expr(inner, subs),
-        Expression::InList { expr: inner, values, .. } => {
+        Expression::InList {
+            expr: inner,
+            values,
+            ..
+        } => {
             let mut c = substitute_in_expr(inner, subs);
             for v in values {
                 c |= substitute_in_expr(v, subs);
             }
             c
         }
-        Expression::Between { expr: inner, lower, upper, .. } => {
+        Expression::Between {
+            expr: inner,
+            lower,
+            upper,
+            ..
+        } => {
             substitute_in_expr(inner, subs)
                 | substitute_in_expr(lower, subs)
                 | substitute_in_expr(upper, subs)
         }
-        Expression::Like { expr: inner, pattern, .. } => {
-            substitute_in_expr(inner, subs) | substitute_in_expr(pattern, subs)
-        }
+        Expression::Like {
+            expr: inner,
+            pattern,
+            ..
+        } => substitute_in_expr(inner, subs) | substitute_in_expr(pattern, subs),
         _ => false,
     }
 }
@@ -447,13 +472,24 @@ fn convert_or_to_in_in_where(where_clause: &mut Option<WhereClause>) {
 
 fn try_convert_or_to_in(cond: &mut Expression) {
     // Recurse into nested Logical nodes first.
-    if let Expression::Logical { left, right, operator: LogicalOperator::And } = cond {
+    if let Expression::Logical {
+        left,
+        right,
+        operator: LogicalOperator::And,
+    } = cond
+    {
         try_convert_or_to_in(left);
         try_convert_or_to_in(right);
         return;
     }
 
-    if !matches!(cond, Expression::Logical { operator: LogicalOperator::Or, .. }) {
+    if !matches!(
+        cond,
+        Expression::Logical {
+            operator: LogicalOperator::Or,
+            ..
+        }
+    ) {
         return;
     }
 

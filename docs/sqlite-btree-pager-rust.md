@@ -256,7 +256,7 @@ Represents a decoded btree page in memory. This struct is allocated as the "extr
 The `xCellSize` and `xParseCell` function pointers are set during `btreeInitPage()` based on the page flags. SQLite provides three concrete variants (`btree.c:1228–1240`):
 
 | Page type | `xParseCell` function | `xCellSize` function |
-|---|---|---|
+| --- | --- | --- |
 | Table leaf (`intKeyLeaf`) | `btreeParseCellPtr()` | `cellSizePtr()` |
 | Table interior (`intKey && !leaf`) | `btreeParseCellPtrNoPayload()` | `cellSizePtrNoPayload()` — always `4 + varint_size(key)` |
 | Index (leaf or interior) | `btreeParseCellPtrIndex()` | `cellSizePtr()` |
@@ -287,7 +287,7 @@ A cursor stores full navigation state. Key fields:
 **Cursor states** (`btreeInt.h:600–604`):
 
 | Value | Name | Meaning |
-|---|---|---|
+| --- | --- | --- |
 | 0 | `CURSOR_VALID` | Points to a valid entry; `getPayload()` is safe |
 | 1 | `CURSOR_INVALID` | Does not point to a valid entry (empty table, not yet positioned) |
 | 2 | `CURSOR_SKIPNEXT` | Valid, but next `Next()`/`Prev()` is a no-op (used after delete) |
@@ -297,7 +297,7 @@ A cursor stores full navigation state. Key fields:
 **Cursor flags** (`btreeInt.h:562–568`):
 
 | Value | Name | Meaning |
-|---|---|---|
+| --- | --- | --- |
 | `0x01` | `BTCF_WriteFlag` | Write cursor (can modify) |
 | `0x02` | `BTCF_ValidNKey` | `info.nKey` is valid (avoids re-parse) |
 | `0x04` | `BTCF_ValidOvfl` | `aOverflow` cache is valid |
@@ -358,7 +358,7 @@ minLeaf = (usableSize - 12) * 32 / 255 - 23;   // same minLocal
 For a default 4096-byte page with no reserved bytes (`usableSize = 4096`):
 
 | Value | Formula result |
-|---|---|
+| --- | --- |
 | `maxLocal` | `(4084 * 64 / 255) - 23 = 1002` |
 | `minLocal` | `(4084 * 32 / 255) - 23 = 489` |
 | `maxLeaf` | `4096 - 35 = 4061` |
@@ -654,29 +654,32 @@ The pager has 7 states, defined at `pager.c:351–357`:
 
 The state diagram (from `pager.c:139–154`):
 
-```
-                       OPEN <------+------+
-                         |         |      |
-                         V         |      |
-          +---------> READER-------+      |
-          |              |                |
-          |              V                |
-          |<------WRITER_LOCKED------> ERROR
-          |              |                ^
-          |              V                |
-          |<-----WRITER_CACHEMOD-------->|
-          |              |                |
-          |              V                |
-          |<------WRITER_DBMOD---------->|
-          |              |                |
-          |              V                |
-          +<-----WRITER_FINISHED-------->+
+```mermaid
+stateDiagram-v2
+    [*] --> OPEN
+    OPEN --> READER
+    READER --> OPEN
+    READER --> WRITER_LOCKED
+    WRITER_LOCKED --> READER
+    WRITER_LOCKED --> WRITER_CACHEMOD
+    WRITER_CACHEMOD --> READER
+    WRITER_CACHEMOD --> WRITER_DBMOD
+    WRITER_DBMOD --> READER
+    WRITER_DBMOD --> WRITER_FINISHED
+    WRITER_FINISHED --> READER
+    
+    READER --> ERROR
+    WRITER_LOCKED --> ERROR
+    WRITER_CACHEMOD --> ERROR
+    WRITER_DBMOD --> ERROR
+    WRITER_FINISHED --> ERROR
+    ERROR --> OPEN
 ```
 
 **State transitions with exact function names** (`pager.c:157–169`):
 
 | From | To | Function |
-|---|---|---|
+| --- | --- | --- |
 | `OPEN` | `READER` | `sqlite3PagerSharedLock()` |
 | `READER` | `OPEN` | `pager_unlock()` |
 | `READER` | `WRITER_LOCKED` | `sqlite3PagerBegin()` |
@@ -708,6 +711,7 @@ For Rust, modeling pager state as an enum with explicit transitions will pay off
 The `Pager` struct (`pager.c:619–706`) is organized into two sections:
 
 **Configuration (fixed or rarely changed):**
+
 - `sqlite3_vfs *pVfs` — VFS implementation for I/O
 - `u8 exclusiveMode`, `u8 journalMode` — locking and journal strategy
 - `u8 useJournal`, `u8 noSync`, `u8 fullSync`, `u8 extraSync` — sync policy
@@ -721,6 +725,7 @@ The `Pager` struct (`pager.c:619–706`) is organized into two sections:
 - `PCache *pPCache` — the page cache object
 
 **Runtime state (changes during operation):**
+
 - `u8 eState` — the state machine value (0–6)
 - `u8 eLock` — current file lock (`NO_LOCK`..`EXCLUSIVE_LOCK`, or `UNKNOWN_LOCK`)
 - `u8 changeCountDone` — prevents redundant change-counter updates
@@ -752,7 +757,7 @@ Represents one cached page. Key fields:
 **Page flags** (`pcache.h:42–53`):
 
 | Value | Name | Meaning |
-|---|---|---|
+| --- | --- | --- |
 | `0x002` | `PGHDR_CLEAN` | Page has not been modified |
 | `0x004` | `PGHDR_DIRTY` | Page has been modified |
 | `0x008` | `PGHDR_WRITEABLE` | Journal copy exists; safe to write in-memory |

@@ -242,9 +242,11 @@ fn build_table_column_metadata(table: &Table) -> Vec<TableColumnMetadata> {
                 }
             }
             crate::catalog::NamedConstraintKind::Unique => {
-                if let Some(index) = table.secondary_indexes.iter().find(|index| {
-                    index.name == constraint.name && index.unique
-                }) {
+                if let Some(index) = table
+                    .secondary_indexes
+                    .iter()
+                    .find(|index| index.name == constraint.name && index.unique)
+                {
                     for &column_index in &index.column_indices {
                         constraints[column_index].push(format!("UNIQUE {}", constraint.name));
                     }

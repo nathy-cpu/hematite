@@ -1,78 +1,147 @@
-//! Pager implementation.
+//! # Stateful Page Cache and Transaction Coordinator (Pager)
 //!
-//! The pager is the only stateful component in the storage layer. It presents the rest of the
-//! system with a logical database made of fixed-size pages and hides the machinery required to
-//! make those pages durable, reusable, and transactionally visible.
+//! The Pager is the central stateful component of the storage subsystem. It translates the concept of
+//! physical file offsets into logical page abstractions, managing an in-memory page cache (buffer pool)
+//! and orchestrating ACID transaction boundaries.
 //!
-//! Main file layout:
+//! ---
 //!
-//! ```text
-//! byte offset 0
-//! +-----------------+-------------+
-//! | logical page 0  | db header   |
-//! +-----------------+-------------+
-//! +-----------------+-------------+
-//! | logical page 1  | metadata    |
-//! +-----------------+-------------+
-//! | logical page 2+ | payload     |
-//! +-----------------+-------------+
-//! ```
+//! ## 1. Core Database Pager Concepts
 //!
-//! Core state inside the pager:
+//! ### Buffer Pool Management
+//! Reading and writing bytes directly to disk for every query is extremely slow. A database engine maintains
+//! an in-memory **Buffer Pool** (Page Cache). When a higher-level module (like the B-Tree cursor) requests
+//! Page $N$, the pager first checks if it is in the buffer pool. If not, it reads the page from disk into a
+//! cache slot (a frame).
 //!
-//! ```text
-//!                  caller
-//!                    |
-//!                    v
-//!      +----------------------------------+
-//!      | read/write/allocate/deallocate    |
-//!      +----------------------------------+
-//!                    |
-//!      +-------------+--------------+
-//!      |                            |
-//!      v                            v
-//! page cache                  transaction state
-//! dirty page ids              original pages / WAL frames
-//! checksum cache              free-page deltas / file-len deltas
-//!      |                            |
-//!      +-------------+--------------+
-//!                    |
-//!                    v
-//!              file manager
-//! ```
+//! ### Cache Eviction (LRU)
+//! The buffer pool has a fixed capacity. When a new page must be fetched but the cache is full, the pager
+//! selects an existing page for eviction using a **Least Recently Used (LRU)** eviction policy.
+//! * **Clean Pages**: If the page has not been modified, it is discarded immediately.
+//! * **Dirty Pages**: If the page has been modified, it cannot be discarded until it is safely written to disk.
+//! * **Pinned Pages**: Pages that are currently held by active cursors are "pinned" and are protected from eviction.
 //!
-//! Commit algorithms:
+//! ### Transaction Boundaries and Journaling
+//! The Pager guarantees durability and atomicity by coordinating how and when dirty pages are written back to disk:
+//! * **Rollback Journaling**: In-place updates. Before writing a dirty page to the database file, its original
+//!   durable page content is saved in a rollback journal file. If the transaction aborts or the system crashes,
+//!   the rollback journal is replayed to undo the changes.
+//! * **Write-Ahead Logging (WAL)**: Out-of-place updates. Modifications are appended to a separate log file
+//!   (the WAL). The main file remains untouched. Readers see a consistent snapshot by overlaying the WAL overrides
+//!   on top of reads from the main database file.
 //!
-//! Rollback mode:
-//! - capture the original page image before first write;
-//! - persist the rollback journal;
-//! - flush dirty main-file pages;
-//! - finalize by deleting the journal.
+//! ---
 //!
-//! WAL mode:
-//! - keep page mutations local to the transaction;
-//! - append a committed record containing page frames plus pager-visible metadata;
-//! - reconstruct reader-visible state by overlaying WAL frames on the main file;
-//! - checkpoint later by copying the visible state back into the main file.
+//! ## 2. Hematite File & Page Layout Invariants
 //!
-//! Reader visibility in WAL mode:
+//! Hematite divides physical file layout into specific logical regions:
+//!
+//! | Page ID | Page Constant Name | Purpose | Layout Details |
+//! |---|---|---|---|
+//! | `0` | `DB_HEADER_PAGE_ID` | Database Header | The first 100 bytes are reserved; a 20-byte database header (magic `HMTD`, version, schema root page, next table ID, checksum) is written at the start. |
+//! | `1` | `STORAGE_METADATA_PAGE_ID`| Pager Metadata | Dedicated metadata page starting with container magic `HMD1`. Stores pager state (journal mode, free pages, checksums) and catalog metadata. |
+//! | `2+`| `FIRST_ALLOCATABLE_PAGE_ID`| User payload pages | Allocated for clustered B-Tree table leaf/interior pages, index B-Tree pages, or overflow page chains. |
+//!
+//! ---
+//!
+//! ## 3. Pager State Transitions
+//!
+//! ### Page Buffer State Transitions
 //!
 //! ```text
-//! main-file page bytes
-//!        +
-//! last committed WAL sequence visible to this reader
-//!        +
-//! WAL frame overrides + checksum overrides + freelist snapshot
-//!        =
-//! effective database image
+//!              +--------------------------------------+
+//!              |                Clean                 |
+//!              |         (Matches main file)          |
+//!              +--------+--------------------+--------+
+//!                       |                    ^
+//!                  Page Write             Checkpoint
+//!                       |                    |
+//!                       v                    |
+//!              +--------+--------------------+--------+
+//!              |                Dirty                 |
+//!              |          (In-memory only)            |
+//!              +--------+-----------------------------+
+//!                       |
+//!                 Commit / Evict
+//!                       |
+//!                       v
+//!              +--------+-----------------------------+
+//!              |              Journaled               |
+//!              |  (Written to WAL / Rollback Journal) |
+//!              +--------+-----------------------------+
+//!                       |
+//!                 Flush to Main DB
+//!                       v
+//!              +--------------------------------------+
+//!              |               Flushed                |
+//!              |       (Durable in main file)         |
+//!              +--------------------------------------+
 //! ```
 //!
-//! Important invariants:
-//! - page allocation and freelist state must stay consistent with both the durable file and any
-//!   in-flight transaction state;
-//! - checksum metadata is part of the durable storage model, not optional verification data;
-//! - checkpoints cannot discard page images that are still needed by an active reader snapshot;
-//! - higher layers never see partial page writes or raw filesystem ordering concerns.
+//! ### Pager Transaction Lifecycle State Machine
+//!
+//! ```text
+//!                      +----------------------+
+//!                      |      1. Idle         |
+//!                      +----------+-----------+
+//!                                 |
+//!                         Begin Transaction
+//!                                 |
+//!                                 v
+//!                      +----------+-----------+
+//!                      |      2. Read         |
+//!                      +----------+-----------+
+//!                                 |
+//!                             Page Write
+//!                                 |
+//!                                 v
+//!                      +----------+-----------+
+//!                      |      3. Write        |
+//!                      +----+-----------+-----+
+//!                           |           |
+//!                      Commit       Abort / Rollback
+//!                           |           |
+//!                           v           v
+//!             +-------------+--+     +--+-------------+
+//!             |  4. Committing |     |  5. Rollback   |
+//!             |  (Flush WAL /  |     |  (Replay undo  |
+//!             |   Journal)     |     |   or discard)  |
+//!             +-------------+--+     +--+-------------+
+//!                           |           |
+//!                           +-----+-----+
+//!                                 |
+//!                                 v
+//!                           Back to Idle
+//! ```
+//!
+//! ---
+//!
+//! ## 4. WAL Reader Visibility Overlay
+//!
+//! When reading page $N$ in WAL mode, the Pager overlays active log frames over the main file to reconstruct
+//! the transaction's visible state:
+//!
+//! ```text
+//!                         Read Page N
+//!                              |
+//!                              v
+//!                  +-----------+-----------+
+//!                  |   Check Active WAL?   |
+//!                  +-----+-----------+-----+
+//!                        |           |
+//!                    Yes |           | No
+//!                        v           v
+//!             +----------+---+   +---+----------+
+//!             | Read frame   |   | Read page N  |
+//!             | from WAL     |   | from main DB |
+//!             | file (.wal)  |   | file (.db)   |
+//!             +----------+---+   +---+----------+
+//!                        |           |
+//!                        +-----+-----+
+//!                              |
+//!                              v
+//!                      Construct Page N
+//! ```
 
 #[path = "pager/cache.rs"]
 mod cache;

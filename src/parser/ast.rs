@@ -1786,7 +1786,6 @@ impl SelectStatement {
             }
         }
     }
-
 }
 
 impl TableReference {

@@ -1,22 +1,108 @@
-//! SQL parser.
+//! # Hand-Rolled Recursive-Descent SQL Parser (`parser`)
 //!
-//! The parser consumes lexer tokens and builds the AST used by planning.
+//! The Parser is responsible for semantic syntax analysis. It consumes sequential tokens produced by the
+//! Lexer and builds a structured Abstract Syntax Tree (AST), enforcing case strictness and SQL grammar invariants.
+//!
+//! ---
+//!
+//! ## 1. Core Database Parsing Concepts
+//!
+//! ### Hand-Rolled Recursive-Descent
+//! A parser translates linear token streams into hierarchical tree structures. Hand-rolled recursive-descent
+//! parsers are preferred in production systems (such as SQLite) because they provide excellent error reporting,
+//! have zero compiler dependency overhead, and allow optimized lookahead tuning.
+//!
+//! The parser associates each grammar rule (e.g. a `SELECT` statement, a table reference, or an expression)
+//! with a dedicated Rust method (e.g., `parse_select`, `parse_table_reference`). These methods call each other
+//! recursively, tracing down the grammar hierarchy.
+//!
+//! ### Lookahead (LL(k))
+//! To decide which grammar path to follow without expensive backtracking, the parser inspects the next few tokens
+//! in the stream (lookahead). For example, if the parser is consuming an identifier and sees a `.` next, it knows
+//! to parse it as a qualified column name (`table.column`). If it sees a `(`, it knows to parse a function call.
+//!
+//! ### Operator Precedence Climbing
+//! Parsing expressions (like `x + y * z`) requires evaluating multiplication before addition. Instead of building
+//! deeply nested recursive grammar rules for every precedence level, Hematite uses **Precedence Climbing**:
+//! 1. Parse the leftmost primary expression (variable or literal).
+//! 2. Inspect the next token's operator precedence.
+//! 3. If the next operator's precedence is higher than the current threshold, recursively parse the right-hand
+//!    side with the operator's precedence as the new threshold, joining them as a binary expression.
+//! 4. Repeat until the next operator has lower precedence.
+//!
+//! ---
+//!
+//! ## 2. Token Flow & Parsing States
 //!
 //! ```text
-//! tokens -> statement kind
-//!              |
-//!              +--> CREATE / DROP
-//!              +--> INSERT / UPDATE / DELETE
-//!              +--> SELECT
-//!                        |
-//!                        +--> projection
-//!                        +--> source table
-//!                        +--> WHERE expression tree
-//!                        +--> ORDER BY / LIMIT
+//!              +--------------------------------------+
+//!              |            SQL Query Text            |
+//!              |      "SELECT * FROM t WHERE x = 1;"  |
+//!              +-------------------+------------------+
+//!                                  |
+//!                         Lexer::tokenize()
+//!                                  v
+//!              +--------------------------------------+
+//!              |            Token Stream              |
+//!              |  [SELECT, Star, FROM, Ident, ...]    |
+//!              +-------------------+------------------+
+//!                                  |
+//!                         Parser::parse()
+//!                                  v
+//!              +--------------------------------------+
+//!              |       Recursive-Descent Router       |
+//!              |    * Matches: SELECT -> parse_select |
+//!              |               INSERT -> parse_insert |
+//!              +-------------------+------------------+
+//!                                  v
+//!              +--------------------------------------+
+//!              |      Abstract Syntax Tree (AST)      |
+//!              |      * Statement::Select { ... }     |
+//!              |      * Expression::Comparison        |
+//!              +--------------------------------------+
 //! ```
 //!
-//! Hematite keeps the grammar strict and explicit so later stages stay small and do not need to
-//! repair ambiguous SQL.
+//! ---
+//!
+//! ## 3. Expression Precedence Climbing Diagram
+//!
+//! Tracing the parser state while parsing `a + b * c`:
+//!
+//! ```text
+//!   Current Precedence: 0
+//!   1. Parse identifier "a" -> Expr::Column("a")
+//!   2. Peek operator "+" (Precedence 10). Since 10 > 0:
+//!      - Consume "+"
+//!      - Recurse parse_expression(min_precedence = 10)
+//!
+//!         Nested Recurse (min_precedence = 10):
+//!         3. Parse identifier "b" -> Expr::Column("b")
+//!         4. Peek operator "*" (Precedence 20). Since 20 > 10:
+//!            - Consume "*"
+//!            - Recurse parse_expression(min_precedence = 20)
+//!
+//!               Nested Recurse (min_precedence = 20):
+//!               5. Parse identifier "c" -> Expr::Column("c")
+//!               6. Peek next token (EOF/Semicolon, Precedence 0). 0 < 20 -> Return Expr::Column("c")
+//!
+//!            - Combine: Right = Expr::Binary(b * c)
+//!         7. Peek next token (EOF/Semicolon, Precedence 0). 0 < 10 -> Return Right
+//!
+//!      - Combine: Left = Expr::Binary(a + (b * c))
+//! ```
+//!
+//! ---
+//!
+//! ## 4. Parsing Invariants
+//!
+//! 1. **Strict Uppercase Casing**: Keywords must be uppercase. The lexer performs case-sensitive matches;
+//!    lowercase keywords are classified as identifiers, causing the parser to return a descriptive casing error.
+//! 2. **Lookahead Consumability**: The parser's `position` index must advance monotonically. Infinite loops
+//!    in token consumption are prevented by ensuring every routing branch either consumes at least one token
+//!    or returns a syntax error.
+//! 3. **Single-Statement trigger bodies**: Grammar rules limit trigger bodies to a single UPDATE, INSERT,
+//!    or DELETE statement, avoiding procedural control parser complexity.
+//!
 
 use crate::error::{HematiteError, Result};
 use crate::parser::ast::*;
@@ -2621,9 +2707,9 @@ fn parse_number_literal(value: &str) -> Result<LiteralValue> {
             .map_err(|_| HematiteError::ParseError(format!("Invalid float literal '{}'", value)))?;
         Ok(LiteralValue::Float(normalize_float_literal(value)))
     } else {
-        Ok(LiteralValue::Integer(value.parse::<i128>().map_err(|_| {
-            HematiteError::ParseError(format!("Invalid integer literal '{}'", value))
-        })?))
+        Ok(LiteralValue::Integer(value.parse::<i128>().map_err(
+            |_| HematiteError::ParseError(format!("Invalid integer literal '{}'", value)),
+        )?))
     }
 }
 

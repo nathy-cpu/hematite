@@ -710,7 +710,13 @@ fn validate_select_with_outer_bindings(
             "SELECT requires at least one table source".to_string(),
         ));
     }
-    validate_table_reference(select, catalog, &select.from, &local_bindings, outer_bindings)?;
+    validate_table_reference(
+        select,
+        catalog,
+        &select.from,
+        &local_bindings,
+        outer_bindings,
+    )?;
 
     let has_aggregate = select.columns.iter().any(|item| match item {
         SelectItem::CountAll | SelectItem::Aggregate { .. } => true,
@@ -745,11 +751,7 @@ fn validate_select_with_outer_bindings(
     for item in &select.columns {
         match item {
             SelectItem::Column(name) => {
-                validate_column_reference_with_outer(
-                    name,
-                    &local_bindings,
-                    outer_bindings,
-                )?;
+                validate_column_reference_with_outer(name, &local_bindings, outer_bindings)?;
             }
             SelectItem::Expression(expr) => {
                 validate_expression_with_bindings(
@@ -762,11 +764,7 @@ fn validate_select_with_outer_bindings(
                 )?;
             }
             SelectItem::Aggregate { column, .. } => {
-                validate_column_reference_with_outer(
-                    column,
-                    &local_bindings,
-                    outer_bindings,
-                )?;
+                validate_column_reference_with_outer(column, &local_bindings, outer_bindings)?;
             }
             SelectItem::Window { function, window } => {
                 for expr in &window.partition_by {
@@ -873,11 +871,7 @@ fn validate_select_with_outer_bindings(
     }
 
     for item in &select.order_by {
-        validate_column_reference_with_outer(
-            &item.column,
-            &local_bindings,
-            outer_bindings,
-        )?;
+        validate_column_reference_with_outer(&item.column, &local_bindings, outer_bindings)?;
     }
 
     Ok(())

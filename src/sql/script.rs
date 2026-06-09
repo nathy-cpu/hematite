@@ -32,7 +32,10 @@ pub fn script_is_complete(sql: &str) -> Result<bool> {
     Ok(has_complete_statement && !has_current_statement_tokens)
 }
 
-fn split_script_state(tokens: Vec<Token>, append_trailing_statement: bool) -> (Vec<Vec<Token>>, bool) {
+fn split_script_state(
+    tokens: Vec<Token>,
+    append_trailing_statement: bool,
+) -> (Vec<Vec<Token>>, bool) {
     let mut statements = Vec::new();
     let mut current_tokens = Vec::new();
     let mut has_current_statement_tokens = false;

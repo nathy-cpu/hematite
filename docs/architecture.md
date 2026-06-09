@@ -1,86 +1,134 @@
-# Architecture
+# Hematite Architectural Guide
 
-Hematite is a layered, embeddable SQL database engine. It follows a strict unidirectional dependency model, where higher-level SQL abstractions are progressively lowered into lower-level storage primitives.
+Hematite is an embeddable, transactional SQL database engine written in Rust. It is designed to serve both as a functional embedded storage manager and as an educational reference for database design.
 
-```text
-sql -> parser -> query -> catalog -> btree -> storage
-```
-
-## Core Layers
-
-### 1. `storage` (The Foundation)
-
-The storage layer is responsible for translating the concept of "pages" into physical disk bytes. It manages the lifecycle of the database file and its associated journals.
-
-- **The Pager**: Manages an in-memory page cache. It uses a least-recently-used (LRU) eviction policy and ensures that "dirty" pages are only written to disk after the appropriate journal entries have been flushed.
-- **Journaling (Atomicity & Durability)**:
-    - **Rollback Journal**: The default mode. Before a page is modified, its original content is written to a journal file. In the event of a crash or rollback, these "undo" records are replayed to restore the database.
-    - **Write-Ahead Log (WAL)**: An optimized mode where changes are appended to a separate log. This allows for concurrent readers and a single writer, as readers can access the stable database file while the writer appends to the log.
-- **Page Allocation**: Maintains a "freelist" of pages that have been deleted and can be reused, preventing fragmentation and uncontrolled file growth.
-
-### 2. `btree` (The Indexing Engine)
-
-Everything in Hematite is stored in B-Trees. Tables are "clustered" (the data lives in the primary key tree), and secondary indexes are separate trees.
-
-- **B+ Tree Structure**: Internal nodes store only keys (for routing), while leaf nodes store both keys and values (the actual row data). This ensures efficient range scans.
-- **Byte Trees vs. Typed Trees**: The engine handles two variants:
-    - **Byte Trees**: Store arbitrary `Vec<u8>` keys and values, used for low-level storage.
-    - **Typed Trees**: Overlay semantic meaning (e.g., "this byte range is a 64-bit integer") onto the byte trees.
-- **Overflow Pages**: When a key or value exceeds the size of a single page, the B-Tree automatically spills it into a chain of overflow pages.
-
-### 3. `catalog` (The Relational Model)
-
-This layer translates the generic B-Trees into structured tables and columns.
-
-- **Schema Registry**: Manages the persistence of `CREATE TABLE`, `CREATE INDEX`, and `CREATE VIEW` metadata. This metadata is itself stored in a special "master" table tree.
-- **Logical Row Encoding**: Hematite uses a compact binary format for rows. It handles null optimization and varint-encoded headers to minimize the storage footprint of each record.
-- **Runtime Type System**: Defines the behavior of `INT`, `DECIMAL`, `TEXT`, `BLOB`, `DATE`, and `INTERVAL` values, including their serialization rules.
-
-### 4. `query` (The Brain)
-
-The query layer is responsible for the "meaning" of SQL.
-
-- **Lowering**: Translates parser-owned syntax (like a literal string '2023-01-01') into a runtime `Value` (like a `DateValue`).
-- **Validation**: Performs semantic checks against the schema (e.g., "Does this column exist?", "Are these types comparable?").
-- **Cost-Based Optimizer**: Although currently simplified, the planner chooses between full table scans and index-based lookups based on available metadata.
-- **The Executor**: An iterator-based execution engine. Operators like `Filter`, `Project`, `Join`, and `Sort` are chained together, pulling rows from the B-tree cursors one at a time.
-
-### 5. `parser` & `sql` (The Interface)
-
-- **Strict Parsing**: The parser is hand-rolled for maximum clarity. It requires uppercase keywords and follows a predictable recursive-descent pattern.
-- **Connection Facade**: Coordinates the overall state. It owns the `Catalog` instance and manages the lifecycle of `Transaction` objects.
+The system relies on a unidirectional layered architecture, where high-level SQL components translate logical commands into physical operations on a B-tree-backed page store.
 
 ---
 
-## Concurrency & Safety
+## 1. Subsystem Layers and Unidirectional Flow
 
-Hematite uses a **Single-Writer, Multiple-Reader (SWMR)** model when in WAL mode.
+Hematite is structured into distinct layers. Dependencies flow strictly from top (client interface) to bottom (OS filesystem):
 
-- **Catalog Locking**: Access to the database metadata and B-trees is protected by an `Arc<Mutex<Catalog>>`. This ensures that only one thread can modify the database structure at a time.
-- **Memory Safety**: Being written in Rust, Hematite naturally avoids common pitfalls like dangling pointers or buffer overflows in the pager and B-tree implementations.
-- **Transaction Isolation**: Supports `SERIALIZABLE` isolation within a single session, and `READ COMMITTED` or better across multiple connections (depending on the journal mode).
+```mermaid
+flowchart TD
+    Client["Client Interface<br><code>src/sql/interface.rs</code>"] --> SQLConn["SQL Connection<br><code>src/sql/connection.rs</code>"]
+    SQLConn --> Parser["SQL Parser<br><code>src/parser/parser.rs</code>"]
+    Parser --> Planner["Query Planner & Optimizer<br><code>src/query/planner.rs, optimizer.rs</code>"]
+    Planner --> Executor["Volcano-Style Executor<br><code>src/query/executor.rs</code>"]
+    Executor --> Catalog["Relational Catalog<br><code>src/catalog/catalog.rs</code>"]
+    Catalog --> BTree["Clustered B+ Trees<br><code>src/btree/mod.rs</code>"]
+    BTree --> Pager["Stateful Page Cache<br><code>src/storage/pager.rs</code>"]
+    Pager --> Durability["Durability & Journaling<br><code>src/storage/wal.rs, journal.rs</code>"]
+```
 
-## Data Flow: The Journey of a Query
+### Layer Responsibilities
 
-1. **Entry**: SQL text is passed to `Connection::execute`.
-2. **Lex & Parse**: The `parser` generates an AST.
-3. **Normalize**: The `query` layer expands `SELECT *` and resolves view definitions.
-4. **Validate**: The AST is checked for semantic correctness against the active `Schema`.
-5. **Plan**: The `planner` generates a `PhysicalPlan`.
-6. **Execute**: The `executor` steps through the plan, opening B-Tree `Cursor`s and performing arithmetic/comparisons.
-7. **Commit**: If a mutation occurred, the `storage` layer flushes pages to disk according to the current journaling protocol.
+1. **Client Interface (`sql::interface`)**: Exposes the user-facing API (`Hematite` struct).
+2. **SQL Connection (`sql::connection`)**: Manages session state, coordinates autocommit and explicit transaction states, savepoint stacks, and views expansion.
+3. **SQL Parser (`parser`)**: Lexes raw text into tokens and parses them using a strict, hand-written recursive-descent parser to construct a logical AST.
+4. **Query Planner & Optimizer (`query::planner`, `query::optimizer`)**: Resolves schema bindings, validates expressions, executes constant folding, logical simplifications, and translates the logical AST into a physical execution program.
+5. **Query Executor (`query::executor`)**: Formulates Volcano-style iterator pipelines. Operators pull data lazily via a `next()` pattern, abstracting table/index scans, filtering, aggregation, and sorting.
+6. **Relational Catalog (`catalog`)**: Translates relational schema elements (tables, columns, types) into low-level B-Tree key-value pairs. Represents types via `Value` and serializes records into packed binary arrays.
+7. **B+ Trees (`btree`)**: Implements internal routing nodes and leaf data nodes. Manages node splitting, merging, keys binary search, and lazy node decoding.
+8. **Pager (`storage::pager`)**: Manages the LRU in-memory page cache, handles page allocation/freelists, and tracks dirty frames.
+9. **Journaling (`storage::wal` & `storage::journal`)**: Coordinates writes to ensure crash safety. Implements either page-undo Rollback journaling or frame-redo Write-Ahead Logging.
 
-## Persistence Guarantees (ACID)
+---
 
-Hematite is designed to provide full ACID compliance:
+## 2. Query Lifecycle Dataflow
 
-## Design Intent
+When a client connection executes a query, the request travels down the engine pipeline. Below is the lifecycle of a `SELECT` query utilizing a secondary index lookup:
 
-The project aims to remain:
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as Client Connection<br>"SELECT name FROM users WHERE age = 30;"
+    participant Parser as Parser / AST<br>[Tokens]
+    participant Planner as Planner & Optimizer<br>[Logical Plan]
+    participant Executor as Executor / Cursor<br>[SelectExecutor]
+    participant BTree as B-Tree / Pager<br>[BTreePage]
 
-- embeddable
-- understandable
-- hackable
-- small enough for experimentation
+    Client->>Parser: Parse()
+    Parser->>Planner: Plan & Optimize()
+    Planner->>Executor: Execute()
+    Executor->>BTree: Open Cursor
+    Note over BTree: Read physical page 2 (Leaf)
+    BTree-->>Executor: Row bytes (Lazy Node)
+    Note over Executor: Decode record
+    Note over Executor: Filter by age = 30
+    Note over Executor: Project column "name"
+    Executor-->>Client: [Rows Output]
+```
 
-That means preferring straightforward code and clear boundaries over trying to mimic every behavior of a larger database system.
+1. **Parse Phase**: Raw query text is tokenized and verified against Hematite's strict SQL grammar rules. Keywords are checked for mandatory uppercase casing. A `Statement::Select` AST is returned.
+2. **Planning & Optimization**: The query is validated against active catalog schemas (checking that the table `users` and columns `name` and `age` exist). The query optimizer performs constant folding and simplifies expression paths. A physical `ExecutionProgram` is chosen.
+3. **Execution**: The executor builds a Volcano iterator chain. An index scan cursor searches the secondary index tree for `age = 30`. It extracts matching `rowid` keys, then performs a point-lookup on the main clustered table to retrieve the complete rows.
+4. **Data Retrieval**: Cursors query the B-Tree module, which asks the Pager for the required page numbers. The Pager reads them from the file (or cache) and serves them as byte blocks.
+5. **Project & Emit**: The executor extracts and formats the requested `name` value, converting it into a user-facing `QueryResult` container.
+
+---
+
+## 3. Concurrency Model: SWMR in WAL Mode
+
+Hematite supports two distinct transactional execution engines: **Rollback Journaling** and **Write-Ahead Logging (WAL)**.
+
+### Rollback Journal Mode
+
+In rollback mode, modifications are executed directly in-place on the main database file. Before any page is modified, its original content is copied to a rollback journal file (`.jrnl`).
+
+* **Concurrency Lockout**: Readers and writers cannot proceed concurrently. A transaction holds a writer lock on the catalog, preventing any concurrent reader threads from accessing the database to avoid seeing partial or dirty state.
+* **Rollback & Recovery**: If a transaction aborts or the engine crashes mid-flight, the recovery coordinator replays the rollback journal, copying the original pages back into the main database file.
+
+### WAL Mode (Single-Writer, Multiple-Reader)
+
+In WAL mode, updates are not written in-place to the database. Instead, all modified pages are appended as redone frames to a separate Write-Ahead Log file (`.wal`).
+
+* **Reader Isolation**: Readers do not access the WAL file directly for writes. They open a transaction snapshot aligned with the current end of the WAL file. When reading page `N`, the pager checks its in-memory index of WAL frames. If page `N` has been written in the current transaction scope, it is read from the WAL file. Otherwise, it is fetched from the main database file.
+* **Writer Flow**: Writers append new page frames to the end of the WAL. They do not block readers, as readers still see their historical snapshot of the main file and pre-committed WAL positions.
+* **Checkpointing**: Periodically, the WAL changes are flushed back into the main database file in page-number order (checkpointing), shrinking the WAL.
+
+#### Comparison: Hematite vs. SQLite Concurrency
+
+| Feature | SQLite Concurrency | Hematite Concurrency |
+| --- | --- | --- |
+| **Locking Mechanism** | OS-level file locks (Shared, Reserved, Pending, Exclusive) | In-memory catalog mutex locking (`Arc<Mutex<Catalog>>`) |
+| **Concurrency Limit** | Multiple reader processes, single writer process | Multiple in-process reader threads, single writer thread |
+| **Commit Boundary** | Handled through physical file locks and WAL header updates | Handled via catalog transactions and frame-based checksum boundaries |
+
+---
+
+## 4. File and Physical Page Layout
+
+Unlike standard SQLite, which merges the main database header and the first table root page payload directly into Page 1, Hematite enforces a strict separation between database headers, transaction metadata, and allocatable data B-trees.
+
+### Physical Layout of a Hematite Database File
+
+| Page 0<br>**Database Header** | Page 1<br>**Storage Metadata** | Page 2+<br>**Allocatable Trees** |
+| :--- | :--- | :--- |
+| 100 bytes reserved | Magic `HMD1` | Slotted Pages |
+
+* **Page 0 (`DB_HEADER_PAGE_ID`)**: The first 100 bytes are reserved. A 20-byte database header is written at the start, containing: magic code `HMTD` (4 bytes), format version `2` (4 bytes), schema B-tree root page ID (4 bytes), next table ID (4 bytes), and header checksum (4 bytes). All header integers are little-endian. The remaining 80 bytes are zero padding. Page size is a compile-time constant (`4096`), not stored in the header.
+* **Page 1 (`STORAGE_METADATA_PAGE_ID`)**: A dedicated metadata container starting with the container magic `HMD1`. It stores pager state (journal mode, free pages, per-page checksums) and catalog runtime metadata (table row counts, next rowid).
+* **Page 2 and onwards (`FIRST_ALLOCATABLE_PAGE_ID`)**: Usable physical pages. These are allocated for clustered table B-trees, secondary index B-trees, or overflow page chains.
+
+---
+
+## 5. ACID Guarantees
+
+Hematite guarantees standard transactional properties (ACID) to ensure database integrity:
+
+* **Atomicity**: Transactions are fully atomic. In Rollback mode, the entire journal must be successfully flushed to disk before any in-place write. If a failure occurs, the journal is replayed to wipe out partial changes. In WAL mode, a transaction commits only when its final frame group commit-boundary is written with valid checksums. Partial transactions are ignored.
+* **Consistency**: DB constraints are verified before a transaction commits. B-Tree leaf and internal node order invariants are checked recursively at validation checkpoints, preventing structure corruption.
+* **Isolation**: Supports `SERIALIZABLE` isolation within a single session. Session updates acquire exclusive write-locks, protecting reader threads from dirty reads, non-repeatable reads, or phantom reads.
+* **Durability**: Modified pages are guaranteed to survive system crashes. Disk synchronization (`fsync` or equivalent) is invoked during key transactional boundaries: before main-file modification (in rollback mode), or upon writing commit-boundaries to the WAL file.
+
+---
+
+## 6. Design Intent
+
+Hematite is built with the following core design guidelines:
+
+* **Understandability over Complexity**: The codebase prefers direct, clear code paths. Simplifications are embraced where they do not hurt correctness or safety (e.g. unified decimal numeric calculations, single-statement trigger bodies).
+* **Strict Dialect & Case Enforcement**: Enforcing uppercase keywords keeps parsing deterministic, preventing complex and fragile grammar ambiguity rules.
+* **Educational Architecture**: By maintaining clean boundaries between the logical query layer, the physical catalog manager, and the low-level storage engines, developers can learn B-tree internals and physical SQL engine query flow directly from the codebase.

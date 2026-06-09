@@ -1,22 +1,105 @@
-//! Relational catalog manager.
+//! # Relational Catalog Manager (`catalog`)
 //!
-//! The catalog owns schema-level state and coordinates it with the catalog engine.
+//! The Catalog is the metadata manager of the database. It translates relational schema concepts
+//! (tables, columns, types, indexes, constraints, views, and triggers) into physical B-Tree structures,
+//! managing metadata serialization and coordinating transactional schema modifications.
+//!
+//! ---
+//!
+//! ## 1. Core Database Catalog Concepts
+//!
+//! ### The Relational Catalog
+//! A database engine needs to know *what* tables and columns exist, their data types, and what constraints
+//! (e.g. check constraints, foreign keys, secondary indexes) apply to them. The Relational Catalog stores
+//! this structural information. In mature database engines, the catalog is stored in "system tables" (special
+//! internal tables that are queried just like normal user tables).
+//!
+//! ### Schema Serialization
+//! In Hematite, all catalog definitions are serialized into bytes and stored within the **Schema B-Tree**
+//! rooted at the Page ID specified in the database header (on Page 0). When the database is opened, the catalog
+//! coordinator traverses this B-Tree, reads the serialized metadata rows, and reconstructs the active in-memory
+//! schema representation (`Schema` registry).
+//!
+//! ### Transactional DDL (Data Definition Language)
+//! Altering a database structure (creating/dropping tables, altering columns, adding indexes) must be transactional:
+//! 1. **Begin**: When a transaction starts, the catalog captures a **Snapshot** of the in-memory schema state.
+//! 2. **Mutate**: Structural changes update both the in-memory registry and write new serialized rows to the
+//!    durable schema B-Tree.
+//! 3. **Commit**: The transaction finishes, making the new schema pointer in the database header durable.
+//! 4. **Rollback**: If the transaction aborts, the catalog discards the in-flight schema mutations and reinstates
+//!    the saved snapshot, restoring both in-memory schema structures and the underlying storage engines to the
+//!    pre-transaction baseline.
+//!
+//! ---
+//!
+//! ## 2. Catalog Structural Interactions
 //!
 //! ```text
-//! in-memory schema --------------------+
-//!                                      |
-//! create/drop/alter style operations   |
-//!                                      v
-//!                               schema B-tree
-//!                                      |
-//!                                database header
+//!    +------------------------------------------+
+//!    |             In-Memory Schema             | <---+ Reader threads fetch schema definitions
+//!    |         (Authoritative at Runtime)       |
+//!    +--------------------+---------------------+
+//!                         |
+//!                 CREATE / DROP / ALTER
+//!                         |
+//!                         v
+//!    +--------------------+---------------------+
+//!    |           Relational Catalog             |
+//!    |    * Serializes metadata into row bytes. |
+//!    |    * Performs constraint validations.    |
+//!    +--------------------+---------------------+
+//!                         |
+//!                Write Catalog Records
+//!                         |
+//!                         v
+//!    +--------------------+---------------------+
+//!    |              Schema B-Tree               | (Root page tracked on Page 0 Header)
+//!    |        (Physical Catalog Tables)         |
+//!    +------------------------------------------+
 //! ```
 //!
-//! Core invariants:
-//! - the in-memory schema is authoritative while a catalog operation is running;
-//! - `schema_root` always names the durable schema tree recorded in the reserved header page;
-//! - schema contents are written before the header is repointed at a new schema root;
-//! - transaction rollback restores both the schema snapshot and the engine snapshot.
+//! ---
+//!
+//! ## 3. Transactional Schema Rollback Flow
+//!
+//! ```text
+//!   Idle State (Active Schema V1)
+//!         |
+//!    BEGIN TRANSACTION
+//!         v
+//!   Capture Schema Snapshot V1 (CatalogEngineSnapshot)
+//!         |
+//!    CREATE TABLE users (id INT, name TEXT)
+//!         v
+//!   Active Schema modified in-memory (Schema V2)
+//!   Metadata rows written to Schema B-Tree
+//!         |
+//!   +-----+-----+
+//!   |           |
+//!   v           v
+//! COMMIT     ROLLBACK
+//!   |           |
+//!   |           +---> Discard Schema V2 in-memory.
+//!   |                 Restore Snapshot V1.
+//!   |                 Revert CatalogEngine changes.
+//!   v                 (Durable rollback journal/WAL cleans physical changes)
+//! Commit V2           |
+//! durably.            v
+//!             Back to Schema V1
+//! ```
+//!
+//! ---
+//!
+//! ## 4. Core Catalog Invariants
+//!
+//! 1. **Authoritative Snapshot**: The in-memory schema registry must be kept in perfect synchronization with the
+//!    durable catalog B-Tree cells during query planning and validation.
+//! 2. **Durable Catalog Repointing**: When the schema B-Tree changes, its new root Page ID must be serialized
+//!    and updated in the Page 0 database header *after* all modified catalog pages are written, preventing pointers
+//!    from referencing unwritten pages.
+//! 3. **Isolation Integrity**: During transaction rollback, catalog state reverts must synchronize both in-memory
+//!    snapshots and storage page states to avoid inconsistent catalog pointer states.
+//!
 
 use crate::catalog::column::Column;
 use crate::catalog::engine::{CatalogEngine, CatalogEngineSnapshot, CatalogIntegrityReport};

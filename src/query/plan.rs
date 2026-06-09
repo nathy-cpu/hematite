@@ -1,11 +1,11 @@
 //! Query plan structures and access-path descriptions.
 
-use crate::query::logest::LogEst;
 use crate::parser::ast::AggregateFunction;
 use crate::parser::ast::{
     AlterStatement, CreateIndexStatement, CreateStatement, DeleteStatement, DropIndexStatement,
     DropStatement, InsertStatement, SelectStatement, UpdateStatement,
 };
+use crate::query::logest::LogEst;
 
 pub struct QueryPlan {
     pub node: PlanNode,

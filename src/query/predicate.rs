@@ -60,4 +60,3 @@ fn collect_literal_equalities(
         _ => true,
     }
 }
-

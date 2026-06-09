@@ -1,13 +1,94 @@
-//! B-tree node layout and node-local algorithms.
+//! # B-Tree Node Layout, Lazy Decoding, and Mutations (`node`)
 //!
-//! The live on-page format is now a slotted-page layout:
-//! - a compact page header
-//! - a cell pointer array in key order
-//! - cell bodies packed from the end of the page backward
-//! - a rightmost-child slot for internal pages
+//! This module coordinates in-memory representations of B-Tree pages, binary search lookups, and page mutation
+//! algorithms such as node splits, cell insertions, deletions, and balance operations.
 //!
-//! This keeps the existing `BTreeNode` API that the rest of the tree code uses, but removes the
-//! old contiguous key/value section format.
+//! ---
+//!
+//! ## 1. Core Database B-Tree Node Concepts
+//!
+//! ### B-Tree Structure Overview
+//! Clustered indexes and tables in a database are represented as B+ Trees:
+//! * **Interior Nodes (Routing)**: Contain separator keys and child page IDs. They do not store data rows.
+//!   Their purpose is to route the search path to the correct leaf page.
+//! * **Leaf Nodes (Data)**: Contain actual data rows (keys and values). They do not contain children pointers.
+//!
+//! ```text
+//!                              +------------------------+
+//!                              |     [Interior Node]    |
+//!                              | Key 20 | Key 50 | P3   |
+//!                              +---+--------+--------+--+
+//!                                 /         |         \
+//!                         Keys < 20     20 <= Keys < 50 \ Keys >= 50
+//!                               /           |             \
+//!                              v            v              v
+//!                 +----------------+ +----------------+ +----------------+
+//!                 |  [Leaf Node]   | |  [Leaf Node]   | |  [Leaf Node]   |
+//!                 | Row 10 | Row 15| | Row 20 | Row 45| | Row 50 | Row 80|
+//!                 +----------------+ +----------------+ +----------------+
+//! ```
+//!
+//! ### Lazy Node Decoding
+//! Creating high-level Rust structs with allocated vectors for every page read is computationally
+//! expensive and increases GC/allocation pressure.
+//! To avoid this, Hematite implements **Lazy Node Decoding**:
+//! * **Lazy Read State**: The `BTreeNode` struct is constructed by wrapping a raw page buffer. It does *not*
+//!   parse the cells. To check if a key exists or to route an interior node, it performs a binary search directly
+//!   on the page bytes using the cell pointer array.
+//! * **Decoded Mutation State**: Only when a cell is inserted, updated, or deleted does the node transition
+//!   into a fully-materialized state. Cells are parsed into memory vectors, mutated, and then serialized back
+//!   into a packed slotted page layout.
+//!
+//! ### B-Tree Node Mutations
+//! * **Cell Insertion**: Inserts a key-value cell. If the page lacks space (even after defragmentation), a **Split** is triggered.
+//! * **Node Split**: Creates a new sibling page. Half of the cells are moved to the new page, and a separator key is propagated to the parent node.
+//! * **Node Borrow / Merge**: When a deletion causes a page to drop below its minimum fill factor (underflow),
+//!   it attempts to borrow cells from a adjacent sibling. If the sibling is also near underflow, the two pages are merged.
+//!
+//! ---
+//!
+//! ## 2. In-Memory Struct Transitions
+//!
+//! ```text
+//!               +--------------------------------------+
+//!               |       Page buffer read from Pager    |
+//!               +-------------------+------------------+
+//!                                   |
+//!                         BTreeNode::from_page()
+//!                                   v
+//!               +--------------------------------------+
+//!               |           BTreeNode (Lazy)           |
+//!               |    * Performs binary searches on     |
+//!               |      in-place page buffer.           |
+//!               |    * Zero memory allocations.        |
+//!               +-------------------+------------------+
+//!                                   |
+//!                             Cell Mutation
+//!                                   v
+//!               +--------------------------------------+
+//!               |          Decoded Cell List           |
+//!               |    * Cells materialized into vectors |
+//!               |    * Mutation performed in memory.   |
+//!               +-------------------+------------------+
+//!                                   |
+//!                         Write / Serialize
+//!                                   v
+//!               +--------------------------------------+
+//!               |        Encoded Page Buffer           |
+//!               |    * Slotted page layout re-packed.  |
+//!               |    * Written back to Pager.          |
+//!               +--------------------------------------+
+//! ```
+//!
+//! ---
+//!
+//! ## 3. B-Tree Invariants
+//!
+//! 1. **Sorted Order**: All cell keys within a node must be sorted monotonically.
+//! 2. **Routing Integrity**: In an interior node, the subtree pointed to by Child ID $I$ must contain only keys
+//!    greater than or equal to Separator Key $I-1$ and strictly less than Separator Key $I$.
+//! 3. **Size Limits**: Cell keys must not exceed `MAX_KEY_SIZE` (256 bytes) and values must not exceed `MAX_VALUE_SIZE` (1024 bytes).
+//!
 
 use crate::btree::page_format::{
     compute_cell_size, insert_cell as pf_insert_cell, remove_cell as pf_remove_cell,
@@ -771,10 +852,8 @@ impl BTreeNode {
         let new_header = BTreePageHeaderV3::parse(page, is_p1)?;
         if (pos + 1) < new_header.cell_count as usize {
             // Overwrite the first 4 bytes of the shifted cell.
-            let shifted_offset =
-                cell_pointer_from_header(page, &new_header, pos + 1)? as usize;
-            page.data[shifted_offset..shifted_offset + 4]
-                .copy_from_slice(&new_child.to_be_bytes());
+            let shifted_offset = cell_pointer_from_header(page, &new_header, pos + 1)? as usize;
+            page.data[shifted_offset..shifted_offset + 4].copy_from_slice(&new_child.to_be_bytes());
         } else {
             // The new cell was appended as the last cell; update rightmost child.
             let header_offset = page_header_offset(page.id);

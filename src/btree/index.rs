@@ -121,7 +121,8 @@ impl BTreeIndex {
         key: BTreeKey,
         value: BTreeValue,
     ) -> Result<TreeMutation> {
-        self.insert_replacing_with_mutation(key, value).map(|(m, _)| m)
+        self.insert_replacing_with_mutation(key, value)
+            .map(|(m, _)| m)
     }
 
     /// Insert a key/value pair and return both the tree mutation metadata

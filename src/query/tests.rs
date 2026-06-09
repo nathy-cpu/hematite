@@ -165,7 +165,9 @@ mod executor_tests {
                 conditions: vec![Expression::Comparison {
                     left: Box::new(Expression::Column("email".to_string())),
                     operator: ComparisonOperator::Equal,
-                    right: Box::new(Expression::Literal(LiteralValue::Text("b@example.com".to_string()))),
+                    right: Box::new(Expression::Literal(LiteralValue::Text(
+                        "b@example.com".to_string(),
+                    ))),
                 }],
             }),
             group_by: Vec::new(),
@@ -1138,7 +1140,9 @@ mod planner_tests {
                 conditions: vec![Expression::Comparison {
                     left: Box::new(Expression::Column("email".to_string())),
                     operator: ComparisonOperator::Equal,
-                    right: Box::new(Expression::Literal(LiteralValue::Text("a@example.com".to_string()))),
+                    right: Box::new(Expression::Literal(LiteralValue::Text(
+                        "a@example.com".to_string(),
+                    ))),
                 }],
             }),
             group_by: Vec::new(),
@@ -1600,7 +1604,9 @@ mod planner_tests {
                     Expression::Comparison {
                         left: Box::new(Expression::Column("email".to_string())),
                         operator: ComparisonOperator::Equal,
-                        right: Box::new(Expression::Literal(LiteralValue::Text("a@example.com".to_string()))),
+                        right: Box::new(Expression::Literal(LiteralValue::Text(
+                            "a@example.com".to_string(),
+                        ))),
                     },
                     Expression::Comparison {
                         left: Box::new(Expression::Column("active".to_string())),
@@ -1876,7 +1882,9 @@ mod planner_tests {
                     operator: LogicalOperator::And,
                     right: Box::new(Expression::Like {
                         expr: Box::new(Expression::Column("name".to_string())),
-                        pattern: Box::new(Expression::Literal(LiteralValue::Text("A%".to_string()))),
+                        pattern: Box::new(Expression::Literal(LiteralValue::Text(
+                            "A%".to_string(),
+                        ))),
                         is_not: false,
                     }),
                 }],

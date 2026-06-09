@@ -1,26 +1,115 @@
-//! SQL connection boundary.
+//! # SQL Session Connection and Transaction Coordinator (`connection`)
 //!
-//! A connection owns a catalog instance plus statement-level transaction behavior.
+//! The Connection module acts as the entry-point facade for client sessions. It coordinates statement
+//! parsing, query planning/execution, autocommit boundaries, explicit transaction states, savepoint stacks,
+//! and view expansion.
+//!
+//! ---
+//!
+//! ## 1. Core Database Connection Concepts
+//!
+//! ### The Connection Session
+//! A connection encapsulates the state of a single database client session. It holds a reference to the
+//! `Catalog` registry, tracks active transactional states, manages savepoint lists, and serializes query
+//! executions, preventing multi-threaded race conditions within a single connection session.
+//!
+//! ### Autocommit vs. Explicit Transactions
+//! By default, database connections run in **Autocommit Mode**. Every SQL DML or DDL statement (e.g. `INSERT`
+//! or `CREATE TABLE`) is wrapped in an implicit transaction:
+//! * If the statement executes successfully, the transaction is committed to disk immediately.
+//! * If the statement fails (due to constraint violations, type mismatch, or syntax error), the transaction
+//!   is automatically rolled back.
+//!
+//! When the user executes `BEGIN` or `START TRANSACTION`:
+//! 1. Autocommit mode is disabled.
+//! 2. An explicit transaction is opened.
+//! 3. Subsequent statements execute within this transaction's scope.
+//! 4. The changes become durable only when `COMMIT` is called. If `ROLLBACK` is called or a session error occurs,
+//!    all changes are discarded.
+//!
+//! ### Savepoint Rollback Stack
+//! A **Savepoint** is a sub-transaction checkpoint. It allows a client to roll back a portion of a transaction
+//! to a specific named state without aborting the entire transaction. The connection coordinates savepoints by
+//! maintaining a stack of named catalog and storage snapshots. Executing `ROLLBACK TO SAVEPOINT name` pops the
+//! transaction stack back to that saved state, reverting B-Tree mutations and schema updates made since the
+//! savepoint was established.
+//!
+//! ### View Resolution
+//! Views are logical virtual tables defined by SELECT statements. Since views do not store data physically, the
+//! connection resolves view references during planning. It intercepts table references in the AST, identifies
+//! views registered in the Catalog, and replaces the view reference with a derived table containing the view's
+//! underlying subquery before planning.
+//!
+//! ---
+//!
+//! ## 2. SQL Statement Processing Pipeline
 //!
 //! ```text
-//! SQL text / prepared statement
-//!            |
-//!            v
-//!         parser
-//!            |
-//!            v
-//!    planner + executor
-//!            |
-//!            v
-//!         catalog
-//!            |
-//!            v
-//!      btree + pager
+//!                      Raw SQL Query Text
+//!                              |
+//!                       Connection::execute()
+//!                              v
+//!                      +-------+-------+
+//!                      |   SQL Parser  | <---+ Expands view references in AST
+//!                      +-------+-------+
+//!                              | AST
+//!                              v
+//!                      +-------+-------+
+//!                      |   Optimizer   | <---+ Constant folding & logical folds
+//!                      +-------+-------+
+//!                              | Optimized AST
+//!                              v
+//!                      +-------+-------+
+//!                      |    Planner    | <---+ Resolves bindings against Schema
+//!                      +-------+-------+
+//!                              | Physical Plan
+//!                              v
+//!                      +-------+-------+
+//!                      |   Executor    | <---+ Volcano-style streaming evaluation
+//!                      +-------+-------+
+//!                              | Results
+//!                              v
+//!                      QueryResult / Rowset
 //! ```
 //!
-//! This is where autocommit, explicit transactions, journal mode changes, and user-facing SQL
-//! errors are coordinated. The connection should not need to understand row encoding or page
-//! structure; it only sequences higher-level components.
+//! ---
+//!
+//! ## 3. Transaction State Transitions
+//!
+//! ```text
+//!                      +-----------------------+
+//!                      |    1. Autocommit      |
+//!                      |  (Implicit Tx per Stmt) |
+//!                      +----------+------------+
+//!                                 |
+//!                         BEGIN / START TX
+//!                                 |
+//!                                 v
+//!                      +----------+------------+
+//!                      |  2. Explicit Active   | <---+ SAVEPOINT name (adds to stack)
+//!                      +----+------------+-----+
+//!                           |            |
+//!                         COMMIT      ROLLBACK or ROLLBACK TO SAVEPOINT
+//!                           |            |
+//!                           v            v
+//!                       Commit Tx    Rollback Tx / Revert Stack
+//!                           \            /
+//!                            \          /
+//!                             v        v
+//!                         Back to Autocommit
+//! ```
+//!
+//! ---
+//!
+//! ## 4. Connection Invariants
+//!
+//! 1. **Autocommit Isolation**: If an error occurs during an autocommit statement, the connection must ensure
+//!    the pager transaction is aborted immediately, preventing partial writes from leaking.
+//! 2. **Savepoint Stack LIFO**: Savepoint stacks must follow Last-In, First-Out (LIFO) behavior. Releasing or
+//!    rolling back to a savepoint implicitly releases all savepoints created after it.
+//! 3. **Concurrency Thread Safety**: The connection session coordinates transaction states sequentially.
+//!    Multiple threads must not mutate connection transaction boundaries concurrently without proper external locking.
+//!
 
 use crate::error::{HematiteError, Result};
 use crate::parser::ast::{

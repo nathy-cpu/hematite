@@ -1,3 +1,89 @@
+//! # Slotted B-Tree Page Layout and Allocation (`page_format`)
+//!
+//! This module manages the physical memory layout of individual B-Tree pages using a **Slotted Page Architecture**.
+//! It provides helper structures to allocate, delete, defragment, and format cells within the page buffer.
+//!
+//! ---
+//!
+//! ## 1. Core Database Slotted Page Concepts
+//!
+//! ### The Need for Slotted Pages
+//! In a database, records (cells) are often variable in size (due to variable-length text, binary data,
+//! or optional NULL columns). If cells are serialized sequentially on a page, deleting a cell in the middle
+//! leaves a hole. Inserting new cells of varying sizes eventually causes fragmentation.
+//!
+//! Shifting all subsequent cells to plug holes is CPU-intensive. Instead, a **Slotted Page** architecture splits
+//! the page into three areas:
+//! 1. **Cell Pointer Array**: Starts at the front of the page and grows *forward*. Contains 2-byte offsets
+//!    pointing to the actual cells. The logical index in this array is stable, even if the cell is moved.
+//! 2. **Cell Content Area**: Starts at the end of the page and grows *backward*. Contains the raw cell payloads.
+//! 3. **Unallocated Gap**: The empty space in the middle.
+//!
+//! ### Physical Layout of a Slotted Page
+//!
+//! ```text
+//! +-----------------------------------------------------------------------+
+//! | Page Header (Kind, Freeblock ptr, Cell count, Content start, Frags)   |
+//! +-----------------------------------------------------------------------+
+//! | Cell Pointer Array (growing forward)                                  |
+//! | [Offset to Cell 0] [Offset to Cell 1] ...                             |
+//! +-----------------------------------------------------------------------+
+//! |                        UNALLOCATED GAP                                |
+//! |                                                                       |
+//! +-----------------------------------------------------------------------+
+//! | Cell Content Area (growing backward)                                  |
+//! | ... [Cell 1 Payload] [Freeblock] [Cell 0 Payload]                     |
+//! +-----------------------------------------------------------------------+
+//! ```
+//!
+//! ### Freeblocks and Fragmented Bytes
+//! When a cell is deleted:
+//! * Its slot pointer is removed.
+//! * Its space in the Cell Content Area is added to a linked list of **Freeblocks** (if it is $\ge 4$ bytes).
+//!   The first 2 bytes of a freeblock store the offset to the next freeblock; the next 2 bytes store the block size.
+//! * If the deleted space is $< 4$ bytes, it is too small to form a freeblock. It is classified as **Fragmented Free Bytes**.
+//!
+//! ### Defragmentation (Compaction)
+//! If a cell allocation fails because the unallocated gap is too small, but the total free space (gap + freeblocks + fragments)
+//! is sufficient, the page is **defragmented**:
+//! 1. All active cells are read into memory.
+//! 2. The Cell Content Area is cleared, wiping out all freeblocks and fragments.
+//! 3. The cells are written back contiguously from the end of the page.
+//! 4. The unallocated gap becomes one large, unified contiguous region.
+//!
+//! ---
+//!
+//! ## 2. Hematite Slotted Page Header Layouts
+//!
+//! Hematite supports four B-Tree page types: Leaf/Interior Table pages, and Leaf/Interior Index pages.
+//! On Page 1 (the first physical page containing the B-Tree schema), the page header starts at offset 100
+//! (`DATABASE_HEADER_SIZE`), directly following the database file header.
+//!
+//! ### Header Offset Calculation
+//!
+//! ```text
+//!              Page 1 (Schema Root)                  Page 2+ (Standard)
+//!            +---------------------+               +---------------------+
+//!            |  Database Header    |               |  B-Tree Page Header |
+//!   Offset 0 |  (100 bytes)        |      Offset 0 |  (8 or 12 bytes)    |
+//!            +---------------------+               +---------------------+
+//! Offset 100 |  B-Tree Page Header |               |  Cell Pointer Array |
+//!            |  (8 or 12 bytes)    |               |  (growing forward)  |
+//!            +---------------------+               +---------------------+
+//! ```
+//!
+//! ### Header Fields
+//!
+//! | Offset | Size (Bytes) | Field Name | Description |
+//! |---|---|---|---|
+//! | `0` | `1` | `page_kind` | One of `0x02` (Interior Index), `0x05` (Interior Table), `0x0A` (Leaf Index), or `0x0D` (Leaf Table). |
+//! | `1` | `2` | `first_freeblock` | Offset to the first freeblock in the page. `0` if none. |
+//! | `3` | `2` | `cell_count` | Number of cells stored on the page. |
+//! | `5` | `2` | `cell_content_start`| Start of the cell content area. Grows backward; `PAGE_SIZE` if empty. |
+//! | `7` | `1` | `fragmented_free_bytes`| Wasted space in bytes that could not form freeblocks. |
+//! | `8` | `4` | `rightmost_child` | (Interior pages only) The page ID of the rightmost routing child. |
+//!
+
 #![allow(dead_code)]
 
 use crate::error::{HematiteError, Result};

@@ -1,393 +1,222 @@
-# Hematite Storage Format Specification v3 Draft
+# Hematite Storage Format Specification v2
 
-This document defines the target on-disk format for the next Hematite storage generation.
+This document defines the physical on-disk format for Hematite v2 database files, rollback journals, and write-ahead logs (WAL).
 
-It is intentionally much closer to SQLite's storage model than the current Hematite format, while
-still leaving room for Hematite-specific simplifications where those do not materially harm page
-density, write behavior, or crash safety.
+Hematite uses a page-based storage engine with a fixed page size of **4096 bytes** (`PAGE_SIZE`), utilizing slotted-page allocations and clustered B+ Trees.
 
-This specification is the implementation target for `F1` and the phases that follow it in
-[storage-refactor-plan.md](./storage-refactor-plan.md).
+---
 
-## Status
+## 1. Database File Layout
 
-- format generation: `v3`
-- compatibility with current Hematite files: none
-- compatibility with SQLite files: none
-- design inspiration: strong
+A database file consists of contiguous, fixed-size pages. Unlike SQLite, which overlays the database header on Page 1 along with the schema tree root, Hematite enforces a strict separation between database headers, transaction metadata, and allocatable data B-trees.
 
-This is a SQLite-inspired format, not a byte-for-byte SQLite clone.
+| Page 0<br>`DB_HEADER_PAGE_ID` | Page 1<br>`STORAGE_METADATA_PAGE_ID` | Page 2+<br>`FIRST_ALLOCATABLE_PAGE_ID` |
+| --- | --- | --- |
+| **Database Header** | **Storage Metadata** | **Allocatable Trees** |
 
-## Core Goals
+### Page 0: Database Header Layout
 
-The format is designed to achieve the following:
+The first 100 bytes of Page 0 are reserved (`DATABASE_HEADER_SIZE = 100`). The actual database header occupies **20 bytes** at the start; the remaining 80 bytes are zero padding reserved for future use. This 100-byte reservation also serves as the B-tree header offset — when Page 0 is also the schema root, the B-tree page header begins at offset 100.
 
-- much denser B-tree pages than the current contiguous key/value layout
-- less page rewrite amplification during insert and delete
-- a cleaner separation between pager and B-tree concerns
-- rollback and WAL formats that scale with dirty pages rather than whole visible-state snapshots
-- elimination of hot-path sidecar metadata files
+All scalar integers in the database header are stored in **little-endian** byte order.
 
-## Main Database File
+| Offset | Size (Bytes) | Type | Field | Description / Value |
+| --- | --- | --- | --- | --- |
+| `0` | `4` | `[u8; 4]` | Magic | ASCII `HMTD`. Identifies the file as a Hematite database. |
+| `4` | `4` | `u32` | Version | Database format version. Current value: `2`. |
+| `8` | `4` | `u32` | Schema Root Page | Root page ID of the schema catalog B-Tree. |
+| `12` | `4` | `u32` | Next Table ID | Incremental counter to allocate unique table IDs. |
+| `16` | `4` | `u32` | Header Checksum | Checksum (`DefaultHasher`) computed over bytes `0..16`. |
+| `20` | `80` | `[u8; 80]` | Reserved | Zero padding. Reserved for future header fields. |
 
-### Page Size
+> **Note**: Page size is not stored in the header — it is a compile-time constant (`PAGE_SIZE = 4096`).
 
-- fixed page size for the first implementation: `4096`
-- all page numbers are 1-based in the main database file
-- page `1` is special and contains the database header plus the first B-tree page payload region
+### Page 1: Storage Metadata Page
 
-This intentionally moves away from the current Hematite layout that uses a 64-byte prelude and
-logical page `0`.
+Page 1 is a dedicated metadata container starting with the container magic `HMD1` (`METADATA_PAGE_MAGIC`). It stores two variable-length sections:
 
-### Database Header Placement
+1. **Pager Metadata** (magic `HPM1`): Persists journal mode, free page list, and per-page checksums.
+2. **Catalog Metadata**: Persists runtime table metadata (row counts, next rowid, root page IDs).
 
-- the first `100` bytes of page `1` are the database header
-- the remainder of page `1` is usable page content for the root B-tree page stored there
-- all pages after page `1` are fully usable except for their own per-page headers
+---
 
-This follows SQLite's most important header-placement choice because it improves compactness and
-removes the need for a separate reserved header page.
+## 2. B-Tree Page Format
 
-### Database Header Fields
+Hematite uses B+ Trees for storage. Tables use B-Trees with `rowid`-derived keys and row payload values. Indexes use B-Trees with composite key columns.
 
-All integer fields are stored big-endian.
+All B-Tree pages are structured using a **Slotted Page Layout**:
 
-| Offset | Size | Field | Notes |
-|---|---:|---|---|
-| `0` | `16` | magic | ASCII `Hematite format 3` truncated/padded to 16 bytes |
-| `16` | `2` | page size | fixed to `4096` for v3 |
-| `18` | `1` | format write version | `3` |
-| `19` | `1` | format read version | `3` |
-| `20` | `1` | reserved space per page | `0` initially |
-| `21` | `1` | max embedded payload fraction | `64` |
-| `22` | `1` | min embedded payload fraction | `32` |
-| `23` | `1` | leaf payload fraction | `32` |
-| `24` | `4` | file change counter | incremented on durable commit |
-| `28` | `4` | page count | durable page count |
-| `32` | `4` | first freelist trunk page | `0` if none |
-| `36` | `4` | total freelist page count | includes trunk and freelist leaf pages |
-| `40` | `4` | schema root page | root of the schema table |
-| `44` | `4` | schema format version | Hematite schema generation number |
-| `48` | `4` | default cache hint | optional tuning hint |
-| `52` | `4` | largest root page | reserved for future auto-vacuum work |
-| `56` | `4` | text encoding | `1 = UTF-8` |
-| `60` | `4` | user version | library-managed or user-managed metadata |
-| `64` | `4` | incremental vacuum flag | reserved |
-| `68` | `4` | application id | optional |
-| `72` | `20` | reserved | zero for now |
-| `92` | `4` | header checksum | checksum over bytes `0..92` |
-| `96` | `4` | next table id | Hematite catalog convenience field |
+| Component | Description |
+| :--- | :--- |
+| **Page Header** | 8 bytes for Leaf, 12 bytes for Interior |
+| **Cell Pointer Array** | 2 bytes per cell, sorted by key (grows forward `====>`) |
+| **UNALLOCATED GAP** | Free space between pointer array and content |
+| **Cell Content Area** | Holds cells and freeblocks (grows backward `<====`) |
 
-The `next table id` field is the main intentional divergence from SQLite's header, since it keeps
-one piece of catalog state cheaply accessible without inventing a separate metadata page.
+### B-Tree Page Headers
 
-## Page Types
+The page type identifier is the first byte:
 
-Each page begins with a page-type-specific header.
+* `0x02`: Interior Index Page
+* `0x05`: Interior Table Page
+* `0x0A`: Leaf Index Page
+* `0x0D`: Leaf Table Page
 
-The first byte identifies page type:
+#### Leaf Page Header Layout (`0x0A` or `0x0D`)
 
-- `0x02`: interior index page
-- `0x05`: interior table page
-- `0x0A`: leaf index page
-- `0x0D`: leaf table page
-- `0x20`: overflow page
-- `0x30`: freelist trunk page
-- `0x31`: freelist leaf page
+* **Offset 0 (1 byte)**: Page Type
+* **Offset 1 (2 bytes)**: First Freeblock Offset (`0` if none)
+* **Offset 3 (2 bytes)**: Cell Count
+* **Offset 5 (2 bytes)**: Start of Cell Content Area (offset from page start)
+* **Offset 7 (1 byte)**: Fragmented Free Byte Count
 
-The first implementation can omit pointer-map pages and auto-vacuum support.
+#### Interior Page Header Layout (`0x02` or `0x05`)
 
-## B-tree Page Format
-
-### Shared Layout
-
-Every B-tree page uses a slotted-page design:
-
-1. page header
-2. cell pointer array growing forward
-3. unallocated gap
-4. cell content area growing backward from the end of the page
-5. freeblocks within the cell content area
-
-This replaces the current Hematite layout that serializes all keys and values as contiguous
-sections.
-
-### B-tree Page Header
-
-For leaf pages:
-
-| Offset | Size | Field |
-|---|---:|---|
-| `0` | `1` | page type |
-| `1` | `2` | first freeblock offset |
-| `3` | `2` | number of cells |
-| `5` | `2` | start of cell content area |
-| `7` | `1` | fragmented free byte count |
-
-For interior pages:
-
-| Offset | Size | Field |
-|---|---:|---|
-| `0` | `1` | page type |
-| `1` | `2` | first freeblock offset |
-| `3` | `2` | number of cells |
-| `5` | `2` | start of cell content area |
-| `7` | `1` | fragmented free byte count |
-| `8` | `4` | rightmost child page |
-
-On page `1`, the usable B-tree page header begins at offset `100` rather than `0`.
+* **Offset 0 (1 byte)**: Page Type
+* **Offset 1 (2 bytes)**: First Freeblock Offset
+* **Offset 3 (2 bytes)**: Cell Count
+* **Offset 5 (2 bytes)**: Start of Cell Content Area
+* **Offset 7 (1 byte)**: Fragmented Free Byte Count
+* **Offset 8 (4 bytes)**: Rightmost Child Page ID
 
 ### Cell Pointer Array
 
-- one 2-byte big-endian offset per cell
-- offsets are stored in sorted key order
-- cell bodies themselves may appear anywhere inside the cell content area
+Directly following the B-Tree header is the cell pointer array. Each entry is a **2-byte big-endian offset** indicating the starting position of a cell within the cell content area. The array is sorted according to the B-Tree keys, allowing in-place binary searching.
 
-This is one of the key performance features we want from SQLite's layout.
+---
 
-### Cell Layouts
+## 3. Cell Payload Formats
 
-#### Table Leaf Cell
+Hematite cells use **fixed-width u16 big-endian** lengths for keys and values (no varints). The B-tree operates on opaque byte keys and values — rowid encoding and record serialization are handled by the catalog layer above.
 
-- varint payload size
-- varint rowid
-- local payload bytes
-- optional 4-byte overflow page number when payload spills
+### Leaf Cell Layout
 
-#### Table Interior Cell
+Stores a key-value pair:
 
-- 4-byte left child page number
-- varint rowid separator key
+| Key Length (2 bytes, BE) | Value Length (2 bytes, BE) | Key Bytes | Value Bytes |
+| --- | --- | --- | --- |
 
-#### Index Leaf Cell
+* Key length: `u16` big-endian. Maximum `MAX_KEY_SIZE = 256` bytes.
+* Value length: `u16` big-endian. Maximum `MAX_VALUE_SIZE = 1024` bytes.
+* Total cell header overhead: **4 bytes**.
 
-- varint payload size
-- local payload bytes
-- optional 4-byte overflow page number when payload spills
+### Interior Cell Layout
 
-#### Index Interior Cell
+Stores a separator key with a left child pointer:
 
-- 4-byte left child page number
-- varint payload size
-- local payload bytes
-- optional 4-byte overflow page number when payload spills
+| Left Child Page ID (4 bytes, BE) | Key Length (2 bytes, BE) | Key Bytes |
+| --- | --- | --- |
 
-For the first migration, rowid table pages should be implemented first. Index pages can follow the
-same general model with a smaller amount of special casing than the current Hematite page format.
+* Left child: `u32` big-endian page ID.
+* Key length: `u16` big-endian. Maximum `MAX_KEY_SIZE = 256` bytes.
+* Total cell header overhead: **6 bytes**.
 
-### Payload Split Rules
+---
 
-The new format should use SQLite-style local payload formulas:
+## 4. Value Overflow and Large Payloads
 
-- `maxLocal = ((usableSize - 12) * 64 / 255) - 23`
-- `minLocal = ((usableSize - 12) * 32 / 255) - 23`
-- `maxLeaf = usableSize - 35`
-- `minLeaf = ((usableSize - 12) * 32 / 255) - 23`
+When a value exceeds the inline capacity of a leaf cell, the B-tree value store layer wraps it in a `StoredValueLayout` that manages inline and overflow portions.
 
-When payload does not fit locally:
+### StoredValueLayout
 
-- choose a local payload size between `minLocal` and `maxLocal`
-- maximize overflow page utilization
-- keep the rule deterministic as part of the format
+Each value stored in a leaf cell uses the following wrapper format:
 
-This should be copied directly because it is one of SQLite's most important space-efficiency
-choices.
+| Tag (1 byte) | Total Length (4 bytes, LE) | Local Payload | Overflow Page ID (4 bytes, optional) | Padding (2 bytes) |
+|---|---|---|---|---|
 
-### Freeblocks And Fragments
+* **Tag**: `0x00` = inline, `0x01` = has overflow.
+* **Header size**: `STORED_VALUE_HEADER_SIZE = 11` bytes.
 
-Free space is represented in three ways:
+### Spilling Formulas (SQLite-style)
 
-- the unallocated gap
-- freeblocks in the cell content area
-- fragments smaller than the minimum freeblock size
+* `MAX_LOCAL_PAYLOAD` = `((4096 - 12) * 64 / 255) - 23` = **1001 bytes**
+* `MIN_LOCAL_PAYLOAD` = `((4096 - 12) * 32 / 255) - 23` = **489 bytes**
 
-The B-tree layer must support:
+If the payload fits in `MAX_LOCAL_PAYLOAD`, it is stored entirely inline. Otherwise, the local portion is computed as:
 
-- allocate from the unallocated gap when possible
-- reuse freeblocks before defragmenting
-- defragment only when needed
+```
+surplus = MIN_LOCAL_PAYLOAD + (total_len - MIN_LOCAL_PAYLOAD) % OVERFLOW_PAYLOAD_CAPACITY
+local = surplus if surplus <= MAX_LOCAL_PAYLOAD else MIN_LOCAL_PAYLOAD
+```
 
-The goal is to stop rebuilding whole pages for ordinary insert and delete paths.
+The remaining bytes are written into a chain of overflow pages.
 
-## Overflow Page Format
+### Overflow Page Structure (`0x20`)
 
-Overflow pages are page-type `0x20`.
+Each overflow page has an 8-byte header followed by payload bytes:
 
-| Offset | Size | Field |
-|---|---:|---|
-| `0` | `1` | page type |
-| `1` | `3` | reserved |
-| `4` | `4` | next overflow page number, `0` if last |
-| `8` | `N` | payload bytes |
+* **Offset 0 (1 byte)**: Page Type (`0x20`)
+* **Offset 1 (3 bytes)**: Reserved (must be `0`)
+* **Offset 4 (4 bytes)**: Next Overflow Page ID (big-endian, `0` if last page in the chain)
+* **Offset 8 onwards**: Payload bytes (up to `OVERFLOW_PAYLOAD_CAPACITY = 4088` bytes)
 
-Overflow payload bytes occupy the rest of the usable page.
+---
 
-Rules:
+## 5. Transaction Journal Formats
 
-- intermediate overflow pages should be filled completely
-- only the final overflow page may be partial
-- cursor code should lazily cache overflow page chains once traversed
+### Rollback Journal Format
 
-## Freelist Format
+A rollback journal (file extension `.jrnl`) enables "undo" recovery. It uses the `HTJ3` binary format.
 
-Freelist pages should move into the main database file rather than sidecar metadata.
+#### Rollback Journal Header (36 bytes)
 
-### Freelist Trunk Page
+| Offset | Size (Bytes) | Type | Field | Description |
+|---|---|---|---|---|
+| `0` | `4` | `[u8; 4]` | Magic | ASCII `HTJ3` |
+| `4` | `4` | `u32` | Version | Journal format version. Current: `1`. |
+| `8` | `1` | `u8` | State | `1` = Active, `2` = Committed |
+| `9` | `2` | `u16` | Page Size | Database page size (`4096`). Big-endian. |
+| `11` | `1` | `u8` | Reserved | Must be `0`. |
+| `12` | `4` | `u32` | Original Page Count | Database page count before the transaction. |
+| `16` | `4` | `u32` | Sector Size Hint | Sector alignment hint. |
+| `20` | `4` | `u32` | Checksum Seed | Seed for page record checksums. |
+| `24` | `4` | `u32` | Free Page Count | Count of free pages serialized after the header. |
+| `28` | `4` | `u32` | Checksum Count | Count of page checksums serialized after free pages. |
+| `32` | `4` | `u32` | Record Count | Number of page records following the metadata sections. |
 
-Page type `0x30`:
+All multi-byte integers in the journal header are big-endian.
 
-- next trunk page number
-- count of freelist leaf entries stored on this page
-- array of free page numbers
+#### Journal Body Layout
 
-### Freelist Leaf Page
+After the 36-byte header, the journal body contains three sections in order:
 
-Page type `0x31`:
+1. **Free page list**: Variable-length encoded list of `free_page_count` page IDs.
+2. **Page checksums**: Variable-length encoded list of `checksum_count` `(page_id, checksum)` pairs.
+3. **Page records**: Each record is an 8-byte prefix (`page_id: u32` + `checksum: u32`) followed by `PAGE_SIZE` bytes of original page content.
 
-- no extra structure required in the first implementation beyond the page-type marker
+---
 
-This is simpler than the current externally persisted free-page list and puts page reuse under the
-same durability model as the rest of the database.
+### Write-Ahead Log (WAL) Format
 
-## Checksums
+A WAL file (file extension `.wal`) enables "redo" recovery and SWMR concurrency. It uses the `HTW3` binary format.
 
-The v3 format should not persist a separate `.pager_checksums` sidecar.
+| WAL Header (24 bytes) | WAL Frame 1 (28-byte prefix + 4096-byte payload) | WAL Frame 2 ... |
+|---|---|---|
 
-For the first implementation:
+#### WAL Header Layout (24 bytes)
 
-- main database pages do not carry a per-page checksum by default
-- rollback journal and WAL records may carry record-level checksums
-- the database header carries a header checksum
+| Offset | Size (Bytes) | Type | Field | Description |
+|---|---|---|---|---|
+| `0` | `4` | `[u8; 4]` | Magic | ASCII `HTW3` |
+| `4` | `4` | `u32` | Version | WAL format version. Current: `1`. |
+| `8` | `2` | `u16` | Page Size | Database page size (`4096`). |
+| `10` | `2` | `u16` | Reserved | Must be `0`. |
+| `12` | `4` | `u32` | Checkpoint Sequence | Monotonically increasing checkpoint counter. |
+| `16` | `4` | `u32` | Salt-1 | Randomized validation salt. |
+| `20` | `4` | `u32` | Salt-2 | Randomized validation salt. |
 
-This is a deliberate tradeoff. The current sidecar checksum model adds write amplification and
-recovery complexity without delivering SQLite-like benefits.
+All multi-byte integers in the WAL header are big-endian.
 
-## Rollback Journal Format
+#### WAL Frame Layout (28-byte prefix + 4096-byte payload)
 
-The rollback journal becomes page-image oriented and self-contained.
+| Offset | Size (Bytes) | Type | Field | Description |
+|---|---|---|---|---|
+| `0` | `4` | `u32` | Page ID | The database page this frame replaces. |
+| `4` | `4` | `u32` | Database Page Count | Non-zero indicates a commit boundary frame. |
+| `8` | `8` | `u64` | Commit Sequence | Monotonic transaction commit counter. |
+| `16` | `4` | `u32` | Salt-1 | Must match the WAL header salt. |
+| `20` | `4` | `u32` | Salt-2 | Must match the WAL header salt. |
+| `24` | `4` | `u32` | Checksum | Frame integrity checksum over header + page bytes. |
+| `28` | `4096` | `[u8]` | Page Payload | The full replacement page image. |
 
-### Journal Header
-
-| Field | Notes |
-|---|---|
-| magic | format identifier |
-| format version | journal format version |
-| page size | must match main database |
-| original database page count | page count before transaction |
-| sector size hint | reserved for later |
-| checksum seed | for record validation |
-
-### Journal Records
-
-Each record stores:
-
-- page number
-- original page bytes
-- record checksum
-
-Rules:
-
-- original page image is journaled before a page becomes writeable
-- each page is journaled at most once per transaction
-- commit phase one syncs the journal before main-file overwrite
-- commit phase two finalizes or removes the journal
-
-This is explicitly closer to SQLite than the current Hematite journal, which still drags along
-broader metadata state.
-
-## WAL Format
-
-The new WAL must be frame-oriented rather than whole-visible-state oriented.
-
-### WAL Header
-
-| Field | Notes |
-|---|---|
-| magic | WAL identifier |
-| format version | WAL format version |
-| page size | must match main database |
-| salt values | for frame validation |
-| checkpoint sequence | optional |
-
-### WAL Frame
-
-Each frame stores:
-
-- page number
-- database page count after commit boundary this frame belongs to
-- page bytes
-- frame checksum
-
-### Commit Boundary
-
-- a transaction is considered committed when a commit-marking frame boundary is durable
-- readers select a stable end mark when they begin
-- checkpoint copies frames back to the main database in page-number order or other pager-approved
-  order
-
-This replaces the current Hematite WAL design that serializes entire visible-state transitions per
-commit.
-
-## Endianness
-
-For v3:
-
-- database header fields use big-endian
-- page-header scalar fields use big-endian
-- journal and WAL headers use big-endian
-- varints use SQLite-style variable-length integer encoding
-
-This choice is made to stay close to SQLite and keep the format easy to inspect with existing
-storage intuition.
-
-## Catalog Mapping
-
-The catalog and higher layers should not need a separate metadata page for durable storage
-coordination.
-
-The schema should live in normal B-tree pages:
-
-- page `1` should be the root page of the schema table where practical
-- table metadata should be stored as ordinary rows in the schema/catalog structure
-- runtime-only metadata must stay in memory and be reconstructable at open time
-
-This does not mean Hematite must adopt SQLite's catalog schema verbatim, only that metadata should
-live in ordinary storage structures rather than custom out-of-band pages and sidecars.
-
-## Migration Policy
-
-Databases created with the current Hematite format are not readable as v3 databases.
-
-`F10` resolves this by choosing explicit old-format retirement for the current release line:
-
-- Hematite opens only databases created with the current post-reset storage generation
-- older on-disk generations are rejected at open time with an explicit migration/retirement error
-- no offline migrator is shipped yet
-
-No in-place compatibility layer should be built into the hot storage path.
-
-## Implementation Order Hints
-
-This spec suggests the following implementation order:
-
-1. new header and page-numbering model
-2. slotted table leaf pages
-3. slotted table interior pages
-4. freelist in main file
-5. overflow pages
-6. rollback journal
-7. WAL
-8. index-page variants and read-path tuning
-
-## Non-Goals For v3
-
-These are intentionally out of scope for the first new format:
-
-- byte-for-byte SQLite compatibility
-- pointer-map pages
-- auto-vacuum
-- mmap-specific page states
-- WITHOUT ROWID table layout
-- sector-aware large-sector journaling on day one
-
-Those can come later once the main structural rewrite is complete.
+All multi-byte integers in WAL frames are big-endian.

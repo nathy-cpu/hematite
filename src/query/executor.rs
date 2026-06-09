@@ -1,23 +1,100 @@
-//! Query execution.
+//! # Volcano-Style Query Execution Engine (`executor`)
 //!
-//! The executor turns a planned access path into concrete catalog operations.
+//! The Query Executor drives planned query access paths, structuring operations into physical processing
+//! iterator pipelines (the Volcano model) and executing relational modifications on B-Tree cursors.
+//!
+//! ---
+//!
+//! ## 1. Core Database Execution Concepts
+//!
+//! ### The Volcano Model (Iterator Model)
+//! The Volcano model is the classical design pattern for database execution. Physical query operators are
+//! organized into a directed tree. Each operator implements a common iterator interface, providing a `next()` method:
+//! * **Laziness**: Calling `next()` on the root node (e.g., `Projection`) recursively pulls rows from child nodes
+//!   (e.g., `Filter`, which pulls from `TableScan`) on-demand.
+//! * **Memory Efficiency**: Rows are processed streaming style, one-by-one. This prevents having to load the
+//!   entire dataset into memory before applying operations.
+//!
+//! ### Query Operators
+//! 1. **Scans**:
+//!    * **Table Scan**: Traverses the entire clustered B-Tree table sequentially.
+//!    * **RowID Lookup**: Performs a direct point search on the clustered table B-Tree using a known primary key.
+//!    * **Index Scan**: Scans a secondary index B-Tree, extracts matching `rowid` keys, then queries the main
+//!      clustered table for payload rows.
+//! 2. **Filter & Projection**: Evaluates boolean predicates and filters rows; projects and computes target output columns.
+//! 3. **Hash Join**: Evaluates equijoins. It reads all rows from the build-side relation, constructs an in-memory
+//!    hash table based on the join keys, then streams the probe-side relation to locate join matches.
+//! 4. **Window and Aggregate Functions**: Computes aggregates (e.g. `SUM`, `AVG`) over partitions or grouping sets,
+//!    holding running state accumulator values.
+//!
+//! ### Storage Layer Agnosticism
+//! The Executor operates exclusively on logical relational types (`Value`, `Row`) and interacts with storage
+//! through catalog cursors. It remains entirely decoupled from physical page formatting, slotted cell layout,
+//! buffer pools, or transaction logging. Leaking B-Tree page bytes or Pager metadata into this layer violates
+//! architectural isolation boundaries.
+//!
+//! ---
+//!
+//! ## 2. Volcano Pipeline Execution Flow
+//!
+//! Tracing a query: `SELECT age FROM users WHERE name = 'Alice';`
 //!
 //! ```text
-//! parsed statement
-//!      +
-//! chosen access path
-//!      |
-//!      v
-//!   executor node
-//!      |
-//!      +--> table cursor scan
-//!      +--> rowid lookup
-//!      +--> PK index -> rowid -> table lookup
-//!      +--> secondary index -> rowid set -> table lookup
+//!    [ProjectionExecutor]  <---+ 4. Extracts "age" column, yields to client.
+//!            |
+//!        next()
+//!            v
+//!      [FilterExecutor]    <---+ 3. Evaluates name == 'Alice', discards non-matches.
+//!            |
+//!        next()
+//!            v
+//!     [TableScanExecutor]  <---+ 1. Asks B-Tree Cursor for next raw record bytes.
+//!            |                  2. Deserializes record bytes into logical Row.
+//!            v
+//!       B-Tree Cursor
 //! ```
 //!
-//! This layer should stay storage-agnostic at the page level. If a change here requires knowledge
-//! of B-tree node layout or pager internals, the boundary below catalog has started to leak.
+//! ---
+//!
+//! ## 3. Query Access Path Resolution
+//!
+//! ```text
+//!                          Scan User Request
+//!                                  |
+//!                   Is there an index on search key?
+//!                    /                            \
+//!                Yes/                              \No
+//!                  v                                v
+//!        +---------+---------+            +---------+---------+
+//!        |    Index Scan     |            |    Table Scan     |
+//!        |  * Scan index tree|            |  * Sequence scan  |
+//!        |  * Get Row IDs    |            |    entire clustered|
+//!        +---------+---------+            |    B-Tree table.  |
+//!                  |                      +---------+---------+
+//!             Point Lookup                          |
+//!                  v                                |
+//!        +---------+---------+                      |
+//!        |   Clustered Table |                      |
+//!        |  * Fetch row bytes|                      |
+//!        +---------+---------+                      |
+//!                  \                                /
+//!                   \                              /
+//!                    v                            v
+//!                    Evaluate filters & Emit Rows
+//! ```
+//!
+//! ---
+//!
+//! ## 4. Execution Invariants
+//!
+//! 1. **Iterator State Isolation**: Operators must track all execution state (such as cursor locations, active
+//!    hash-table maps, and window accumulators) within their own instantiated executor structures. Shared execution
+//!    state must not leak between concurrent connection queries.
+//! 2. **Autocommit Boundary Verification**: Insert, update, and delete mutations must perform type-checking
+//!    and constraint validations (e.g. check constraints, foreign keys) before updating the B-Tree cursor.
+//! 3. **Resource Lifecycle Integrity**: Cursors opened during scans must be closed/dropped promptly when the
+//!    pipeline completes or encounters an error, releasing pinned page frames in the Pager cache.
+//!
 
 use crate::catalog::column::{collation_is_nocase, pad_text_to_char_length};
 use crate::catalog::table::{
@@ -242,7 +319,10 @@ where
     ))
 }
 
-fn conditions_match_with<FEval>(conditions: &[Expression], mut eval_condition: FEval) -> Result<bool>
+fn conditions_match_with<FEval>(
+    conditions: &[Expression],
+    mut eval_condition: FEval,
+) -> Result<bool>
 where
     FEval: FnMut(&Expression) -> Result<Option<bool>>,
 {
@@ -1834,10 +1914,7 @@ impl SelectExecutor {
 
         match function {
             AggregateFunction::Count => {
-                let count = rows
-                    .iter()
-                    .filter(|row| !row[index].is_null())
-                    .count();
+                let count = rows.iter().filter(|row| !row[index].is_null()).count();
                 Ok(Some(Value::Integer(count as i32)))
             }
             AggregateFunction::Min => {
@@ -1847,9 +1924,9 @@ impl SelectExecutor {
                     if value.is_null() {
                         continue;
                     }
-                    if current
-                        .is_none_or(|existing| value.partial_cmp(existing).is_some_and(|ord| ord.is_lt()))
-                    {
+                    if current.is_none_or(|existing| {
+                        value.partial_cmp(existing).is_some_and(|ord| ord.is_lt())
+                    }) {
                         current = Some(value);
                     }
                 }
@@ -1862,9 +1939,9 @@ impl SelectExecutor {
                     if value.is_null() {
                         continue;
                     }
-                    if current
-                        .is_none_or(|existing| value.partial_cmp(existing).is_some_and(|ord| ord.is_gt()))
-                    {
+                    if current.is_none_or(|existing| {
+                        value.partial_cmp(existing).is_some_and(|ord| ord.is_gt())
+                    }) {
                         current = Some(value);
                     }
                 }
@@ -2016,7 +2093,6 @@ impl SelectExecutor {
             Ordering::Equal
         });
     }
-
 
     fn evaluate_projected_boolean_expression(
         &self,
@@ -2571,7 +2647,10 @@ impl InsertExecutor {
             })?;
 
         for (column_index, column) in table.columns.iter().enumerate() {
-            let value = if let Some(position) = column_positions.get(column_index).and_then(|position| *position) {
+            let value = if let Some(position) = column_positions
+                .get(column_index)
+                .and_then(|position| *position)
+            {
                 let expr = value_row.get(position).ok_or_else(|| {
                     HematiteError::ParseError(format!("Missing value for column '{}'", column.name))
                 })?;
@@ -2651,7 +2730,8 @@ impl QueryExecutor for InsertExecutor {
         };
 
         for value_row in &input_rows {
-            let row_values = self.build_row_with_metadata(ctx, &table, &column_positions, value_row)?;
+            let row_values =
+                self.build_row_with_metadata(ctx, &table, &column_positions, value_row)?;
             if let Some(assignments) = &self.statement.on_duplicate {
                 if let Some(conflicting_row) =
                     self.find_conflicting_row(ctx, &table, &row_values)?
@@ -2720,7 +2800,10 @@ impl UpdateExecutor {
             let candidate_pk = primary_key_values(table, &row.values)?;
             let key_bucket = primary_keys.entry(hash_row(&candidate_pk)).or_default();
             if key_bucket.iter().any(|existing| existing == &candidate_pk) {
-                return Err(duplicate_primary_key_parse_error(&table.name, &candidate_pk));
+                return Err(duplicate_primary_key_parse_error(
+                    &table.name,
+                    &candidate_pk,
+                ));
             }
             key_bucket.push(candidate_pk.clone());
 
@@ -3779,7 +3862,10 @@ fn current_table_row_counts(engine: &crate::catalog::CatalogEngine) -> HashMap<S
         .collect()
 }
 
-fn build_insert_column_positions(table: &Table, input_columns: &[String]) -> Result<Vec<Option<usize>>> {
+fn build_insert_column_positions(
+    table: &Table,
+    input_columns: &[String],
+) -> Result<Vec<Option<usize>>> {
     let mut positions = vec![None; table.columns.len()];
 
     for (input_index, column_name) in input_columns.iter().enumerate() {
@@ -5524,17 +5610,22 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
             Value::Text(v) => match v.to_ascii_uppercase().as_str() {
                 "TRUE" | "1" => Ok(Value::Boolean(true)),
                 "FALSE" | "0" => Ok(Value::Boolean(false)),
-                _ => Err(HematiteError::ParseError(format!("Cannot CAST '{}' AS BOOLEAN", v))),
+                _ => Err(HematiteError::ParseError(format!(
+                    "Cannot CAST '{}' AS BOOLEAN",
+                    v
+                ))),
             },
-            other if matches!(
-                other,
-                Value::Integer(_)
-                    | Value::BigInt(_)
-                    | Value::Int128(_)
-                    | Value::UInteger(_)
-                    | Value::UBigInt(_)
-                    | Value::UInt128(_)
-            ) => {
+            other
+                if matches!(
+                    other,
+                    Value::Integer(_)
+                        | Value::BigInt(_)
+                        | Value::Int128(_)
+                        | Value::UInteger(_)
+                        | Value::UBigInt(_)
+                        | Value::UInt128(_)
+                ) =>
+            {
                 let is_zero = match other {
                     Value::Integer(v) => v == 0,
                     Value::BigInt(v) => v == 0,
@@ -5546,11 +5637,18 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
                 };
                 Ok(Value::Boolean(!is_zero))
             }
-            _ => Err(HematiteError::ParseError(format!("Cannot CAST '{:?}' AS BOOLEAN", value))),
+            _ => Err(HematiteError::ParseError(format!(
+                "Cannot CAST '{:?}' AS BOOLEAN",
+                value
+            ))),
         },
         DataType::Text => cast_value_to_text_string(value).map(Value::Text),
-        DataType::Char(length) => coerce_char_value(cast_value_to_text_string(value)?, length, "CAST"),
-        DataType::VarChar(length) => coerce_varchar_value(cast_value_to_text_string(value)?, length, "CAST"),
+        DataType::Char(length) => {
+            coerce_char_value(cast_value_to_text_string(value)?, length, "CAST")
+        }
+        DataType::VarChar(length) => {
+            coerce_varchar_value(cast_value_to_text_string(value)?, length, "CAST")
+        }
         DataType::Binary(length) => coerce_binary_value(value, length, "CAST", true),
         DataType::VarBinary(length) => coerce_binary_value(value, length, "CAST", false),
         DataType::Enum(variants) => coerce_enum_value(value, &variants, "CAST"),
@@ -5573,34 +5671,51 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
             Value::UInteger(v) => Ok(Value::Blob(v.to_le_bytes().to_vec())),
             Value::UBigInt(v) => Ok(Value::Blob(v.to_le_bytes().to_vec())),
             Value::UInt128(v) => Ok(Value::Blob(v.to_le_bytes().to_vec())),
-            _ => Err(HematiteError::ParseError(format!("Cannot CAST '{:?}' AS BLOB", value))),
+            _ => Err(HematiteError::ParseError(format!(
+                "Cannot CAST '{:?}' AS BLOB",
+                value
+            ))),
         },
         DataType::Date => match value {
             Value::Date(v) => Ok(Value::Date(v)),
             Value::Text(v) => Ok(Value::Date(validate_date_string(&v)?)),
-            _ => Err(HematiteError::ParseError(format!("Cannot CAST '{:?}' AS DATE", value))),
+            _ => Err(HematiteError::ParseError(format!(
+                "Cannot CAST '{:?}' AS DATE",
+                value
+            ))),
         },
         DataType::Time => match value {
             Value::Time(v) => Ok(Value::Time(v)),
             Value::Text(v) => Ok(Value::Time(validate_time_string(&v)?)),
-            _ => Err(HematiteError::ParseError(format!("Cannot CAST '{:?}' AS TIME", value))),
+            _ => Err(HematiteError::ParseError(format!(
+                "Cannot CAST '{:?}' AS TIME",
+                value
+            ))),
         },
         DataType::DateTime => match value {
             Value::DateTime(v) => Ok(Value::DateTime(v)),
             Value::Text(v) => Ok(Value::DateTime(validate_datetime_string(&v)?)),
-            _ => Err(HematiteError::ParseError(format!("Cannot CAST '{:?}' AS DATETIME", value))),
+            _ => Err(HematiteError::ParseError(format!(
+                "Cannot CAST '{:?}' AS DATETIME",
+                value
+            ))),
         },
         DataType::TimeWithTimeZone => match value {
             Value::TimeWithTimeZone(v) => Ok(Value::TimeWithTimeZone(v)),
-            Value::Text(v) => Ok(Value::TimeWithTimeZone(validate_time_with_time_zone_string(&v)?)),
-            _ => Err(HematiteError::ParseError(format!("Cannot CAST '{:?}' AS TIME WITH TIME ZONE", value))),
+            Value::Text(v) => Ok(Value::TimeWithTimeZone(
+                validate_time_with_time_zone_string(&v)?,
+            )),
+            _ => Err(HematiteError::ParseError(format!(
+                "Cannot CAST '{:?}' AS TIME WITH TIME ZONE",
+                value
+            ))),
         },
-        DataType::IntervalYearMonth => Ok(Value::IntervalYearMonth(
-            IntervalYearMonthValue::parse(&cast_value_to_text_string(value)?)?,
-        )),
-        DataType::IntervalDaySecond => Ok(Value::IntervalDaySecond(
-            IntervalDaySecondValue::parse(&cast_value_to_text_string(value)?)?,
-        )),
+        DataType::IntervalYearMonth => Ok(Value::IntervalYearMonth(IntervalYearMonthValue::parse(
+            &cast_value_to_text_string(value)?,
+        )?)),
+        DataType::IntervalDaySecond => Ok(Value::IntervalDaySecond(IntervalDaySecondValue::parse(
+            &cast_value_to_text_string(value)?,
+        )?)),
     }
 }
 
@@ -5973,10 +6088,12 @@ fn evaluate_round(args: Vec<Value>) -> Result<Value> {
 
     match value {
         Value::Null => Ok(Value::Null),
-        value @ (Value::Integer(_) | Value::BigInt(_) | Value::Int128(_)
-               | Value::UInteger(_) | Value::UBigInt(_) | Value::UInt128(_)) => {
-            round_integral_value(value, precision)
-        }
+        value @ (Value::Integer(_)
+        | Value::BigInt(_)
+        | Value::Int128(_)
+        | Value::UInteger(_)
+        | Value::UBigInt(_)
+        | Value::UInt128(_)) => round_integral_value(value, precision),
         Value::Float32(value) => Ok(Value::Float32(round_float(value as f64, precision) as f32)),
         Value::Float(value) => Ok(Value::Float(round_float(value, precision))),
         value => Err(HematiteError::ParseError(format!(
@@ -6609,25 +6726,33 @@ fn round_integral_value(value: Value, precision: i32) -> Result<Value> {
         }
         Value::Int128(_) => {
             if !rounded.is_finite() || rounded < i128::MIN as f64 || rounded > i128::MAX as f64 {
-                return Err(HematiteError::ParseError("ROUND overflowed INT128".to_string()));
+                return Err(HematiteError::ParseError(
+                    "ROUND overflowed INT128".to_string(),
+                ));
             }
             Ok(Value::Int128(rounded as i128))
         }
         Value::UInteger(_) => {
             if rounded < 0.0 || rounded > u32::MAX as f64 {
-                return Err(HematiteError::ParseError("ROUND overflowed UINT".to_string()));
+                return Err(HematiteError::ParseError(
+                    "ROUND overflowed UINT".to_string(),
+                ));
             }
             Ok(Value::UInteger(rounded as u32))
         }
         Value::UBigInt(_) => {
             if rounded < 0.0 || rounded > u64::MAX as f64 {
-                return Err(HematiteError::ParseError("ROUND overflowed UINT64".to_string()));
+                return Err(HematiteError::ParseError(
+                    "ROUND overflowed UINT64".to_string(),
+                ));
             }
             Ok(Value::UBigInt(rounded as u64))
         }
         Value::UInt128(_) => {
             if !rounded.is_finite() || rounded < 0.0 || rounded > u128::MAX as f64 {
-                return Err(HematiteError::ParseError("ROUND overflowed UINT128".to_string()));
+                return Err(HematiteError::ParseError(
+                    "ROUND overflowed UINT128".to_string(),
+                ));
             }
             Ok(Value::UInt128(rounded as u128))
         }
@@ -7131,7 +7256,8 @@ struct StandardResolver<'a> {
 
 impl<'a> ColumnResolver for StandardResolver<'a> {
     fn resolve_column(&self, name: &str) -> Result<Value> {
-        self.executor.resolve_column_value(self.sources, name, self.row)
+        self.executor
+            .resolve_column_value(self.sources, name, self.row)
     }
 
     fn resolve_aggregate(
@@ -7178,7 +7304,8 @@ impl<'a> ColumnResolver for StandardResolver<'a> {
         &self,
         expr: &Expression,
     ) -> Result<Option<TextComparisonContext>> {
-        self.executor.text_comparison_context_for_expression(self.sources, expr)
+        self.executor
+            .text_comparison_context_for_expression(self.sources, expr)
     }
 
     fn merged_text_comparison_context(
@@ -7186,7 +7313,8 @@ impl<'a> ColumnResolver for StandardResolver<'a> {
         left: &Expression,
         right: &Expression,
     ) -> Result<Option<TextComparisonContext>> {
-        self.executor.merged_text_comparison_context(self.sources, left, right)
+        self.executor
+            .merged_text_comparison_context(self.sources, left, right)
     }
 }
 
@@ -7265,7 +7393,8 @@ impl<'a> ColumnResolver for ProjectedResolver<'a> {
         &self,
         expr: &Expression,
     ) -> Result<Option<TextComparisonContext>> {
-        self.executor.text_comparison_context_for_expression(self.sources, expr)
+        self.executor
+            .text_comparison_context_for_expression(self.sources, expr)
     }
 
     fn merged_text_comparison_context(
@@ -7273,7 +7402,8 @@ impl<'a> ColumnResolver for ProjectedResolver<'a> {
         left: &Expression,
         right: &Expression,
     ) -> Result<Option<TextComparisonContext>> {
-        self.executor.merged_text_comparison_context(self.sources, left, right)
+        self.executor
+            .merged_text_comparison_context(self.sources, left, right)
     }
 }
 
@@ -7346,28 +7476,17 @@ fn evaluate_expression_generic<R: ColumnResolver>(
             else_expr,
         } => {
             for branch in branches {
-                match evaluate_boolean_expression_generic(
-                    ctx,
-                    cache,
-                    &branch.condition,
-                    resolver,
-                )? {
+                match evaluate_boolean_expression_generic(ctx, cache, &branch.condition, resolver)?
+                {
                     Some(true) => {
-                        return evaluate_expression_generic(
-                            ctx,
-                            cache,
-                            &branch.result,
-                            resolver,
-                        )
+                        return evaluate_expression_generic(ctx, cache, &branch.result, resolver)
                     }
                     Some(false) | None => {}
                 }
             }
 
             match else_expr {
-                Some(else_expr) => {
-                    evaluate_expression_generic(ctx, cache, else_expr, resolver)
-                }
+                Some(else_expr) => evaluate_expression_generic(ctx, cache, else_expr, resolver),
                 None => Ok(Value::Null),
             }
         }
@@ -7424,7 +7543,12 @@ fn evaluate_boolean_expression_generic<R: ColumnResolver>(
             let left_val = evaluate_expression_generic(ctx, cache, left, resolver)?;
             let right_val = evaluate_expression_generic(ctx, cache, right, resolver)?;
             let text_context = resolver.merged_text_comparison_context(left, right)?;
-            Ok(compare_condition_values(&left_val, operator, &right_val, text_context))
+            Ok(compare_condition_values(
+                &left_val,
+                operator,
+                &right_val,
+                text_context,
+            ))
         }
         Expression::InList {
             expr,
@@ -7450,7 +7574,12 @@ fn evaluate_boolean_expression_generic<R: ColumnResolver>(
                 .map(|row| row.first().cloned().unwrap_or(Value::Null))
                 .collect::<Vec<_>>();
             let text_context = resolver.text_comparison_context_for_expression(expr)?;
-            Ok(evaluate_in_candidates(probe, candidates, *is_not, text_context))
+            Ok(evaluate_in_candidates(
+                probe,
+                candidates,
+                *is_not,
+                text_context,
+            ))
         }
         Expression::Between {
             expr,
@@ -7487,10 +7616,7 @@ fn evaluate_boolean_expression_generic<R: ColumnResolver>(
             Ok(Some(if *is_not { !is_null } else { is_null }))
         }
         Expression::UnaryNot(expr) => Ok(evaluate_boolean_expression_generic(
-            ctx,
-            cache,
-            expr,
-            resolver,
+            ctx, cache, expr, resolver,
         )?
         .map(|value| !value)),
         Expression::Logical {

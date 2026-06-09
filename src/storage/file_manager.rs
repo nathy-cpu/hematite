@@ -146,8 +146,6 @@ impl FileManager {
         Page::from_bytes(page_id, data)
     }
 
-
-
     pub fn write_page(&mut self, page: &Page) -> Result<()> {
         let offset = Self::page_offset(page.id)?;
 
@@ -156,8 +154,6 @@ impl FileManager {
 
         Ok(())
     }
-
-
 
     pub fn allocate_page(&mut self) -> Result<PageId> {
         // Try to reuse a free page first
@@ -227,8 +223,6 @@ impl FileManager {
         self.next_page_id = next_page_id_for_file_len(len);
         Ok(())
     }
-
-
 
     pub(crate) fn next_page_id(&self) -> u32 {
         self.next_page_id

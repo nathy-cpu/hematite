@@ -1,217 +1,133 @@
-# SQL Dialect
+# Hematite SQL Dialect Reference
 
-Hematite has its own SQL dialect.
+This document defines the SQL dialect supported by Hematite, detailing the type system, supported functions, syntax rules, and limitations.
 
-It borrows ideas from mainstream SQL databases, and it accepts some MySQL-inspired syntax, but it
-is not trying to be a strict clone of MySQL.
+---
 
-## Key Dialect Rules
+## 1. Key Dialect Rules
 
-### Keywords must be uppercase
+### Uppercase Keyword Casing
 
-This is intentional.
+To keep lexing and parsing simple and unambiguous, Hematite enforces uppercase casing for all SQL keywords.
 
-- `SELECT * FROM users;` is valid
-- `select * from users;` is rejected
+* **Valid**: `SELECT * FROM users;`
+* **Rejected**: `select * from users;`
+* The parser detects lowercased keywords and provides descriptive errors showing the expected uppercase keyword.
 
-The parser tries to tell the user which keyword needs capitalization.
+### Unified Exact Numeric System
 
-### Library-first, embedded-first design
+Hematite handles all exact numeric calculations (`INT8` through `INT128`, unsigned counterparts, and `DECIMAL`) using an intermediate high-precision decimal representation:
 
-The dialect is chosen for a small embedded database, not for wire compatibility with external
-database servers.
+1. **Promotion to Decimal**: Any arithmetic operation involving exact numerics (e.g. adding a `UINT8` to an `INT128`) automatically promotes both operands to `DecimalValue` before performing the calculation, preventing overflow or underflow.
+2. **Automatic Down-scaling**: After the calculation, the engine evaluates the resulting value and down-scales it back to the smallest integer type capable of safely representing the value (e.g., trying to fit into `i32`, then `i64`, then `i128`).
+3. **Rounding**: Divisions on exact decimal types employ nearest-neighbor rounding (round-half-up).
 
-## Currently Supported
+---
 
-This is the high-level supported surface today.
-
-### Core DDL
-
-- `CREATE TABLE`
-- `DROP TABLE`
-- `ALTER TABLE`
-- `CREATE INDEX`
-- `DROP INDEX`
-
-### Metadata Objects
-
-- views
-- triggers
-- named constraints
-
-### DML
-
-- `INSERT`
-- `INSERT ... SELECT`
-- `INSERT ... ON DUPLICATE KEY UPDATE`
-- `SELECT`
-- joined `UPDATE`
-- joined `DELETE`
-- `SELECT INTO`
-
-### Query Features
-
-- joins: cross, inner, left, right, full
-- subqueries
-- recursive CTEs
-- aggregates
-- window functions
-- `CASE`
-- scalar subqueries
-- interval arithmetic
-
-### Transactions
-
-- `BEGIN`
-- `COMMIT`
-- `ROLLBACK`
-- savepoints
-
-### Introspection
-
-- `SHOW TABLES`
-- `SHOW VIEWS`
-- `SHOW INDEXES`
-- `SHOW TRIGGERS`
-- `SHOW CREATE TABLE`
-- `SHOW CREATE VIEW`
-- `DESCRIBE`
-- `EXPLAIN`
-
-## Type System
-
-Hematite uses an explicit custom type system.
+## 2. Supported Data Types
 
 ### Integer Types
 
-- `INT8`
-- `INT16`
-- `INT`
-- `INT32` as alias of `INT`
-- `INT64`
-- `INT128`
-- `UINT8`
-- `UINT16`
-- `UINT`
-- `UINT32` as alias of `UINT`
-- `UINT64`
-- `UINT128`
+* Signed: `INT8` (1 byte), `INT16` (2 bytes), `INT`/`INT32` (4 bytes), `INT64` (8 bytes), `INT128` (16 bytes).
+* Unsigned: `UINT8` (1 byte), `UINT16` (2 bytes), `UINT`/`UINT32` (4 bytes), `UINT64` (8 bytes), `UINT128` (16 bytes).
 
 ### Floating-Point Types
 
-- `FLOAT32`
-- `FLOAT`
-- `FLOAT64` as alias of `FLOAT`
+* `FLOAT32` (single-precision IEEE 754 float).
+* `FLOAT`/`FLOAT64` (double-precision IEEE 754 float).
 
 ### Exact and Textual Types
 
-- `DECIMAL`
-- `TEXT`
-- `CHAR(n)`
-- `VARCHAR(n)`
-- `ENUM(...)`
-- `BOOLEAN` (`BOOL` as alias)
+* `DECIMAL` / `DECIMAL(precision, scale)`: Fixed-point exact decimals.
+* `TEXT`: Variable-length UTF-8 encoded string.
+* `CHAR(n)`: Fixed-length blank-padded character string of length `n`.
+* `VARCHAR(n)`: Variable-length character string with maximum length `n`.
+* `ENUM('val1', 'val2', ...)`: Internally persisted string enumeration.
+* `BOOLEAN`/`BOOL`: Boolean states (`TRUE` or `FALSE`).
 
 ### Binary Types
 
-- `BINARY(n)`
-- `VARBINARY(n)`
-- `BLOB`
+* `BINARY(n)`: Fixed-length zero-padded binary array of length `n`.
+* `VARBINARY(n)`: Variable-length binary array with maximum length `n`.
+* `BLOB`: Large binary object.
 
 ### Temporal and Interval Types
 
-- `DATE`
-- `TIME`
-- `DATETIME`
-- `TIME WITH TIME ZONE`
-- `INTERVAL YEAR TO MONTH`
-- `INTERVAL DAY TO SECOND`
+* `DATE`: Calendar date (YYYY-MM-DD).
+* `TIME`: Time of day (HH:MM:SS.FFF).
+* `DATETIME`: Combined timestamp.
+* `TIME WITH TIME ZONE`: Time with UTC offset.
+* `INTERVAL YEAR TO MONTH`: Period in years and months.
+* `INTERVAL DAY TO SECOND`: Period in days, hours, minutes, and seconds.
 
-## Supported Functions
+---
 
-### Comparison & Conditional
+## 3. Supported SQL Functions
 
-- `COALESCE(v1, v2, ...)`: Returns the first non-null value.
-- `IFNULL(v, default)`: Alias for `COALESCE(v, default)` with two arguments.
-- `NULLIF(v1, v2)`: Returns `NULL` if `v1 = v2`, otherwise returns `v1`.
-- `GREATEST(v1, v2, ...)`: Returns the maximum value in the list.
-- `LEAST(v1, v2, ...)`: Returns the minimum value in the list.
+### Comparison & Conditional Functions
+
+* **`COALESCE(val1, val2, ...)`**: Returns the first non-null argument.
+
+  ```sql
+  SELECT COALESCE(null_col, 'default_val');
+  ```
+
+* **`IFNULL(val, default)`**: Evaluates to `default` if `val` is null; equivalent to `COALESCE` with two arguments.
+* **`NULLIF(val1, val2)`**: Returns `NULL` if `val1 = val2`; otherwise returns `val1`.
+* **`GREATEST(val1, val2, ...)`**: Returns the largest value in the argument list.
+* **`LEAST(val1, val2, ...)`**: Returns the smallest value in the argument list.
 
 ### String Functions
 
-- `LOWER(str)` / `UPPER(str)`: Case conversion.
-- `TRIM(str)`: Removes leading and trailing whitespace.
-- `LENGTH(str)`: Returns number of characters (for text) or bytes (for blobs).
-- `OCTET_LENGTH(str)`: Returns number of bytes.
-- `BIT_LENGTH(str)`: Returns number of bits.
-- `CONCAT(s1, s2, ...)`: Joins strings together.
-- `CONCAT_WS(sep, s1, s2, ...)`: Joins strings with a separator.
-- `SUBSTRING(str, start, [len])`: Extracts a portion of a string.
-- `LEFT(str, len)` / `RIGHT(str, len)`: Extracts from the start or end.
-- `REPLACE(str, from, to)`: Replaces occurrences of a substring.
-- `REPEAT(str, count)`: Repeats a string.
-- `REVERSE(str)`: Reverses a string.
-- `LOCATE(sub, str, [pos])`: Finds the position of a substring.
-- `HEX(blob)` / `UNHEX(str)`: Hexadecimal encoding and decoding. (little-endian)
+* **`LOWER(str)` / `UPPER(str)`**: Transforms characters to lower/upper case.
+* **`TRIM(str)`**: Strips leading and trailing white space.
+* **`LENGTH(str)`**: Returns character count (for text) or byte count (for blobs).
+* **`OCTET_LENGTH(str)`**: Returns the byte length of the string.
+* **`BIT_LENGTH(str)`**: Returns the bit length of the string.
+* **`CONCAT(s1, s2, ...)`**: Concatenates arguments into a single string.
+* **`CONCAT_WS(separator, s1, s2, ...)`**: Concatenates arguments using a custom separator.
+* **`SUBSTRING(str, start_pos, [length])`**: Extracts a substring starting at index `start_pos` (1-indexed).
+* **`LEFT(str, length)` / `RIGHT(str, length)`**: Extracts `length` characters from the start or end.
+* **`REPLACE(str, target, replacement)`**: Replaces all instances of `target` with `replacement` in `str`.
+* **`REPEAT(str, count)`**: Repeats `str` exactly `count` times.
+* **`REVERSE(str)`**: Reverses the character order.
+* **`LOCATE(substr, str, [start_pos])`**: Returns the 1-based index of the first occurrence of `substr` in `str`.
+* **`HEX(blob)` / `UNHEX(hex_str)`**: Encodes binary values to hexadecimal text or decodes hexadecimal strings (little-endian representation).
 
 ### Math Functions
 
-- `ABS(n)`: Absolute value.
-- `ROUND(n, [d])`: Rounds to `d` decimal places (defaults to 0).
-- `CEIL(n)` / `FLOOR(n)`: Upward and downward integer rounding.
-- `POWER(base, exp)`: Exponentiation.
+* **`ABS(val)`**: Returns the absolute value of `val`.
+* **`ROUND(val, [decimal_places])`**: Rounds `val` to `decimal_places` (defaults to 0).
+* **`CEIL(val)` / `FLOOR(val)`**: Rounds up or down to the nearest integer.
+* **`POWER(base, exponent)`**: Raises `base` to the power of `exponent`.
 
 ### Temporal Functions
 
-- `DATE(v)` / `TIME(v)`: Extracts date or time component.
-- `YEAR(v)`, `MONTH(v)`, `DAY(v)`: Extracts date components.
-- `HOUR(v)`, `MINUTE(v)`, `SECOND(v)`: Extracts time components.
-- `TIME_TO_SEC(time)` / `SEC_TO_TIME(sec)`: Conversion between time and seconds.
-- `UNIX_TIMESTAMP([v])`: Returns seconds since the Unix epoch.
+* **`DATE(datetime)` / `TIME(datetime)`**: Extracts the date or time component from a `DATETIME` value.
+* **`YEAR(val)` / `MONTH(val)` / `DAY(val)`**: Extracts the calendar component from a `DATE` or `DATETIME`.
+* **`HOUR(val)` / `MINUTE(val)` / `SECOND(val)`**: Extracts the time component.
+* **`TIME_TO_SEC(time)` / `SEC_TO_TIME(seconds)`**: Converts a time value to/from seconds since midnight.
+* **`UNIX_TIMESTAMP([datetime])`**: Returns the epoch seconds value.
 
 ### Aggregate Functions
 
-- `COUNT(*)` / `COUNT(col)`
-- `SUM(col)`
-- `AVG(col)`
-- `MIN(col)`
-- `MAX(col)`
+* **`COUNT(*)` / `COUNT(column)`**
+* **`SUM(column)`**
+* **`AVG(column)`**
+* **`MIN(column)`**
+* **`MAX(column)`**
 
 ### Window Functions
 
-- `ROW_NUMBER()`
-- `RANK()`
-- `DENSE_RANK()`
-- `SUM(...) OVER (...)`
-- `AVG(...) OVER (...)`
-- `COUNT(...) OVER (...)`
-- `MIN(...) OVER (...)`
-- `MAX(...) OVER (...)`
+* **`ROW_NUMBER() OVER (...)`**: Assigns sequential integers starting at 1.
+* **`RANK() OVER (...)`**: Assigns rank integers, leaving gaps in case of ties.
+* **`DENSE_RANK() OVER (...)`**: Assigns dense rank integers, leaving no gaps.
+* **`SUM/AVG/COUNT/MIN/MAX(...) OVER (...)`**: Computes the aggregate over the partition window.
 
-## Supported But Simplified
+---
 
-These exist, but their semantics are deliberately smaller than in some larger systems.
+## 4. Syntactic Constraints and Limitations
 
-- `CHARACTER SET` metadata is persisted, but runtime behavior is centered on collation, not full
-  encoding negotiation
-- text collations are supported in a focused way, not as a full collation ecosystem
-- trigger bodies are single statements
-- views are read-only
-
-## Not Supported Yet
-
-Important things that are still absent:
-
-- stored procedures
-- user-defined functions
-- full information-schema style system catalogs
-
-## Things The Project Does Not Intend To Chase
-
-- server/network protocol support
-- user and privilege management
-- full compatibility with another database’s parser quirks
-- every admin command from a server RDBMS
-- extremely broad SQL dialect compatibility at the cost of code size and clarity
-
-The project should stay small, understandable, and embedded-first.
+* **Single-Statement Triggers**: Trigger bodies are limited to a single SQL mutation statement; trigger logic cascades must be modeled without procedural blocks.
+* **Read-Only Views**: Views can be created and queried, but they are read-only and cannot accept write modifications directly.
+* **No Stored Procedures / User-Defined Functions**: Procedural languages and custom extensions are not supported. All logic must be coordinated via client queries.

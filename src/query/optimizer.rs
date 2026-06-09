@@ -1,4 +1,85 @@
-//! Query optimizer for improving logical query execution plans.
+//! # AST Query Optimizer (`optimizer`)
+//!
+//! The Query Optimizer implements logical plan transformations on the AST, simplifying expressions,
+//! executing constant folding, pruning redundant predicates, and resolving logical identities.
+//!
+//! ---
+//!
+//! ## 1. Core Database Optimization Concepts
+//!
+//! ### Logical vs. Physical Optimization
+//! Query optimization typically happens in two stages:
+//! 1. **Logical Optimization**: Rewrites the query expression to be simpler and logically equivalent, without
+//!    yet deciding on B-Tree index scan methods. Examples include removing double negations, folding constants,
+//!    and removing dead branches.
+//! 2. **Physical Optimization**: Selects the actual execution path (e.g. choosing to scan a secondary index
+//!    instead of a full table sequential scan).
+//!
+//! Hematite's `QueryOptimizer` focuses on **Logical AST Optimization**.
+//!
+//! ### Constant Folding
+//! Evaluating expressions like `2 + 3` or `'hello' LIKE 'he%'` during execution for every single row in a
+//! 1,000,000-row table is a waste of CPU cycles. The optimizer folds (evaluates) these static operations
+//! during planning time, replacing them with a single literal value (`5` or `TRUE`).
+//!
+//! ### Boolean Identity Simplification
+//! Logical conditions can be simplified by applying identity rules:
+//! * `x AND TRUE` -> `x`
+//! * `x AND FALSE` -> `FALSE`
+//! * `x OR TRUE` -> `TRUE`
+//! * `x OR FALSE` -> `x`
+//! * `NOT (NOT (x))` -> `x` (Double Negation Elimination)
+//!
+//! ### CASE Branch Pruning
+//! When a `CASE` statement contains static branch predicates (e.g. `CASE WHEN TRUE THEN a WHEN FALSE THEN b END`),
+//! the optimizer prunes the dead branches and collapses the expression directly into the matching result (`a`),
+//! avoiding execution overhead.
+//!
+//! ---
+//!
+//! ## 2. Constant Folding Lifecycle
+//!
+//! ```text
+//!               Parsed Statement AST
+//!             "WHERE age > 10 + 20 AND TRUE"
+//!                        |
+//!               optimize_statement()
+//!                        v
+//!               Constant Folding (+)
+//!             "WHERE age > 30 AND TRUE"
+//!                        |
+//!                        v
+//!               Boolean Identity Fold (AND TRUE)
+//!                    "WHERE age > 30"
+//!                        |
+//!                        v
+//!               Optimized Statement AST
+//! ```
+//!
+//! ---
+//!
+//! ## 3. AST Simplification Tree
+//!
+//! ```text
+//!                  [Logical AND]                         [Comparison]
+//!                  /           \                           /      \
+//!            [Comparison]     [Literal]   ====>       [Column]   [Literal]
+//!              /      \        (TRUE)                   (age)      (30)
+//!          [Column]  [Literal]
+//!            (age)     (30)
+//! ```
+//!
+//! ---
+//!
+//! ## 4. Optimization Invariants
+//!
+//! 1. **Logical Equivalence**: Every transformation rule must produce a output tree that evaluates to the
+//!    exact same result value as the input tree for all possible database records (including NULL handling).
+//! 2. **Recursion Safety**: The optimizer must recursively traverse all AST branches (subqueries, CTEs, joins,
+//!    assignments, projections) to ensure no subexpressions are left unoptimized.
+//! 3. **Type Constancy**: Constant folding must preserve data types (e.g., folding two `FLOAT` literals
+//!    must yield a `FLOAT` literal, preserving scale and precision boundaries).
+//!
 
 use crate::error::Result;
 use crate::parser::ast::*;

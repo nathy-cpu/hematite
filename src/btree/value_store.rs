@@ -48,8 +48,7 @@ pub fn local_payload_size(total_payload_len: usize) -> usize {
         return total_payload_len;
     }
     let overflow_usable = OVERFLOW_PAYLOAD_CAPACITY;
-    let surplus = MIN_LOCAL_PAYLOAD
-        + (total_payload_len - MIN_LOCAL_PAYLOAD) % overflow_usable;
+    let surplus = MIN_LOCAL_PAYLOAD + (total_payload_len - MIN_LOCAL_PAYLOAD) % overflow_usable;
     if surplus <= MAX_LOCAL_PAYLOAD {
         surplus
     } else {

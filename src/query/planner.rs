@@ -157,7 +157,7 @@ impl QueryPlanner {
         {
             None
         } else {
-            Some(self.analyze_table_access(&statement.table, &statement.where_clause, &[])? )
+            Some(self.analyze_table_access(&statement.table, &statement.where_clause, &[])?)
         };
         let access_path = analysis
             .as_ref()
@@ -179,7 +179,9 @@ impl QueryPlanner {
                 })
                 .unwrap_or(LogEst::from_count(assignment_count as u64))
         } else {
-            let analysis = analysis.as_ref().expect("non-join access path requires analysis");
+            let analysis = analysis
+                .as_ref()
+                .expect("non-join access path requires analysis");
             self.estimate_update_cost(&analysis, &access_path, assignment_count)
         };
 
@@ -199,7 +201,7 @@ impl QueryPlanner {
         {
             None
         } else {
-            Some(self.analyze_table_access(&statement.table, &statement.where_clause, &[])? )
+            Some(self.analyze_table_access(&statement.table, &statement.where_clause, &[])?)
         };
         let access_path = analysis
             .as_ref()
@@ -216,7 +218,9 @@ impl QueryPlanner {
                 .map(|table| LogEst::from_count(self.estimate_table_rows(table) as u64))
                 .unwrap_or(LogEst(0))
         } else {
-            let analysis = analysis.as_ref().expect("non-join access path requires analysis");
+            let analysis = analysis
+                .as_ref()
+                .expect("non-join access path requires analysis");
             self.estimate_delete_cost(&analysis, &access_path)
         };
 
@@ -494,7 +498,8 @@ impl QueryPlanner {
                 column_id: first_pk.id,
                 index_type: IndexType::PrimaryKey,
                 index_name: None,
-                selectivity: LogEst(0) - LogEst::from_count(self.estimate_table_rows(table).max(1) as u64),
+                selectivity: LogEst(0)
+                    - LogEst::from_count(self.estimate_table_rows(table).max(1) as u64),
             });
         }
 
@@ -513,7 +518,8 @@ impl QueryPlanner {
                     index_type: IndexType::Secondary,
                     index_name: Some(index.name.clone()),
                     selectivity: if index.unique {
-                        LogEst(0) - LogEst::from_count(self.estimate_table_rows(table).max(1) as u64)
+                        LogEst(0)
+                            - LogEst::from_count(self.estimate_table_rows(table).max(1) as u64)
                     } else if index.column_indices.len() > 1 {
                         LogEst(-17) // ~0.02
                     } else {
@@ -750,7 +756,11 @@ impl QueryPlanner {
         let access_path = self.choose_access_path(analysis);
         let mut cost = self.estimate_total_access_cost(analysis, &access_path);
         cost = cost + LogEst::from_count(analysis.accessed_columns.len() as u64);
-        if cost.0 < 0 { LogEst(0) } else { cost }
+        if cost.0 < 0 {
+            LogEst(0)
+        } else {
+            cost
+        }
     }
 
     fn estimate_update_cost(
@@ -764,7 +774,11 @@ impl QueryPlanner {
         let write_cost = rows_touched + LogEst::from_count(3); // 3x per row for write
         let assign_cost = LogEst::from_count(assignment_count as u64);
         let total = locator.add(write_cost).add(assign_cost);
-        if total.0 < 0 { LogEst(0) } else { total }
+        if total.0 < 0 {
+            LogEst(0)
+        } else {
+            total
+        }
     }
 
     fn estimate_delete_cost(
@@ -776,7 +790,11 @@ impl QueryPlanner {
         let locator = self.estimate_locator_cost(analysis, access_path);
         let delete_cost = rows_touched + LogEst::from_count(2);
         let total = locator.add(delete_cost);
-        if total.0 < 0 { LogEst(0) } else { total }
+        if total.0 < 0 {
+            LogEst(0)
+        } else {
+            total
+        }
     }
 
     fn estimate_rows_touched(
@@ -789,10 +807,15 @@ impl QueryPlanner {
             SelectAccessPath::RowIdLookup | SelectAccessPath::PrimaryKeyLookup => LogEst(0),
             SelectAccessPath::SecondaryIndexLookup(index_name) => {
                 let rows = LogEst::from_count(analysis.estimated_rows as u64);
-                let sel = self.secondary_index_selectivity(analysis, index_name)
+                let sel = self
+                    .secondary_index_selectivity(analysis, index_name)
                     .unwrap_or(LogEst(-10));
                 let result = rows + sel;
-                if result.0 < 0 { LogEst(0) } else { result }
+                if result.0 < 0 {
+                    LogEst(0)
+                } else {
+                    result
+                }
             }
             SelectAccessPath::FullTableScan => LogEst::from_count(analysis.estimated_rows as u64),
         }

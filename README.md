@@ -38,7 +38,7 @@ fn main() -> hematite::Result<()> {
     // Flexible query API
     let rows = db.query("SELECT id, name FROM users WHERE balance > 500;")?;
     for row in rows.iter() {
-        println!("User {}: {}", row.get_as::<i32>(0)?, row.get_as::<String>(1)?);
+        println!("User {}: {}", row.get_int(0)?, row.get_string(1)?);
     }
 
     Ok(())

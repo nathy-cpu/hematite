@@ -1,10 +1,112 @@
+/*! # Write-Ahead Logging (WAL) and Redo Recovery
+//!
+//! Write-Ahead Logging (WAL) is the default journaling mechanism of Hematite. It ensures transactional
+//! Durability (the D in ACID) and enables Single-Writer, Multiple-Reader (SWMR) concurrency by logging
+//! modifications out-of-place to a separate WAL file before checkpointing them back to the database.
+//!
+//! ---
+//!
+//! ## 1. Core Database WAL Concepts
+//!
+//! ### Write-Ahead Constraint
+//! The fundamental rule of write-ahead logging states: *never write a database page directly to disk
+//! without first flushing the log frame describing the modification to non-volatile storage.*
+//! If the system crashes, the recovery coordinator can reconstruct the correct database state by
+//! replaying the redo frames in the log.
+//!
+//! ### SWMR Concurrency
+//! When WAL is enabled, writer threads write exclusively to the end of the WAL file (`.wal`). Reader threads
+//! read pages from a read snapshot. When reading page $N$, the reader consults the WAL index:
+//! * If page $N$ was modified in or before the reader's transaction snapshot, the reader overlays the page
+//!   payload from the WAL file.
+//! * If page $N$ was not modified in the WAL scope, the reader reads the base page from the main database file.
+//!
+//! Because readers do not access active writer offsets, writers can commit transactions without blocking
+//! active read operations.
+//!
+//! ### Checkpointing
+//! As transactions commit, the WAL file grows. To prevent the log from consuming too much disk space
+//! and slowing down startup recovery, a **Checkpoint** operation is performed periodically. Checkpointing:
+//! 1. Flushes modified page frames from the WAL back into their in-place offsets in the main database file.
+//! 2. Truncates or resets the WAL file.
+//!
+//! ---
+//!
+//! ## 2. WAL File Layout & Specifications
+//!
+//! A Hematite WAL file consists of a 24-byte header followed by zero or more frames. Each frame contains a
+//! 28-byte frame prefix followed by a `PAGE_SIZE` (4096 bytes) page image.
+//!
+//! ### WAL File Physical Layout
+//!
+//! ```text
+//! +------------------+-----------------------------+-----------------------------+
+//! |    WAL Header    |         WAL Frame 1         |         WAL Frame 2         |
+//! |    (24 bytes)    | (28B prefix + 4096B payload)| (28B prefix + 4096B payload)|
+//! +------------------+-----------------------------+-----------------------------+
+//! ```
+//!
+//! ### WAL Header Layout (24 bytes)
+//!
+//! | Offset | Size (Bytes) | Field | Description / Value |
+//! |---|---|---|---|
+//! | `0` | `4` | Magic | Magic signature bytes `HTW3`. |
+//! | `4` | `4` | Version | File format version. Fixed to `1`. |
+//! | `8` | `2` | Page Size | Database page size. Fixed to `4096`. |
+//! | `10`| `2` | Reserved | Zero-filled padding bytes. |
+//! | `12`| `4` | Checkpoint Seq | Monotonically increasing checkpoint sequence number. |
+//! | `16`| `4` | Salt 1 | Random salt used for validating frame checksums. |
+//! | `20`| `4` | Salt 2 | Random salt used for validating frame checksums. |
+//!
+//! ### WAL Frame Layout (28-byte prefix + 4096-byte payload)
+//!
+//! | Offset | Size (Bytes) | Field | Description / Value |
+//! |---|---|---|---|
+//! | `0` | `4` | Page ID | Logical page ID (1-based index in the database file). |
+//! | `4` | `4` | DB Page Count | Total page count of the database file after this frame's transaction commit. |
+//! | `8` | `8` | Commit Sequence | Monotonically increasing transaction commit ID. |
+//! | `16`| `4` | Salt 1 | Copy of Salt 1 from WAL header for frame verification. |
+//! | `20`| `4` | Salt 2 | Copy of Salt 2 from WAL header for frame verification. |
+//! | `24`| `4` | Checksum | CRC32 checksum computed over frame headers + page data. |
+//! | `28`| `4096`| Page Data | Raw page bytes. |
+//!
+//! ---
+//!
+//! ## 3. Reader Snapshot and WAL Overlay Mapping
+//!
+//! ```text
+//!            Reader Requests Page N
+//!                      |
+//!                      v
+//!          +-----------+-----------+
+//!          | Consult WAL Index     |
+//!          | (VisibleWalState)     |
+//!          +-----------+-----------+
+//!                      |
+//!           Does WAL contain Page N?
+//!            (commit_seq <= snapshot_seq)
+//!            /                   \
+//!        Yes/                     \No
+//!          v                       v
+//!   +------+------+         +------+------+
+//!   | Read frame  |         | Read page   |
+//!   | from WAL    |         | from DB     |
+//!   | file (.wal) |         | file (.db)  |
+//!   +------+------+         +------+------+
+//!          \                       /
+//!           \                     /
+//!            v                   v
+//!           Serve reconstructed page bytes
+//! ```
+//!*/
+
 use crate::error::{HematiteError, Result};
 use crate::storage::metadata_page;
 use crate::storage::pager::JournalMode;
 use crate::storage::pager_metadata::PersistedPagerState;
 use crate::storage::{
-    file_len_for_next_page_id, next_page_id_for_file_len, PageId,
-    PAGE_SIZE, STORAGE_METADATA_PAGE_ID,
+    file_len_for_next_page_id, next_page_id_for_file_len, PageId, PAGE_SIZE,
+    STORAGE_METADATA_PAGE_ID,
 };
 #[cfg(test)]
 use std::collections::BTreeMap;
@@ -103,8 +205,6 @@ impl VisibleWalState {
         }
     }
 
-
-
     pub fn apply_committed_delta(
         &mut self,
         sequence: u64,
@@ -177,8 +277,6 @@ impl VisibleWalState {
         self.page_checksums.get(&page_id).copied()
     }
 }
-
-
 
 pub(crate) fn append_committed_frames_to_path<P: AsRef<Path>>(
     path: P,
@@ -274,8 +372,6 @@ pub(crate) fn load_visible_state_from_path_with_base<P: AsRef<Path>>(
         page_overrides: page_overrides_btree.into_iter().collect(),
     }))
 }
-
-
 
 fn existing_or_default_header(path: &Path) -> Result<WalHeader> {
     Ok(WalFile::load_header_from_path(path)?.unwrap_or_default())

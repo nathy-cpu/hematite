@@ -375,7 +375,9 @@ mod lexer_tests {
     #[test]
     fn test_hex_blob_literal_rejects_odd_digit_count() {
         let mut lexer = Lexer::new("SELECT X'ABC' FROM files;");
-        let err = lexer.tokenize().expect_err("odd hex digit count should fail");
+        let err = lexer
+            .tokenize()
+            .expect_err("odd hex digit count should fail");
         assert!(err
             .to_string()
             .contains("Hex blob literal must contain an even number of digits"));
@@ -507,8 +509,7 @@ mod lexer_tests {
 
     #[test]
     fn test_offset_statement() -> Result<()> {
-        let mut lexer =
-            Lexer::new("SELECT id FROM users ORDER BY name DESC LIMIT 5 OFFSET 2;");
+        let mut lexer = Lexer::new("SELECT id FROM users ORDER BY name DESC LIMIT 5 OFFSET 2;");
         lexer.tokenize()?;
 
         let expected = vec![
@@ -573,9 +574,8 @@ mod lexer_tests {
 
     #[test]
     fn test_group_by_having_statement() -> Result<()> {
-        let mut lexer = Lexer::new(
-            "SELECT name, COUNT(id) FROM users GROUP BY name HAVING name = 'Alice';",
-        );
+        let mut lexer =
+            Lexer::new("SELECT name, COUNT(id) FROM users GROUP BY name HAVING name = 'Alice';");
         lexer.tokenize()?;
 
         let expected = vec![
@@ -724,8 +724,7 @@ mod lexer_tests {
 
     #[test]
     fn test_update_statement() -> Result<()> {
-        let mut lexer =
-            Lexer::new("UPDATE users SET name = 'John', active = TRUE WHERE id = 1;");
+        let mut lexer = Lexer::new("UPDATE users SET name = 'John', active = TRUE WHERE id = 1;");
         lexer.tokenize()?;
 
         let expected = vec![
@@ -790,8 +789,7 @@ mod lexer_tests {
 
     #[test]
     fn test_create_table() -> Result<()> {
-        let mut lexer =
-            Lexer::new("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)");
+        let mut lexer = Lexer::new("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)");
         lexer.tokenize()?;
 
         let expected = vec![
@@ -836,8 +834,7 @@ mod lexer_tests {
 
     #[test]
     fn test_string_literal_escaped_quotes() -> Result<()> {
-        let mut lexer =
-            Lexer::new("INSERT INTO users (name) VALUES ('O\\'Brien'), ('D''Angelo');");
+        let mut lexer = Lexer::new("INSERT INTO users (name) VALUES ('O\\'Brien'), ('D''Angelo');");
         lexer.tokenize()?;
 
         assert_eq!(
@@ -1109,7 +1106,10 @@ mod parser_tests {
         let select = parse_select("SELECT id FROM users WHERE NOT (id = 1 OR id = 2);")?;
         let where_clause = select.where_clause.expect("missing WHERE clause");
         assert_eq!(where_clause.conditions.len(), 1);
-        assert!(matches!(&where_clause.conditions[0], Expression::UnaryNot(_)));
+        assert!(matches!(
+            &where_clause.conditions[0],
+            Expression::UnaryNot(_)
+        ));
         Ok(())
     }
 
@@ -2435,9 +2435,7 @@ mod perf_baseline_tests {
             .map(|i| format!("({}, 'user{}', {}, TRUE)", i + 1, i + 1, (i % 97) + 1))
             .collect::<Vec<_>>()
             .join(", ");
-        let sql = format!(
-            "INSERT INTO users (id, name, score, active) VALUES {values};"
-        );
+        let sql = format!("INSERT INTO users (id, name, score, active) VALUES {values};");
         let token_count = parse_statement_tokens(&sql)?;
         let elapsed = measure("baseline_large_insert_values_parse", 250, || {
             parse_statement_tokens(&sql).expect("large insert should parse");

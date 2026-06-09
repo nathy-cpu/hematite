@@ -1366,8 +1366,6 @@ mod mod_tests {
     }
 }
 
-
-
 mod page_format_tests {
     use crate::btree::page_format::{
         cell_pointer, defragment_page, initialize_btree_page, insert_cell, remove_cell,
@@ -1519,8 +1517,12 @@ mod index_extra_tests {
         {
             let pg_read = storage.read().unwrap();
             let page0 = pg_read.read_page(0).expect("read page0");
-            let header = crate::catalog::header::DatabaseHeader::deserialize(&page0.data).expect("db header decode");
-            assert_eq!(header.version, crate::catalog::header::DatabaseHeader::CURRENT_VERSION);
+            let header = crate::catalog::header::DatabaseHeader::deserialize(&page0.data)
+                .expect("db header decode");
+            assert_eq!(
+                header.version,
+                crate::catalog::header::DatabaseHeader::CURRENT_VERSION
+            );
             let _bt_header = crate::btree::page_format::BTreePageHeaderV3::parse(&page0, true)
                 .expect("b-tree header parse");
         }
@@ -1576,7 +1578,8 @@ mod index_extra_tests {
         {
             let pg_read = storage.read().unwrap();
             let page0 = pg_read.read_page(0).expect("read page0");
-            let _header = crate::catalog::header::DatabaseHeader::deserialize(&page0.data).expect("db header");
+            let _header = crate::catalog::header::DatabaseHeader::deserialize(&page0.data)
+                .expect("db header");
         }
     }
 
@@ -1612,7 +1615,7 @@ mod index_extra_tests {
 
 mod value_store_tests {
     use crate::btree::value_store::{
-        StoredValueLayout, STORED_VALUE_HEADER_SIZE, MAX_LOCAL_PAYLOAD,
+        StoredValueLayout, MAX_LOCAL_PAYLOAD, STORED_VALUE_HEADER_SIZE,
     };
     use crate::storage::INVALID_PAGE_ID;
 
@@ -1630,11 +1633,8 @@ mod value_store_tests {
     #[test]
     fn test_stored_value_layout_overflow_roundtrip() -> crate::error::Result<()> {
         let local_payload = vec![0xAB; MAX_LOCAL_PAYLOAD];
-        let layout = StoredValueLayout::new_overflow(
-            MAX_LOCAL_PAYLOAD + 123,
-            local_payload.clone(),
-            77,
-        )?;
+        let layout =
+            StoredValueLayout::new_overflow(MAX_LOCAL_PAYLOAD + 123, local_payload.clone(), 77)?;
         let encoded = layout.encode()?;
         assert_eq!(
             encoded.len(),
