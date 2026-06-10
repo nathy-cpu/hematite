@@ -256,6 +256,8 @@ embedded-first design over chasing every feature found in larger database system
 - [Architecture](docs/architecture.md)
 - [Codebase Guide](docs/codebase-guide.md)
 - [SQL Dialect](docs/sql-dialect.md)
+- [Database Internals Glossary](docs/glossary.md)
+- [Query Execution Walkthrough](docs/query-walkthrough.md)
 - [Contributing](CONTRIBUTING.md)
 
 ## Status

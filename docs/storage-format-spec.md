@@ -44,6 +44,12 @@ Page 1 is a dedicated metadata container starting with the container magic `HMD1
 
 Hematite uses B+ Trees for storage. Tables use B-Trees with `rowid`-derived keys and row payload values. Indexes use B-Trees with composite key columns.
 
+> [!NOTE]
+> **Why Slotted Pages?** 
+> When database rows contain variable-length columns (e.g., text or blobs), a simple array of rows makes insertion, deletion, and updates extremely expensive. Deleting a row would require shifting all subsequent rows to fill the gap, and inserting a larger row would require rewriting the entire page.
+>
+> A **Slotted Page Layout** solves this by separating pointers from the actual data. Pointers grow forward from the start of the page, while the data cells grow backward from the end of the page. This leaves a flexible "unallocated gap" in the middle. If a row is deleted, we mark its space as a freeblock and remove its pointer, avoiding expensive shifts.
+
 All B-Tree pages are structured using a **Slotted Page Layout**:
 
 | Component | Description |
@@ -114,6 +120,12 @@ Stores a separator key with a left child pointer:
 ---
 
 ## 4. Value Overflow and Large Payloads
+
+> [!NOTE]
+> **Why Value Overflow?**
+> A B-Tree is most efficient when its nodes have a high fan-out (meaning each page points to many children), keeping the tree shallow. If we store extremely large rows (e.g., a 10KB text block) directly inside the B-Tree node, a single row would occupy multiple pages, reducing the node capacity and forcing the tree to grow much deeper.
+>
+> To prevent this, Hematite limits the size of data stored "inline" (directly in the node cell). When a row's value exceeds a certain threshold, the database "spills" the excess data into a linked list of **Overflow Pages** (each holding up to 4088 bytes of payload). The main leaf cell retains only a small prefix of the data (the local payload) and a 4-byte pointer to the first overflow page.
 
 When a value exceeds the inline capacity of a leaf cell, the B-tree value store layer wraps it in a `StoredValueLayout` that manages inline and overflow portions.
 
