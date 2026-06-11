@@ -45,17 +45,12 @@ pub(crate) fn validate_integrity(engine: &mut CatalogEngine) -> Result<CatalogIn
         let mut max_row_id = 0u64;
         let mut previous_row_id = None;
         for (key, value) in engine.read_tree_entries(metadata.root_page_id)? {
-            if key.len() != 8 {
-                return Err(HematiteError::CorruptedData(format!(
-                    "Table '{}' contains a rowid key with invalid length {}",
-                    table_name,
-                    key.len()
-                )));
-            }
-
-            let mut row_id_bytes = [0u8; 8];
-            row_id_bytes.copy_from_slice(&key);
-            let row_id = u64::from_be_bytes(row_id_bytes);
+            let row_id = RowCodec::decode_row_id_key(&key).map_err(|e| {
+                HematiteError::CorruptedData(format!(
+                    "Table '{}' has invalid rowid key: {}",
+                    table_name, e
+                ))
+            })?;
             if let Some(last_row_id) = previous_row_id {
                 if row_id <= last_row_id {
                     return Err(HematiteError::CorruptedData(format!(
@@ -64,7 +59,7 @@ pub(crate) fn validate_integrity(engine: &mut CatalogEngine) -> Result<CatalogIn
                     )));
                 }
             }
-            let row = RowCodec::decode_stored_row(&value)?;
+            let row = RowCodec::decode_stored_row(row_id, &value)?;
             if row.row_id != row_id {
                 return Err(HematiteError::CorruptedData(format!(
                     "Stored rowid mismatch in table '{}': key={}, row={}",

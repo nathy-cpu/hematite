@@ -28,9 +28,8 @@ impl DatabaseHeader {
     pub const MAGIC: [u8; 4] = *b"HMTD";
     /// Current database format version.
     ///
-    /// Version 2 is the first version after the M0 storage reset that intentionally
-    /// breaks compatibility with previous files.
-    pub const CURRENT_VERSION: u32 = 2;
+    /// Version 1 is the first version after the M0 storage reset.
+    pub const CURRENT_VERSION: u32 = 1;
     /// Fixed reserved page ID for the database header.
     pub const HEADER_PAGE_ID: u32 = 0;
 

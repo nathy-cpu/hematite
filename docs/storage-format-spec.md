@@ -1,6 +1,6 @@
-# Hematite Storage Format Specification v2
+# Hematite Storage Format Specification v1
 
-This document defines the physical on-disk format for Hematite v2 database files, rollback journals, and write-ahead logs (WAL).
+This document defines the physical on-disk format for Hematite v1 database files, rollback journals, and write-ahead logs (WAL).
 
 Hematite uses a page-based storage engine with a fixed page size of **4096 bytes** (`PAGE_SIZE`), utilizing slotted-page allocations and clustered B+ Trees.
 
@@ -23,7 +23,7 @@ All scalar integers in the database header are stored in **little-endian** byte 
 | Offset | Size (Bytes) | Type | Field | Description / Value |
 | --- | --- | --- | --- | --- |
 | `0` | `4` | `[u8; 4]` | Magic | ASCII `HMTD`. Identifies the file as a Hematite database. |
-| `4` | `4` | `u32` | Version | Database format version. Current value: `2`. |
+| `4` | `4` | `u32` | Version | Database format version. Current value: `1`. |
 | `8` | `4` | `u32` | Schema Root Page | Root page ID of the schema catalog B-Tree. |
 | `12` | `4` | `u32` | Next Table ID | Incremental counter to allocate unique table IDs. |
 | `16` | `4` | `u32` | Header Checksum | Checksum (`DefaultHasher`) computed over bytes `0..16`. |

@@ -66,7 +66,7 @@ pub(crate) fn insert_into_table(
         values: row,
     })?;
     let new_root_page_id = tree
-        .insert_with_mutation(&row_id.to_be_bytes(), &encoded_row)?
+        .insert_with_mutation(&RowCodec::encode_row_id_key(row_id), &encoded_row)?
         .root_page_id;
 
     engine.record_generated_row_insert(table_name, new_root_page_id, row_id);
@@ -104,7 +104,7 @@ pub(crate) fn delete_from_table_by_rowid(
 ) -> Result<bool> {
     let root_page_id = engine.table_runtime_metadata(table_name)?.root_page_id;
     let mut tree = engine.open_tree(root_page_id)?;
-    let (deleted, mutation) = tree.delete_with_mutation(&rowid.to_be_bytes())?;
+    let (deleted, mutation) = tree.delete_with_mutation(&RowCodec::encode_row_id_key(rowid))?;
     engine.record_row_delete(table_name, mutation.root_page_id, deleted.is_some());
     Ok(deleted.is_some())
 }
@@ -120,8 +120,9 @@ pub(crate) fn open_table_cursor(
 ) -> Result<TableCursor> {
     let root_page_id = engine.table_runtime_metadata(table_name)?.root_page_id;
     let mut rows = Vec::new();
-    engine.visit_tree_entries(root_page_id, |_key, value| {
-        rows.push(RowCodec::decode_stored_row(value)?);
+    engine.visit_tree_entries(root_page_id, |key, value| {
+        let row_id = RowCodec::decode_row_id_key(key)?;
+        rows.push(RowCodec::decode_stored_row(row_id, value)?);
         Ok(())
     })?;
     Ok(TableCursor::from_ordered_rows(rows))
@@ -163,8 +164,8 @@ pub(crate) fn lookup_row_by_rowid(
 ) -> Result<Option<StoredRow>> {
     let root_page_id = engine.table_runtime_metadata(table_name)?.root_page_id;
     let tree = engine.open_tree(root_page_id)?;
-    match tree.get(&rowid.to_be_bytes())? {
-        Some(value) => Ok(Some(RowCodec::decode_stored_row(&value)?)),
+    match tree.get(&RowCodec::encode_row_id_key(rowid))? {
+        Some(value) => Ok(Some(RowCodec::decode_stored_row(rowid, &value)?)),
         None => Ok(None),
     }
 }
@@ -178,7 +179,7 @@ pub(crate) fn insert_stored_row(
     let mut tree = engine.open_tree(root_page_id)?;
     let encoded_row = RowCodec::encode_stored_row(&row)?;
     let new_root_page_id = tree
-        .insert_with_mutation(&row.row_id.to_be_bytes(), &encoded_row)?
+        .insert_with_mutation(&RowCodec::encode_row_id_key(row.row_id), &encoded_row)?
         .root_page_id;
 
     engine.record_explicit_row_insert(table_name, new_root_page_id);
