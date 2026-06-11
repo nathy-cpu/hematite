@@ -98,4 +98,28 @@ impl Pager {
     pub fn trailing_free_page_count(&self) -> usize {
         self.file_manager.trailing_free_page_count()
     }
+
+    pub fn mark_page_active(&mut self, page_id: PageId) -> Result<()> {
+        self.check_error_state()?;
+        if let Some(transaction) = self.active_rollback_transaction_mut() {
+            transaction.rollback_free_list.remove_page(page_id);
+            return Ok(());
+        }
+        if self.journal_mode == JournalMode::Wal {
+            if let Some(transaction) = self.active_wal_transaction_mut() {
+                if transaction.wal_free_page_set.remove(&page_id) {
+                    if let Some(pos) = transaction.wal_free_pages.iter().position(|&x| x == page_id) {
+                        transaction.wal_free_pages.remove(pos);
+                    }
+                }
+                return Ok(());
+            }
+        }
+        let mut free_pages = self.file_manager.free_pages().to_vec();
+        if let Some(pos) = free_pages.iter().position(|&p| p == page_id) {
+            free_pages.remove(pos);
+            self.file_manager.set_free_pages(free_pages);
+        }
+        Ok(())
+    }
 }

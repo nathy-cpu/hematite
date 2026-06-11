@@ -461,11 +461,23 @@ impl Pager {
         Ok(())
     }
 
-    pub(super) fn logical_free_pages(&self) -> &[PageId] {
+    pub(crate) fn logical_free_pages(&self) -> &[PageId] {
         if let Some(transaction) = self.active_rollback_transaction() {
             transaction.rollback_free_list.as_slice()
+        } else if let Some(transaction) = self.active_wal_transaction() {
+            &transaction.wal_free_pages
         } else {
             self.file_manager.free_pages()
+        }
+    }
+
+    pub fn next_page_id(&self) -> PageId {
+        if let Some(transaction) = self.active_rollback_transaction() {
+            transaction.rollback_next_page_id
+        } else if let Some(transaction) = self.active_wal_transaction() {
+            transaction.wal_next_page_id
+        } else {
+            self.file_manager.next_page_id()
         }
     }
 

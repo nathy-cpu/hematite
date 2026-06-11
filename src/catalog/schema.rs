@@ -164,6 +164,10 @@ impl Schema {
         &self.tables
     }
 
+    pub(crate) fn tables_mut(&mut self) -> &mut HashMap<TableId, Table> {
+        &mut self.tables
+    }
+
     pub fn drop_table(&mut self, table_id: TableId) -> Result<()> {
         let table = self
             .tables

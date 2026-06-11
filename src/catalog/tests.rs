@@ -1787,4 +1787,115 @@ mod catalog_new_tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_catalog_auto_vacuum_compaction() -> Result<()> {
+        let test_db = TestDbFile::new("_test_auto_vacuum_compaction");
+
+        // 1. Open database and create multiple tables to allocate pages
+        let mut catalog = Catalog::open_or_create(test_db.path())?;
+        
+        let columns1 = vec![
+            Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true),
+            Column::new(ColumnId::new(2), "data".to_string(), DataType::Text),
+        ];
+        let columns2 = vec![
+            Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true),
+            Column::new(ColumnId::new(2), "data".to_string(), DataType::Text),
+        ];
+
+        catalog.begin_transaction()?;
+
+        let table1_id = catalog.create_table("table1", columns1)?;
+        let table1_root_id = catalog.with_engine(|engine| engine.create_table("table1"))?;
+        let table1_pk_root_id = catalog.with_engine(|engine| engine.create_empty_btree())?;
+        catalog.set_table_root_page(table1_id, table1_root_id)?;
+        catalog.set_table_primary_key_root_page(table1_id, table1_pk_root_id)?;
+
+        let table2_id = catalog.create_table("table2", columns2)?;
+        let table2_root_id = catalog.with_engine(|engine| engine.create_table("table2"))?;
+        let table2_pk_root_id = catalog.with_engine(|engine| engine.create_empty_btree())?;
+        catalog.set_table_root_page(table2_id, table2_root_id)?;
+        catalog.set_table_primary_key_root_page(table2_id, table2_pk_root_id)?;
+
+        let table1_def = catalog.get_table(table1_id)?.unwrap();
+        let table2_def = catalog.get_table(table2_id)?.unwrap();
+
+        // Insert some rows in both tables and register them in primary-key index
+        catalog.with_engine(|engine| {
+            for i in 0..50 {
+                let vals1 = vec![Value::Integer(i), Value::Text(format!("row {}", i))];
+                let row_id1 = engine.insert_into_table("table1", vals1.clone())?;
+                engine.register_primary_key_row(&table1_def, crate::catalog::StoredRow { row_id: row_id1, values: vals1 })?;
+
+                let vals2 = vec![Value::Integer(i), Value::Text(format!("row {}", i))];
+                let row_id2 = engine.insert_into_table("table2", vals2.clone())?;
+                engine.register_primary_key_row(&table2_def, crate::catalog::StoredRow { row_id: row_id2, values: vals2 })?;
+            }
+            Ok(())
+        })?;
+
+        catalog.commit_transaction()?;
+
+        // Get count of allocated pages before drop
+        let pages_before = catalog.with_engine(|engine| engine.with_pager(|pager| Ok(pager.allocated_page_count())))?;
+
+        // 2. Drop table1. This deallocates table1 pages and puts them in the free list.
+        // Since table2 pages were allocated after table1, we now have free slots scattered
+        // in the middle of the database file, with active table2 pages at the end of the file.
+        catalog.begin_transaction()?;
+        let table1 = catalog.get_table(table1_id)?.unwrap();
+        catalog.with_engine(|engine| {
+            engine.drop_table_with_indexes(&table1)
+        })?;
+        catalog.drop_table(table1_id)?;
+
+        let pages_after_drop = catalog.with_engine(|engine| engine.with_pager(|pager| Ok(pager.allocated_page_count())))?;
+        let _next_page_after_drop = catalog.with_engine(|engine| engine.with_pager(|pager| Ok(pager.next_page_id())))?;
+
+        // Within the active transaction, check that free pages are present
+        let (pages_inside_tx, free_count_inside_tx) = catalog.with_engine(|engine| {
+            engine.with_pager(|pager| {
+                Ok((pager.allocated_page_count(), pager.logical_free_pages().len()))
+            })
+        })?;
+        assert!(free_count_inside_tx > 0, "Should have free pages inside active transaction");
+
+        // Commit transaction. This should automatically run auto-vacuum compaction
+        catalog.commit_transaction().unwrap();
+
+        // Get count of allocated pages and free pages after commit
+        let (pages_after_commit, free_count_after_commit) = catalog.with_engine(|engine| {
+            engine.with_pager(|pager| {
+                Ok((pager.allocated_page_count(), pager.logical_free_pages().len()))
+            })
+        })?;
+
+        assert!(pages_after_commit < pages_inside_tx, "Allocated pages should decrease after commit auto-vacuum");
+        assert_eq!(free_count_after_commit, 0, "All free pages should be reclaimed/compacted");
+
+        // 3. Verify database integrity and data readability of the surviving table
+        catalog.validate_integrity()?;
+
+        let mut reopened = Catalog::open_or_create(test_db.path())?;
+        reopened.validate_integrity()?;
+        
+        // Check table2 rows are fully intact
+        reopened.with_engine(|engine| {
+            let mut cursor = engine.open_table_cursor("table2")?;
+            let mut count = 0;
+            if cursor.first() {
+                loop {
+                    count += 1;
+                    if !cursor.next() {
+                        break;
+                    }
+                }
+            }
+            assert_eq!(count, 50, "table2 should have exactly 50 rows");
+            Ok(())
+        })?;
+
+        Ok(())
+    }
 }

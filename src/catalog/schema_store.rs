@@ -84,8 +84,11 @@ pub(crate) fn save_schema(
     let mut buffer = Vec::new();
     schema.serialize(&mut buffer)?;
 
-    tree_store.delete_tree(current_root)?;
-    let schema_root = tree_store.create_tree()?;
+    let schema_root = if current_root != 0 {
+        current_root
+    } else {
+        tree_store.create_tree()?
+    };
     let mut tree = tree_store.open_tree(schema_root)?;
     tree.insert(&SCHEMA_BLOB_KEY.to_string(), &buffer)?;
 

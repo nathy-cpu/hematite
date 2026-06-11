@@ -227,7 +227,11 @@ impl ByteTreeStore {
     }
 
     pub fn free_page_ids(&self) -> Result<Vec<PageId>> {
-        Ok(self.lock_storage_read()?.free_pages().to_vec())
+        Ok(self.lock_storage_read()?.logical_free_pages().to_vec())
+    }
+
+    pub fn next_page_id(&self) -> Result<PageId> {
+        Ok(self.lock_storage_read()?.next_page_id())
     }
 
     pub fn fragmented_free_page_count(&self) -> Result<usize> {

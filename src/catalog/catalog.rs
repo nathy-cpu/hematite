@@ -112,10 +112,10 @@ use crate::error::Result;
 use std::collections::HashMap;
 #[derive(Debug)]
 pub struct Catalog {
-    engine: CatalogEngine,
-    schema: Schema,
-    schema_root: u32,
-    schema_dirty: bool,
+    pub(crate) engine: CatalogEngine,
+    pub(crate) schema: Schema,
+    pub(crate) schema_root: u32,
+    pub(crate) schema_dirty: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -580,7 +580,57 @@ impl Catalog {
         }
     }
 
+    pub fn auto_vacuum(&mut self) -> Result<()> {
+        let mut root_pages = Vec::new();
+        if self.schema_root >= 2 {
+            root_pages.push(self.schema_root);
+        }
+        for table in self.schema.tables().values() {
+            if table.root_page_id >= 2 {
+                root_pages.push(table.root_page_id);
+            }
+            if table.primary_key_index_root_page_id >= 2 {
+                root_pages.push(table.primary_key_index_root_page_id);
+            }
+            for index in &table.secondary_indexes {
+                if index.root_page_id >= 2 {
+                    root_pages.push(index.root_page_id);
+                }
+            }
+        }
+
+        let storage = self.engine.tree_store.shared_storage();
+        crate::btree::compaction::auto_vacuum(&storage, &mut root_pages, |old_id, new_id| -> Result<()> {
+            if self.schema_root == old_id {
+                self.schema_root = new_id;
+                self.engine.update_database_header(|h| h.schema_root_page = new_id)?;
+            }
+            for table in self.schema.tables_mut().values_mut() {
+                if table.root_page_id == old_id {
+                    table.root_page_id = new_id;
+                    if let Some(metadata) = self.engine.table_metadata.get_mut(&table.name) {
+                        metadata.root_page_id = new_id;
+                    }
+                    self.schema_dirty = true;
+                }
+                if table.primary_key_index_root_page_id == old_id {
+                    table.primary_key_index_root_page_id = new_id;
+                    self.schema_dirty = true;
+                }
+                for index in &mut table.secondary_indexes {
+                    if index.root_page_id == old_id {
+                        index.root_page_id = new_id;
+                        self.schema_dirty = true;
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+
     pub(crate) fn commit_transaction(&mut self) -> Result<()> {
+        self.save_schema_to_btree()?;
+        self.auto_vacuum()?;
         self.save_schema_to_btree()?;
         self.engine.commit_transaction()
     }
