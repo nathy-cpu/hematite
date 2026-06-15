@@ -108,7 +108,11 @@ impl Pager {
         if self.journal_mode == JournalMode::Wal {
             if let Some(transaction) = self.active_wal_transaction_mut() {
                 if transaction.wal_free_page_set.remove(&page_id) {
-                    if let Some(pos) = transaction.wal_free_pages.iter().position(|&x| x == page_id) {
+                    if let Some(pos) = transaction
+                        .wal_free_pages
+                        .iter()
+                        .position(|&x| x == page_id)
+                    {
                         transaction.wal_free_pages.remove(pos);
                     }
                 }

@@ -2031,10 +2031,13 @@ mod mod_tests {
         assert_eq!(node.node_type, NodeType::Leaf);
         assert!(node.keys.len() >= 2);
 
-        let first_row_id = crate::catalog::serialization::RowCodec::decode_row_id_key(&node.keys[0].data)?;
+        let first_row_id =
+            crate::catalog::serialization::RowCodec::decode_row_id_key(&node.keys[0].data)?;
 
         // Corrupt the second rowid key to be <= the first rowid key.
-        node.keys[1] = BTreeKey::new(crate::catalog::serialization::RowCodec::encode_row_id_key(first_row_id));
+        node.keys[1] = BTreeKey::new(crate::catalog::serialization::RowCodec::encode_row_id_key(
+            first_row_id,
+        ));
         node.to_page(&mut page)?;
         storage.write_page(page)?;
 

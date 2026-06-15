@@ -1,9 +1,9 @@
-use crate::storage::{PageId, Pager, Page, INVALID_PAGE_ID};
 use crate::btree::node::BTreeNode;
-use crate::btree::NodeType;
 use crate::btree::value_store::StoredValueLayout;
 use crate::btree::BTreeValue;
-use crate::error::{Result, HematiteError};
+use crate::btree::NodeType;
+use crate::error::{HematiteError, Result};
+use crate::storage::{Page, PageId, Pager, INVALID_PAGE_ID};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
@@ -81,7 +81,8 @@ fn trace_tree(
         NodeType::Leaf => {
             for (i, value) in node.values.iter().enumerate() {
                 let layout = StoredValueLayout::decode(&value.data)?;
-                if layout.overflow_first_page != INVALID_PAGE_ID && layout.overflow_first_page >= 2 {
+                if layout.overflow_first_page != INVALID_PAGE_ID && layout.overflow_first_page >= 2
+                {
                     trace_overflow(
                         pager,
                         layout.overflow_first_page,
@@ -119,7 +120,9 @@ fn trace_overflow(
         trace_overflow(
             pager,
             next_page_id,
-            PageParent::OverflowPredecessor { pred_page_id: page_id },
+            PageParent::OverflowPredecessor {
+                pred_page_id: page_id,
+            },
             parent_map,
             visited,
         )?;
@@ -140,18 +143,18 @@ where
 {
     // 1. Read the old page data.
     let mut page = {
-        let pager = storage.read().map_err(|_| {
-            HematiteError::InternalError("Pager lock is poisoned".to_string())
-        })?;
+        let pager = storage
+            .read()
+            .map_err(|_| HematiteError::InternalError("Pager lock is poisoned".to_string()))?;
         pager.read_page(old_page_id)?
     };
 
     // 2. Change the page ID to new_page_id and write to pager.
     page.id = new_page_id;
     {
-        let mut pager = storage.write().map_err(|_| {
-            HematiteError::InternalError("Pager lock is poisoned".to_string())
-        })?;
+        let mut pager = storage
+            .write()
+            .map_err(|_| HematiteError::InternalError("Pager lock is poisoned".to_string()))?;
         pager.mark_page_active(new_page_id)?;
         pager.write_page(page)?;
     }
@@ -236,9 +239,7 @@ where
     }
     for val in parent_map.values_mut() {
         match val {
-            PageParent::BTreeInternal {
-                parent_page_id, ..
-            } if *parent_page_id == old_page_id => {
+            PageParent::BTreeInternal { parent_page_id, .. } if *parent_page_id == old_page_id => {
                 *parent_page_id = new_page_id;
             }
             PageParent::BTreeLeafCell { leaf_page_id, .. } if *leaf_page_id == old_page_id => {
@@ -253,9 +254,9 @@ where
 
     // 6. Deallocate the old page ID.
     {
-        let mut pager = storage.write().map_err(|_| {
-            HematiteError::InternalError("Pager lock is poisoned".to_string())
-        })?;
+        let mut pager = storage
+            .write()
+            .map_err(|_| HematiteError::InternalError("Pager lock is poisoned".to_string()))?;
         pager.deallocate_page(old_page_id)?;
     }
 
@@ -273,9 +274,9 @@ where
     loop {
         // Read lock storage to check state
         let (next_page_id, mut free_pages) = {
-            let pager = storage.read().map_err(|_| {
-                HematiteError::InternalError("Pager lock is poisoned".to_string())
-            })?;
+            let pager = storage
+                .read()
+                .map_err(|_| HematiteError::InternalError("Pager lock is poisoned".to_string()))?;
             let next_page = pager.next_page_id();
             let free_pages = pager.logical_free_pages().to_vec();
             (next_page, free_pages)
@@ -291,9 +292,9 @@ where
         // Check if the highest page is actually a free page.
         // If it is, the Pager itself should compact it.
         if free_pages.contains(&highest_page_id) {
-            let mut pager = storage.write().map_err(|_| {
-                HematiteError::InternalError("Pager lock is poisoned".to_string())
-            })?;
+            let mut pager = storage
+                .write()
+                .map_err(|_| HematiteError::InternalError("Pager lock is poisoned".to_string()))?;
             pager.deallocate_page(highest_page_id)?;
             continue;
         }
@@ -309,9 +310,9 @@ where
 
         // We build parent map for this iteration.
         let parent_map = {
-            let pager = storage.read().map_err(|_| {
-                HematiteError::InternalError("Pager lock is poisoned".to_string())
-            })?;
+            let pager = storage
+                .read()
+                .map_err(|_| HematiteError::InternalError("Pager lock is poisoned".to_string()))?;
             build_parent_map(&pager, roots)?
         };
 

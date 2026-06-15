@@ -600,32 +600,37 @@ impl Catalog {
         }
 
         let storage = self.engine.tree_store.shared_storage();
-        crate::btree::compaction::auto_vacuum(&storage, &mut root_pages, |old_id, new_id| -> Result<()> {
-            if self.schema_root == old_id {
-                self.schema_root = new_id;
-                self.engine.update_database_header(|h| h.schema_root_page = new_id)?;
-            }
-            for table in self.schema.tables_mut().values_mut() {
-                if table.root_page_id == old_id {
-                    table.root_page_id = new_id;
-                    if let Some(metadata) = self.engine.table_metadata.get_mut(&table.name) {
-                        metadata.root_page_id = new_id;
-                    }
-                    self.schema_dirty = true;
+        crate::btree::compaction::auto_vacuum(
+            &storage,
+            &mut root_pages,
+            |old_id, new_id| -> Result<()> {
+                if self.schema_root == old_id {
+                    self.schema_root = new_id;
+                    self.engine
+                        .update_database_header(|h| h.schema_root_page = new_id)?;
                 }
-                if table.primary_key_index_root_page_id == old_id {
-                    table.primary_key_index_root_page_id = new_id;
-                    self.schema_dirty = true;
-                }
-                for index in &mut table.secondary_indexes {
-                    if index.root_page_id == old_id {
-                        index.root_page_id = new_id;
+                for table in self.schema.tables_mut().values_mut() {
+                    if table.root_page_id == old_id {
+                        table.root_page_id = new_id;
+                        if let Some(metadata) = self.engine.table_metadata.get_mut(&table.name) {
+                            metadata.root_page_id = new_id;
+                        }
                         self.schema_dirty = true;
                     }
+                    if table.primary_key_index_root_page_id == old_id {
+                        table.primary_key_index_root_page_id = new_id;
+                        self.schema_dirty = true;
+                    }
+                    for index in &mut table.secondary_indexes {
+                        if index.root_page_id == old_id {
+                            index.root_page_id = new_id;
+                            self.schema_dirty = true;
+                        }
+                    }
                 }
-            }
-            Ok(())
-        })
+                Ok(())
+            },
+        )
     }
 
     pub(crate) fn commit_transaction(&mut self) -> Result<()> {

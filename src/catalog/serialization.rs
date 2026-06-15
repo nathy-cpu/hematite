@@ -154,24 +154,21 @@ impl RowCodec {
     /// Decodes a `u64` row ID from the prefix-length variable-length byte array.
     pub fn decode_row_id_key(key: &[u8]) -> Result<u64> {
         if key.is_empty() {
-            return Err(HematiteError::CorruptedData(
-                "Empty rowid key".to_string(),
-            ));
+            return Err(HematiteError::CorruptedData("Empty rowid key".to_string()));
         }
         let bytes_needed = key[0] as usize;
         if bytes_needed < 1 || bytes_needed > 8 {
-            return Err(HematiteError::CorruptedData(
-                format!("Invalid rowid key prefix length: {}", bytes_needed),
-            ));
+            return Err(HematiteError::CorruptedData(format!(
+                "Invalid rowid key prefix length: {}",
+                bytes_needed
+            )));
         }
         if key.len() != 1 + bytes_needed {
-            return Err(HematiteError::CorruptedData(
-                format!(
-                    "Rowid key length mismatch: prefix specifies {} bytes but key length is {}",
-                    bytes_needed,
-                    key.len()
-                ),
-            ));
+            return Err(HematiteError::CorruptedData(format!(
+                "Rowid key length mismatch: prefix specifies {} bytes but key length is {}",
+                bytes_needed,
+                key.len()
+            )));
         }
         let mut be_bytes = [0u8; 8];
         be_bytes[8 - bytes_needed..].copy_from_slice(&key[1..]);
@@ -704,4 +701,3 @@ mod tests {
         }
     }
 }
-
