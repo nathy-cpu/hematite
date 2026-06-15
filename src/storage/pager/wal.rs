@@ -1,6 +1,7 @@
 use super::{JournalMode, Pager, PagerLockMode};
 use crate::error::Result;
-use crate::storage::Page;
+use crate::storage::{Page, PageId};
+use std::sync::Arc;
 
 impl Pager {
     fn checkpoint_wal_guarded(&mut self) -> Result<()> {
@@ -94,10 +95,18 @@ impl Pager {
         self.file_manager.restore_file_len(state.file_len)?;
         self.file_manager.set_free_pages(state.free_pages.clone());
         self.file_manager.compact_free_pages()?;
-        for (page_id, data) in &state.page_overrides {
-            let page = Page::from_bytes(*page_id, data.clone())?;
-            self.file_manager.write_page(&page)?;
+
+        // Collect overridden page IDs, then read each page's data.
+        // We get mutable access through Arc::make_mut for LRU cache updates.
+        let overridden_pages: Vec<PageId> = state.overridden_page_ids().collect();
+        let state_mut = Arc::make_mut(self.latest_wal_state.as_mut().unwrap());
+        for page_id in overridden_pages {
+            if let Some(data) = state_mut.read_page_data(page_id)? {
+                let page = Page::from_bytes(page_id, data)?;
+                self.file_manager.write_page(&page)?;
+            }
         }
+
         self.file_manager.flush()?;
         self.page_checksums = state.page_checksums.clone();
         self.latest_wal_state = None;

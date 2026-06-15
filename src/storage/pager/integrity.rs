@@ -1,34 +1,34 @@
 use super::Pager;
 use crate::error::Result;
 use crate::storage::{
-    next_page_id_for_file_len, Page, PagerIntegrityReport, DB_HEADER_PAGE_ID,
+    next_page_id_for_file_len, Page, PageId, PagerIntegrityReport, DB_HEADER_PAGE_ID,
     STORAGE_METADATA_PAGE_ID,
 };
 use std::collections::HashSet;
 
 impl Pager {
-    pub fn validate_integrity(&self) -> Result<PagerIntegrityReport> {
-        let (max_page_id_exclusive, logical_free_pages, logical_checksums, wal_overrides) =
+    pub fn validate_integrity(&mut self) -> Result<PagerIntegrityReport> {
+        let (max_page_id_exclusive, logical_free_pages, logical_checksums, wal_override_page_ids) =
             if let Some(state) = &self.latest_wal_state {
                 (
                     next_page_id_for_file_len(state.file_len),
                     state.free_pages.clone(),
                     state.page_checksums.clone(),
-                    state.page_overrides.clone(),
+                    state.overridden_page_ids().collect::<HashSet<PageId>>(),
                 )
             } else if let Some(transaction) = self.active_rollback_transaction() {
                 (
                     transaction.rollback_next_page_id,
                     transaction.rollback_free_list.as_slice().to_vec(),
                     self.page_checksums.clone(),
-                    std::collections::HashMap::new(),
+                    HashSet::new(),
                 )
             } else {
                 (
                     self.file_manager.next_page_id(),
                     self.file_manager.free_pages().to_vec(),
                     self.page_checksums.clone(),
-                    std::collections::HashMap::new(),
+                    HashSet::new(),
                 )
             };
 
@@ -90,8 +90,13 @@ impl Pager {
                         page_id
                     ))
                 })?
-            } else if let Some(data) = wal_overrides.get(&page_id) {
-                Page::from_bytes(page_id, data.clone())?
+            } else if wal_override_page_ids.contains(&page_id) {
+                // Read WAL page data on-demand through the LRU cache
+                if let Some(data) = self.read_wal_page_data(page_id)? {
+                    Page::from_bytes(page_id, data)?
+                } else {
+                    self.file_manager.read_page(page_id)?
+                }
             } else {
                 self.file_manager.read_page(page_id)?
             };

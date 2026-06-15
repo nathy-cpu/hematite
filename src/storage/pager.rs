@@ -431,6 +431,36 @@ impl Pager {
             .or_else(|| self.latest_wal_state.as_ref().map(Arc::as_ref))
     }
 
+    /// Read WAL-overridden page data, getting mutable access to the WAL state's
+    /// LRU cache. This uses Arc::make_mut to clone-on-write the VisibleWalState
+    /// only if other readers are holding references.
+    fn read_wal_page_data(&mut self, page_id: PageId) -> crate::error::Result<Option<Vec<u8>>> {
+        // Try the read snapshot first (reader path)
+        if let Some(snapshot) = &mut self.wal_read_snapshot {
+            let state = Arc::make_mut(&mut snapshot.state);
+            return state.read_page_data(page_id);
+        }
+        // Fall back to the latest WAL state (writer path)
+        if let Some(state_arc) = &mut self.latest_wal_state {
+            let state = Arc::make_mut(state_arc);
+            return state.read_page_data(page_id);
+        }
+        Ok(None)
+    }
+
+    /// Immutable read of WAL page data. Checks the LRU cache without
+    /// promotion and reads from the WAL file without caching.
+    /// Used by `read_page_shared` which takes `&self`.
+    fn read_wal_page_data_readonly(&self, page_id: PageId) -> crate::error::Result<Option<Vec<u8>>> {
+        if let Some(snapshot) = &self.wal_read_snapshot {
+            return snapshot.state.read_page_data_readonly(page_id);
+        }
+        if let Some(state) = &self.latest_wal_state {
+            return state.read_page_data_readonly(page_id);
+        }
+        Ok(None)
+    }
+
     fn rollback_visible_next_page_id(&self) -> Option<PageId> {
         self.active_rollback_transaction()
             .map(|transaction| transaction.rollback_next_page_id)

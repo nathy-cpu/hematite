@@ -60,30 +60,42 @@ impl Pager {
                 }
             }
         }
+        // WAL visible state: extract all needed info immutably first,
+        // then perform the mutable page data read separately to avoid
+        // overlapping borrows.
+        let wal_info = self.current_wal_visible_state().map(|state| {
+            (
+                state.contains_page(page_id),
+                state.has_page_override(page_id),
+                state.checksum_for_page(page_id),
+                state.visible_next_page_id(),
+            )
+        });
 
-        if let Some(state) = self.current_wal_visible_state() {
-            if !state.contains_page(page_id) {
+        if let Some((contains, has_override, expected_checksum, visible_next_page_id)) = wal_info {
+            if !contains {
                 return Err(crate::error::HematiteError::StorageError(format!(
                     "Page {} is not allocated in the current WAL-visible state",
                     page_id
                 )));
             }
-            if let Some(data) = state.page_bytes(page_id) {
-                let page = Arc::new(Page::from_bytes(page_id, data.to_vec())?);
-                if let Some(expected_checksum) = state.checksum_for_page(page_id) {
-                    let actual_checksum = Self::calculate_page_checksum(&page);
-                    if actual_checksum != expected_checksum {
-                        return Err(crate::error::HematiteError::CorruptedData(format!(
-                            "WAL page checksum mismatch for page {}: expected {}, got {}",
-                            page_id, expected_checksum, actual_checksum
-                        )));
+            if has_override {
+                if let Some(data) = self.read_wal_page_data_readonly(page_id)? {
+                    let page = Arc::new(Page::from_bytes(page_id, data)?);
+                    if let Some(expected_checksum) = expected_checksum {
+                        let actual_checksum = Self::calculate_page_checksum(&page);
+                        if actual_checksum != expected_checksum {
+                            return Err(crate::error::HematiteError::CorruptedData(format!(
+                                "WAL page checksum mismatch for page {}: expected {}, got {}",
+                                page_id, expected_checksum, actual_checksum
+                            )));
+                        }
                     }
+                    self.cache_write()?
+                        .put_shared_with_view(page.clone(), view_token);
+                    return Ok(page);
                 }
-                self.cache_write()?
-                    .put_shared_with_view(page.clone(), view_token);
-                return Ok(page);
             }
-            let visible_next_page_id = state.visible_next_page_id();
             if page_id >= self.file_manager.next_page_id() && page_id < visible_next_page_id {
                 let page = Arc::new(Page::new(page_id));
                 self.cache_write()?

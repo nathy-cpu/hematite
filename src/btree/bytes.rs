@@ -243,7 +243,7 @@ impl ByteTreeStore {
     }
 
     pub fn validate_storage(&self) -> Result<PagerIntegrityReport> {
-        self.lock_storage_read()?.validate_integrity()
+        self.lock_storage()?.validate_integrity()
     }
 
     pub fn create_tree(&self) -> Result<PageId> {

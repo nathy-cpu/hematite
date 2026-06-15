@@ -625,6 +625,8 @@ impl Pager {
             self.page_checksums.clone(),
             &frames,
         )?;
+        // Ensure the WAL path is set so on-demand page reads can access the file
+        updated_visible_state.wal_path = self.wal_path.clone();
         self.latest_wal_state = Some(Arc::new(updated_visible_state));
         self.refresh_wal_file_stamp_best_effort();
         let committed_view_token = self.cache_view_token();

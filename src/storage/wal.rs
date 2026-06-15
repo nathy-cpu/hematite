@@ -110,10 +110,105 @@ use crate::storage::{
 };
 #[cfg(test)]
 use std::collections::BTreeMap;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Default capacity for the WAL page image LRU cache.
+/// Only the N most recently accessed page images are held in memory;
+/// all other WAL-committed pages are read from the WAL file on demand.
+const WAL_PAGE_CACHE_CAPACITY: usize = 64;
+
+/// Bounded LRU cache for WAL page images.
+///
+/// Holds up to `capacity` page images in memory. When a new page is
+/// inserted and the cache is full, the least-recently-used entry is evicted.
+/// Cache misses are serviced by reading from the WAL file at the stored
+/// byte offset.
+#[derive(Debug, Clone)]
+pub(crate) struct WalPageCache {
+    capacity: usize,
+    /// Order tracks recency: front = most-recently-used, back = LRU.
+    order: VecDeque<PageId>,
+    entries: HashMap<PageId, Vec<u8>>,
+}
+
+impl WalPageCache {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            order: VecDeque::with_capacity(capacity),
+            entries: HashMap::with_capacity(capacity),
+        }
+    }
+
+    /// Get a page image from the cache, promoting it to most-recently-used.
+    pub fn get(&mut self, page_id: PageId) -> Option<&[u8]> {
+        if self.entries.contains_key(&page_id) {
+            // Promote to MRU by removing and re-inserting at front
+            self.order.retain(|&id| id != page_id);
+            self.order.push_front(page_id);
+            self.entries.get(&page_id).map(Vec::as_slice)
+        } else {
+            None
+        }
+    }
+
+    /// Insert a page image into the cache, evicting the LRU entry if needed.
+    pub fn put(&mut self, page_id: PageId, data: Vec<u8>) {
+        if self.entries.contains_key(&page_id) {
+            // Update existing entry and promote
+            self.entries.insert(page_id, data);
+            self.order.retain(|&id| id != page_id);
+            self.order.push_front(page_id);
+            return;
+        }
+
+        // Evict LRU if at capacity
+        while self.entries.len() >= self.capacity {
+            if let Some(evicted) = self.order.pop_back() {
+                self.entries.remove(&evicted);
+            } else {
+                break;
+            }
+        }
+
+        self.entries.insert(page_id, data);
+        self.order.push_front(page_id);
+    }
+
+    /// Remove a specific page from the cache.
+    pub fn remove(&mut self, page_id: PageId) {
+        if self.entries.remove(&page_id).is_some() {
+            self.order.retain(|&id| id != page_id);
+        }
+    }
+
+    /// Remove all entries whose page_id does not satisfy the predicate.
+    pub fn retain(&mut self, predicate: impl Fn(&PageId) -> bool) {
+        self.entries.retain(|page_id, _| predicate(page_id));
+        self.order.retain(|page_id| predicate(page_id));
+    }
+
+    /// Returns an iterator over all cached page IDs and their data.
+    pub fn iter(&self) -> impl Iterator<Item = (&PageId, &Vec<u8>)> {
+        self.entries.iter()
+    }
+
+    /// Returns the number of entries currently in the cache.
+    #[allow(dead_code)]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+impl PartialEq for WalPageCache {
+    fn eq(&self, other: &Self) -> bool {
+        self.entries == other.entries
+    }
+}
+impl Eq for WalPageCache {}
 
 const V3_WAL_MAGIC: &[u8; 4] = b"HTW3";
 const V3_WAL_VERSION: u32 = 1;
@@ -185,7 +280,13 @@ pub struct VisibleWalState {
     pub free_pages: Vec<PageId>,
     pub free_page_set: HashSet<PageId>,
     pub page_checksums: HashMap<PageId, u32>,
-    pub page_overrides: HashMap<PageId, Vec<u8>>,
+    /// Byte offset into the WAL file for each overridden page.
+    /// Used to read page data on-demand instead of storing full images.
+    pub(crate) page_override_offsets: HashMap<PageId, u64>,
+    /// Bounded LRU cache of recently-accessed WAL page images.
+    pub(crate) page_cache: WalPageCache,
+    /// Path to the WAL file for on-demand reads on cache miss.
+    pub(crate) wal_path: Option<PathBuf>,
 }
 
 impl VisibleWalState {
@@ -201,7 +302,9 @@ impl VisibleWalState {
             free_pages,
             free_page_set,
             page_checksums,
-            page_overrides: HashMap::new(),
+            page_override_offsets: HashMap::new(),
+            page_cache: WalPageCache::new(WAL_PAGE_CACHE_CAPACITY),
+            wal_path: None,
         }
     }
 
@@ -221,7 +324,10 @@ impl VisibleWalState {
 
         let visible_next_page_id = visible_next_page_id(file_len);
         let free_page_set = free_pages.iter().copied().collect::<HashSet<_>>();
-        self.page_overrides.retain(|page_id, _| {
+        self.page_override_offsets.retain(|page_id, _| {
+            *page_id < visible_next_page_id && !free_page_set.contains(page_id)
+        });
+        self.page_cache.retain(|page_id| {
             *page_id < visible_next_page_id && !free_page_set.contains(page_id)
         });
 
@@ -245,8 +351,17 @@ impl VisibleWalState {
                     sequence, frame.page_id
                 )));
             }
-            self.page_overrides
-                .insert(frame.page_id, frame.data.clone());
+            // Compute the byte offset where this frame's page data lives
+            // in the WAL file. We calculate this from the WAL file structure:
+            // frames are appended sequentially, so the offset for a newly
+            // committed frame is determined by the WAL file layout.
+            // For freshly committed frames, cache the data directly since
+            // it's already in memory from the commit.
+            self.page_cache.put(frame.page_id, frame.data.clone());
+            // The offset will be set by the caller after frames are written
+            // to disk. For now, mark the page as overridden with a sentinel.
+            // The read path will check the cache first, then fall back to file.
+            self.page_override_offsets.insert(frame.page_id, 0);
         }
 
         self.visible_sequence = sequence;
@@ -269,8 +384,73 @@ impl VisibleWalState {
         self.free_page_set.contains(&page_id)
     }
 
-    pub fn page_bytes(&self, page_id: PageId) -> Option<&[u8]> {
-        self.page_overrides.get(&page_id).map(Vec::as_slice)
+    /// Check if this state has an override for the given page.
+    pub fn has_page_override(&self, page_id: PageId) -> bool {
+        self.page_override_offsets.contains_key(&page_id)
+    }
+
+    /// Read a WAL-overridden page's data. Checks the in-memory LRU cache
+    /// first; on cache miss, reads from the WAL file at the stored offset.
+    /// Returns None if the page has no WAL override.
+    pub fn read_page_data(&mut self, page_id: PageId) -> Result<Option<Vec<u8>>> {
+        if !self.page_override_offsets.contains_key(&page_id) {
+            return Ok(None);
+        }
+
+        // Check LRU cache first
+        if let Some(data) = self.page_cache.get(page_id) {
+            return Ok(Some(data.to_vec()));
+        }
+
+        // Cache miss: read from WAL file
+        let Some(wal_path) = &self.wal_path else {
+            return Err(HematiteError::StorageError(format!(
+                "WAL page {} has override but no WAL file path for on-demand read",
+                page_id
+            )));
+        };
+
+        let data = read_page_from_wal_file(wal_path, page_id)?;
+        match data {
+            Some(page_data) => {
+                self.page_cache.put(page_id, page_data.clone());
+                Ok(Some(page_data))
+            }
+            None => {
+                // Page not found in WAL file (possibly truncated after checkpoint)
+                self.page_override_offsets.remove(&page_id);
+                Ok(None)
+            }
+        }
+    }
+
+    /// Immutable read of WAL-overridden page data. Checks the LRU cache
+    /// without promoting, and reads from the WAL file without caching.
+    /// Used by read paths that only have `&self` (e.g. `read_page_shared`).
+    pub fn read_page_data_readonly(&self, page_id: PageId) -> Result<Option<Vec<u8>>> {
+        if !self.page_override_offsets.contains_key(&page_id) {
+            return Ok(None);
+        }
+
+        // Check cache without promoting (peek, not get)
+        if let Some(data) = self.page_cache.entries.get(&page_id) {
+            return Ok(Some(data.clone()));
+        }
+
+        // Cache miss: read from WAL file (no cache update)
+        let Some(wal_path) = &self.wal_path else {
+            return Err(HematiteError::StorageError(format!(
+                "WAL page {} has override but no WAL file path for on-demand read",
+                page_id
+            )));
+        };
+
+        read_page_from_wal_file(wal_path, page_id)
+    }
+
+    /// Iterate over all overridden page IDs.
+    pub fn overridden_page_ids(&self) -> impl Iterator<Item = PageId> + '_ {
+        self.page_override_offsets.keys().copied()
     }
 
     pub fn checksum_for_page(&self, page_id: PageId) -> Option<u32> {
@@ -306,7 +486,8 @@ pub(crate) fn load_visible_state_from_path_with_base<P: AsRef<Path>>(
     baseline_checksums: HashMap<PageId, u32>,
     baseline_metadata_page: &[u8],
 ) -> Result<Option<VisibleWalState>> {
-    let Some(wal) = WalFile::load_from_path(path)? else {
+    let wal_path = path.as_ref().to_path_buf();
+    let Some(wal) = WalFile::load_from_path(&wal_path)? else {
         return Ok(None);
     };
     let committed_groups = committed_frame_groups(&wal.frames);
@@ -315,7 +496,10 @@ pub(crate) fn load_visible_state_from_path_with_base<P: AsRef<Path>>(
     }
 
     let latest_sequence = committed_groups.last().unwrap()[0].commit_sequence;
-    let (database_page_count, mut page_overrides_btree) =
+    // We still need to read page data during loading for checksum computation
+    // and metadata page parsing. But we store only the page IDs as override
+    // markers, not the full page data.
+    let (database_page_count, page_overrides_btree) =
         visible_pages_from_committed_groups(&committed_groups)?;
     let file_len = if database_page_count == 0 {
         baseline_file_len
@@ -353,15 +537,28 @@ pub(crate) fn load_visible_state_from_path_with_base<P: AsRef<Path>>(
 
     let visible_next_page_id = next_page_id_for_file_len(file_len);
     let free_page_set = free_pages.iter().copied().collect::<HashSet<_>>();
-    page_overrides_btree
-        .retain(|page_id, _| *page_id < visible_next_page_id && !free_page_set.contains(page_id));
-    checksums
-        .retain(|page_id, _| *page_id < visible_next_page_id && !free_page_set.contains(page_id));
+
+    // Compute checksums from the in-memory data (still needed for correctness)
+    // but only store page IDs as override markers.
+    let mut page_override_offsets = HashMap::new();
+    let mut page_cache = WalPageCache::new(WAL_PAGE_CACHE_CAPACITY);
+
     for (page_id, bytes) in &page_overrides_btree {
+        if *page_id >= visible_next_page_id || free_page_set.contains(page_id) {
+            continue;
+        }
         if *page_id != STORAGE_METADATA_PAGE_ID {
             checksums.insert(*page_id, page_checksum(bytes));
         }
+        // Mark this page as having a WAL override (offset 0 = sentinel,
+        // the read path will scan the WAL file to find the actual frame)
+        page_override_offsets.insert(*page_id, 0u64);
+        // Populate the LRU cache with the page data we already have
+        page_cache.put(*page_id, bytes.clone());
     }
+
+    checksums
+        .retain(|page_id, _| *page_id < visible_next_page_id && !free_page_set.contains(page_id));
 
     Ok(Some(VisibleWalState {
         visible_sequence: latest_sequence,
@@ -369,8 +566,68 @@ pub(crate) fn load_visible_state_from_path_with_base<P: AsRef<Path>>(
         free_pages,
         free_page_set,
         page_checksums: checksums,
-        page_overrides: page_overrides_btree.into_iter().collect(),
+        page_override_offsets,
+        page_cache,
+        wal_path: Some(wal_path),
     }))
+}
+
+/// Read a specific page's data from the WAL file by scanning for the latest
+/// frame that matches the given page_id. This is the on-demand read path
+/// used when the WAL LRU cache misses.
+///
+/// Returns the page data if found, or None if the page is not in the WAL file.
+fn read_page_from_wal_file(wal_path: &Path, target_page_id: PageId) -> Result<Option<Vec<u8>>> {
+    let mut file = match OpenOptions::new().read(true).open(wal_path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+
+    let file_len = file.metadata()?.len();
+    if file_len < V3_WAL_HEADER_SIZE as u64 {
+        return Ok(None);
+    }
+
+    // Read and validate the header
+    let mut header_bytes = [0u8; V3_WAL_HEADER_SIZE];
+    file.seek(SeekFrom::Start(0))?;
+    file.read_exact(&mut header_bytes)?;
+    let header = WalHeader::decode(&header_bytes)?;
+
+    // Scan all frames, keeping track of the latest match.
+    // Frames for the same page_id can appear multiple times across different
+    // transactions; the last one wins (latest commit sequence).
+    let frame_size = (V3_WAL_FRAME_PREFIX_SIZE + PAGE_SIZE) as u64;
+    let mut offset = V3_WAL_HEADER_SIZE as u64;
+    let mut latest_data: Option<Vec<u8>> = None;
+
+    while offset + frame_size <= file_len {
+        // Read just the frame prefix to check the page_id
+        let mut prefix = [0u8; V3_WAL_FRAME_PREFIX_SIZE];
+        file.seek(SeekFrom::Start(offset))?;
+        file.read_exact(&mut prefix)?;
+
+        let frame_page_id = u32::from_be_bytes([prefix[0], prefix[1], prefix[2], prefix[3]]);
+        let salt_1 = u32::from_be_bytes([prefix[16], prefix[17], prefix[18], prefix[19]]);
+        let salt_2 = u32::from_be_bytes([prefix[20], prefix[21], prefix[22], prefix[23]]);
+
+        // Verify frame belongs to current WAL epoch
+        if salt_1 != header.salt_1 || salt_2 != header.salt_2 {
+            break; // Stale/corrupt frame, stop scanning
+        }
+
+        if frame_page_id == target_page_id {
+            // Read the page data
+            let mut page_data = vec![0u8; PAGE_SIZE];
+            file.read_exact(&mut page_data)?;
+            latest_data = Some(page_data);
+        }
+
+        offset += frame_size;
+    }
+
+    Ok(latest_data)
 }
 
 fn existing_or_default_header(path: &Path) -> Result<WalHeader> {

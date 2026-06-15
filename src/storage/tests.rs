@@ -1716,7 +1716,7 @@ mod pager_tests {
         };
         fs::write(&wal_path, wal.encode()?)?;
 
-        let pager = Pager::new(test_db.path(), 8)?;
+        let mut pager = Pager::new(test_db.path(), 8)?;
         let report = pager.validate_integrity()?;
         assert_eq!(report.verified_checksum_pages, 1);
         Ok(())
