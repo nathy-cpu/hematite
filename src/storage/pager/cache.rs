@@ -1,4 +1,4 @@
-use crate::storage::{Page, PageId};
+use crate::storage::{Page, PageId, PAGE_SIZE};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -25,6 +25,9 @@ struct CachedPageEntry {
 #[derive(Debug, Clone)]
 pub(crate) struct PageCache {
     capacity: usize,
+    /// Pre-allocated 4KB page data buffers returned to this pool on eviction.
+    /// Sized to `capacity` at construction so no allocation is needed after startup.
+    free_buffers: Vec<Vec<u8>>,
     entries: HashMap<PageId, CachedPageEntry>,
     lru_head: Option<PageId>,
     lru_tail: Option<PageId>,
@@ -43,6 +46,7 @@ impl PageCache {
     pub(crate) fn new(capacity: usize) -> Self {
         Self {
             capacity,
+            free_buffers: Vec::new(),
             entries: HashMap::new(),
             lru_head: None,
             lru_tail: None,
@@ -52,6 +56,17 @@ impl PageCache {
             next_dirty_sequence: 0,
             synced_head: None,
         }
+    }
+
+    /// Take a zeroed 4KB buffer from the pool, allocating only if the pool is empty.
+    pub(crate) fn take_page_buffer(&mut self) -> Vec<u8> {
+        self.free_buffers.pop().unwrap_or_else(|| vec![0u8; PAGE_SIZE])
+    }
+
+    /// Return a page data buffer to the pool after zeroing it.
+    fn return_page_buffer(&mut self, mut data: Vec<u8>) {
+        data.fill(0);
+        self.free_buffers.push(data);
     }
     #[cfg(test)]
     pub(crate) fn get(&mut self, page_id: PageId) -> Option<Arc<Page>> {
@@ -145,11 +160,21 @@ impl PageCache {
         }
         self.detach_lru(page_id);
         self.detach_dirty(page_id);
-        self.entries.remove(&page_id);
+        if let Some(entry) = self.entries.remove(&page_id) {
+            if let Ok(page) = Arc::try_unwrap(entry.page) {
+                self.return_page_buffer(page.data);
+            }
+        }
     }
 
     pub(crate) fn reset(&mut self) {
-        self.entries.clear();
+        // Reclaim all page buffers before clearing entries.
+        let arcs: Vec<Arc<Page>> = self.entries.drain().map(|(_, e)| e.page).collect();
+        for arc in arcs {
+            if let Ok(page) = Arc::try_unwrap(arc) {
+                self.return_page_buffer(page.data);
+            }
+        }
         self.lru_head = None;
         self.lru_tail = None;
         self.dirty_head = None;
@@ -374,10 +399,11 @@ impl PageCache {
             return;
         }
         self.evict_if_needed(Some(page_id));
+        let data = self.take_page_buffer();
         self.entries.insert(
             page_id,
             CachedPageEntry {
-                page: Arc::new(Page::new(page_id)),
+                page: Arc::new(Page { id: page_id, data }),
                 meta: CachedPageMeta::default(),
                 lru_prev: None,
                 lru_next: None,

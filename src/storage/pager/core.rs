@@ -3,7 +3,40 @@ use super::{
     WalTransaction,
 };
 use crate::error::Result;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+
+/// Recycle a finished transaction into the scratch slots, freeing any data that is
+/// only needed for rollback (dirty-page images, page-record copies, savepoint
+/// snapshots) while keeping the bare allocations (Vec capacity, HashMap bucket
+/// arrays) alive for reuse on the next `begin_transaction`.
+fn stash_transaction(
+    rollback_scratch: &mut Option<RollbackTransaction>,
+    wal_scratch: &mut Option<WalTransaction>,
+    txn: Option<PagerTransaction>,
+) {
+    match txn {
+        Some(PagerTransaction::Rollback(mut r)) => {
+            // savepoints carry dirty-page images (4 KB each) and checksum snapshots;
+            // page_records carry original page data for the rollback journal.
+            // Both must be dropped here — they are only valid for rollback.
+            r.savepoints.clear();
+            r.page_records.clear();
+            // Clear stale scalar caches; they will be refilled by begin_transaction.
+            r.original_checksums.clear();
+            r.original_free_pages.clear();
+            r.rollback_uninitialized_pages.clear();
+            r.journaled_pages.clear();
+            *rollback_scratch = Some(r);
+        }
+        Some(PagerTransaction::Wal(mut w)) => {
+            w.original_checksums.clear();
+            w.wal_free_pages.clear();
+            w.wal_free_page_set.clear();
+            *wal_scratch = Some(w);
+        }
+        None => {}
+    }
+}
 
 impl Pager {
     pub fn begin_transaction(&mut self) -> Result<()> {
@@ -24,18 +57,35 @@ impl Pager {
             JournalMode::Rollback => {
                 let mut rollback_free_list = crate::storage::free_list::FreeList::new();
                 rollback_free_list.replace(self.file_manager.free_pages().to_vec());
-                let mut rollback = RollbackTransaction {
-                    original_file_len: self.file_manager.file_len()?,
-                    original_free_pages: self.file_manager.free_pages().to_vec(),
-                    original_checksums: self.page_checksums.clone(),
-                    rollback_next_page_id: self.file_manager.next_page_id(),
-                    rollback_free_list: rollback_free_list.clone(),
-                    rollback_uninitialized_pages: HashSet::new(),
-                    journaled_pages: HashSet::new(),
-                    page_records: Vec::new(),
-                    savepoints: Vec::new(),
-                    next_savepoint_id: 1,
-                };
+                // Reuse a pre-allocated RollbackTransaction from the scratch slot when available,
+                // so inner Vec/HashSet/HashMap allocations survive across transaction boundaries.
+                let mut rollback = self.rollback_scratch.take().unwrap_or_else(|| {
+                    RollbackTransaction {
+                        original_file_len: 0,
+                        original_free_pages: Vec::new(),
+                        original_checksums: HashMap::new(),
+                        rollback_next_page_id: 0,
+                        rollback_free_list: crate::storage::free_list::FreeList::new(),
+                        rollback_uninitialized_pages: HashSet::new(),
+                        journaled_pages: HashSet::new(),
+                        page_records: Vec::new(),
+                        savepoints: Vec::new(),
+                        next_savepoint_id: 1,
+                    }
+                });
+                rollback.original_file_len = self.file_manager.file_len()?;
+                rollback.original_free_pages.clear();
+                rollback
+                    .original_free_pages
+                    .extend_from_slice(self.file_manager.free_pages());
+                rollback.original_checksums.clone_from(&self.page_checksums);
+                rollback.rollback_next_page_id = self.file_manager.next_page_id();
+                rollback.rollback_free_list = rollback_free_list;
+                rollback.rollback_uninitialized_pages.clear();
+                rollback.journaled_pages.clear();
+                rollback.page_records.clear();
+                rollback.savepoints.clear();
+                rollback.next_savepoint_id = 1;
                 let baseline = RollbackSavepoint {
                     id: 0,
                     file_manager: self.file_manager.snapshot()?,
@@ -59,12 +109,18 @@ impl Pager {
             JournalMode::Wal => {
                 let visible_state = self.snapshot_wal_visible_state()?;
                 self.page_checksums = visible_state.page_checksums.clone();
-                PagerTransaction::Wal(WalTransaction {
-                    wal_next_page_id: visible_state.visible_next_page_id(),
-                    wal_free_pages: visible_state.free_pages.clone(),
-                    wal_free_page_set: visible_state.free_page_set.clone(),
-                    original_checksums: visible_state.page_checksums.clone(),
-                })
+                // Reuse a pre-allocated WalTransaction when available.
+                let mut wal = self.wal_scratch.take().unwrap_or_else(|| WalTransaction {
+                    wal_next_page_id: 0,
+                    wal_free_pages: Vec::new(),
+                    wal_free_page_set: HashSet::new(),
+                    original_checksums: HashMap::new(),
+                });
+                wal.wal_next_page_id = visible_state.visible_next_page_id();
+                wal.wal_free_pages.clone_from(&visible_state.free_pages);
+                wal.wal_free_page_set.clone_from(&visible_state.free_page_set);
+                wal.original_checksums.clone_from(&visible_state.page_checksums);
+                PagerTransaction::Wal(wal)
             }
         });
         self.transition_state(PagerState::WriterLocked)?;
@@ -95,8 +151,9 @@ impl Pager {
         if self.journal_mode == JournalMode::Rollback {
             self.remove_journal_file()?;
         }
-        self.transaction = None;
+        let old_txn = self.transaction.take();
         self.exit_writer_scope_to_open()?;
+        stash_transaction(&mut self.rollback_scratch, &mut self.wal_scratch, old_txn);
         Ok(())
     }
 
@@ -112,8 +169,9 @@ impl Pager {
         } else {
             self.rollback_rollback_transaction()?;
         }
-        self.transaction = None;
+        let old_txn = self.transaction.take();
         self.exit_writer_scope_to_open()?;
+        stash_transaction(&mut self.rollback_scratch, &mut self.wal_scratch, old_txn);
         Ok(())
     }
 }

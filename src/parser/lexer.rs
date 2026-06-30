@@ -174,10 +174,16 @@ pub struct Lexer<'a> {
 
 impl<'a> Lexer<'a> {
     pub fn new(input: &'a str) -> Self {
+        Self::with_capacity(input, 64)
+    }
+
+    /// Create a lexer with a pre-sized token buffer to avoid repeated reallocations.
+    /// Pass the token count from a previous parse of a similar query as the hint.
+    pub fn with_capacity(input: &'a str, token_capacity: usize) -> Self {
         Self {
             input,
             position: 0,
-            tokens: Vec::new(),
+            tokens: Vec::with_capacity(token_capacity),
         }
     }
 

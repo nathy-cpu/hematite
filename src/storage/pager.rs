@@ -284,6 +284,10 @@ pub struct Pager {
     latest_wal_state: Option<Arc<VisibleWalState>>,
     latest_wal_file_stamp: Option<WalFileStamp>,
     transaction: Option<PagerTransaction>,
+    /// Pre-allocated rollback transaction state recycled between transactions.
+    rollback_scratch: Option<RollbackTransaction>,
+    /// Pre-allocated WAL transaction state recycled between transactions.
+    wal_scratch: Option<WalTransaction>,
     state: PagerState,
     /// Open handle to the rollback journal file for incremental appending.
     journal_file: Option<File>,
@@ -337,6 +341,8 @@ impl Pager {
             latest_wal_state: None,
             latest_wal_file_stamp: None,
             transaction: None,
+            rollback_scratch: None,
+            wal_scratch: None,
             state: PagerState::Open,
             journal_file: None,
             journal_record_count: 0,
@@ -370,6 +376,8 @@ impl Pager {
             latest_wal_state: None,
             latest_wal_file_stamp: None,
             transaction: None,
+            rollback_scratch: None,
+            wal_scratch: None,
             state: PagerState::Open,
             journal_file: None,
             journal_record_count: 0,

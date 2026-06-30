@@ -133,16 +133,20 @@ impl FileManager {
     }
 
     pub fn read_page(&self, page_id: PageId) -> Result<Page> {
-        let offset = Self::page_offset(page_id)?;
+        self.read_page_with_buf(page_id, vec![0u8; PAGE_SIZE])
+    }
 
-        let mut data = vec![0u8; PAGE_SIZE];
+    /// Read a page from disk into a caller-supplied buffer, reusing its allocation.
+    /// The buffer must have a capacity of at least `PAGE_SIZE`; it will be resized.
+    pub(crate) fn read_page_with_buf(&self, page_id: PageId, mut data: Vec<u8>) -> Result<Page> {
+        let offset = Self::page_offset(page_id)?;
+        data.resize(PAGE_SIZE, 0);
         self.read_exact_at(offset, &mut data).map_err(|err| {
             crate::error::HematiteError::StorageError(format!(
                 "Failed to read page {} at offset {}: {}",
                 page_id, offset, err
             ))
         })?;
-
         Page::from_bytes(page_id, data)
     }
 

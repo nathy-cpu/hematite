@@ -24,7 +24,8 @@ impl Pager {
                 )));
             }
             if self.rollback_page_is_uninitialized(page_id) {
-                let page = Arc::new(Page::new(page_id));
+                let data = self.cache_write()?.take_page_buffer();
+                let page = Arc::new(Page { id: page_id, data });
                 self.cache_write()?
                     .put_shared_with_view(page.clone(), view_token);
                 return Ok(page);
@@ -53,7 +54,8 @@ impl Pager {
                 if (page_id >= base_visible_next_page_id || base_page_is_free)
                     && page_id < transaction.wal_next_page_id
                 {
-                    let page = Arc::new(Page::new(page_id));
+                    let data = self.cache_write()?.take_page_buffer();
+                    let page = Arc::new(Page { id: page_id, data });
                     self.cache_write()?
                         .put_shared_with_view(page.clone(), view_token);
                     return Ok(page);
@@ -97,14 +99,16 @@ impl Pager {
                 }
             }
             if page_id >= self.file_manager.next_page_id() && page_id < visible_next_page_id {
-                let page = Arc::new(Page::new(page_id));
+                let data = self.cache_write()?.take_page_buffer();
+                let page = Arc::new(Page { id: page_id, data });
                 self.cache_write()?
                     .put_shared_with_view(page.clone(), view_token);
                 return Ok(page);
             }
         }
 
-        let page = Arc::new(self.file_manager.read_page(page_id)?);
+        let buf = { self.cache_write()?.take_page_buffer() };
+        let page = Arc::new(self.file_manager.read_page_with_buf(page_id, buf)?);
         let expected_checksum = self
             .current_wal_visible_state()
             .and_then(|state| state.checksum_for_page(page_id))
