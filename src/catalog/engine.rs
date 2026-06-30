@@ -109,12 +109,28 @@ not available yet.",
         ))
     }
 
+    /// Default page-cache capacity (in pages) used when a caller does not specify one.
+    ///
+    /// At the 4 KiB page size this is ~8 MiB, comparable to SQLite's default cache. The
+    /// previous value of 100 pages (~400 KiB) was far smaller than typical working sets and
+    /// caused the cache to thrash — hot pages were evicted and re-read from the OS on nearly
+    /// every operation. See the benchmark investigation for details.
+    pub const DEFAULT_PAGE_CACHE_CAPACITY: usize = 2000;
+
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
-        Self::from_tree_store(ByteTreeStore::open_path(path, 100)?)
+        Self::with_cache_capacity(path, Self::DEFAULT_PAGE_CACHE_CAPACITY)
+    }
+
+    pub fn with_cache_capacity<P: AsRef<Path>>(path: P, cache_capacity: usize) -> Result<Self> {
+        Self::from_tree_store(ByteTreeStore::open_path(path, cache_capacity)?)
     }
 
     pub fn new_in_memory() -> Result<Self> {
-        Self::from_tree_store(ByteTreeStore::new_in_memory(100)?)
+        Self::new_in_memory_with_cache_capacity(Self::DEFAULT_PAGE_CACHE_CAPACITY)
+    }
+
+    pub fn new_in_memory_with_cache_capacity(cache_capacity: usize) -> Result<Self> {
+        Self::from_tree_store(ByteTreeStore::new_in_memory(cache_capacity)?)
     }
 
     pub(crate) fn from_tree_store(tree_store: ByteTreeStore) -> Result<Self> {

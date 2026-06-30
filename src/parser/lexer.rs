@@ -1,9 +1,11 @@
 //! SQL query lexer for tokenizing SQL statements
 
+use std::borrow::Cow;
+
 use crate::error::{HematiteError, Result};
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Token {
+pub enum Token<'a> {
     // Keywords
     Begin,
     Commit,
@@ -150,10 +152,15 @@ pub enum Token {
     Placeholder,
 
     // Literals
-    Identifier(String),
-    StringLiteral(String),
+    //
+    // Identifiers and string literals borrow directly from the input SQL in the
+    // common case and only own a `String` when escape unescaping is required
+    // (doubled `` ` ``/`'` or backslash escapes). Number literals are always a
+    // borrowed slice of the input.
+    Identifier(Cow<'a, str>),
+    StringLiteral(Cow<'a, str>),
     BlobLiteral(Vec<u8>),
-    NumberLiteral(String),
+    NumberLiteral(&'a str),
     BooleanLiteral(bool),
     NullLiteral,
 }
@@ -162,7 +169,7 @@ pub enum Token {
 pub struct Lexer<'a> {
     input: &'a str,
     position: usize,
-    tokens: Vec<Token>,
+    tokens: Vec<Token<'a>>,
 }
 
 impl<'a> Lexer<'a> {
@@ -211,11 +218,11 @@ impl<'a> Lexer<'a> {
         Ok(())
     }
 
-    pub fn get_tokens(&self) -> &[Token] {
+    pub fn get_tokens(&self) -> &[Token<'a>] {
         &self.tokens
     }
 
-    pub fn into_tokens(self) -> Vec<Token> {
+    pub fn into_tokens(self) -> Vec<Token<'a>> {
         self.tokens
     }
 
@@ -258,6 +265,10 @@ impl<'a> Lexer<'a> {
     }
 
     fn read_identifier(&mut self) -> Result<()> {
+        // Copy the `&'a str` so the produced slice borrows the input directly
+        // (lifetime `'a`) rather than `&mut self`, allowing the borrowed token
+        // to be pushed without conflicting with the mutable borrow of `self`.
+        let input = self.input;
         let start = self.position;
 
         while self.position < self.input.len() {
@@ -276,7 +287,7 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        let identifier = &self.input[start..self.position];
+        let identifier = &input[start..self.position];
         let token = match identifier {
             "BEGIN" => Token::Begin,
             "COMMIT" => Token::Commit,
@@ -401,7 +412,7 @@ impl<'a> Lexer<'a> {
             "OR" => Token::Or,
             "TRUE" => Token::BooleanLiteral(true),
             "FALSE" => Token::BooleanLiteral(false),
-            _ => Token::Identifier(identifier.to_string()),
+            _ => Token::Identifier(Cow::Borrowed(identifier)),
         };
 
         self.tokens.push(token);
@@ -409,8 +420,38 @@ impl<'a> Lexer<'a> {
     }
 
     fn read_quoted_identifier(&mut self) -> Result<()> {
+        let input = self.input;
         self.advance_char();
-        let mut identifier = String::new();
+        let content_start = self.position;
+
+        // Fast path: borrow the slice directly when the identifier contains no
+        // escaped (doubled) backticks. Fall back to an owned buffer otherwise.
+        while self.position < self.input.len() {
+            let ch = self.current_char();
+            if ch == '`' {
+                if self.peek_char() == Some('`') {
+                    return self.read_escaped_quoted_identifier(content_start);
+                }
+
+                let identifier = &input[content_start..self.position];
+                self.advance_char();
+                self.tokens.push(Token::Identifier(Cow::Borrowed(identifier)));
+                return Ok(());
+            }
+
+            self.advance_char();
+        }
+
+        Err(HematiteError::ParseError(
+            "Unterminated quoted identifier".to_string(),
+        ))
+    }
+
+    /// Slow path for quoted identifiers containing doubled backticks; builds an
+    /// owned `String`, reusing the already-scanned escape-free prefix.
+    fn read_escaped_quoted_identifier(&mut self, content_start: usize) -> Result<()> {
+        let input = self.input;
+        let mut identifier = String::from(&input[content_start..self.position]);
 
         while self.position < self.input.len() {
             let ch = self.current_char();
@@ -423,7 +464,7 @@ impl<'a> Lexer<'a> {
                 }
 
                 self.advance_char();
-                self.tokens.push(Token::Identifier(identifier));
+                self.tokens.push(Token::Identifier(Cow::Owned(identifier)));
                 return Ok(());
             }
 
@@ -437,8 +478,46 @@ impl<'a> Lexer<'a> {
     }
 
     fn read_string_literal(&mut self) -> Result<()> {
+        let input = self.input;
         self.advance_char(); // Skip opening quote
-        let mut literal = String::new();
+        let content_start = self.position;
+
+        // Fast path: borrow the slice directly when the literal contains no
+        // escapes. Fall back to an owned buffer only when an escape is found.
+        while self.position < self.input.len() {
+            let ch = self.current_char();
+            if ch == '\'' {
+                if self.peek_char() == Some('\'') {
+                    return self.read_escaped_string_literal(content_start);
+                }
+
+                let literal = &input[content_start..self.position];
+                self.tokens.push(Token::StringLiteral(Cow::Borrowed(literal)));
+                self.advance_char(); // Skip closing quote
+                return Ok(());
+            }
+
+            if ch == '\\' {
+                if let Some(next) = self.peek_char() {
+                    if next == '\'' || next == '\\' {
+                        return self.read_escaped_string_literal(content_start);
+                    }
+                }
+            }
+
+            self.advance_char();
+        }
+
+        Err(HematiteError::ParseError(
+            "Unterminated string literal".to_string(),
+        ))
+    }
+
+    /// Slow path for string literals containing escapes; builds an owned
+    /// `String`, reusing the already-scanned escape-free prefix.
+    fn read_escaped_string_literal(&mut self, content_start: usize) -> Result<()> {
+        let input = self.input;
+        let mut literal = String::from(&input[content_start..self.position]);
 
         while self.position < self.input.len() {
             let ch = self.current_char();
@@ -450,7 +529,7 @@ impl<'a> Lexer<'a> {
                     continue;
                 }
 
-                self.tokens.push(Token::StringLiteral(literal));
+                self.tokens.push(Token::StringLiteral(Cow::Owned(literal)));
                 self.advance_char(); // Skip closing quote
                 return Ok(());
             }
@@ -513,6 +592,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn read_number(&mut self) -> Result<()> {
+        let input = self.input;
         let start = self.position;
         let mut has_decimal = false;
 
@@ -533,9 +613,8 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        let number_str = &self.input[start..self.position];
-        self.tokens
-            .push(Token::NumberLiteral(number_str.to_string()));
+        let number_str = &input[start..self.position];
+        self.tokens.push(Token::NumberLiteral(number_str));
 
         Ok(())
     }

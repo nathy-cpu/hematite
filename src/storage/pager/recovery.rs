@@ -111,7 +111,22 @@ impl Pager {
         let metadata_page = self.read_persisted_state_page()?;
         self.apply_persisted_state_page(metadata_page.as_ref())?;
         if self.journal_mode != JournalMode::Wal {
-            self.cache_mut()?.reset();
+            // In rollback mode there is no WAL to version reads, so a fresh read must observe
+            // any state another writer committed. Previously the entire page cache was thrown
+            // away on every `begin_read`, which defeated caching (re-reading every page from
+            // the OS) and churned the allocator. Instead, fingerprint the persisted metadata
+            // page (which encodes per-page checksums and therefore changes on any commit) and
+            // only reset the cache when that on-disk state has actually changed.
+            let current_fingerprint = metadata_page.as_ref().map(|page| page.data.as_slice());
+            let unchanged = matches!(
+                (self.rollback_persisted_fingerprint.as_deref(), current_fingerprint),
+                (Some(prev), Some(cur)) if prev == cur
+            );
+            if !unchanged {
+                self.cache_mut()?.reset();
+                self.rollback_persisted_fingerprint =
+                    current_fingerprint.map(|bytes| bytes.to_vec().into_boxed_slice());
+            }
             self.latest_wal_state = None;
             self.latest_wal_file_stamp = None;
             return Ok(());

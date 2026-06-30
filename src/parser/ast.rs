@@ -3,6 +3,23 @@
 use crate::error::{HematiteError, Result};
 use crate::parser::types::{LiteralValue, SqlTypeName};
 
+/// Render `items` into a single `separator`-joined `String`, writing each item
+/// directly into one buffer instead of collecting an intermediate `Vec<String>`.
+fn join_rendered<I, F>(items: I, separator: &str, mut render: F) -> String
+where
+    I: IntoIterator,
+    F: FnMut(I::Item) -> String,
+{
+    let mut out = String::new();
+    for (index, item) in items.into_iter().enumerate() {
+        if index > 0 {
+            out.push_str(separator);
+        }
+        out.push_str(&render(item));
+    }
+    out
+}
+
 #[derive(Debug, Clone)]
 pub enum Statement {
     Begin,
@@ -563,19 +580,9 @@ impl Statement {
                 );
                 match &insert.source {
                     InsertSource::Values(rows) => {
-                        let rows_sql = rows
-                            .iter()
-                            .map(|row| {
-                                format!(
-                                    "({})",
-                                    row.iter()
-                                        .map(Expression::to_sql)
-                                        .collect::<Vec<_>>()
-                                        .join(", ")
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join(", ");
+                        let rows_sql = join_rendered(rows.iter(), ", ", |row| {
+                            format!("({})", join_rendered(row.iter(), ", ", Expression::to_sql))
+                        });
                         sql.push_str(&format!("VALUES {rows_sql}"));
                     }
                     InsertSource::Select(select) => {
@@ -584,15 +591,9 @@ impl Statement {
                 }
                 if let Some(assignments) = &insert.on_duplicate {
                     sql.push_str(" ON DUPLICATE KEY UPDATE ");
-                    sql.push_str(
-                        &assignments
-                            .iter()
-                            .map(|assignment| {
-                                format!("{} = {}", assignment.column, assignment.value.to_sql())
-                            })
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                    );
+                    sql.push_str(&join_rendered(assignments.iter(), ", ", |assignment| {
+                        format!("{} = {}", assignment.column, assignment.value.to_sql())
+                    }));
                 }
                 sql
             }
@@ -601,24 +602,14 @@ impl Statement {
                 let mut sql = format!(
                     "UPDATE {} SET {}",
                     source.to_sql(),
-                    update
-                        .assignments
-                        .iter()
-                        .map(|assignment| {
-                            format!("{} = {}", assignment.column, assignment.value.to_sql())
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    join_rendered(update.assignments.iter(), ", ", |assignment| {
+                        format!("{} = {}", assignment.column, assignment.value.to_sql())
+                    })
                 );
                 if let Some(where_clause) = &update.where_clause {
                     sql.push_str(&format!(
                         " WHERE {}",
-                        where_clause
-                            .conditions
-                            .iter()
-                            .map(Expression::to_sql)
-                            .collect::<Vec<_>>()
-                            .join(" AND ")
+                        join_rendered(where_clause.conditions.iter(), " AND ", Expression::to_sql)
                     ));
                 }
                 sql
@@ -635,12 +626,7 @@ impl Statement {
                 if let Some(where_clause) = &delete.where_clause {
                     sql.push_str(&format!(
                         " WHERE {}",
-                        where_clause
-                            .conditions
-                            .iter()
-                            .map(Expression::to_sql)
-                            .collect::<Vec<_>>()
-                            .join(" AND ")
+                        join_rendered(where_clause.conditions.iter(), " AND ", Expression::to_sql)
                     ));
                 }
                 sql
@@ -674,15 +660,6 @@ impl Statement {
             | Statement::DropView(_)
             | Statement::DropTrigger(_)
             | Statement::DropIndex(_) => format!("{self:?}"),
-        }
-    }
-
-    fn into_select(self) -> Result<SelectStatement> {
-        match self {
-            Statement::Select(select) => Ok(select),
-            _ => Err(HematiteError::InternalError(
-                "expected SELECT statement while binding a subquery".to_string(),
-            )),
         }
     }
 
@@ -726,7 +703,12 @@ impl Statement {
     }
 
     pub fn bind_parameters(&self, parameters: &[LiteralValue]) -> Result<Statement> {
-        self.bind_statement(parameters)
+        // Clone the (reusable) statement once, then substitute parameter
+        // placeholders in place. This avoids rebuilding the entire AST field by
+        // field and re-cloning every parameterless subtree on each execution.
+        let mut bound = self.clone();
+        bound.substitute_parameters(parameters)?;
+        Ok(bound)
     }
 
     fn visit_parameters<F>(&self, f: &mut F)
@@ -798,181 +780,71 @@ impl Statement {
         }
     }
 
-    fn bind_statement(&self, parameters: &[LiteralValue]) -> Result<Statement> {
+    fn substitute_parameters(&mut self, parameters: &[LiteralValue]) -> Result<()> {
         match self {
-            Statement::Begin => Ok(Statement::Begin),
-            Statement::Commit => Ok(Statement::Commit),
-            Statement::Rollback => Ok(Statement::Rollback),
-            Statement::Savepoint(name) => Ok(Statement::Savepoint(name.clone())),
-            Statement::RollbackToSavepoint(name) => {
-                Ok(Statement::RollbackToSavepoint(name.clone()))
+            Statement::Explain(explain) => explain.statement.substitute_parameters(parameters)?,
+            Statement::Select(select) => select.substitute_parameters(parameters)?,
+            Statement::SelectInto(select_into) => {
+                select_into.query.substitute_parameters(parameters)?
             }
-            Statement::ReleaseSavepoint(name) => Ok(Statement::ReleaseSavepoint(name.clone())),
-            Statement::Explain(explain) => Ok(Statement::Explain(ExplainStatement {
-                statement: Box::new(explain.statement.bind_parameters(parameters)?),
-            })),
-            Statement::Describe(describe) => Ok(Statement::Describe(describe.clone())),
-            Statement::ShowTables => Ok(Statement::ShowTables),
-            Statement::ShowViews => Ok(Statement::ShowViews),
-            Statement::ShowIndexes(table) => Ok(Statement::ShowIndexes(table.clone())),
-            Statement::ShowTriggers(table) => Ok(Statement::ShowTriggers(table.clone())),
-            Statement::ShowCreateTable(table) => Ok(Statement::ShowCreateTable(table.clone())),
-            Statement::ShowCreateView(view) => Ok(Statement::ShowCreateView(view.clone())),
-            Statement::Select(select) => Ok(Statement::Select(SelectStatement {
-                with_clause: select
-                    .with_clause
-                    .iter()
-                    .map(|cte| {
-                        Ok(CommonTableExpression {
-                            name: cte.name.clone(),
-                            recursive: cte.recursive,
-                            query: Box::new(
-                                Statement::Select((*cte.query).clone())
-                                    .bind_parameters(parameters)?
-                                    .into_select()?,
-                            ),
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?,
-                distinct: select.distinct,
-                columns: select
-                    .columns
-                    .iter()
-                    .map(|item| item.bind(parameters))
-                    .collect::<Result<Vec<_>>>()?,
-                column_aliases: select.column_aliases.clone(),
-                from: select.from.clone(),
-                where_clause: select
-                    .where_clause
-                    .as_ref()
-                    .map(|where_clause| where_clause.bind(parameters))
-                    .transpose()?,
-                group_by: select
-                    .group_by
-                    .iter()
-                    .map(|expr| expr.bind(parameters))
-                    .collect::<Result<Vec<_>>>()?,
-                having_clause: select
-                    .having_clause
-                    .as_ref()
-                    .map(|having_clause| having_clause.bind(parameters))
-                    .transpose()?,
-                order_by: select.order_by.clone(),
-                limit: select.limit,
-                offset: select.offset,
-                set_operation: select
-                    .set_operation
-                    .as_ref()
-                    .map(|set_operation| {
-                        Ok::<SetOperation, HematiteError>(SetOperation {
-                            operator: set_operation.operator,
-                            right: Box::new(
-                                Statement::Select((*set_operation.right).clone())
-                                    .bind_parameters(parameters)?
-                                    .into_select()?,
-                            ),
-                        })
-                    })
-                    .transpose()?,
-            })),
-            Statement::SelectInto(select_into) => Ok(Statement::SelectInto(SelectIntoStatement {
-                table: select_into.table.clone(),
-                query: Statement::Select(select_into.query.clone())
-                    .bind_parameters(parameters)?
-                    .into_select()?,
-            })),
-            Statement::Update(update) => Ok(Statement::Update(UpdateStatement {
-                table: update.table.clone(),
-                target_binding: update.target_binding.clone(),
-                source: update.source.clone(),
-                assignments: update
-                    .assignments
-                    .iter()
-                    .map(|assignment| {
-                        Ok(UpdateAssignment {
-                            column: assignment.column.clone(),
-                            value: assignment.value.bind(parameters)?,
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?,
-                where_clause: update
-                    .where_clause
-                    .as_ref()
-                    .map(|where_clause| where_clause.bind(parameters))
-                    .transpose()?,
-            })),
-            Statement::Insert(insert) => Ok(Statement::Insert(InsertStatement {
-                table: insert.table.clone(),
-                columns: insert.columns.clone(),
-                source: match &insert.source {
-                    InsertSource::Values(rows) => InsertSource::Values(
-                        rows.iter()
-                            .map(|row| {
-                                row.iter()
-                                    .map(|expr| expr.bind(parameters))
-                                    .collect::<Result<Vec<_>>>()
-                            })
-                            .collect::<Result<Vec<_>>>()?,
-                    ),
-                    InsertSource::Select(select) => InsertSource::Select(Box::new(
-                        Statement::Select((**select).clone())
-                            .bind_parameters(parameters)?
-                            .into_select()?,
-                    )),
-                },
-                on_duplicate: insert
-                    .on_duplicate
-                    .as_ref()
-                    .map(|assignments| {
-                        assignments
-                            .iter()
-                            .map(|assignment| {
-                                Ok(UpdateAssignment {
-                                    column: assignment.column.clone(),
-                                    value: assignment.value.bind(parameters)?,
-                                })
-                            })
-                            .collect::<Result<Vec<_>>>()
-                    })
-                    .transpose()?,
-            })),
-            Statement::Delete(delete) => Ok(Statement::Delete(DeleteStatement {
-                table: delete.table.clone(),
-                target_binding: delete.target_binding.clone(),
-                source: delete.source.clone(),
-                where_clause: delete
-                    .where_clause
-                    .as_ref()
-                    .map(|where_clause| where_clause.bind(parameters))
-                    .transpose()?,
-            })),
-            Statement::Create(create) => Ok(Statement::Create(create.clone())),
-            Statement::CreateView(create_view) => Ok(Statement::CreateView(CreateViewStatement {
-                view: create_view.view.clone(),
-                if_not_exists: create_view.if_not_exists,
-                query: Statement::Select(create_view.query.clone())
-                    .bind_parameters(parameters)?
-                    .into_select()?,
-            })),
+            Statement::Update(update) => {
+                for assignment in &mut update.assignments {
+                    assignment.value.substitute_parameters(parameters)?;
+                }
+                if let Some(where_clause) = &mut update.where_clause {
+                    where_clause.substitute_parameters(parameters)?;
+                }
+            }
+            Statement::Insert(insert) => {
+                match &mut insert.source {
+                    InsertSource::Values(rows) => {
+                        for row in rows {
+                            for expr in row {
+                                expr.substitute_parameters(parameters)?;
+                            }
+                        }
+                    }
+                    InsertSource::Select(select) => select.substitute_parameters(parameters)?,
+                }
+                if let Some(assignments) = &mut insert.on_duplicate {
+                    for assignment in assignments {
+                        assignment.value.substitute_parameters(parameters)?;
+                    }
+                }
+            }
+            Statement::Delete(delete) => {
+                if let Some(where_clause) = &mut delete.where_clause {
+                    where_clause.substitute_parameters(parameters)?;
+                }
+            }
+            Statement::CreateView(create_view) => {
+                create_view.query.substitute_parameters(parameters)?
+            }
             Statement::CreateTrigger(create_trigger) => {
-                Ok(Statement::CreateTrigger(CreateTriggerStatement {
-                    trigger: create_trigger.trigger.clone(),
-                    table: create_trigger.table.clone(),
-                    event: create_trigger.event,
-                    body: Box::new(create_trigger.body.bind_parameters(parameters)?),
-                }))
+                create_trigger.body.substitute_parameters(parameters)?
             }
-            Statement::CreateIndex(create_index) => {
-                Ok(Statement::CreateIndex(create_index.clone()))
-            }
-            Statement::Alter(alter) => Ok(Statement::Alter(alter.clone())),
-            Statement::Drop(drop) => Ok(Statement::Drop(drop.clone())),
-            Statement::DropView(drop_view) => Ok(Statement::DropView(drop_view.clone())),
-            Statement::DropTrigger(drop_trigger) => {
-                Ok(Statement::DropTrigger(drop_trigger.clone()))
-            }
-            Statement::DropIndex(drop_index) => Ok(Statement::DropIndex(drop_index.clone())),
+            Statement::Begin
+            | Statement::Commit
+            | Statement::Rollback
+            | Statement::Savepoint(_)
+            | Statement::RollbackToSavepoint(_)
+            | Statement::ReleaseSavepoint(_)
+            | Statement::Describe(_)
+            | Statement::ShowTables
+            | Statement::ShowViews
+            | Statement::ShowIndexes(_)
+            | Statement::ShowTriggers(_)
+            | Statement::ShowCreateTable(_)
+            | Statement::ShowCreateView(_)
+            | Statement::Create(_)
+            | Statement::CreateIndex(_)
+            | Statement::Alter(_)
+            | Statement::Drop(_)
+            | Statement::DropView(_)
+            | Statement::DropTrigger(_)
+            | Statement::DropIndex(_) => {}
         }
+        Ok(())
     }
 }
 
@@ -992,14 +864,11 @@ impl WhereClause {
         }
     }
 
-    fn bind(&self, parameters: &[LiteralValue]) -> Result<WhereClause> {
-        Ok(WhereClause {
-            conditions: self
-                .conditions
-                .iter()
-                .map(|condition| condition.bind(parameters))
-                .collect::<Result<Vec<_>>>()?,
-        })
+    fn substitute_parameters(&mut self, parameters: &[LiteralValue]) -> Result<()> {
+        for condition in &mut self.conditions {
+            condition.substitute_parameters(parameters)?;
+        }
+        Ok(())
     }
 }
 impl SelectItem {
@@ -1036,28 +905,20 @@ impl SelectItem {
         }
     }
 
-    fn bind(&self, parameters: &[LiteralValue]) -> Result<SelectItem> {
+    fn substitute_parameters(&mut self, parameters: &[LiteralValue]) -> Result<()> {
         match self {
-            SelectItem::Wildcard => Ok(SelectItem::Wildcard),
-            SelectItem::Column(name) => Ok(SelectItem::Column(name.clone())),
-            SelectItem::Expression(expr) => Ok(SelectItem::Expression(expr.bind(parameters)?)),
-            SelectItem::CountAll => Ok(SelectItem::CountAll),
-            SelectItem::Aggregate { function, column } => Ok(SelectItem::Aggregate {
-                function: *function,
-                column: column.clone(),
-            }),
-            SelectItem::Window { function, window } => Ok(SelectItem::Window {
-                function: function.clone(),
-                window: WindowSpec {
-                    partition_by: window
-                        .partition_by
-                        .iter()
-                        .map(|expr| expr.bind(parameters))
-                        .collect::<Result<Vec<_>>>()?,
-                    order_by: window.order_by.clone(),
-                },
-            }),
+            SelectItem::Expression(expr) => expr.substitute_parameters(parameters)?,
+            SelectItem::Window { window, .. } => {
+                for expr in &mut window.partition_by {
+                    expr.substitute_parameters(parameters)?;
+                }
+            }
+            SelectItem::Wildcard
+            | SelectItem::Column(_)
+            | SelectItem::CountAll
+            | SelectItem::Aggregate { .. } => {}
         }
+        Ok(())
     }
 }
 
@@ -1067,28 +928,20 @@ impl WindowSpec {
         if !self.partition_by.is_empty() {
             parts.push(format!(
                 "PARTITION BY {}",
-                self.partition_by
-                    .iter()
-                    .map(Expression::to_sql)
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                join_rendered(self.partition_by.iter(), ", ", Expression::to_sql)
             ));
         }
         if !self.order_by.is_empty() {
             parts.push(format!(
                 "ORDER BY {}",
-                self.order_by
-                    .iter()
-                    .map(|item| format!(
-                        "{} {}",
-                        item.column,
-                        match item.direction {
-                            SortDirection::Asc => "ASC",
-                            SortDirection::Desc => "DESC",
-                        }
-                    ))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                join_rendered(self.order_by.iter(), ", ", |item| format!(
+                    "{} {}",
+                    item.column,
+                    match item.direction {
+                        SortDirection::Asc => "ASC",
+                        SortDirection::Desc => "DESC",
+                    }
+                ))
             ));
         }
         parts.join(" ")
@@ -1238,156 +1091,79 @@ impl Expression {
         }
     }
 
-    fn bind(&self, parameters: &[LiteralValue]) -> Result<Expression> {
+    fn substitute_parameters(&mut self, parameters: &[LiteralValue]) -> Result<()> {
         match self {
-            Expression::Column(name) => Ok(Expression::Column(name.clone())),
-            Expression::Literal(value) => Ok(Expression::Literal(value.clone())),
-            Expression::IntervalLiteral { value, qualifier } => Ok(Expression::IntervalLiteral {
-                value: value.clone(),
-                qualifier: *qualifier,
-            }),
-            Expression::Parameter(index) => parameters
-                .get(*index)
-                .cloned()
-                .map(Expression::Literal)
-                .ok_or_else(|| {
+            Expression::Parameter(index) => {
+                let value = parameters.get(*index).cloned().ok_or_else(|| {
                     HematiteError::ParseError(format!(
                         "Missing bound value for parameter {}",
-                        index + 1
+                        *index + 1
                     ))
-                }),
-            Expression::ScalarSubquery(subquery) => Ok(Expression::ScalarSubquery(Box::new(
-                Statement::Select((**subquery).clone())
-                    .bind_parameters(parameters)?
-                    .into_select()?,
-            ))),
-            Expression::Cast { expr, target_type } => Ok(Expression::Cast {
-                expr: Box::new(expr.bind(parameters)?),
-                target_type: target_type.clone(),
-            }),
+                })?;
+                *self = Expression::Literal(value);
+            }
+            Expression::ScalarSubquery(subquery) => subquery.substitute_parameters(parameters)?,
+            Expression::Cast { expr, .. } => expr.substitute_parameters(parameters)?,
             Expression::Case {
                 branches,
                 else_expr,
-            } => Ok(Expression::Case {
-                branches: branches
-                    .iter()
-                    .map(|branch| {
-                        Ok(CaseWhenClause {
-                            condition: branch.condition.bind(parameters)?,
-                            result: branch.result.bind(parameters)?,
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?,
-                else_expr: else_expr
-                    .as_ref()
-                    .map(|expr| expr.bind(parameters).map(Box::new))
-                    .transpose()?,
-            }),
-            Expression::ScalarFunctionCall { function, args } => {
-                let mut bound_args = Vec::with_capacity(args.len());
-                for arg in args {
-                    bound_args.push(arg.bind(parameters)?);
+            } => {
+                for branch in branches {
+                    branch.condition.substitute_parameters(parameters)?;
+                    branch.result.substitute_parameters(parameters)?;
                 }
-                Ok(Expression::ScalarFunctionCall {
-                    function: *function,
-                    args: bound_args,
-                })
+                if let Some(else_expr) = else_expr {
+                    else_expr.substitute_parameters(parameters)?;
+                }
             }
-            Expression::AggregateCall { function, target } => Ok(Expression::AggregateCall {
-                function: *function,
-                target: target.clone(),
-            }),
-            Expression::UnaryMinus(expr) => {
-                Ok(Expression::UnaryMinus(Box::new(expr.bind(parameters)?)))
+            Expression::ScalarFunctionCall { args, .. } => {
+                for arg in args {
+                    arg.substitute_parameters(parameters)?;
+                }
             }
-            Expression::UnaryNot(expr) => {
-                Ok(Expression::UnaryNot(Box::new(expr.bind(parameters)?)))
+            Expression::AggregateCall { .. } => {}
+            Expression::UnaryMinus(expr) => expr.substitute_parameters(parameters)?,
+            Expression::UnaryNot(expr) => expr.substitute_parameters(parameters)?,
+            Expression::Binary { left, right, .. } => {
+                left.substitute_parameters(parameters)?;
+                right.substitute_parameters(parameters)?;
             }
-            Expression::Binary {
-                left,
-                operator,
-                right,
-            } => Ok(Expression::Binary {
-                left: Box::new(left.bind(parameters)?),
-                operator: *operator,
-                right: Box::new(right.bind(parameters)?),
-            }),
-            Expression::Comparison {
-                left,
-                operator,
-                right,
-            } => Ok(Expression::Comparison {
-                left: Box::new(left.bind(parameters)?),
-                operator: operator.clone(),
-                right: Box::new(right.bind(parameters)?),
-            }),
-            Expression::InList {
-                expr,
-                values,
-                is_not,
-            } => Ok(Expression::InList {
-                expr: Box::new(expr.bind(parameters)?),
-                values: values
-                    .iter()
-                    .map(|value| value.bind(parameters))
-                    .collect::<Result<Vec<_>>>()?,
-                is_not: *is_not,
-            }),
-            Expression::InSubquery {
-                expr,
-                subquery,
-                is_not,
-            } => Ok(Expression::InSubquery {
-                expr: Box::new(expr.bind(parameters)?),
-                subquery: Box::new(
-                    Statement::Select((**subquery).clone())
-                        .bind_parameters(parameters)?
-                        .into_select()?,
-                ),
-                is_not: *is_not,
-            }),
+            Expression::Comparison { left, right, .. } => {
+                left.substitute_parameters(parameters)?;
+                right.substitute_parameters(parameters)?;
+            }
+            Expression::InList { expr, values, .. } => {
+                expr.substitute_parameters(parameters)?;
+                for value in values {
+                    value.substitute_parameters(parameters)?;
+                }
+            }
+            Expression::InSubquery { expr, subquery, .. } => {
+                expr.substitute_parameters(parameters)?;
+                subquery.substitute_parameters(parameters)?;
+            }
             Expression::Between {
-                expr,
-                lower,
-                upper,
-                is_not,
-            } => Ok(Expression::Between {
-                expr: Box::new(expr.bind(parameters)?),
-                lower: Box::new(lower.bind(parameters)?),
-                upper: Box::new(upper.bind(parameters)?),
-                is_not: *is_not,
-            }),
-            Expression::Like {
-                expr,
-                pattern,
-                is_not,
-            } => Ok(Expression::Like {
-                expr: Box::new(expr.bind(parameters)?),
-                pattern: Box::new(pattern.bind(parameters)?),
-                is_not: *is_not,
-            }),
-            Expression::Exists { subquery, is_not } => Ok(Expression::Exists {
-                subquery: Box::new(
-                    Statement::Select((**subquery).clone())
-                        .bind_parameters(parameters)?
-                        .into_select()?,
-                ),
-                is_not: *is_not,
-            }),
-            Expression::NullCheck { expr, is_not } => Ok(Expression::NullCheck {
-                expr: Box::new(expr.bind(parameters)?),
-                is_not: *is_not,
-            }),
-            Expression::Logical {
-                left,
-                operator,
-                right,
-            } => Ok(Expression::Logical {
-                left: Box::new(left.bind(parameters)?),
-                operator: operator.clone(),
-                right: Box::new(right.bind(parameters)?),
-            }),
+                expr, lower, upper, ..
+            } => {
+                expr.substitute_parameters(parameters)?;
+                lower.substitute_parameters(parameters)?;
+                upper.substitute_parameters(parameters)?;
+            }
+            Expression::Like { expr, pattern, .. } => {
+                expr.substitute_parameters(parameters)?;
+                pattern.substitute_parameters(parameters)?;
+            }
+            Expression::Exists { subquery, .. } => subquery.substitute_parameters(parameters)?,
+            Expression::NullCheck { expr, .. } => expr.substitute_parameters(parameters)?,
+            Expression::Logical { left, right, .. } => {
+                left.substitute_parameters(parameters)?;
+                right.substitute_parameters(parameters)?;
+            }
+            Expression::Column(_)
+            | Expression::Literal(_)
+            | Expression::IntervalLiteral { .. } => {}
         }
+        Ok(())
     }
 }
 
@@ -1440,6 +1216,28 @@ impl SelectStatement {
         if let Some(set_operation) = &self.set_operation {
             set_operation.right.visit_parameters(f);
         }
+    }
+
+    fn substitute_parameters(&mut self, parameters: &[LiteralValue]) -> Result<()> {
+        for item in &mut self.columns {
+            item.substitute_parameters(parameters)?;
+        }
+        for cte in &mut self.with_clause {
+            cte.query.substitute_parameters(parameters)?;
+        }
+        if let Some(where_clause) = &mut self.where_clause {
+            where_clause.substitute_parameters(parameters)?;
+        }
+        for expr in &mut self.group_by {
+            expr.substitute_parameters(parameters)?;
+        }
+        if let Some(having_clause) = &mut self.having_clause {
+            having_clause.substitute_parameters(parameters)?;
+        }
+        if let Some(set_operation) = &mut self.set_operation {
+            set_operation.right.substitute_parameters(parameters)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn is_hidden_rowid(name: &str) -> bool {
@@ -1560,12 +1358,9 @@ impl SelectStatement {
         let mut parts = Vec::new();
         if !self.with_clause.is_empty() {
             let recursive = self.with_clause.iter().any(|cte| cte.recursive);
-            let ctes = self
-                .with_clause
-                .iter()
-                .map(|cte| format!("{} AS ({})", cte.name, cte.query.to_sql()))
-                .collect::<Vec<_>>()
-                .join(", ");
+            let ctes = join_rendered(self.with_clause.iter(), ", ", |cte| {
+                format!("{} AS ({})", cte.name, cte.query.to_sql())
+            });
             parts.push(format!(
                 "WITH {}{}",
                 if recursive { "RECURSIVE " } else { "" },
@@ -1573,23 +1368,17 @@ impl SelectStatement {
             ));
         }
 
-        let projections = self
-            .columns
-            .iter()
-            .enumerate()
-            .map(|(index, item)| {
-                let base = item.to_sql();
-                match self
-                    .column_aliases
-                    .get(index)
-                    .and_then(|alias| alias.clone())
-                {
-                    Some(alias) => format!("{base} AS {alias}"),
-                    None => base,
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
+        let projections = join_rendered(self.columns.iter().enumerate(), ", ", |(index, item)| {
+            let base = item.to_sql();
+            match self
+                .column_aliases
+                .get(index)
+                .and_then(|alias| alias.clone())
+            {
+                Some(alias) => format!("{base} AS {alias}"),
+                None => base,
+            }
+        });
         parts.push(format!(
             "SELECT{} {} INTO {}",
             if self.distinct { " DISTINCT" } else { "" },
@@ -1601,43 +1390,29 @@ impl SelectStatement {
         if let Some(where_clause) = &self.where_clause {
             parts.push(format!(
                 "WHERE {}",
-                where_clause
-                    .conditions
-                    .iter()
-                    .map(Expression::to_sql)
-                    .collect::<Vec<_>>()
-                    .join(" AND ")
+                join_rendered(where_clause.conditions.iter(), " AND ", Expression::to_sql)
             ));
         }
         if !self.group_by.is_empty() {
             parts.push(format!(
                 "GROUP BY {}",
-                self.group_by
-                    .iter()
-                    .map(Expression::to_sql)
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                join_rendered(self.group_by.iter(), ", ", Expression::to_sql)
             ));
         }
         if let Some(having_clause) = &self.having_clause {
             parts.push(format!(
                 "HAVING {}",
-                having_clause
-                    .conditions
-                    .iter()
-                    .map(Expression::to_sql)
-                    .collect::<Vec<_>>()
-                    .join(" AND ")
+                join_rendered(having_clause.conditions.iter(), " AND ", Expression::to_sql)
             ));
         }
         if !self.order_by.is_empty() {
             parts.push(format!(
                 "ORDER BY {}",
-                self.order_by
-                    .iter()
-                    .map(|item| format!("{} {}", item.column, item.direction.to_sql()))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                join_rendered(self.order_by.iter(), ", ", |item| format!(
+                    "{} {}",
+                    item.column,
+                    item.direction.to_sql()
+                ))
             ));
         }
         if let Some(limit) = self.limit {
@@ -1661,12 +1436,9 @@ impl SelectStatement {
         let mut parts = Vec::new();
         if !self.with_clause.is_empty() {
             let recursive = self.with_clause.iter().any(|cte| cte.recursive);
-            let ctes = self
-                .with_clause
-                .iter()
-                .map(|cte| format!("{} AS ({})", cte.name, cte.query.to_sql()))
-                .collect::<Vec<_>>()
-                .join(", ");
+            let ctes = join_rendered(self.with_clause.iter(), ", ", |cte| {
+                format!("{} AS ({})", cte.name, cte.query.to_sql())
+            });
             parts.push(format!(
                 "WITH {}{}",
                 if recursive { "RECURSIVE " } else { "" },
@@ -1674,23 +1446,17 @@ impl SelectStatement {
             ));
         }
 
-        let projections = self
-            .columns
-            .iter()
-            .enumerate()
-            .map(|(index, item)| {
-                let base = item.to_sql();
-                match self
-                    .column_aliases
-                    .get(index)
-                    .and_then(|alias| alias.clone())
-                {
-                    Some(alias) => format!("{base} AS {alias}"),
-                    None => base,
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
+        let projections = join_rendered(self.columns.iter().enumerate(), ", ", |(index, item)| {
+            let base = item.to_sql();
+            match self
+                .column_aliases
+                .get(index)
+                .and_then(|alias| alias.clone())
+            {
+                Some(alias) => format!("{base} AS {alias}"),
+                None => base,
+            }
+        });
         parts.push(format!(
             "SELECT{} {}",
             if self.distinct { " DISTINCT" } else { "" },
@@ -1701,43 +1467,29 @@ impl SelectStatement {
         if let Some(where_clause) = &self.where_clause {
             parts.push(format!(
                 "WHERE {}",
-                where_clause
-                    .conditions
-                    .iter()
-                    .map(Expression::to_sql)
-                    .collect::<Vec<_>>()
-                    .join(" AND ")
+                join_rendered(where_clause.conditions.iter(), " AND ", Expression::to_sql)
             ));
         }
         if !self.group_by.is_empty() {
             parts.push(format!(
                 "GROUP BY {}",
-                self.group_by
-                    .iter()
-                    .map(Expression::to_sql)
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                join_rendered(self.group_by.iter(), ", ", Expression::to_sql)
             ));
         }
         if let Some(having_clause) = &self.having_clause {
             parts.push(format!(
                 "HAVING {}",
-                having_clause
-                    .conditions
-                    .iter()
-                    .map(Expression::to_sql)
-                    .collect::<Vec<_>>()
-                    .join(" AND ")
+                join_rendered(having_clause.conditions.iter(), " AND ", Expression::to_sql)
             ));
         }
         if !self.order_by.is_empty() {
             parts.push(format!(
                 "ORDER BY {}",
-                self.order_by
-                    .iter()
-                    .map(|item| format!("{} {}", item.column, item.direction.to_sql()))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                join_rendered(self.order_by.iter(), ", ", |item| format!(
+                    "{} {}",
+                    item.column,
+                    item.direction.to_sql()
+                ))
             ));
         }
         if let Some(limit) = self.limit {
@@ -2148,16 +1900,13 @@ impl Expression {
             Expression::ScalarFunctionCall { function, args } => format!(
                 "{}({})",
                 function.to_sql(),
-                args.iter()
-                    .map(Expression::to_sql)
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                join_rendered(args.iter(), ", ", Expression::to_sql)
             ),
             Expression::AggregateCall { function, target } => {
                 format!("{}({})", function.to_sql(), target.to_sql())
             }
             Expression::Cast { expr, target_type } => {
-                format!("CAST({} AS {})", expr.to_sql(), target_type.to_sql())
+                format!("CAST({} AS {target_type})", expr.to_sql())
             }
             Expression::UnaryMinus(expr) => format!("-{}", expr.to_sql()),
             Expression::UnaryNot(expr) => format!("NOT {}", expr.to_sql()),
@@ -2184,11 +1933,7 @@ impl Expression {
                 "{} {}IN ({})",
                 expr.to_sql(),
                 if *is_not { "NOT " } else { "" },
-                values
-                    .iter()
-                    .map(Expression::to_sql)
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                join_rendered(values.iter(), ", ", Expression::to_sql)
             ),
             Expression::InSubquery { expr, is_not, .. } => format!(
                 "{} {}IN (<subquery>)",

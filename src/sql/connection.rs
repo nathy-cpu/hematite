@@ -558,6 +558,17 @@ impl Connection {
         })
     }
 
+    /// Open a file-based connection with an explicit page-cache capacity (in pages).
+    pub fn with_cache_capacity(database_path: &str, cache_capacity: usize) -> Result<Self> {
+        let catalog =
+            Catalog::open_or_create_with_cache_capacity(database_path, cache_capacity)?;
+        Ok(Self {
+            catalog: Arc::new(Mutex::new(catalog)),
+            transaction: None,
+            trigger_depth: 0,
+        })
+    }
+
     pub fn new_in_memory() -> Result<Self> {
         let catalog = Catalog::open_in_memory()?;
         Ok(Self {
@@ -1804,7 +1815,7 @@ impl Connection {
         self.execute(sql).map(ExecutedStatement::from_query_result)
     }
 
-    pub fn iter_script<'a>(&'a mut self, sql: &str) -> Result<ScriptIter<'a>> {
+    pub fn iter_script<'a>(&'a mut self, sql: &'a str) -> Result<ScriptIter<'a>> {
         Ok(ScriptIter::new(self, split_script_tokens(sql)?))
     }
 

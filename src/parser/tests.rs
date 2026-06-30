@@ -294,7 +294,7 @@ mod lexer_tests {
             Token::Select,
             Token::Asterisk,
             Token::From,
-            Token::Identifier("users".to_string()),
+            Token::Identifier("users".into()),
         ];
 
         assert_eq!(lexer.get_tokens(), &expected);
@@ -309,9 +309,9 @@ mod lexer_tests {
         let expected = vec![
             Token::Select,
             Token::Distinct,
-            Token::Identifier("name".to_string()),
+            Token::Identifier("name".into()),
             Token::From,
-            Token::Identifier("users".to_string()),
+            Token::Identifier("users".into()),
             Token::Semicolon,
         ];
 
@@ -329,23 +329,23 @@ mod lexer_tests {
         let expected = vec![
             Token::Create,
             Token::Table,
-            Token::Identifier("user data".to_string()),
+            Token::Identifier("user data".into()),
             Token::LeftParen,
-            Token::Identifier("id".to_string()),
+            Token::Identifier("id".into()),
             Token::Int,
             Token::Primary,
             Token::Key,
             Token::Comma,
-            Token::Identifier("active".to_string()),
+            Token::Identifier("active".into()),
             Token::Bool,
             Token::Comma,
-            Token::Identifier("score".to_string()),
+            Token::Identifier("score".into()),
             Token::Float,
             Token::Comma,
-            Token::Identifier("name".to_string()),
+            Token::Identifier("name".into()),
             Token::Varchar,
             Token::LeftParen,
-            Token::NumberLiteral("32".to_string()),
+            Token::NumberLiteral("32"),
             Token::RightParen,
             Token::RightParen,
             Token::Semicolon,
@@ -364,7 +364,7 @@ mod lexer_tests {
             Token::Select,
             Token::BlobLiteral(b"Hello".to_vec()),
             Token::From,
-            Token::Identifier("files".to_string()),
+            Token::Identifier("files".into()),
             Token::Semicolon,
         ];
 
@@ -399,18 +399,18 @@ mod lexer_tests {
 
         let expected = vec![
             Token::Select,
-            Token::Identifier("id".to_string()),
+            Token::Identifier("id".into()),
             Token::From,
-            Token::Identifier("users".to_string()),
+            Token::Identifier("users".into()),
             Token::Where,
-            Token::Identifier("id".to_string()),
+            Token::Identifier("id".into()),
             Token::In,
             Token::LeftParen,
-            Token::NumberLiteral("1".to_string()),
+            Token::NumberLiteral("1"),
             Token::Comma,
-            Token::NumberLiteral("2".to_string()),
+            Token::NumberLiteral("2"),
             Token::Comma,
-            Token::NumberLiteral("3".to_string()),
+            Token::NumberLiteral("3"),
             Token::RightParen,
             Token::Semicolon,
         ];
@@ -426,15 +426,15 @@ mod lexer_tests {
 
         let expected = vec![
             Token::Select,
-            Token::Identifier("id".to_string()),
+            Token::Identifier("id".into()),
             Token::From,
-            Token::Identifier("users".to_string()),
+            Token::Identifier("users".into()),
             Token::Where,
-            Token::Identifier("id".to_string()),
+            Token::Identifier("id".into()),
             Token::Between,
-            Token::NumberLiteral("1".to_string()),
+            Token::NumberLiteral("1"),
             Token::And,
-            Token::NumberLiteral("3".to_string()),
+            Token::NumberLiteral("3"),
             Token::Semicolon,
         ];
 
@@ -467,17 +467,17 @@ mod lexer_tests {
 
         let expected = vec![
             Token::Select,
-            Token::Identifier("id".to_string()),
+            Token::Identifier("id".into()),
             Token::From,
-            Token::Identifier("users".to_string()),
+            Token::Identifier("users".into()),
             Token::Where,
-            Token::Identifier("id".to_string()),
+            Token::Identifier("id".into()),
             Token::Equal,
-            Token::NumberLiteral("1".to_string()),
+            Token::NumberLiteral("1"),
             Token::And,
-            Token::Identifier("id".to_string()),
+            Token::Identifier("id".into()),
             Token::NotEqual,
-            Token::NumberLiteral("2".to_string()),
+            Token::NumberLiteral("2"),
         ];
 
         assert_eq!(lexer.get_tokens(), &expected);
@@ -491,15 +491,15 @@ mod lexer_tests {
 
         let expected = vec![
             Token::Select,
-            Token::Identifier("id".to_string()),
+            Token::Identifier("id".into()),
             Token::From,
-            Token::Identifier("users".to_string()),
+            Token::Identifier("users".into()),
             Token::Order,
             Token::By,
-            Token::Identifier("name".to_string()),
+            Token::Identifier("name".into()),
             Token::Desc,
             Token::Limit,
-            Token::NumberLiteral("5".to_string()),
+            Token::NumberLiteral("5"),
             Token::Semicolon,
         ];
 
@@ -514,17 +514,17 @@ mod lexer_tests {
 
         let expected = vec![
             Token::Select,
-            Token::Identifier("id".to_string()),
+            Token::Identifier("id".into()),
             Token::From,
-            Token::Identifier("users".to_string()),
+            Token::Identifier("users".into()),
             Token::Order,
             Token::By,
-            Token::Identifier("name".to_string()),
+            Token::Identifier("name".into()),
             Token::Desc,
             Token::Limit,
-            Token::NumberLiteral("5".to_string()),
+            Token::NumberLiteral("5"),
             Token::Offset,
-            Token::NumberLiteral("2".to_string()),
+            Token::NumberLiteral("2"),
             Token::Semicolon,
         ];
 
@@ -544,7 +544,7 @@ mod lexer_tests {
             Token::Asterisk,
             Token::RightParen,
             Token::From,
-            Token::Identifier("users".to_string()),
+            Token::Identifier("users".into()),
             Token::Semicolon,
         ];
 
@@ -561,10 +561,10 @@ mod lexer_tests {
             Token::Select,
             Token::Sum,
             Token::LeftParen,
-            Token::Identifier("score".to_string()),
+            Token::Identifier("score".into()),
             Token::RightParen,
             Token::From,
-            Token::Identifier("users".to_string()),
+            Token::Identifier("users".into()),
             Token::Semicolon,
         ];
 
@@ -580,21 +580,21 @@ mod lexer_tests {
 
         let expected = vec![
             Token::Select,
-            Token::Identifier("name".to_string()),
+            Token::Identifier("name".into()),
             Token::Comma,
             Token::Count,
             Token::LeftParen,
-            Token::Identifier("id".to_string()),
+            Token::Identifier("id".into()),
             Token::RightParen,
             Token::From,
-            Token::Identifier("users".to_string()),
+            Token::Identifier("users".into()),
             Token::Group,
             Token::By,
-            Token::Identifier("name".to_string()),
+            Token::Identifier("name".into()),
             Token::Having,
-            Token::Identifier("name".to_string()),
+            Token::Identifier("name".into()),
             Token::Equal,
-            Token::StringLiteral("Alice".to_string()),
+            Token::StringLiteral("Alice".into()),
             Token::Semicolon,
         ];
 
@@ -611,9 +611,9 @@ mod lexer_tests {
             Token::Select,
             Token::Asterisk,
             Token::From,
-            Token::Identifier("users".to_string()),
+            Token::Identifier("users".into()),
             Token::Where,
-            Token::Identifier("id".to_string()),
+            Token::Identifier("id".into()),
             Token::Equal,
             Token::Placeholder,
             Token::Semicolon,
@@ -630,15 +630,15 @@ mod lexer_tests {
 
         let expected = vec![
             Token::Select,
-            Token::Identifier("id".to_string()),
+            Token::Identifier("id".into()),
             Token::From,
-            Token::Identifier("users".to_string()),
+            Token::Identifier("users".into()),
             Token::Order,
             Token::By,
-            Token::Identifier("name".to_string()),
+            Token::Identifier("name".into()),
             Token::Desc,
             Token::Comma,
-            Token::Identifier("id".to_string()),
+            Token::Identifier("id".into()),
             Token::Asc,
             Token::Semicolon,
         ];
@@ -655,17 +655,17 @@ mod lexer_tests {
         let expected = vec![
             Token::Insert,
             Token::Into,
-            Token::Identifier("users".to_string()),
+            Token::Identifier("users".into()),
             Token::LeftParen,
-            Token::Identifier("id".to_string()),
+            Token::Identifier("id".into()),
             Token::Comma,
-            Token::Identifier("name".to_string()),
+            Token::Identifier("name".into()),
             Token::RightParen,
             Token::Values,
             Token::LeftParen,
-            Token::NumberLiteral("1".to_string()),
+            Token::NumberLiteral("1"),
             Token::Comma,
-            Token::StringLiteral("John".to_string()),
+            Token::StringLiteral("John".into()),
             Token::RightParen,
         ];
 
@@ -683,18 +683,18 @@ mod lexer_tests {
         let expected = vec![
             Token::Create,
             Token::Index,
-            Token::Identifier("idx_users_name".to_string()),
+            Token::Identifier("idx_users_name".into()),
             Token::On,
-            Token::Identifier("users".to_string()),
+            Token::Identifier("users".into()),
             Token::LeftParen,
-            Token::Identifier("name".to_string()),
+            Token::Identifier("name".into()),
             Token::RightParen,
             Token::Semicolon,
             Token::Drop,
             Token::Index,
-            Token::Identifier("idx_users_name".to_string()),
+            Token::Identifier("idx_users_name".into()),
             Token::On,
-            Token::Identifier("users".to_string()),
+            Token::Identifier("users".into()),
             Token::Semicolon,
         ];
 
@@ -710,11 +710,11 @@ mod lexer_tests {
         let expected = vec![
             Token::Delete,
             Token::From,
-            Token::Identifier("users".to_string()),
+            Token::Identifier("users".into()),
             Token::Where,
-            Token::Identifier("id".to_string()),
+            Token::Identifier("id".into()),
             Token::Equal,
-            Token::NumberLiteral("1".to_string()),
+            Token::NumberLiteral("1"),
             Token::Semicolon,
         ];
 
@@ -729,19 +729,19 @@ mod lexer_tests {
 
         let expected = vec![
             Token::Update,
-            Token::Identifier("users".to_string()),
+            Token::Identifier("users".into()),
             Token::Set,
-            Token::Identifier("name".to_string()),
+            Token::Identifier("name".into()),
             Token::Equal,
-            Token::StringLiteral("John".to_string()),
+            Token::StringLiteral("John".into()),
             Token::Comma,
-            Token::Identifier("active".to_string()),
+            Token::Identifier("active".into()),
             Token::Equal,
             Token::BooleanLiteral(true),
             Token::Where,
-            Token::Identifier("id".to_string()),
+            Token::Identifier("id".into()),
             Token::Equal,
-            Token::NumberLiteral("1".to_string()),
+            Token::NumberLiteral("1"),
             Token::Semicolon,
         ];
 
@@ -758,9 +758,9 @@ mod lexer_tests {
             Token::Select,
             Token::Asterisk,
             Token::From,
-            Token::Identifier("users".to_string()),
+            Token::Identifier("users".into()),
             Token::Where,
-            Token::Identifier("name".to_string()),
+            Token::Identifier("name".into()),
             Token::Is,
             Token::Not,
             Token::Null,
@@ -779,7 +779,7 @@ mod lexer_tests {
         let expected = vec![
             Token::Drop,
             Token::Table,
-            Token::Identifier("users".to_string()),
+            Token::Identifier("users".into()),
             Token::Semicolon,
         ];
 
@@ -795,14 +795,14 @@ mod lexer_tests {
         let expected = vec![
             Token::Create,
             Token::Table,
-            Token::Identifier("users".to_string()),
+            Token::Identifier("users".into()),
             Token::LeftParen,
-            Token::Identifier("id".to_string()),
+            Token::Identifier("id".into()),
             Token::Int,
             Token::Primary,
             Token::Key,
             Token::Comma,
-            Token::Identifier("name".to_string()),
+            Token::Identifier("name".into()),
             Token::Text,
             Token::RightParen,
         ];
@@ -818,13 +818,13 @@ mod lexer_tests {
 
         let expected = vec![
             Token::Select,
-            Token::Identifier("navn".to_string()),
+            Token::Identifier("navn".into()),
             Token::From,
-            Token::Identifier("brukere".to_string()),
+            Token::Identifier("brukere".into()),
             Token::Where,
-            Token::Identifier("navn".to_string()),
+            Token::Identifier("navn".into()),
             Token::Equal,
-            Token::StringLiteral("Alíce".to_string()),
+            Token::StringLiteral("Alíce".into()),
             Token::Semicolon,
         ];
 
@@ -842,17 +842,17 @@ mod lexer_tests {
             &[
                 Token::Insert,
                 Token::Into,
-                Token::Identifier("users".to_string()),
+                Token::Identifier("users".into()),
                 Token::LeftParen,
-                Token::Identifier("name".to_string()),
+                Token::Identifier("name".into()),
                 Token::RightParen,
                 Token::Values,
                 Token::LeftParen,
-                Token::StringLiteral("O'Brien".to_string()),
+                Token::StringLiteral("O'Brien".into()),
                 Token::RightParen,
                 Token::Comma,
                 Token::LeftParen,
-                Token::StringLiteral("D'Angelo".to_string()),
+                Token::StringLiteral("D'Angelo".into()),
                 Token::RightParen,
                 Token::Semicolon,
             ]
@@ -866,10 +866,10 @@ mod lexer_tests {
         lexer.tokenize()?;
 
         let expected = vec![
-            Token::Identifier("select".to_string()),
+            Token::Identifier("select".into()),
             Token::Asterisk,
-            Token::Identifier("from".to_string()),
-            Token::Identifier("users".to_string()),
+            Token::Identifier("from".into()),
+            Token::Identifier("users".into()),
             Token::Semicolon,
         ];
 

@@ -109,14 +109,14 @@ use crate::parser::ast::*;
 use crate::parser::lexer::{Lexer, Token};
 use crate::parser::types::{normalize_float_literal, LiteralValue, SqlTypeName};
 
-pub struct Parser {
-    tokens: Vec<Token>,
+pub struct Parser<'a> {
+    tokens: Vec<Token<'a>>,
     position: usize,
     parameter_count: usize,
 }
 
-impl Parser {
-    pub fn new(tokens: Vec<Token>) -> Self {
+impl<'a> Parser<'a> {
+    pub fn new(tokens: Vec<Token<'a>>) -> Self {
         Self {
             tokens,
             position: 0,
@@ -132,7 +132,7 @@ impl Parser {
         let token = self.peek_token()?;
 
         if let Token::Identifier(name) = token {
-            if let Some(keyword) = uppercase_keyword_match(name.as_str(), &TOP_LEVEL_KEYWORDS) {
+            if let Some(keyword) = uppercase_keyword_match(name.as_ref(), &TOP_LEVEL_KEYWORDS) {
                 return Err(HematiteError::ParseError(format!(
                     "Keyword '{}' must be capitalized as '{}'",
                     name, keyword
@@ -1141,9 +1141,9 @@ impl Parser {
             }
             Token::Identifier(_) => Ok(Expression::Column(self.parse_identifier_reference()?)),
             Token::StringLiteral(value) => {
-                let value_clone = value.clone();
+                let value = value.clone().into_owned();
                 self.advance();
-                Ok(Expression::Literal(LiteralValue::Text(value_clone)))
+                Ok(Expression::Literal(LiteralValue::Text(value)))
             }
             Token::BlobLiteral(value) => {
                 let value_clone = value.clone();
@@ -1151,9 +1151,9 @@ impl Parser {
                 Ok(Expression::Literal(LiteralValue::Blob(value_clone)))
             }
             Token::NumberLiteral(value) => {
-                let value_clone = value.clone();
+                let value = *value;
                 self.advance();
-                Ok(Expression::Literal(parse_number_literal(&value_clone)?))
+                Ok(Expression::Literal(parse_number_literal(value)?))
             }
             Token::BooleanLiteral(value) => {
                 let value_clone = value.clone();
@@ -1197,9 +1197,9 @@ impl Parser {
         self.consume_token(&Token::Interval)?;
         let value = match self.peek_token()? {
             Token::StringLiteral(value) => {
-                let value_clone = value.clone();
+                let value = value.clone().into_owned();
                 self.advance();
-                value_clone
+                value
             }
             token => {
                 return Err(HematiteError::ParseError(format!(
@@ -1852,9 +1852,9 @@ impl Parser {
         let token = self.peek_token()?;
         match token {
             Token::Identifier(name) => {
-                let name_clone = name.clone();
+                let name = name.clone().into_owned();
                 self.advance();
-                Ok(name_clone)
+                Ok(name)
             }
             _ => Err(HematiteError::ParseError(format!(
                 "Expected identifier, found: {:?}",
@@ -2031,9 +2031,9 @@ impl Parser {
             let token = parser.peek_token()?;
             match token {
                 Token::Identifier(name) => {
-                    let name_clone = name.clone();
+                    let name = name.clone().into_owned();
                     parser.advance();
-                    Ok(name_clone)
+                    Ok(name)
                 }
                 _ => Err(HematiteError::ParseError(format!(
                     "Expected column name, found: {:?}",
@@ -2376,7 +2376,7 @@ impl Parser {
                         )))
                     }
                 };
-                return match (start.as_str(), end.as_str()) {
+                return match (start.as_ref(), end.as_ref()) {
                     ("YEAR", "MONTH") => Ok(SqlTypeName::IntervalYearMonth),
                     ("DAY", "SECOND") => Ok(SqlTypeName::IntervalDaySecond),
                     _ => Err(HematiteError::ParseError(format!(
@@ -2437,7 +2437,7 @@ impl Parser {
 
     fn parse_integer_type(
         &mut self,
-        token: Token,
+        token: Token<'a>,
         signed_type: SqlTypeName,
     ) -> Result<SqlTypeName> {
         self.consume_token(&token)?;
@@ -2450,9 +2450,9 @@ impl Parser {
         loop {
             match self.peek_token()? {
                 Token::StringLiteral(value) => {
-                    let value_clone = value.clone();
+                    let value = value.clone().into_owned();
                     self.advance();
-                    variants.push(value_clone);
+                    variants.push(value);
                 }
                 token => {
                     return Err(HematiteError::ParseError(format!(
@@ -2492,7 +2492,7 @@ impl Parser {
         self.consume_token(&Token::LeftParen)?;
         let length = match self.peek_token()? {
             Token::NumberLiteral(length) => {
-                let parsed = parse_positive_u32_literal(&length, "length")?;
+                let parsed = parse_positive_u32_literal(length, "length")?;
                 self.advance();
                 parsed
             }
@@ -2526,7 +2526,7 @@ impl Parser {
     fn consume_positive_integer_literal(&mut self, label: &str) -> Result<u32> {
         match self.peek_token()? {
             Token::NumberLiteral(value) => {
-                let parsed = parse_non_negative_u32_literal(&value, label)?;
+                let parsed = parse_non_negative_u32_literal(value, label)?;
                 self.advance();
                 Ok(parsed)
             }
@@ -2541,7 +2541,7 @@ impl Parser {
         let token = self.peek_token()?;
         match token {
             Token::StringLiteral(value) => {
-                let value = value.clone();
+                let value = value.clone().into_owned();
                 self.advance();
                 Ok(LiteralValue::Text(value))
             }
@@ -2551,9 +2551,9 @@ impl Parser {
                 Ok(LiteralValue::Blob(value))
             }
             Token::NumberLiteral(value) => {
-                let value_clone = value.clone();
+                let value = *value;
                 self.advance();
-                Ok(parse_number_literal(&value_clone)?)
+                Ok(parse_number_literal(value)?)
             }
             Token::BooleanLiteral(value) => {
                 let value = *value;
@@ -2575,7 +2575,7 @@ impl Parser {
         }
     }
 
-    fn peek_token(&self) -> Result<&Token> {
+    fn peek_token(&self) -> Result<&Token<'a>> {
         self.tokens
             .get(self.position)
             .ok_or_else(|| HematiteError::ParseError("Unexpected end of input".to_string()))
@@ -2600,19 +2600,19 @@ impl Parser {
         Ok(items)
     }
 
-    fn next_token_is(&self, expected: &Token) -> bool {
+    fn next_token_is(&self, expected: &Token<'_>) -> bool {
         self.tokens
             .get(self.position + 1)
             .is_some_and(|token| token == expected)
     }
 
-    fn consume_token(&mut self, expected: &Token) -> Result<()> {
+    fn consume_token(&mut self, expected: &Token<'_>) -> Result<()> {
         let token = self.peek_token()?;
         if token == expected {
             self.position += 1;
             Ok(())
         } else if let Token::Identifier(name) = token {
-            if let Some(keyword) = uppercase_keyword_match(name.as_str(), ALL_UPPERCASE_KEYWORDS) {
+            if let Some(keyword) = uppercase_keyword_match(name.as_ref(), ALL_UPPERCASE_KEYWORDS) {
                 Err(HematiteError::ParseError(format!(
                     "Keyword '{}' must be capitalized as '{}'",
                     name, keyword
@@ -2644,7 +2644,7 @@ impl Parser {
     }
 }
 
-pub fn tokenize_sql(sql: &str) -> Result<Vec<Token>> {
+pub fn tokenize_sql(sql: &str) -> Result<Vec<Token<'_>>> {
     let mut lexer = Lexer::new(sql);
     lexer.tokenize()?;
     Ok(lexer.into_tokens())
@@ -2901,7 +2901,7 @@ fn uppercase_keyword_match<'a>(name: &str, keywords: &'a [&'a str]) -> Option<&'
         .find(|keyword| name.eq_ignore_ascii_case(keyword) && name != *keyword)
 }
 
-fn capitalization_hint_for_token(token: &Token) -> Option<String> {
+fn capitalization_hint_for_token(token: &Token<'_>) -> Option<String> {
     match token {
         Token::Identifier(name) => uppercase_keyword_match(name, ALL_UPPERCASE_KEYWORDS)
             .map(|keyword| format!("Keyword '{}' must be capitalized as '{}'", name, keyword)),
@@ -2921,7 +2921,7 @@ fn parse_window_function_name(name: &str) -> Option<WindowFunction> {
     }
 }
 
-fn token_keyword_name(token: &Token) -> Option<&'static str> {
+fn token_keyword_name(token: &Token<'_>) -> Option<&'static str> {
     match token {
         Token::Begin => Some("BEGIN"),
         Token::Commit => Some("COMMIT"),

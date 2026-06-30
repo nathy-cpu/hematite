@@ -1,6 +1,7 @@
 //! Parser-owned SQL literal and type names.
 
 use std::cmp::Ordering;
+use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SqlTypeName {
@@ -37,45 +38,44 @@ pub enum SqlTypeName {
 }
 
 impl SqlTypeName {
+    /// Canonical SQL spelling for the parameterless type names, returned as a
+    /// borrowed `&'static str` (no allocation). Parameterized types
+    /// (`CHAR(n)`, `DECIMAL(p, s)`, `ENUM(...)`) return `None` and must be
+    /// rendered through the `Display` impl / [`to_sql`](Self::to_sql).
+    pub fn as_static_str(&self) -> Option<&'static str> {
+        Some(match self {
+            SqlTypeName::Int8 => "INT8",
+            SqlTypeName::Int16 => "INT16",
+            SqlTypeName::Int => "INT",
+            SqlTypeName::Int64 => "INT64",
+            SqlTypeName::Int128 => "INT128",
+            SqlTypeName::UInt8 => "UINT8",
+            SqlTypeName::UInt16 => "UINT16",
+            SqlTypeName::UInt => "UINT",
+            SqlTypeName::UInt64 => "UINT64",
+            SqlTypeName::UInt128 => "UINT128",
+            SqlTypeName::Text => "TEXT",
+            SqlTypeName::Boolean => "BOOLEAN",
+            SqlTypeName::Float32 => "FLOAT32",
+            SqlTypeName::Float => "FLOAT",
+            SqlTypeName::Blob => "BLOB",
+            SqlTypeName::Date => "DATE",
+            SqlTypeName::Time => "TIME",
+            SqlTypeName::DateTime => "DATETIME",
+            SqlTypeName::TimeWithTimeZone => "TIME WITH TIME ZONE",
+            SqlTypeName::IntervalYearMonth => "INTERVAL YEAR TO MONTH",
+            SqlTypeName::IntervalDaySecond => "INTERVAL DAY TO SECOND",
+            SqlTypeName::Char(_)
+            | SqlTypeName::VarChar(_)
+            | SqlTypeName::Binary(_)
+            | SqlTypeName::VarBinary(_)
+            | SqlTypeName::Enum(_)
+            | SqlTypeName::Decimal { .. } => return None,
+        })
+    }
+
     pub fn to_sql(&self) -> String {
-        match self {
-            SqlTypeName::Int8 => "INT8".to_string(),
-            SqlTypeName::Int16 => "INT16".to_string(),
-            SqlTypeName::Int => "INT".to_string(),
-            SqlTypeName::Int64 => "INT64".to_string(),
-            SqlTypeName::Int128 => "INT128".to_string(),
-            SqlTypeName::UInt8 => "UINT8".to_string(),
-            SqlTypeName::UInt16 => "UINT16".to_string(),
-            SqlTypeName::UInt => "UINT".to_string(),
-            SqlTypeName::UInt64 => "UINT64".to_string(),
-            SqlTypeName::UInt128 => "UINT128".to_string(),
-            SqlTypeName::Text => "TEXT".to_string(),
-            SqlTypeName::Char(length) => format!("CHAR({length})"),
-            SqlTypeName::VarChar(length) => format!("VARCHAR({length})"),
-            SqlTypeName::Binary(length) => format!("BINARY({length})"),
-            SqlTypeName::VarBinary(length) => format!("VARBINARY({length})"),
-            SqlTypeName::Enum(values) => format!(
-                "ENUM({})",
-                values
-                    .iter()
-                    .map(|value| format!("'{}'", value.replace('\'', "''")))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            SqlTypeName::Boolean => "BOOLEAN".to_string(),
-            SqlTypeName::Float32 => "FLOAT32".to_string(),
-            SqlTypeName::Float => "FLOAT".to_string(),
-            SqlTypeName::Decimal { precision, scale } => {
-                format_numeric_type("DECIMAL", *precision, *scale)
-            }
-            SqlTypeName::Blob => "BLOB".to_string(),
-            SqlTypeName::Date => "DATE".to_string(),
-            SqlTypeName::Time => "TIME".to_string(),
-            SqlTypeName::DateTime => "DATETIME".to_string(),
-            SqlTypeName::TimeWithTimeZone => "TIME WITH TIME ZONE".to_string(),
-            SqlTypeName::IntervalYearMonth => "INTERVAL YEAR TO MONTH".to_string(),
-            SqlTypeName::IntervalDaySecond => "INTERVAL DAY TO SECOND".to_string(),
-        }
+        self.to_string()
     }
 
     pub fn supports_text_metadata(&self) -> bool {
@@ -86,11 +86,33 @@ impl SqlTypeName {
     }
 }
 
-fn format_numeric_type(name: &str, precision: Option<u32>, scale: Option<u32>) -> String {
-    match (precision, scale) {
-        (Some(precision), Some(scale)) => format!("{name}({precision}, {scale})"),
-        (Some(precision), None) => format!("{name}({precision})"),
-        (None, _) => name.to_string(),
+impl fmt::Display for SqlTypeName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(name) = self.as_static_str() {
+            return f.write_str(name);
+        }
+        match self {
+            SqlTypeName::Char(length) => write!(f, "CHAR({length})"),
+            SqlTypeName::VarChar(length) => write!(f, "VARCHAR({length})"),
+            SqlTypeName::Binary(length) => write!(f, "BINARY({length})"),
+            SqlTypeName::VarBinary(length) => write!(f, "VARBINARY({length})"),
+            SqlTypeName::Enum(values) => {
+                f.write_str("ENUM(")?;
+                for (index, value) in values.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "'{}'", value.replace('\'', "''"))?;
+                }
+                f.write_str(")")
+            }
+            SqlTypeName::Decimal { precision, scale } => match (precision, scale) {
+                (Some(precision), Some(scale)) => write!(f, "DECIMAL({precision}, {scale})"),
+                (Some(precision), None) => write!(f, "DECIMAL({precision})"),
+                (None, _) => f.write_str("DECIMAL"),
+            },
+            _ => unreachable!("parameterless type names are handled by as_static_str"),
+        }
     }
 }
 

@@ -26,6 +26,15 @@ impl Hematite {
         Ok(Self { connection })
     }
 
+    /// Create a file-based database with an explicit page-cache capacity (in pages).
+    ///
+    /// The default (see [`crate::catalog::CatalogEngine::DEFAULT_PAGE_CACHE_CAPACITY`]) is
+    /// usually appropriate; use this to size the cache for a known working set.
+    pub fn new_with_cache_capacity(database_path: &str, cache_capacity: usize) -> Result<Self> {
+        let connection = Connection::with_cache_capacity(database_path, cache_capacity)?;
+        Ok(Self { connection })
+    }
+
     /// Execute a SQL statement and return the result
     pub fn execute(&mut self, sql: &str) -> Result<StatementResult> {
         match self.connection.execute_result(sql)? {
@@ -107,7 +116,7 @@ impl Hematite {
         self.connection.execute_result(sql)
     }
 
-    pub fn iter_script<'a>(&'a mut self, sql: &str) -> Result<ScriptIter<'a>> {
+    pub fn iter_script<'a>(&'a mut self, sql: &'a str) -> Result<ScriptIter<'a>> {
         self.connection.iter_script(sql)
     }
 

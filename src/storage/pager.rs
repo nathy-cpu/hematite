@@ -294,6 +294,10 @@ pub struct Pager {
     /// Whether the current rollback journal contents must be synced before dirty pages can spill
     /// or flush to the main database file.
     journal_needs_sync: bool,
+    /// Fingerprint (raw bytes) of the persisted metadata page observed at the last read
+    /// refresh in rollback mode. Used to skip the page-cache reset on `begin_read` when the
+    /// committed on-disk state has not changed since the cache was last validated.
+    rollback_persisted_fingerprint: Option<Box<[u8]>>,
     #[cfg(test)]
     wal_visible_state_reload_count: usize,
 }
@@ -338,6 +342,7 @@ impl Pager {
             journal_record_count: 0,
             journal_header_len: 0,
             journal_needs_sync: false,
+            rollback_persisted_fingerprint: None,
             #[cfg(test)]
             wal_visible_state_reload_count: 0,
         };
@@ -370,6 +375,7 @@ impl Pager {
             journal_record_count: 0,
             journal_header_len: 0,
             journal_needs_sync: false,
+            rollback_persisted_fingerprint: None,
             #[cfg(test)]
             wal_visible_state_reload_count: 0,
         })

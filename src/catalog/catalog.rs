@@ -132,6 +132,14 @@ impl Catalog {
         Self::open_with_engine(CatalogEngine::new(path)?)
     }
 
+    /// Open or create a database with an explicit page-cache capacity (in pages).
+    pub fn open_or_create_with_cache_capacity<P: AsRef<std::path::Path>>(
+        path: P,
+        cache_capacity: usize,
+    ) -> Result<Self> {
+        Self::open_with_engine(CatalogEngine::with_cache_capacity(path, cache_capacity)?)
+    }
+
     pub fn open_in_memory() -> Result<Self> {
         Self::open_with_engine(CatalogEngine::new_in_memory()?)
     }

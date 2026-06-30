@@ -193,9 +193,19 @@ impl Pager {
             return Ok(());
         };
 
-        fs::create_dir_all(&dir_path)?;
         let path = self.wal_reader_sequence_path(sequence, next_wal_reader_registration_id())?;
-        let file = open_lock_file(&path)?;
+        // Open the per-reader lock file directly. The `.wal.readers` directory is created
+        // lazily only when the open fails with NotFound, so the steady-state path costs a
+        // single `openat` instead of a `create_dir_all` (mkdir + stat) on every read
+        // transaction.
+        let file = match open_reader_lock_file(&path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir_all(&dir_path)?;
+                open_reader_lock_file(&path)?
+            }
+            Err(err) => return Err(err.into()),
+        };
         try_lock_shared(&file)?;
         self.wal_reader_registration = Some(WalReaderRegistration {
             path,
@@ -341,6 +351,16 @@ fn open_lock_file(path: &Path) -> Result<File> {
         .write(true)
         .open(path)
         .map_err(Into::into)
+}
+
+/// Like [`open_lock_file`] but preserves the raw [`std::io::Error`] so callers can react to
+/// specific kinds (e.g. lazily creating the parent directory on `NotFound`).
+fn open_reader_lock_file(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(path)
 }
 
 #[cfg(unix)]
