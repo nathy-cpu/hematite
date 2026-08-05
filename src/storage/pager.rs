@@ -583,6 +583,27 @@ impl Pager {
 
         Ok(page)
     }
+
+    /// Zero-copy variant of `take_page_for_write` for callers that guarantee
+    /// this page will be committed via exactly one `write_page` call with no
+    /// other pager access to the same `page_id` in between. See
+    /// `PageCache::take_page_for_write_owned` for the exact contract.
+    pub(crate) fn take_page_for_write_owned(&mut self, page_id: PageId) -> Result<Page> {
+        self.check_error_state()?;
+        self.snapshot_original_page(page_id)?;
+        let page = self.cache_mut()?.take_page_for_write_owned(page_id);
+        Ok(page)
+    }
+
+    /// Build a fresh, zero-filled `Page` for `page_id` sourced from the
+    /// cache's recycled buffer pool instead of a raw heap allocation. Intended
+    /// for callers that are about to populate a brand-new page (e.g. a
+    /// b-tree split's new sibling) and will write it back via `write_page`,
+    /// which performs its own snapshot/checksum bookkeeping.
+    pub(crate) fn new_page_buffer(&mut self, page_id: PageId) -> Result<Page> {
+        let data = self.cache_mut()?.take_page_buffer();
+        Ok(Page { id: page_id, data })
+    }
 }
 
 impl Drop for Pager {

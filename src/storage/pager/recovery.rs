@@ -613,7 +613,7 @@ impl Pager {
             .peek(STORAGE_METADATA_PAGE_ID)
             .cloned()
             .unwrap_or(self.file_manager.read_page(STORAGE_METADATA_PAGE_ID)?);
-        if let Some(path) = &self.wal_path {
+        let frame_offsets = if let Some(path) = &self.wal_path {
             append_committed_frames_to_path(
                 path,
                 next_sequence,
@@ -622,8 +622,10 @@ impl Pager {
                 &self.page_checksums,
                 &metadata_page.data,
                 &frames,
-            )?;
-        }
+            )?
+        } else {
+            std::collections::HashMap::new()
+        };
         let mut updated_visible_state = if let Some(state) = &self.latest_wal_state {
             state.as_ref().clone()
         } else {
@@ -638,7 +640,8 @@ impl Pager {
             file_len_for_next_page_id(wal_next_page_id),
             wal_free_pages.clone(),
             self.page_checksums.clone(),
-            &frames,
+            frames,
+            &frame_offsets,
         )?;
         // Ensure the WAL path is set so on-demand page reads can access the file
         updated_visible_state.wal_path = self.wal_path.clone();

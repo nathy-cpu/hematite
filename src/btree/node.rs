@@ -290,8 +290,17 @@ impl BTreeNode {
             offsets.push(cell_pointer_from_header(&page, &header, index)?);
         }
         node.cell_offsets = offsets;
-        // BUG-02 fix: use exact per-cell sizing (reads key_len/value_len from page
-        // bytes) so the last cell's range is not over-estimated to PAGE_SIZE.
+        // BUG-02 fix: validate exact per-cell sizing (reads key_len/value_len
+        // from page bytes) up front, for every page constructed here, not
+        // just cells a caller happens to query. This is a deliberate
+        // defense-in-depth choice: `BTreeCursor::key_view`/`value_view` (used
+        // by the public cursor API) swallow per-cell decode errors via `.ok()`
+        // and report them as "no entry" rather than propagating
+        // `CorruptedData` — so eager, whole-page validation here is the only
+        // thing that reliably surfaces corruption on cells a cursor merely
+        // navigates past without directly reading. Deferring this to
+        // first-access (as the mutation-invalidation paths below do) would
+        // silently mask corruption instead of erroring.
         *node.cell_ranges_cache.borrow_mut() = Some(compute_cell_ranges_exact(
             &page,
             &header,
@@ -708,13 +717,9 @@ impl BTreeNode {
             offsets.push(cell_pointer_from_header(page, &header, i)?);
         }
         self.cell_offsets = offsets;
-        // BUG-02 fix: rebuild the cell-range cache with exact per-cell sizing
-        // so the last cell is not over-estimated to PAGE_SIZE.
-        *self.cell_ranges_cache.borrow_mut() = Some(compute_cell_ranges_exact(
-            page,
-            &header,
-            &self.cell_offsets,
-        )?);
+        // Invalidate the cell-range cache; it's rebuilt lazily (with exact
+        // per-cell sizing, BUG-02 fix) on next access via `cell_range_for_index`.
+        *self.cell_ranges_cache.borrow_mut() = None;
         self.payload_len = PAGE_SIZE.saturating_sub(header.cell_content_start as usize);
         self.keys.clear();
         self.values.clear();
@@ -759,7 +764,7 @@ impl BTreeNode {
 
         // Allocate a fresh leaf page.
         let new_page_id = storage.allocate_page()?;
-        let mut new_page = Page::new(new_page_id);
+        let mut new_page = storage.new_page_buffer(new_page_id)?;
         // Initialize page bytes as an empty leaf.
         initialize_page_bytes(&mut new_page, PageKind::LeafTable)?;
 
@@ -965,7 +970,7 @@ impl BTreeNode {
         }
 
         let new_page_id = storage.allocate_page()?;
-        let mut new_page = Page::new(new_page_id);
+        let mut new_page = storage.new_page_buffer(new_page_id)?;
         let mut new_node = Self::new_leaf(new_page_id);
         let split_pos = if is_append {
             self.keys.len() - 1
@@ -982,7 +987,7 @@ impl BTreeNode {
         self.key_count = self.keys.len();
         let split_key = new_node.keys[0].clone();
 
-        let mut current_page = storage.read_page(self.page_id)?;
+        let mut current_page = storage.take_page_for_write(self.page_id)?;
         self.to_page(&mut current_page)?;
         storage.write_page(current_page)?;
         new_node.to_page(&mut new_page)?;
@@ -1014,7 +1019,7 @@ impl BTreeNode {
         }
 
         let new_page_id = storage.allocate_page()?;
-        let mut new_page = Page::new(new_page_id);
+        let mut new_page = storage.new_page_buffer(new_page_id)?;
         let mut new_node = Self::new_internal(new_page_id);
 
         let split_pos = if is_append {
@@ -1034,7 +1039,7 @@ impl BTreeNode {
         self.key_count = self.keys.len();
         new_node.key_count = new_node.keys.len();
 
-        let mut current_page = storage.read_page(self.page_id)?;
+        let mut current_page = storage.take_page_for_write(self.page_id)?;
         self.to_page(&mut current_page)?;
         storage.write_page(current_page)?;
         new_node.to_page(&mut new_page)?;
@@ -1257,12 +1262,21 @@ impl BTreeNode {
             )));
         }
 
-        // Populate cache on first access.  The cache is built with exact sizes
-        // in from_shared_page; if it is missing here (e.g. after in-place
-        // mutation that cleared the cache) fall back to the offset-neighbour
-        // approximation so callers still work.
+        // Populate the cache lazily on first access, using the exact-sizing
+        // algorithm (reads key_len/value_len from the page bytes) so a node
+        // that's never had its ranges queried before pays this cost at most
+        // once, and so that validation is always the corrected exact form
+        // rather than the offset-neighbour approximation.
         if self.cell_ranges_cache.borrow().is_none() {
-            *self.cell_ranges_cache.borrow_mut() = Some(compute_cell_ranges(&self.cell_offsets)?);
+            let page = self.raw_page.as_ref().ok_or_else(|| {
+                HematiteError::CorruptedData("Missing raw page for lazy node".to_string())
+            })?;
+            let header = BTreePageHeaderV3::parse(page, is_page_one(self.page_id))?;
+            *self.cell_ranges_cache.borrow_mut() = Some(compute_cell_ranges_exact(
+                page,
+                &header,
+                &self.cell_offsets,
+            )?);
         }
         self.cell_ranges_cache
             .borrow()
@@ -1272,41 +1286,6 @@ impl BTreeNode {
                 HematiteError::StorageError(format!("Cell index {} out of bounds in cache", index))
             })
     }
-}
-
-fn compute_cell_ranges(cell_offsets: &[u16]) -> Result<Vec<(usize, usize)>> {
-    let mut indexed_offsets = cell_offsets
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(index, offset)| (offset as usize, index))
-        .collect::<Vec<_>>();
-    indexed_offsets.sort_unstable_by_key(|(offset, _)| *offset);
-
-    if indexed_offsets
-        .windows(2)
-        .any(|window| window[0].0 == window[1].0)
-    {
-        return Err(HematiteError::CorruptedData(
-            "Duplicate B-tree cell pointers".to_string(),
-        ));
-    }
-
-    let mut ranges = vec![(0usize, 0usize); cell_offsets.len()];
-    for (sorted_index, (start, original_index)) in indexed_offsets.iter().copied().enumerate() {
-        let end = indexed_offsets
-            .get(sorted_index + 1)
-            .map(|(next_start, _)| *next_start)
-            .unwrap_or(PAGE_SIZE);
-        if start >= end || end > PAGE_SIZE {
-            return Err(HematiteError::CorruptedData(
-                "B-tree cell pointer ordering is invalid".to_string(),
-            ));
-        }
-        ranges[original_index] = (start, end);
-    }
-
-    Ok(ranges)
 }
 
 /// Exact-sizing variant of compute_cell_ranges that reads key_len/value_len
@@ -1320,17 +1299,37 @@ fn compute_cell_ranges_exact(
     header: &BTreePageHeaderV3,
     cell_offsets: &[u16],
 ) -> Result<Vec<(usize, usize)>> {
-    let mut ranges = Vec::with_capacity(cell_offsets.len());
-    for &off in cell_offsets {
-        let start = off as usize;
-        let size = compute_cell_size(page, header, start)?;
-        ranges.push((start, start + size));
+    // Sort (offset, original_index) pairs once so both the duplicate check and
+    // the overlap check can be done against this single ordering, instead of
+    // computing exact ranges in cell-index order and then cloning the whole
+    // vec just to re-sort it for validation.
+    let mut indexed_offsets: Vec<(usize, usize)> = cell_offsets
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, offset)| (offset as usize, index))
+        .collect();
+    indexed_offsets.sort_unstable_by_key(|(offset, _)| *offset);
+
+    if indexed_offsets
+        .windows(2)
+        .any(|window| window[0].0 == window[1].0)
+    {
+        return Err(HematiteError::CorruptedData(
+            "Duplicate B-tree cell pointers".to_string(),
+        ));
     }
 
-    let mut sorted_ranges = ranges.clone();
-    sorted_ranges.sort_unstable_by_key(|r| r.0);
-    for window in sorted_ranges.windows(2) {
-        if window[0].1 > window[1].0 {
+    let mut ranges = vec![(0usize, 0usize); cell_offsets.len()];
+    for &(start, original_index) in &indexed_offsets {
+        let size = compute_cell_size(page, header, start)?;
+        ranges[original_index] = (start, start + size);
+    }
+
+    for window in indexed_offsets.windows(2) {
+        let (_, left_index) = window[0];
+        let (right_start, _) = window[1];
+        if ranges[left_index].1 > right_start {
             return Err(HematiteError::CorruptedData(
                 "Overlapping B-tree cells or duplicate pointers".to_string(),
             ));

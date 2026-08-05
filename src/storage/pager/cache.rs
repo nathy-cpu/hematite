@@ -25,8 +25,12 @@ struct CachedPageEntry {
 #[derive(Debug, Clone)]
 pub(crate) struct PageCache {
     capacity: usize,
-    /// Pre-allocated 4KB page data buffers returned to this pool on eviction.
-    /// Sized to `capacity` at construction so no allocation is needed after startup.
+    /// 4KB page data buffers recycled from evicted pages, reused instead of
+    /// freed/reallocated on the next page fault. Starts empty and grows
+    /// lazily with actual eviction/use -- `capacity` is only an upper bound
+    /// on cache occupancy, not the real working set, so pre-filling this to
+    /// `capacity` at construction would allocate `capacity * PAGE_SIZE`
+    /// bytes upfront regardless of how many pages a workload ever touches.
     free_buffers: Vec<Vec<u8>>,
     entries: HashMap<PageId, CachedPageEntry>,
     lru_head: Option<PageId>,
@@ -61,6 +65,11 @@ impl PageCache {
     /// Take a zeroed 4KB buffer from the pool, allocating only if the pool is empty.
     pub(crate) fn take_page_buffer(&mut self) -> Vec<u8> {
         self.free_buffers.pop().unwrap_or_else(|| vec![0u8; PAGE_SIZE])
+    }
+
+    #[cfg(test)]
+    pub(crate) fn free_buffer_pool_len(&self) -> usize {
+        self.free_buffers.len()
     }
 
     /// Return a page data buffer to the pool after zeroing it.
@@ -418,17 +427,49 @@ impl PageCache {
     /// This implements a simple copy-on-write helper at the cache level:
     /// - ensures a cache entry exists for `page_id`;
     /// - marks the cached entry as writeable;
-    /// - returns a cloned `Page` (caller can mutate and then call `put`/write back).
+    /// - returns a copy of the `Page` sourced from the buffer pool (caller can
+    ///   mutate and then call `put`/write back).
     ///
     /// Note: this does not attempt in-place mutation of the cached Arc; it hands the
     /// caller an owned copy. Higher-level pager APIs can use this to avoid calling
     /// `entry.page.as_ref().clone()` at call sites and centralize the copy behavior.
     pub(crate) fn take_page_for_write(&mut self, page_id: PageId) -> Page {
         self.ensure_entry(page_id);
+        let mut data = self.take_page_buffer();
         let entry = self.entries.get_mut(&page_id).expect("entry should exist");
         entry.meta.writeable = true;
-        // Clone the page bytes into an owned Page that the caller can mutate.
-        (*entry.page).clone()
+        data.copy_from_slice(&entry.page.data);
+        Page { id: page_id, data }
+    }
+
+    /// Zero-copy fast path for `take_page_for_write`: if the cached `Arc<Page>`
+    /// is uniquely held (no other readers/cursors pinning it), this moves the
+    /// existing buffer out instead of copying. Falls back to a pooled-buffer
+    /// copy (identical to `take_page_for_write`) when the Arc is shared.
+    ///
+    /// Contract: callers must guarantee this page's content will be committed
+    /// via exactly one `write_page`/`put` call with no other pager access to
+    /// the same `page_id` in between — otherwise the placeholder buffer left
+    /// behind here could be observed by another accessor. Only use this at
+    /// call sites that unconditionally commit their mutation.
+    pub(crate) fn take_page_for_write_owned(&mut self, page_id: PageId) -> Page {
+        self.ensure_entry(page_id);
+        let placeholder = Arc::new(Page {
+            id: page_id,
+            data: self.take_page_buffer(),
+        });
+        let entry = self.entries.get_mut(&page_id).expect("entry should exist");
+        entry.meta.writeable = true;
+        let arc = std::mem::replace(&mut entry.page, placeholder);
+        match Arc::try_unwrap(arc) {
+            Ok(page) => page,
+            Err(shared_arc) => {
+                let mut data = self.take_page_buffer();
+                data.copy_from_slice(&shared_arc.data);
+                self.entries.get_mut(&page_id).expect("entry should exist").page = shared_arc;
+                Page { id: page_id, data }
+            }
+        }
     }
 
     fn attach_lru_front(&mut self, page_id: PageId) {

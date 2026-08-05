@@ -1660,6 +1660,119 @@ mod value_store_tests {
     }
 }
 
+mod compaction_tests {
+    use crate::btree::bytes::ByteTreeStore;
+    use crate::btree::compaction::{auto_vacuum, build_parent_map, BUILD_PARENT_MAP_CALLS};
+    use crate::error::Result;
+    use crate::storage::{Pager, PAGE_SIZE};
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn auto_vacuum_relocates_overflow_and_internal_pages_in_a_single_parent_map_build(
+    ) -> Result<()> {
+        let trees = ByteTreeStore::new(Pager::new_in_memory(100)?);
+
+        // Tree A will be dropped, scattering free pages among tree B's
+        // higher-numbered pages -- forcing more than one relocation. It needs
+        // enough rows to span multiple leaf pages (plus an internal root),
+        // not just one, so deleting it frees more than a single page.
+        let root_a = trees.create_tree()?;
+        {
+            let mut tree_a = trees.open_tree(root_a)?;
+            for i in 0..300u32 {
+                tree_a.insert(&i.to_be_bytes(), &vec![i as u8; 32])?;
+            }
+        }
+
+        // Tree B: enough rows to span multiple internal + leaf pages, plus a
+        // value large enough to force an overflow chain -- exercising both
+        // the `RelocationChildren::Internal` and `RelocationChildren::Leaf`
+        // (overflow-pointer) patch paths in `relocate_page`.
+        let root_b = trees.create_tree()?;
+        {
+            let mut tree_b = trees.open_tree(root_b)?;
+            for i in 0..80u32 {
+                tree_b.insert(&i.to_be_bytes(), &vec![i as u8; 32])?;
+            }
+            tree_b.insert(b"blob", &vec![0x5A; PAGE_SIZE * 2])?;
+        }
+
+        trees.delete_tree(root_a)?;
+
+        let free_before = trees.free_page_ids()?.len();
+        assert!(
+            free_before > 1,
+            "expected multiple scattered free slots (got {}), to force more than one relocation",
+            free_before
+        );
+
+        BUILD_PARENT_MAP_CALLS.store(0, Ordering::SeqCst);
+        let storage = trees.shared_storage();
+        let mut roots = [root_b];
+        auto_vacuum(&storage, &mut roots, |_old, _new| Ok(()))?;
+
+        assert_eq!(
+            BUILD_PARENT_MAP_CALLS.load(Ordering::SeqCst),
+            1,
+            "a single auto_vacuum() call should rebuild the parent map at most once, \
+             regardless of how many pages it relocates"
+        );
+
+        assert_eq!(
+            trees.free_page_ids()?.len(),
+            0,
+            "auto_vacuum should reclaim every free page"
+        );
+
+        // Cross-check: the incrementally-maintained parent map (verified
+        // implicitly by successful relocation above) must be consistent with
+        // a from-scratch rebuild once vacuum has settled -- i.e. re-deriving
+        // the map from the post-vacuum tree must succeed without error.
+        {
+            let pager = storage
+                .read()
+                .map_err(|_| crate::error::HematiteError::InternalError("lock poisoned".into()))?;
+            build_parent_map(&pager, &roots)?;
+        }
+
+        // All of tree B's data, including the overflow-bearing value, must
+        // survive relocation intact.
+        let tree_b = trees.open_tree(roots[0])?;
+        for i in 0..80u32 {
+            assert_eq!(tree_b.get(&i.to_be_bytes())?, Some(vec![i as u8; 32]));
+        }
+        assert_eq!(tree_b.get(b"blob")?, Some(vec![0x5A; PAGE_SIZE * 2]));
+
+        Ok(())
+    }
+
+    #[test]
+    fn auto_vacuum_is_idempotent_when_nothing_needs_relocating() -> Result<()> {
+        let trees = ByteTreeStore::new(Pager::new_in_memory(100)?);
+        let root = trees.create_tree()?;
+        {
+            let mut tree = trees.open_tree(root)?;
+            for i in 0..10u32 {
+                tree.insert(&i.to_be_bytes(), &[i as u8])?;
+            }
+        }
+
+        BUILD_PARENT_MAP_CALLS.store(0, Ordering::SeqCst);
+        let storage = trees.shared_storage();
+        let mut roots = [root];
+        auto_vacuum(&storage, &mut roots, |_old, _new| Ok(()))?;
+
+        assert_eq!(
+            BUILD_PARENT_MAP_CALLS.load(Ordering::SeqCst),
+            0,
+            "auto_vacuum should not build a parent map at all when there is nothing to relocate"
+        );
+        assert_eq!(roots[0], root, "root should be unchanged with nothing to relocate");
+
+        Ok(())
+    }
+}
+
 mod tree_tests {
     use crate::btree::bytes::ByteTreeStore;
     use crate::btree::node::BTreeNode;
@@ -1777,6 +1890,43 @@ mod tree_tests {
 
         let err = lazy.search(&BTreeKey::new(vec![2])).unwrap_err();
         assert!(matches!(err, crate::error::HematiteError::CorruptedData(_)));
+        assert!(!lazy.is_decoded);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_btree_lazy_search_reports_overlapping_cells_as_corruption() -> Result<()> {
+        let page_id = 2;
+        let mut node = BTreeNode::new_leaf(page_id);
+        node.keys.push_back(BTreeKey::new(vec![0]));
+        node.values.push_back(BTreeValue::new(vec![5]));
+        node.keys.push_back(BTreeKey::new(vec![0]));
+        node.values.push_back(BTreeValue::new(vec![5]));
+
+        let mut page = Page::new(page_id);
+        BTreeNode::to_page(&node, &mut page)?;
+
+        let mut lazy = BTreeNode::from_page(page)?;
+        // Shift the earlier cell's declared offset forward by 2 bytes so it
+        // reads into its own header/payload bytes as a *different*, smaller
+        // cell -- overlapping the later cell's byte range without being an
+        // exact duplicate pointer (distinct from the case covered above).
+        let (lower_index, higher_index) = if lazy.cell_offsets[0] < lazy.cell_offsets[1] {
+            (0, 1)
+        } else {
+            (1, 0)
+        };
+        lazy.cell_offsets[lower_index] += 2;
+        assert!(lazy.cell_offsets[lower_index] != lazy.cell_offsets[higher_index]);
+        *lazy.cell_ranges_cache.borrow_mut() = None;
+
+        let err = lazy.search(&BTreeKey::new(vec![0])).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::HematiteError::CorruptedData(ref message)
+                if message.contains("Overlapping")
+        ));
         assert!(!lazy.is_decoded);
 
         Ok(())

@@ -3,6 +3,7 @@ use crate::btree::value_store::StoredValueLayout;
 use crate::btree::BTreeValue;
 use crate::btree::NodeType;
 use crate::error::{HematiteError, Result};
+use crate::storage::format::PageKind;
 use crate::storage::{Page, PageId, Pager, INVALID_PAGE_ID};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
@@ -23,10 +24,21 @@ pub(crate) enum PageParent {
     },
 }
 
+/// Counts calls to `build_parent_map`, so tests can assert that a single
+/// `auto_vacuum()` call rebuilds the parent map at most once regardless of
+/// how many pages it relocates -- a regression guard for the O(1)-per-call
+/// invariant this module relies on.
+#[cfg(test)]
+pub(crate) static BUILD_PARENT_MAP_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 pub(crate) fn build_parent_map(
     pager: &Pager,
     roots: &[PageId],
 ) -> Result<HashMap<PageId, PageParent>> {
+    #[cfg(test)]
+    BUILD_PARENT_MAP_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
     let mut parent_map = HashMap::new();
     let mut visited = HashSet::new();
 
@@ -58,12 +70,16 @@ fn trace_tree(
 
     parent_map.insert(page_id, parent);
 
-    let page = pager.read_page(page_id)?;
-    let node = BTreeNode::from_page_decoded(page)?;
+    // Zero-copy lazy view: parent-map construction only needs child page ids
+    // (internal nodes) or overflow pointers (leaf values), never full key/value
+    // bytes, so avoid the full decode-into-owned-buffers path here.
+    let page = pager.read_page_shared(page_id)?;
+    let node = BTreeNode::from_shared_page(page)?;
 
     match node.node_type {
         NodeType::Internal => {
-            for (i, &child_page_id) in node.children.iter().enumerate() {
+            for i in 0..=node.key_count {
+                let child_page_id = node.get_child_procedural(i)?;
                 if child_page_id >= 2 {
                     trace_tree(
                         pager,
@@ -79,8 +95,8 @@ fn trace_tree(
             }
         }
         NodeType::Leaf => {
-            for (i, value) in node.values.iter().enumerate() {
-                let layout = StoredValueLayout::decode(&value.data)?;
+            for i in 0..node.key_count {
+                let layout = StoredValueLayout::decode(node.get_value_view(i)?)?;
                 if layout.overflow_first_page != INVALID_PAGE_ID && layout.overflow_first_page >= 2
                 {
                     trace_overflow(
@@ -131,6 +147,56 @@ fn trace_overflow(
     Ok(())
 }
 
+/// What a page being relocated points to -- the exact set of parent-map
+/// entries that need patching after its id changes, bounded by `BTREE_ORDER`
+/// (a page's own fan-out), not by database size.
+enum RelocationChildren {
+    Internal(Vec<PageId>),
+    Leaf(Vec<(usize, PageId)>),
+    Overflow(Option<PageId>),
+}
+
+/// Determines what `page` points to (its children, its leaf cells' overflow
+/// pointers, or its overflow-chain successor) using the same zero-copy lazy
+/// accessors as `trace_tree`, so this never decodes key/value bytes into
+/// owned buffers just to discover topology.
+fn collect_relocation_children(page: Arc<Page>) -> Result<RelocationChildren> {
+    let kind = PageKind::from_byte(page.data[0])?;
+    match kind {
+        PageKind::LeafTable | PageKind::LeafIndex => {
+            let node = BTreeNode::from_shared_page(page)?;
+            let mut overflow_pointers = Vec::new();
+            for i in 0..node.key_count {
+                let layout = StoredValueLayout::decode(node.get_value_view(i)?)?;
+                if layout.overflow_first_page != INVALID_PAGE_ID && layout.overflow_first_page >= 2
+                {
+                    overflow_pointers.push((i, layout.overflow_first_page));
+                }
+            }
+            Ok(RelocationChildren::Leaf(overflow_pointers))
+        }
+        PageKind::InteriorTable | PageKind::InteriorIndex => {
+            let node = BTreeNode::from_shared_page(page)?;
+            let mut children = Vec::with_capacity(node.key_count + 1);
+            for i in 0..=node.key_count {
+                children.push(node.get_child_procedural(i)?);
+            }
+            Ok(RelocationChildren::Internal(children))
+        }
+        PageKind::Overflow => {
+            let next_page_id =
+                u32::from_be_bytes([page.data[4], page.data[5], page.data[6], page.data[7]]);
+            Ok(RelocationChildren::Overflow(
+                (next_page_id != 0 && next_page_id >= 2).then_some(next_page_id),
+            ))
+        }
+        other => Err(HematiteError::CorruptedData(format!(
+            "Unexpected page kind {:?} encountered during vacuum relocation",
+            other
+        ))),
+    }
+}
+
 fn relocate_page<F>(
     storage: &Arc<RwLock<Pager>>,
     old_page_id: PageId,
@@ -141,13 +207,26 @@ fn relocate_page<F>(
 where
     F: FnMut(PageId, PageId) -> Result<()>,
 {
-    // 1. Read the old page data.
-    let mut page = {
+    // 1. Read the old page data and determine what it points to (children,
+    //    overflow pointers, or overflow-chain successor) before consuming it
+    //    into the id-flip below. Wrapping the freshly-read, uniquely-owned
+    //    page in an `Arc` here costs only a refcount bump, not a copy: the
+    //    lazy `BTreeNode` built inside `collect_relocation_children` only
+    //    clones the small set of pointers a page can hold (bounded by
+    //    `BTREE_ORDER`), so `Arc::try_unwrap` below reclaims the original
+    //    page buffer with no 4KB copy.
+    let old_page_arc = {
         let pager = storage
             .read()
             .map_err(|_| HematiteError::InternalError("Pager lock is poisoned".to_string()))?;
-        pager.read_page(old_page_id)?
+        Arc::new(pager.read_page(old_page_id)?)
     };
+    let outgoing = collect_relocation_children(old_page_arc.clone())?;
+    let mut page = Arc::try_unwrap(old_page_arc).map_err(|_| {
+        HematiteError::InternalError(
+            "Relocated page unexpectedly retained by another reference".to_string(),
+        )
+    })?;
 
     // 2. Change the page ID to new_page_id and write to pager.
     page.id = new_page_id;
@@ -233,23 +312,48 @@ where
         }
     }
 
-    // 5. Update the parent map dynamically.
+    // 5. Update the parent map: re-key the moved page's own entry (who
+    //    points at it), then patch exactly the entries describing what the
+    //    moved page points to (its children / overflow pointers / overflow
+    //    successor, collected in step 1) -- bounded by the page's own fan-out,
+    //    not by the size of the whole map.
     if let Some(parent_info) = parent_map.remove(&old_page_id) {
         parent_map.insert(new_page_id, parent_info);
     }
-    for val in parent_map.values_mut() {
-        match val {
-            PageParent::BTreeInternal { parent_page_id, .. } if *parent_page_id == old_page_id => {
-                *parent_page_id = new_page_id;
+    match outgoing {
+        RelocationChildren::Internal(children) => {
+            for (child_index, child_id) in children.into_iter().enumerate() {
+                if child_id >= 2 {
+                    parent_map.insert(
+                        child_id,
+                        PageParent::BTreeInternal {
+                            parent_page_id: new_page_id,
+                            child_index,
+                        },
+                    );
+                }
             }
-            PageParent::BTreeLeafCell { leaf_page_id, .. } if *leaf_page_id == old_page_id => {
-                *leaf_page_id = new_page_id;
-            }
-            PageParent::OverflowPredecessor { pred_page_id } if *pred_page_id == old_page_id => {
-                *pred_page_id = new_page_id;
-            }
-            _ => {}
         }
+        RelocationChildren::Leaf(overflow_pointers) => {
+            for (cell_index, overflow_page_id) in overflow_pointers {
+                parent_map.insert(
+                    overflow_page_id,
+                    PageParent::BTreeLeafCell {
+                        leaf_page_id: new_page_id,
+                        cell_index,
+                    },
+                );
+            }
+        }
+        RelocationChildren::Overflow(Some(next_page_id)) => {
+            parent_map.insert(
+                next_page_id,
+                PageParent::OverflowPredecessor {
+                    pred_page_id: new_page_id,
+                },
+            );
+        }
+        RelocationChildren::Overflow(None) => {}
     }
 
     // 6. Deallocate the old page ID.
@@ -271,6 +375,14 @@ pub fn auto_vacuum<F>(
 where
     F: FnMut(PageId, PageId) -> Result<()>,
 {
+    // Built lazily on the first relocation actually needed, then reused for
+    // every remaining iteration of this call: relocation never changes tree
+    // topology (only a page's id and exactly one incoming pointer), so the
+    // parent/child graph stays valid across the whole loop and only needs
+    // patching at the moved page's own outgoing edges (done inside
+    // `relocate_page`), not a full rebuild per relocation.
+    let mut parent_map: Option<HashMap<PageId, PageParent>> = None;
+
     loop {
         // Read lock storage to check state
         let (next_page_id, mut free_pages) = {
@@ -308,20 +420,21 @@ where
             break;
         }
 
-        // We build parent map for this iteration.
-        let parent_map = {
+        if parent_map.is_none() {
             let pager = storage
                 .read()
                 .map_err(|_| HematiteError::InternalError("Pager lock is poisoned".to_string()))?;
-            build_parent_map(&pager, roots)?
-        };
+            parent_map = Some(build_parent_map(&pager, roots)?);
+        }
+        let map = parent_map
+            .as_mut()
+            .expect("parent_map was just initialized above");
 
-        let mut parent_map_mut = parent_map;
         relocate_page(
             storage,
             highest_page_id,
             first_free,
-            &mut parent_map_mut,
+            map,
             |old_id, new_id| {
                 update_root(old_id, new_id)?;
                 for r in roots.iter_mut() {

@@ -19,7 +19,7 @@ use crate::btree::node::SearchResult;
 use crate::btree::KeyValueCodec;
 use crate::btree::{BTreeKey, BTreeValue, NodeType};
 use crate::error::{HematiteError, Result};
-use crate::storage::{Page, PageId, Pager};
+use crate::storage::{PageId, Pager};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 use super::node;
@@ -180,7 +180,8 @@ impl BTreeIndex {
         value: BTreeValue,
     ) -> Result<InsertResult> {
         let shared = pager.read_page_shared(page_id)?;
-        let mut node = BTreeNode::from_shared_page(shared.clone())?;
+        let shared_id = shared.id;
+        let mut node = BTreeNode::from_shared_page(shared)?;
 
         match node.node_type {
             NodeType::Leaf => {
@@ -189,7 +190,7 @@ impl BTreeIndex {
                 // bytes before overwriting.
                 if let Some(idx) = node.exact_key_index(&key)? {
                     let old_value = BTreeValue::new(node.get_value_view(idx)?.to_vec());
-                    let mut page = pager.take_page_for_write(shared.id)?;
+                    let mut page = pager.take_page_for_write(shared_id)?;
 
                     if node.try_update_leaf_in_place(&mut page, &key, &value)? {
                         pager.write_page(page)?;
@@ -229,7 +230,7 @@ impl BTreeIndex {
                 }
 
                 // New key: no existing value to return.
-                let mut page = pager.take_page_for_write(shared.id)?;
+                let mut page = pager.take_page_for_write(shared_id)?;
 
                 if node.try_insert_leaf_in_place(&mut page, &key, &value)? {
                     pager.write_page(page)?;
@@ -273,7 +274,7 @@ impl BTreeIndex {
 
                 if let Some((split_key, split_page_id)) = child_result.split {
                     // Try in-place insert first (no decode needed).
-                    let mut page = pager.take_page_for_write(shared.id)?;
+                    let mut page = pager.take_page_for_write(shared_id)?;
                     if node.try_insert_internal_in_place(&mut page, &split_key, split_page_id)? {
                         pager.write_page(page)?;
                         Ok(InsertResult {
@@ -316,8 +317,8 @@ impl BTreeIndex {
         right_page_id: PageId,
     ) -> Result<()> {
         let left_child_page_id = pager.allocate_page()?;
-        let root_snapshot = pager.read_page(self.root_page_id)?;
-        let mut left_child_page = Page::new(left_child_page_id);
+        let root_snapshot = pager.read_page_shared(self.root_page_id)?;
+        let mut left_child_page = pager.new_page_buffer(left_child_page_id)?;
 
         // If the old root is page 0, the first DATABASE_HEADER_SIZE bytes are the
         // database header and must not be copied into a regular b-tree page.
@@ -343,7 +344,7 @@ impl BTreeIndex {
         new_root.children.push_back(left_child_page_id);
         new_root.children.push_back(right_page_id);
 
-        let mut root_page = Page::new(self.root_page_id);
+        let mut root_page = pager.new_page_buffer(self.root_page_id)?;
         BTreeNode::to_page(&new_root, &mut root_page)?;
 
         // If the root lives at page 0 we must preserve the database header bytes
@@ -361,7 +362,7 @@ impl BTreeIndex {
         } else {
             // `root_snapshot` was read earlier in this function; reuse it to preserve
             // the database header region that lives at the start of page 0.
-            let mut merged = Page::new(self.root_page_id);
+            let mut merged = pager.new_page_buffer(self.root_page_id)?;
             // Start with the existing snapshot so the DB header remains intact.
             merged.data.copy_from_slice(&root_snapshot.data);
             let copy_len = crate::storage::PAGE_SIZE - header_offset;
@@ -430,11 +431,17 @@ impl BTreeIndex {
         key: &BTreeKey,
     ) -> Result<Option<BTreeValue>> {
         let shared = pager.read_page_shared(page_id)?;
+        let shared_id = shared.id;
         let mut lazy_node = BTreeNode::from_shared_page(shared.clone())?;
         if lazy_node.node_type == NodeType::Leaf {
             if let Some(index) = lazy_node.exact_key_index(key)? {
                 let value = lazy_node.get_value_procedural(index)?;
-                let mut page = pager.take_page_for_write(shared.id)?;
+                // Drop this call's own pins on the cached page (the local
+                // `shared` handle and the node's internal `raw_page` clone) so
+                // the pager's zero-copy fast path can detect unique ownership.
+                lazy_node.raw_page = None;
+                drop(shared);
+                let mut page = pager.take_page_for_write_owned(shared_id)?;
                 lazy_node.try_remove_cell_in_place(&mut page, index)?;
                 pager.write_page(page)?;
                 return Ok(Some(value));
@@ -463,7 +470,7 @@ impl BTreeIndex {
                 }
 
                 if node_modified {
-                    let mut page = pager.read_page(page_id)?;
+                    let mut page = pager.take_page_for_write(page_id)?;
                     node.to_page(&mut page)?;
                     pager.write_page(page)?;
                 }
@@ -482,10 +489,10 @@ impl BTreeIndex {
 
         if node.keys.is_empty() && !node.children.is_empty() {
             let child_page_id = node.children[0];
-            let child_page = pager.read_page(child_page_id)?;
+            let child_page = pager.read_page_shared(child_page_id)?;
             // Read an owned snapshot of the existing root page so we preserve any
             // database-header bytes that live at the start of page 0.
-            let mut root_page = pager.read_page(self.root_page_id)?;
+            let mut root_page = pager.take_page_for_write(self.root_page_id)?;
 
             if self.root_page_id == 0 {
                 let header_offset = crate::storage::format::DATABASE_HEADER_SIZE;
@@ -554,12 +561,12 @@ impl BTreeIndex {
         child_index: usize,
         left_sibling_id: PageId,
     ) -> Result<bool> {
-        let left_page = pager.read_page(left_sibling_id)?;
-        let mut left_sibling = BTreeNode::from_page_decoded(left_page)?;
+        let left_page = pager.read_page_shared(left_sibling_id)?;
+        let mut left_sibling = BTreeNode::from_shared_page_decoded(left_page)?;
 
         let child_id = parent.children[child_index];
-        let child_page = pager.read_page(child_id)?;
-        let mut child_node = BTreeNode::from_page_decoded(child_page)?;
+        let child_page = pager.read_page_shared(child_id)?;
+        let mut child_node = BTreeNode::from_shared_page_decoded(child_page)?;
 
         if left_sibling.node_type != child_node.node_type {
             return Err(HematiteError::StorageError(
@@ -599,9 +606,9 @@ impl BTreeIndex {
             }
         }
 
-        let mut write_left = Page::new(left_sibling_id);
+        let mut write_left = pager.new_page_buffer(left_sibling_id)?;
         left_sibling.to_page(&mut write_left)?;
-        let mut write_child = Page::new(child_id);
+        let mut write_child = pager.new_page_buffer(child_id)?;
         child_node.to_page(&mut write_child)?;
         pager.write_page(write_left)?;
         pager.write_page(write_child)?;
@@ -616,12 +623,12 @@ impl BTreeIndex {
         child_index: usize,
         right_sibling_id: PageId,
     ) -> Result<bool> {
-        let right_page = pager.read_page(right_sibling_id)?;
-        let mut right_sibling = BTreeNode::from_page_decoded(right_page)?;
+        let right_page = pager.read_page_shared(right_sibling_id)?;
+        let mut right_sibling = BTreeNode::from_shared_page_decoded(right_page)?;
 
         let child_id = parent.children[child_index];
-        let child_page = pager.read_page(child_id)?;
-        let mut child_node = BTreeNode::from_page_decoded(child_page)?;
+        let child_page = pager.read_page_shared(child_id)?;
+        let mut child_node = BTreeNode::from_shared_page_decoded(child_page)?;
 
         if right_sibling.node_type != child_node.node_type {
             return Err(HematiteError::StorageError(
@@ -667,9 +674,9 @@ impl BTreeIndex {
             }
         }
 
-        let mut write_right = Page::new(right_sibling_id);
+        let mut write_right = pager.new_page_buffer(right_sibling_id)?;
         right_sibling.to_page(&mut write_right)?;
-        let mut write_child = Page::new(child_id);
+        let mut write_child = pager.new_page_buffer(child_id)?;
         child_node.to_page(&mut write_child)?;
         pager.write_page(write_right)?;
         pager.write_page(write_child)?;
@@ -688,11 +695,11 @@ impl BTreeIndex {
         let left_sibling_id = parent.children[child_index - 1];
         let child_id = parent.children[child_index];
 
-        let left_page = pager.read_page(left_sibling_id)?;
-        let mut left_sibling = BTreeNode::from_page_decoded(left_page)?;
+        let left_page = pager.read_page_shared(left_sibling_id)?;
+        let mut left_sibling = BTreeNode::from_shared_page_decoded(left_page)?;
 
-        let child_page = pager.read_page(child_id)?;
-        let mut child_node = BTreeNode::from_page_decoded(child_page)?;
+        let child_page = pager.read_page_shared(child_id)?;
+        let mut child_node = BTreeNode::from_shared_page_decoded(child_page)?;
 
         let separator_key = parent.keys[child_index - 1].clone();
 
@@ -727,7 +734,7 @@ impl BTreeIndex {
             }
         }
 
-        let mut write_left = pager.read_page(left_sibling_id)?;
+        let mut write_left = pager.new_page_buffer(left_sibling_id)?;
         left_sibling.to_page(&mut write_left)?;
         pager.write_page(write_left)?;
         // child_id was absorbed into left_sibling and already deallocated
@@ -747,11 +754,11 @@ impl BTreeIndex {
         let child_id = parent.children[child_index];
         let right_sibling_id = parent.children[child_index + 1];
 
-        let child_page = pager.read_page(child_id)?;
-        let mut child_node = BTreeNode::from_page_decoded(child_page)?;
+        let child_page = pager.read_page_shared(child_id)?;
+        let mut child_node = BTreeNode::from_shared_page_decoded(child_page)?;
 
-        let right_page = pager.read_page(right_sibling_id)?;
-        let mut right_sibling = BTreeNode::from_page_decoded(right_page)?;
+        let right_page = pager.read_page_shared(right_sibling_id)?;
+        let mut right_sibling = BTreeNode::from_shared_page_decoded(right_page)?;
 
         let separator_key = parent.keys[child_index].clone();
 
@@ -786,7 +793,7 @@ impl BTreeIndex {
             }
         }
 
-        let mut write_child = pager.read_page(child_id)?;
+        let mut write_child = pager.new_page_buffer(child_id)?;
         child_node.to_page(&mut write_child)?;
         pager.write_page(write_child)?;
         // right_sibling_id was absorbed into child_node and already deallocated
@@ -800,26 +807,18 @@ impl BTreeIndex {
 impl BTreeIndex {
     pub fn new_with_init(storage: Pager) -> Result<Self> {
         let storage_arc = Arc::new(RwLock::new(storage));
-        let root_page_id = storage_arc
-            .write()
-            .map_err(|_| {
-                crate::error::HematiteError::InternalError(
-                    "B-tree index storage lock is poisoned".to_string(),
-                )
-            })?
-            .allocate_page()?;
+        let mut guard = storage_arc.write().map_err(|_| {
+            crate::error::HematiteError::InternalError(
+                "B-tree index storage lock is poisoned".to_string(),
+            )
+        })?;
+        let root_page_id = guard.allocate_page()?;
 
         let root_node = BTreeNode::new_leaf(root_page_id);
-        let mut root_page = Page::new(root_page_id);
+        let mut root_page = guard.new_page_buffer(root_page_id)?;
         root_node.to_page(&mut root_page)?;
-        storage_arc
-            .write()
-            .map_err(|_| {
-                crate::error::HematiteError::InternalError(
-                    "B-tree index storage lock is poisoned".to_string(),
-                )
-            })?
-            .write_page(root_page)?;
+        guard.write_page(root_page)?;
+        drop(guard);
 
         Ok(Self {
             storage: storage_arc,

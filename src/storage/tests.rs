@@ -44,13 +44,16 @@ mod freelist_tests {
 mod wal_tests {
     use crate::storage::file_len_for_next_page_id;
     use crate::storage::metadata_page;
+    use crate::storage::pager_metadata::PersistedPagerState;
     use crate::storage::wal::{
-        load_visible_state_from_path_with_base, WalFile, WalFrame, WalHeader,
+        load_visible_state_from_path_with_base, VisibleWalState, WalFile, WalFrame, WalHeader,
+        WalPageCache,
     };
-    use crate::storage::{PAGE_SIZE, STORAGE_METADATA_PAGE_ID};
+    use crate::storage::{JournalMode, PAGE_SIZE, STORAGE_METADATA_PAGE_ID};
     use crate::test_utils::TestDbFile;
     use std::collections::HashMap;
     use std::fs;
+    use std::sync::Arc;
 
     #[test]
     fn test_wal_visible_state_rejects_malformed_committed_metadata_frame(
@@ -85,6 +88,141 @@ mod wal_tests {
         assert!(err.to_string().contains("malformed"));
         Ok(())
     }
+
+    fn valid_metadata_frame_bytes() -> crate::error::Result<Vec<u8>> {
+        let payload = PersistedPagerState {
+            journal_mode: JournalMode::Wal,
+            free_pages: vec![],
+            checksums: HashMap::new(),
+        }
+        .encode(1);
+        metadata_page::write_pager_metadata(&vec![0u8; PAGE_SIZE], &payload)
+    }
+
+    #[test]
+    fn wal_page_cache_evicts_least_recently_used_entry() {
+        let mut cache = WalPageCache::new(2);
+        cache.put(1, Arc::new(vec![1u8; 4]));
+        cache.put(2, Arc::new(vec![2u8; 4]));
+
+        // Touch page 1 so it becomes MRU and page 2 becomes the LRU entry.
+        assert!(cache.get(1).is_some());
+        // Inserting a third page at capacity 2 should evict page 2, not page 1.
+        cache.put(3, Arc::new(vec![3u8; 4]));
+
+        assert!(
+            cache.peek(2).is_none(),
+            "page 2 should have been evicted as the least-recently-used entry"
+        );
+        assert!(cache.peek(1).is_some());
+        assert!(cache.peek(3).is_some());
+    }
+
+    #[test]
+    fn wal_offset_read_returns_latest_committed_frame_across_commits() -> crate::error::Result<()>
+    {
+        let test_db = TestDbFile::new("_test_wal_offset_read_returns_latest_frame");
+        let wal_path = std::path::PathBuf::from(format!("{}.wal", test_db.path()));
+        let page_id = 5;
+
+        let mut first_page = vec![0u8; PAGE_SIZE];
+        first_page[0] = 1;
+        let mut second_page = vec![0u8; PAGE_SIZE];
+        second_page[0] = 2;
+
+        let wal = WalFile {
+            header: WalHeader::default(),
+            frames: vec![
+                WalFrame::committed(page_id, 6, 1, first_page),
+                WalFrame::committed(STORAGE_METADATA_PAGE_ID, 6, 1, valid_metadata_frame_bytes()?),
+                WalFrame::committed(page_id, 6, 2, second_page.clone()),
+                WalFrame::committed(STORAGE_METADATA_PAGE_ID, 6, 2, valid_metadata_frame_bytes()?),
+            ],
+        };
+        fs::write(&wal_path, wal.encode()?)?;
+
+        let mut state = load_visible_state_from_path_with_base(
+            &wal_path,
+            file_len_for_next_page_id(6),
+            Vec::new(),
+            HashMap::new(),
+            &vec![0u8; PAGE_SIZE],
+        )?
+        .expect("visible state should be loaded from the WAL file");
+
+        let offset = state.page_override_offsets[&page_id];
+        assert_ne!(offset, 0, "a real frame offset should be recorded, not the sentinel");
+
+        // The recorded offset must point at the *second* (later) commit's
+        // frame, not the first -- i.e. "latest wins" for offsets, matching
+        // the existing "latest wins" semantics for cached page data.
+        let frame_size =
+            crate::storage::wal::V3_WAL_FRAME_PREFIX_SIZE as u64 + PAGE_SIZE as u64;
+        let first_frame_offset = crate::storage::wal::V3_WAL_HEADER_SIZE as u64;
+        let second_frame_offset = first_frame_offset + frame_size;
+        assert!(
+            offset >= second_frame_offset,
+            "offset {} should point at the second commit's frame (>= {})",
+            offset,
+            second_frame_offset
+        );
+
+        assert_eq!(state.read_page_data_readonly(page_id)?, Some(second_page.clone()));
+        assert_eq!(state.read_page_data(page_id)?, Some(second_page));
+        Ok(())
+    }
+
+    #[test]
+    fn wal_read_page_data_falls_back_to_scan_and_detects_offset_mismatch(
+    ) -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_wal_offset_mismatch_detection");
+        let wal_path = std::path::PathBuf::from(format!("{}.wal", test_db.path()));
+        let page_id = 7;
+
+        let mut page_bytes = vec![0u8; PAGE_SIZE];
+        page_bytes[0] = 42;
+
+        let wal = WalFile {
+            header: WalHeader::default(),
+            frames: vec![
+                WalFrame::committed(page_id, 8, 1, page_bytes.clone()),
+                WalFrame::committed(STORAGE_METADATA_PAGE_ID, 8, 1, valid_metadata_frame_bytes()?),
+            ],
+        };
+        fs::write(&wal_path, wal.encode()?)?;
+
+        // Sentinel offset (0) should still work via the legacy full-file scan.
+        let mut sentinel_state =
+            VisibleWalState::from_database_state(file_len_for_next_page_id(8), Vec::new(), HashMap::new());
+        sentinel_state.wal_path = Some(wal_path.clone());
+        sentinel_state.page_override_offsets.insert(page_id, 0);
+        assert_eq!(sentinel_state.read_page_data(page_id)?, Some(page_bytes));
+
+        // An out-of-bounds offset should be treated as a miss, not a panic/error.
+        let mut oob_state =
+            VisibleWalState::from_database_state(file_len_for_next_page_id(8), Vec::new(), HashMap::new());
+        oob_state.wal_path = Some(wal_path.clone());
+        oob_state.page_override_offsets.insert(page_id, 10_000_000);
+        assert_eq!(oob_state.read_page_data(page_id)?, None);
+
+        // An in-bounds offset that doesn't actually point at `page_id`'s frame
+        // (here, the metadata frame's offset) must be reported as corruption,
+        // not silently returned as if it were the requested page's data.
+        let frame_size =
+            crate::storage::wal::V3_WAL_FRAME_PREFIX_SIZE as u64 + PAGE_SIZE as u64;
+        let metadata_frame_offset = crate::storage::wal::V3_WAL_HEADER_SIZE as u64 + frame_size;
+        let mut mismatched_state =
+            VisibleWalState::from_database_state(file_len_for_next_page_id(8), Vec::new(), HashMap::new());
+        mismatched_state.wal_path = Some(wal_path);
+        mismatched_state
+            .page_override_offsets
+            .insert(page_id, metadata_frame_offset);
+        let err = mismatched_state.read_page_data(page_id).unwrap_err();
+        assert!(matches!(err, crate::error::HematiteError::CorruptedData(_)));
+        assert!(err.to_string().contains("mismatch"));
+
+        Ok(())
+    }
 }
 
 mod pager_tests {
@@ -95,7 +233,8 @@ mod pager_tests {
         load_visible_state_from_path_with_base, WalFile, WalFrame, WalHeader,
     };
     use crate::storage::{
-        metadata_page, JournalMode, Page, DB_HEADER_PAGE_ID, PAGE_SIZE, STORAGE_METADATA_PAGE_ID,
+        metadata_page, JournalMode, Page, PageId, DB_HEADER_PAGE_ID, PAGE_SIZE,
+        STORAGE_METADATA_PAGE_ID,
     };
     use crate::test_utils::TestDbFile;
     use std::collections::HashMap;
@@ -339,6 +478,47 @@ mod pager_tests {
         reopened.begin_read()?;
         assert_eq!(reopened.read_page(target_page_id)?.data[0], 222);
         reopened.end_read()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_pager_wal_commit_beyond_cache_capacity_reads_correctly_after_eviction(
+    ) -> crate::error::Result<()> {
+        // WAL_PAGE_CACHE_CAPACITY is 64; committing more distinct dirty pages
+        // than that in one transaction forces the earliest-committed pages
+        // out of the in-memory WAL page cache. Reading them back must fall
+        // through to an on-demand read from the WAL file at the real byte
+        // offset recorded during commit, not the page's stale pre-transaction
+        // content.
+        let test_db = TestDbFile::new("_test_pager_wal_commit_beyond_cache_capacity");
+        let mut pager = Pager::new(test_db.path(), 64)?;
+        let page_ids: Vec<PageId> = (0..100)
+            .map(|_| pager.allocate_page())
+            .collect::<crate::error::Result<_>>()?;
+        pager.flush()?;
+        pager.set_journal_mode(JournalMode::Wal)?;
+
+        pager.begin_transaction()?;
+        for (index, &page_id) in page_ids.iter().enumerate() {
+            let mut page = pager.read_page(page_id)?;
+            page.data[0] = (index % 251) as u8;
+            pager.write_page(page)?;
+        }
+        pager.commit_transaction()?;
+
+        pager.begin_read()?;
+        for (index, &page_id) in page_ids.iter().enumerate() {
+            assert_eq!(
+                pager.read_page(page_id)?.data[0],
+                (index % 251) as u8,
+                "page {} (dirtied {}th in a {}-page commit) should read back its \
+                 committed value even after eviction from the WAL page cache",
+                page_id,
+                index,
+                page_ids.len()
+            );
+        }
+        pager.end_read()?;
         Ok(())
     }
 
@@ -3316,7 +3496,7 @@ mod overflow_unit_tests {
         encode_overflow_chain, split_payload_into_overflow_chunks, OverflowPage,
         OVERFLOW_CHUNK_CAPACITY,
     };
-    use crate::storage::Page;
+    use crate::storage::{Page, Pager};
 
     #[test]
     fn overflow_chunk_split_uses_full_intermediate_pages() {
@@ -3332,7 +3512,8 @@ mod overflow_unit_tests {
     #[test]
     fn overflow_chain_roundtrip() {
         let payload = vec![0x44; OVERFLOW_CHUNK_CAPACITY + 37];
-        let pages = encode_overflow_chain(&[8, 9], &payload).unwrap();
+        let mut storage = Pager::new_in_memory(8).unwrap();
+        let pages = encode_overflow_chain(&[8, 9], &payload, &mut storage).unwrap();
         let mut decoded = Vec::new();
 
         for (index, page) in pages.iter().enumerate() {

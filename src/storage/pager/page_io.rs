@@ -6,7 +6,13 @@ use std::sync::Arc;
 
 impl Pager {
     pub fn read_page(&self, page_id: PageId) -> Result<Page> {
-        Ok((*self.read_page_shared(page_id)?).clone())
+        let shared = self.read_page_shared(page_id)?;
+        let mut data = self.cache_write()?.take_page_buffer();
+        data.copy_from_slice(&shared.data);
+        Ok(Page {
+            id: shared.id,
+            data,
+        })
     }
 
     pub(crate) fn read_page_shared(&self, page_id: PageId) -> Result<Arc<Page>> {

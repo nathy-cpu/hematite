@@ -17,7 +17,7 @@ use crate::btree::NodeType;
 use crate::error::{HematiteError, Result};
 use crate::storage::overflow::collect_overflow_page_ids;
 use crate::storage::{
-    Page, PageId, Pager, DB_HEADER_PAGE_ID, INVALID_PAGE_ID, STORAGE_METADATA_PAGE_ID,
+    PageId, Pager, DB_HEADER_PAGE_ID, INVALID_PAGE_ID, STORAGE_METADATA_PAGE_ID,
 };
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -237,7 +237,7 @@ pub fn create_tree_root(pager: &mut Pager) -> Result<PageId> {
 }
 
 pub fn initialize_empty_tree_root(pager: &mut Pager, root_page_id: PageId) -> Result<()> {
-    let mut root_page = Page::new(root_page_id);
+    let mut root_page = pager.new_page_buffer(root_page_id)?;
     let root_node = BTreeNode::new_leaf(root_page_id);
     BTreeNode::to_page(&root_node, &mut root_page)?;
     pager.write_page(root_page)

@@ -20,7 +20,7 @@ pub(crate) struct OverflowPage {
 }
 
 impl OverflowPage {
-    pub(crate) fn encode(&self, page_id: PageId) -> Result<Page> {
+    pub(crate) fn encode(&self, page_id: PageId, storage: &mut Pager) -> Result<Page> {
         if self.payload_chunk.len() > OVERFLOW_PAYLOAD_CAPACITY {
             return Err(HematiteError::StorageError(format!(
                 "overflow payload chunk {} exceeds capacity {}",
@@ -29,7 +29,7 @@ impl OverflowPage {
             )));
         }
 
-        let mut page = Page::new(page_id);
+        let mut page = storage.new_page_buffer(page_id)?;
         page.data[0] = PageKind::Overflow as u8;
         page.data[1..4].fill(0);
         page.data[4..8].copy_from_slice(&self.next_page_id.to_be_bytes());
@@ -71,7 +71,11 @@ pub(crate) fn split_payload_into_overflow_chunks(payload: &[u8]) -> Vec<Vec<u8>>
         .collect()
 }
 
-pub(crate) fn encode_overflow_chain(page_ids: &[PageId], payload: &[u8]) -> Result<Vec<Page>> {
+pub(crate) fn encode_overflow_chain(
+    page_ids: &[PageId],
+    payload: &[u8],
+    storage: &mut Pager,
+) -> Result<Vec<Page>> {
     let chunks = split_payload_into_overflow_chunks(payload);
     if chunks.len() != page_ids.len() {
         return Err(HematiteError::StorageError(format!(
@@ -89,7 +93,7 @@ pub(crate) fn encode_overflow_chain(page_ids: &[PageId], payload: &[u8]) -> Resu
                 next_page_id,
                 payload_chunk,
             }
-            .encode(*page_id)?,
+            .encode(*page_id, storage)?,
         );
     }
     Ok(pages)
@@ -171,7 +175,7 @@ pub fn write_overflow_chain(storage: &mut Pager, payload: &[u8]) -> Result<Optio
         page_ids.push(storage.allocate_page()?);
     }
 
-    let pages = encode_overflow_chain(&page_ids, payload)?;
+    let pages = encode_overflow_chain(&page_ids, payload, storage)?;
     for page in pages {
         storage.write_page(page)?;
     }

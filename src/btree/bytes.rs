@@ -56,7 +56,7 @@ use crate::storage::overflow::{
     collect_overflow_page_ids, validate_overflow_chain, OverflowReadCache,
 };
 use crate::storage::{
-    JournalMode, Page, PageId, Pager, PagerIntegrityReport, DB_HEADER_PAGE_ID, INVALID_PAGE_ID,
+    JournalMode, PageId, Pager, PagerIntegrityReport, DB_HEADER_PAGE_ID, INVALID_PAGE_ID,
     PAGE_SIZE, STORAGE_METADATA_PAGE_ID,
 };
 
@@ -148,9 +148,10 @@ impl ByteTreeStore {
                 PAGE_SIZE
             )));
         }
-        let mut page = Page::new(page_id);
+        let mut storage = self.lock_storage()?;
+        let mut page = storage.new_page_buffer(page_id)?;
         page.data[..bytes.len()].copy_from_slice(bytes);
-        self.lock_storage()?.write_page(page)
+        storage.write_page(page)
     }
 
     pub fn flush(&self) -> Result<()> {

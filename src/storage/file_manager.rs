@@ -214,6 +214,14 @@ impl FileManager {
         self.free_list.replace(free_pages);
     }
 
+    /// Removes `page_id` from the free list if present, in O(1) amortized
+    /// time. Prefer this over `free_pages().to_vec()` + manual scan +
+    /// `set_free_pages()`, which clones the whole list and rebuilds its
+    /// position index just to drop one entry.
+    pub(crate) fn remove_free_page(&mut self, page_id: PageId) -> bool {
+        self.free_list.remove_page(page_id)
+    }
+
     pub fn is_free_page(&self, page_id: PageId) -> bool {
         self.free_list.contains(page_id)
     }

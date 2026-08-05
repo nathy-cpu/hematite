@@ -119,11 +119,7 @@ impl Pager {
                 return Ok(());
             }
         }
-        let mut free_pages = self.file_manager.free_pages().to_vec();
-        if let Some(pos) = free_pages.iter().position(|&p| p == page_id) {
-            free_pages.remove(pos);
-            self.file_manager.set_free_pages(free_pages);
-        }
+        self.file_manager.remove_free_page(page_id);
         Ok(())
     }
 }
