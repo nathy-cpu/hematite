@@ -32,10 +32,8 @@ impl QueryPlanner {
     }
 
     pub fn plan(&self, statement: Statement) -> Result<QueryPlan> {
-        // Validate statement against catalog
         validate_statement(&statement, &self.catalog)?;
 
-        // Logical optimization
         let optimizer = QueryOptimizer::from_schema(&self.catalog);
         let optimized_stmt = optimizer.optimize_statement(statement)?;
 
@@ -65,11 +63,8 @@ impl QueryPlanner {
             Statement::Explain(_)
             | Statement::Describe(_)
             | Statement::ShowTables
-            | Statement::ShowViews
             | Statement::ShowIndexes(_)
-            | Statement::ShowTriggers(_)
-            | Statement::ShowCreateTable(_)
-            | Statement::ShowCreateView(_) => {
+            | Statement::ShowCreateTable(_) => {
                 return Err(HematiteError::ParseError(
                     "Introspection statements are handled at the SQL connection boundary"
                         .to_string(),
@@ -85,19 +80,9 @@ impl QueryPlanner {
             Statement::Insert(insert) => self.plan_insert(insert),
             Statement::Delete(delete) => self.plan_delete(delete),
             Statement::Create(create) => self.plan_create(create),
-            Statement::CreateView(_) | Statement::CreateTrigger(_) => {
-                return Err(HematiteError::ParseError(
-                    "View and trigger statements are not planned yet".to_string(),
-                ))
-            }
             Statement::CreateIndex(create_index) => self.plan_create_index(create_index),
             Statement::Alter(alter) => self.plan_alter(alter),
             Statement::Drop(drop) => self.plan_drop(drop),
-            Statement::DropView(_) | Statement::DropTrigger(_) => {
-                return Err(HematiteError::ParseError(
-                    "View and trigger statements are not planned yet".to_string(),
-                ))
-            }
             Statement::DropIndex(drop_index) => self.plan_drop_index(drop_index),
         }?;
 
@@ -403,7 +388,6 @@ impl QueryPlanner {
         // Analyze WHERE clause for index usage opportunities
         let usable_indexes = self.analyze_where_clause(where_clause, table)?;
 
-        // Analyze column access patterns
         let accessed_columns = self.analyze_column_access(select_items, table)?;
 
         Ok(SelectAnalysis {
@@ -565,21 +549,6 @@ impl QueryPlanner {
                 }
                 SelectItem::CountAll => {}
                 SelectItem::Aggregate { .. } => {}
-                SelectItem::Window { window, .. } => {
-                    for expr in &window.partition_by {
-                        self.collect_expression_columns(expr, table, &mut accessed_columns);
-                    }
-                    for item in &window.order_by {
-                        if let Some(column) = table.get_column_by_name(
-                            SelectStatement::column_reference_name(&item.column),
-                        ) {
-                            accessed_columns.push(ColumnAccess {
-                                column_id: column.id,
-                                access_type: ColumnAccessType::Read,
-                            });
-                        }
-                    }
-                }
             }
         }
 
@@ -678,9 +647,7 @@ impl QueryPlanner {
                 self.collect_expression_columns(left, table, accessed_columns);
                 self.collect_expression_columns(right, table, accessed_columns);
             }
-            Expression::Literal(_)
-            | Expression::IntervalLiteral { .. }
-            | Expression::Parameter(_) => {}
+            Expression::Literal(_) | Expression::Parameter(_) => {}
         }
     }
 

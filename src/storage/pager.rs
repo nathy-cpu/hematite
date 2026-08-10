@@ -465,7 +465,10 @@ impl Pager {
     /// Immutable read of WAL page data. Checks the LRU cache without
     /// promotion and reads from the WAL file without caching.
     /// Used by `read_page_shared` which takes `&self`.
-    fn read_wal_page_data_readonly(&self, page_id: PageId) -> crate::error::Result<Option<Vec<u8>>> {
+    fn read_wal_page_data_readonly(
+        &self,
+        page_id: PageId,
+    ) -> crate::error::Result<Option<Vec<u8>>> {
         if let Some(snapshot) = &self.wal_read_snapshot {
             return snapshot.state.read_page_data_readonly(page_id);
         }
@@ -570,7 +573,6 @@ impl Pager {
     /// Captures original page image (for rollback journals) and returns an owned `Page`
     /// that callers may mutate and then write back using `write_page`.
     pub(crate) fn take_page_for_write(&mut self, page_id: PageId) -> Result<Page> {
-        // Ensure pager healthy.
         self.check_error_state()?;
 
         // Capture original page image so rollback journaling has baseline if needed.

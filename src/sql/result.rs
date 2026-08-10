@@ -1,10 +1,7 @@
 //! SQL result set and row interface
 
 use crate::error::{HematiteError, Result};
-use crate::query::{
-    DateTimeValue, DateValue, DecimalValue, IntervalDaySecondValue, IntervalYearMonthValue,
-    QueryResult, TimeValue, TimeWithTimeZoneValue, Value,
-};
+use crate::query::{DecimalValue, QueryResult, Value};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -167,14 +164,7 @@ impl Row {
     pub fn get_string(&self, index: usize) -> Result<String> {
         match self.get(index) {
             Some(Value::Text(s)) => Ok(s.clone()),
-            Some(Value::Enum(s)) => Ok(s.clone()),
             Some(Value::Decimal(value)) => Ok(value.to_string()),
-            Some(Value::Date(value)) => Ok(value.to_string()),
-            Some(Value::Time(value)) => Ok(value.to_string()),
-            Some(Value::DateTime(value)) => Ok(value.to_string()),
-            Some(Value::TimeWithTimeZone(value)) => Ok(value.to_string()),
-            Some(Value::IntervalYearMonth(value)) => Ok(value.to_string()),
-            Some(Value::IntervalDaySecond(value)) => Ok(value.to_string()),
             Some(value) => Err(HematiteError::ParseError(format!(
                 "Expected TEXT, found {:?}",
                 value
@@ -206,8 +196,6 @@ impl Row {
             Some(Value::UInteger(i)) => Ok(*i as f64),
             Some(Value::BigInt(i)) => Ok(*i as f64),
             Some(Value::UBigInt(i)) => Ok(*i as f64),
-            Some(Value::Int128(i)) => Ok(*i as f64),
-            Some(Value::UInt128(i)) => Ok(*i as f64),
             Some(value) => Err(HematiteError::ParseError(format!(
                 "Expected FLOAT, found {:?}",
                 value
@@ -229,23 +217,6 @@ impl Row {
             Some(Value::UInteger(i)) => Ok(*i as i64),
             Some(value) => Err(HematiteError::ParseError(format!(
                 "Expected INT64, found {:?}",
-                value
-            ))),
-            None => Err(HematiteError::ParseError(
-                "Column index out of bounds".to_string(),
-            )),
-        }
-    }
-
-    pub fn get_int128(&self, index: usize) -> Result<i128> {
-        match self.get(index) {
-            Some(Value::Int128(i)) => Ok(*i),
-            Some(Value::BigInt(i)) => Ok(*i as i128),
-            Some(Value::Integer(i)) => Ok(*i as i128),
-            Some(Value::UInteger(i)) => Ok(*i as i128),
-            Some(Value::UBigInt(i)) => Ok(*i as i128),
-            Some(value) => Err(HematiteError::ParseError(format!(
-                "Expected INT128, found {:?}",
                 value
             ))),
             None => Err(HematiteError::ParseError(
@@ -283,22 +254,6 @@ impl Row {
         }
     }
 
-    pub fn get_uint128(&self, index: usize) -> Result<u128> {
-        match self.get(index) {
-            Some(Value::UInt128(i)) => Ok(*i),
-            Some(Value::UBigInt(i)) => Ok(*i as u128),
-            Some(Value::UInteger(i)) => Ok(*i as u128),
-            Some(Value::Integer(i)) if *i >= 0 => Ok(*i as u128),
-            Some(value) => Err(HematiteError::ParseError(format!(
-                "Expected UINT128, found {:?}",
-                value
-            ))),
-            None => Err(HematiteError::ParseError(
-                "Column index out of bounds".to_string(),
-            )),
-        }
-    }
-
     pub fn get_decimal(&self, index: usize) -> Result<DecimalValue> {
         match self.get(index) {
             Some(Value::Decimal(value)) => Ok(value.clone()),
@@ -317,84 +272,6 @@ impl Row {
             Some(Value::Blob(value)) => Ok(value.clone()),
             Some(value) => Err(HematiteError::ParseError(format!(
                 "Expected BLOB, found {:?}",
-                value
-            ))),
-            None => Err(HematiteError::ParseError(
-                "Column index out of bounds".to_string(),
-            )),
-        }
-    }
-
-    pub fn get_date(&self, index: usize) -> Result<DateValue> {
-        match self.get(index) {
-            Some(Value::Date(value)) => Ok(*value),
-            Some(value) => Err(HematiteError::ParseError(format!(
-                "Expected DATE, found {:?}",
-                value
-            ))),
-            None => Err(HematiteError::ParseError(
-                "Column index out of bounds".to_string(),
-            )),
-        }
-    }
-
-    pub fn get_time(&self, index: usize) -> Result<TimeValue> {
-        match self.get(index) {
-            Some(Value::Time(value)) => Ok(*value),
-            Some(value) => Err(HematiteError::ParseError(format!(
-                "Expected TIME, found {:?}",
-                value
-            ))),
-            None => Err(HematiteError::ParseError(
-                "Column index out of bounds".to_string(),
-            )),
-        }
-    }
-
-    pub fn get_datetime(&self, index: usize) -> Result<DateTimeValue> {
-        match self.get(index) {
-            Some(Value::DateTime(value)) => Ok(*value),
-            Some(value) => Err(HematiteError::ParseError(format!(
-                "Expected DATETIME, found {:?}",
-                value
-            ))),
-            None => Err(HematiteError::ParseError(
-                "Column index out of bounds".to_string(),
-            )),
-        }
-    }
-
-    pub fn get_time_with_time_zone(&self, index: usize) -> Result<TimeWithTimeZoneValue> {
-        match self.get(index) {
-            Some(Value::TimeWithTimeZone(value)) => Ok(*value),
-            Some(value) => Err(HematiteError::ParseError(format!(
-                "Expected TIME WITH TIME ZONE, found {:?}",
-                value
-            ))),
-            None => Err(HematiteError::ParseError(
-                "Column index out of bounds".to_string(),
-            )),
-        }
-    }
-
-    pub fn get_interval_year_month(&self, index: usize) -> Result<IntervalYearMonthValue> {
-        match self.get(index) {
-            Some(Value::IntervalYearMonth(value)) => Ok(*value),
-            Some(value) => Err(HematiteError::ParseError(format!(
-                "Expected INTERVAL YEAR TO MONTH, found {:?}",
-                value
-            ))),
-            None => Err(HematiteError::ParseError(
-                "Column index out of bounds".to_string(),
-            )),
-        }
-    }
-
-    pub fn get_interval_day_second(&self, index: usize) -> Result<IntervalDaySecondValue> {
-        match self.get(index) {
-            Some(Value::IntervalDaySecond(value)) => Ok(*value),
-            Some(value) => Err(HematiteError::ParseError(format!(
-                "Expected INTERVAL DAY TO SECOND, found {:?}",
                 value
             ))),
             None => Err(HematiteError::ParseError(
@@ -486,24 +363,15 @@ fn render_value_for_table(value: &Value) -> String {
     match value {
         Value::Null => "NULL".to_string(),
         Value::Text(value) => sanitize_table_cell(value),
-        Value::Enum(value) => sanitize_table_cell(value),
         Value::Blob(bytes) => sanitize_table_cell(&format!("0x{}", hex::encode(bytes))),
         Value::Boolean(value) => value.to_string(),
         Value::Integer(value) => value.to_string(),
         Value::BigInt(value) => value.to_string(),
-        Value::Int128(value) => value.to_string(),
         Value::UInteger(value) => value.to_string(),
         Value::UBigInt(value) => value.to_string(),
-        Value::UInt128(value) => value.to_string(),
         Value::Float32(value) => value.to_string(),
         Value::Float(value) => value.to_string(),
         Value::Decimal(value) => value.to_string(),
-        Value::Date(value) => value.to_string(),
-        Value::Time(value) => value.to_string(),
-        Value::DateTime(value) => value.to_string(),
-        Value::TimeWithTimeZone(value) => value.to_string(),
-        Value::IntervalYearMonth(value) => value.to_string(),
-        Value::IntervalDaySecond(value) => value.to_string(),
     }
 }
 

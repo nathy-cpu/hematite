@@ -9,18 +9,12 @@ pub enum SqlTypeName {
     Int16,
     Int,
     Int64,
-    Int128,
     UInt8,
     UInt16,
     UInt,
     UInt64,
-    UInt128,
     Text,
-    Char(u32),
     VarChar(u32),
-    Binary(u32),
-    VarBinary(u32),
-    Enum(Vec<String>),
     Boolean,
     Float32,
     Float,
@@ -29,48 +23,29 @@ pub enum SqlTypeName {
         scale: Option<u32>,
     },
     Blob,
-    Date,
-    Time,
-    DateTime,
-    TimeWithTimeZone,
-    IntervalYearMonth,
-    IntervalDaySecond,
 }
 
 impl SqlTypeName {
     /// Canonical SQL spelling for the parameterless type names, returned as a
     /// borrowed `&'static str` (no allocation). Parameterized types
-    /// (`CHAR(n)`, `DECIMAL(p, s)`, `ENUM(...)`) return `None` and must be
-    /// rendered through the `Display` impl / [`to_sql`](Self::to_sql).
+    /// (`VARCHAR(n)`, `DECIMAL(p, s)`) return `None` and must be rendered
+    /// through the `Display` impl / [`to_sql`](Self::to_sql).
     pub fn as_static_str(&self) -> Option<&'static str> {
         Some(match self {
             SqlTypeName::Int8 => "INT8",
             SqlTypeName::Int16 => "INT16",
             SqlTypeName::Int => "INT",
             SqlTypeName::Int64 => "INT64",
-            SqlTypeName::Int128 => "INT128",
             SqlTypeName::UInt8 => "UINT8",
             SqlTypeName::UInt16 => "UINT16",
             SqlTypeName::UInt => "UINT",
             SqlTypeName::UInt64 => "UINT64",
-            SqlTypeName::UInt128 => "UINT128",
             SqlTypeName::Text => "TEXT",
             SqlTypeName::Boolean => "BOOLEAN",
             SqlTypeName::Float32 => "FLOAT32",
             SqlTypeName::Float => "FLOAT",
             SqlTypeName::Blob => "BLOB",
-            SqlTypeName::Date => "DATE",
-            SqlTypeName::Time => "TIME",
-            SqlTypeName::DateTime => "DATETIME",
-            SqlTypeName::TimeWithTimeZone => "TIME WITH TIME ZONE",
-            SqlTypeName::IntervalYearMonth => "INTERVAL YEAR TO MONTH",
-            SqlTypeName::IntervalDaySecond => "INTERVAL DAY TO SECOND",
-            SqlTypeName::Char(_)
-            | SqlTypeName::VarChar(_)
-            | SqlTypeName::Binary(_)
-            | SqlTypeName::VarBinary(_)
-            | SqlTypeName::Enum(_)
-            | SqlTypeName::Decimal { .. } => return None,
+            SqlTypeName::VarChar(_) | SqlTypeName::Decimal { .. } => return None,
         })
     }
 
@@ -79,10 +54,7 @@ impl SqlTypeName {
     }
 
     pub fn supports_text_metadata(&self) -> bool {
-        matches!(
-            self,
-            SqlTypeName::Text | SqlTypeName::Char(_) | SqlTypeName::VarChar(_)
-        )
+        matches!(self, SqlTypeName::Text | SqlTypeName::VarChar(_))
     }
 }
 
@@ -92,20 +64,7 @@ impl fmt::Display for SqlTypeName {
             return f.write_str(name);
         }
         match self {
-            SqlTypeName::Char(length) => write!(f, "CHAR({length})"),
             SqlTypeName::VarChar(length) => write!(f, "VARCHAR({length})"),
-            SqlTypeName::Binary(length) => write!(f, "BINARY({length})"),
-            SqlTypeName::VarBinary(length) => write!(f, "VARBINARY({length})"),
-            SqlTypeName::Enum(values) => {
-                f.write_str("ENUM(")?;
-                for (index, value) in values.iter().enumerate() {
-                    if index > 0 {
-                        f.write_str(", ")?;
-                    }
-                    write!(f, "'{}'", value.replace('\'', "''"))?;
-                }
-                f.write_str(")")
-            }
             SqlTypeName::Decimal { precision, scale } => match (precision, scale) {
                 (Some(precision), Some(scale)) => write!(f, "DECIMAL({precision}, {scale})"),
                 (Some(precision), None) => write!(f, "DECIMAL({precision})"),
@@ -144,30 +103,18 @@ impl LiteralValue {
             (LiteralValue::Integer(_), SqlTypeName::Int16) => true,
             (LiteralValue::Integer(_), SqlTypeName::Int) => true,
             (LiteralValue::Integer(_), SqlTypeName::Int64) => true,
-            (LiteralValue::Integer(_), SqlTypeName::Int128) => true,
             (LiteralValue::Integer(value), SqlTypeName::UInt8) => *value >= 0,
             (LiteralValue::Integer(value), SqlTypeName::UInt16) => *value >= 0,
             (LiteralValue::Integer(value), SqlTypeName::UInt) => *value >= 0,
             (LiteralValue::Integer(value), SqlTypeName::UInt64) => *value >= 0,
-            (LiteralValue::Integer(value), SqlTypeName::UInt128) => *value >= 0,
             (LiteralValue::Integer(_), SqlTypeName::Decimal { .. }) => true,
             (LiteralValue::Float(_), SqlTypeName::Float32) => true,
             (LiteralValue::Float(_), SqlTypeName::Float) => true,
             (LiteralValue::Float(_), SqlTypeName::Decimal { .. }) => true,
             (LiteralValue::Text(_), SqlTypeName::Text) => true,
-            (LiteralValue::Text(_), SqlTypeName::Char(_)) => true,
             (LiteralValue::Text(_), SqlTypeName::VarChar(_)) => true,
-            (LiteralValue::Text(_), SqlTypeName::Binary(_)) => true,
-            (LiteralValue::Text(_), SqlTypeName::VarBinary(_)) => true,
-            (LiteralValue::Text(_), SqlTypeName::Enum(_)) => true,
             (LiteralValue::Text(_), SqlTypeName::Blob) => true,
-            (LiteralValue::Text(_), SqlTypeName::Date) => true,
-            (LiteralValue::Text(_), SqlTypeName::Time) => true,
-            (LiteralValue::Text(_), SqlTypeName::DateTime) => true,
-            (LiteralValue::Text(_), SqlTypeName::TimeWithTimeZone) => true,
             (LiteralValue::Text(_), SqlTypeName::Decimal { .. }) => true,
-            (LiteralValue::Blob(_), SqlTypeName::Binary(_)) => true,
-            (LiteralValue::Blob(_), SqlTypeName::VarBinary(_)) => true,
             (LiteralValue::Blob(_), SqlTypeName::Blob) => true,
             (LiteralValue::Boolean(_), SqlTypeName::Boolean) => true,
             (LiteralValue::Null, _) => true,

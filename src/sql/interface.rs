@@ -1,9 +1,7 @@
 //! High-level SQL interface
 
 use crate::error::{HematiteError, Result};
-use crate::query::{
-    DateTimeValue, DateValue, DecimalValue, JournalMode, TimeValue, TimeWithTimeZoneValue, Value,
-};
+use crate::query::{DecimalValue, JournalMode, Value};
 use crate::sql::connection::{Connection, PreparedStatement, Transaction};
 use crate::sql::result::{ExecutedStatement, FromRow, ResultSet, Row, StatementResult};
 use crate::sql::script::ScriptIter;
@@ -164,12 +162,7 @@ impl FromValue for String {
     fn from_value(value: &Value) -> Result<Self> {
         match value {
             Value::Text(s) => Ok(s.clone()),
-            Value::Enum(s) => Ok(s.clone()),
             Value::Decimal(s) => Ok(s.to_string()),
-            Value::Date(s) => Ok(s.to_string()),
-            Value::Time(s) => Ok(s.to_string()),
-            Value::DateTime(s) => Ok(s.to_string()),
-            Value::TimeWithTimeZone(s) => Ok(s.to_string()),
             _ => Err(HematiteError::ParseError(format!(
                 "Expected TEXT, found {:?}",
                 value
@@ -199,8 +192,6 @@ impl FromValue for f64 {
             Value::UInteger(i) => Ok(*i as f64),
             Value::BigInt(i) => Ok(*i as f64),
             Value::UBigInt(i) => Ok(*i as f64),
-            Value::Int128(i) => Ok(*i as f64),
-            Value::UInt128(i) => Ok(*i as f64),
             _ => Err(HematiteError::ParseError(format!(
                 "Expected FLOAT, found {:?}",
                 value
@@ -223,22 +214,6 @@ impl FromValue for i64 {
             Value::UInteger(i) => Ok(*i as i64),
             _ => Err(HematiteError::ParseError(format!(
                 "Expected INT64, found {:?}",
-                value
-            ))),
-        }
-    }
-}
-
-impl FromValue for i128 {
-    fn from_value(value: &Value) -> Result<Self> {
-        match value {
-            Value::Int128(i) => Ok(*i),
-            Value::BigInt(i) => Ok(*i as i128),
-            Value::Integer(i) => Ok(*i as i128),
-            Value::UInteger(i) => Ok(*i as i128),
-            Value::UBigInt(i) => Ok(*i as i128),
-            _ => Err(HematiteError::ParseError(format!(
-                "Expected INT128, found {:?}",
                 value
             ))),
         }
@@ -272,21 +247,6 @@ impl FromValue for u64 {
     }
 }
 
-impl FromValue for u128 {
-    fn from_value(value: &Value) -> Result<Self> {
-        match value {
-            Value::UInt128(i) => Ok(*i),
-            Value::UBigInt(i) => Ok(*i as u128),
-            Value::UInteger(i) => Ok(*i as u128),
-            Value::Integer(i) if *i >= 0 => Ok(*i as u128),
-            _ => Err(HematiteError::ParseError(format!(
-                "Expected UINT128, found {:?}",
-                value
-            ))),
-        }
-    }
-}
-
 impl FromValue for DecimalValue {
     fn from_value(value: &Value) -> Result<Self> {
         match value {
@@ -305,54 +265,6 @@ impl FromValue for Vec<u8> {
             Value::Blob(value) => Ok(value.clone()),
             _ => Err(HematiteError::ParseError(format!(
                 "Expected BLOB, found {:?}",
-                value
-            ))),
-        }
-    }
-}
-
-impl FromValue for DateValue {
-    fn from_value(value: &Value) -> Result<Self> {
-        match value {
-            Value::Date(value) => Ok(*value),
-            _ => Err(HematiteError::ParseError(format!(
-                "Expected DATE, found {:?}",
-                value
-            ))),
-        }
-    }
-}
-
-impl FromValue for DateTimeValue {
-    fn from_value(value: &Value) -> Result<Self> {
-        match value {
-            Value::DateTime(value) => Ok(*value),
-            _ => Err(HematiteError::ParseError(format!(
-                "Expected DATETIME, found {:?}",
-                value
-            ))),
-        }
-    }
-}
-
-impl FromValue for TimeValue {
-    fn from_value(value: &Value) -> Result<Self> {
-        match value {
-            Value::Time(value) => Ok(*value),
-            _ => Err(HematiteError::ParseError(format!(
-                "Expected TIME, found {:?}",
-                value
-            ))),
-        }
-    }
-}
-
-impl FromValue for TimeWithTimeZoneValue {
-    fn from_value(value: &Value) -> Result<Self> {
-        match value {
-            Value::TimeWithTimeZone(value) => Ok(*value),
-            _ => Err(HematiteError::ParseError(format!(
-                "Expected TIME WITH TIME ZONE, found {:?}",
                 value
             ))),
         }

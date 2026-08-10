@@ -1668,8 +1668,8 @@ mod compaction_tests {
     use std::sync::atomic::Ordering;
 
     #[test]
-    fn auto_vacuum_relocates_overflow_and_internal_pages_in_a_single_parent_map_build(
-    ) -> Result<()> {
+    fn auto_vacuum_relocates_overflow_and_internal_pages_in_a_single_parent_map_build() -> Result<()>
+    {
         let trees = ByteTreeStore::new(Pager::new_in_memory(100)?);
 
         // Tree A will be dropped, scattering free pages among tree B's
@@ -1767,7 +1767,10 @@ mod compaction_tests {
             0,
             "auto_vacuum should not build a parent map at all when there is nothing to relocate"
         );
-        assert_eq!(roots[0], root, "root should be unchanged with nothing to relocate");
+        assert_eq!(
+            roots[0], root,
+            "root should be unchanged with nothing to relocate"
+        );
 
         Ok(())
     }

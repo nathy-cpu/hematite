@@ -156,60 +156,6 @@ mod ast_tests {
     }
 
     #[test]
-    fn test_window_projection_rejects_group_by_mix() {
-        let mut catalog = crate::catalog::Schema::new();
-
-        let columns = vec![
-            crate::catalog::Column::new(
-                crate::catalog::ColumnId::new(1),
-                "id".to_string(),
-                CatalogDataType::Int,
-            )
-            .primary_key(true),
-            crate::catalog::Column::new(
-                crate::catalog::ColumnId::new(2),
-                "name".to_string(),
-                CatalogDataType::Text,
-            ),
-            crate::catalog::Column::new(
-                crate::catalog::ColumnId::new(3),
-                "team".to_string(),
-                CatalogDataType::Text,
-            ),
-        ];
-        catalog.create_table("users".to_string(), columns).unwrap();
-
-        let select = SelectStatement {
-            with_clause: Vec::new(),
-            distinct: false,
-            columns: vec![
-                SelectItem::Column("team".to_string()),
-                SelectItem::Window {
-                    function: WindowFunction::RowNumber,
-                    window: WindowSpec {
-                        partition_by: vec![Expression::Column("team".to_string())],
-                        order_by: vec![OrderByItem {
-                            column: "name".to_string(),
-                            direction: SortDirection::Asc,
-                        }],
-                    },
-                },
-            ],
-            column_aliases: vec![None, Some("row_num".to_string())],
-            from: TableReference::Table("users".to_string(), None),
-            where_clause: None,
-            group_by: vec![Expression::Column("team".to_string())],
-            having_clause: None,
-            order_by: Vec::new(),
-            limit: None,
-            offset: None,
-            set_operation: None,
-        };
-
-        assert!(validate_statement(&Statement::Select(select), &catalog).is_err());
-    }
-
-    #[test]
     fn test_multi_table_column_resolution_requires_qualification_when_ambiguous() -> Result<()> {
         let mut catalog = crate::catalog::Schema::new();
         catalog.create_table(
@@ -949,26 +895,6 @@ mod parser_tests {
         }
     }
 
-    fn parse_create_view(sql: &str) -> Result<CreateViewStatement> {
-        match parse_statement(sql)? {
-            Statement::CreateView(create_view) => Ok(create_view),
-            other => Err(crate::error::HematiteError::InternalError(format!(
-                "Expected CREATE VIEW statement, found {:?}",
-                other
-            ))),
-        }
-    }
-
-    fn parse_create_trigger(sql: &str) -> Result<CreateTriggerStatement> {
-        match parse_statement(sql)? {
-            Statement::CreateTrigger(create_trigger) => Ok(create_trigger),
-            other => Err(crate::error::HematiteError::InternalError(format!(
-                "Expected CREATE TRIGGER statement, found {:?}",
-                other
-            ))),
-        }
-    }
-
     fn parse_create_index(sql: &str) -> Result<CreateIndexStatement> {
         match parse_statement(sql)? {
             Statement::CreateIndex(create_index) => Ok(create_index),
@@ -1175,49 +1101,6 @@ mod parser_tests {
     }
 
     #[test]
-    fn test_parse_temporal_scalar_functions() -> Result<()> {
-        let select = parse_select(
-            "SELECT DATE(created_at), TIME(created_at), YEAR(created_at), TIME_TO_SEC(at), UNIX_TIMESTAMP(stamped) FROM typed;",
-        )?;
-        assert!(matches!(
-            &select.columns[0],
-            SelectItem::Expression(Expression::ScalarFunctionCall {
-                function: ScalarFunction::DateFn,
-                ..
-            })
-        ));
-        assert!(matches!(
-            &select.columns[1],
-            SelectItem::Expression(Expression::ScalarFunctionCall {
-                function: ScalarFunction::TimeFn,
-                ..
-            })
-        ));
-        assert!(matches!(
-            &select.columns[2],
-            SelectItem::Expression(Expression::ScalarFunctionCall {
-                function: ScalarFunction::Year,
-                ..
-            })
-        ));
-        assert!(matches!(
-            &select.columns[3],
-            SelectItem::Expression(Expression::ScalarFunctionCall {
-                function: ScalarFunction::TimeToSec,
-                ..
-            })
-        ));
-        assert!(matches!(
-            &select.columns[4],
-            SelectItem::Expression(Expression::ScalarFunctionCall {
-                function: ScalarFunction::UnixTimestamp,
-                ..
-            })
-        ));
-        Ok(())
-    }
-
-    #[test]
     fn test_parse_case_expression() -> Result<()> {
         let select = parse_select(
             "SELECT CASE WHEN score >= 90 THEN 'A' WHEN score >= 80 THEN 'B' ELSE 'C' END AS grade FROM users;",
@@ -1380,44 +1263,15 @@ mod parser_tests {
     }
 
     #[test]
-    fn test_parse_window_functions() -> Result<()> {
-        let select = parse_select(
-            "SELECT name, ROW_NUMBER() OVER (PARTITION BY team ORDER BY score DESC), \
-             COUNT(*) OVER (PARTITION BY team) \
-             FROM users;",
-        )?;
-
-        assert_eq!(select.columns.len(), 3);
-        assert!(matches!(select.columns[1], SelectItem::Window { .. }));
-        assert!(matches!(select.columns[2], SelectItem::Window { .. }));
-
-        match &select.columns[1] {
-            SelectItem::Window { function, window } => {
-                assert!(matches!(function, WindowFunction::RowNumber));
-                assert_eq!(window.partition_by.len(), 1);
-                assert_eq!(window.order_by.len(), 1);
-            }
-            _ => unreachable!("expected window function"),
-        }
-
-        Ok(())
-    }
-
-    #[test]
     fn test_parse_interval_literals() -> Result<()> {
-        let select = parse_select(
-            "SELECT DATE('2026-03-28') + INTERVAL '1-02' YEAR TO MONTH, \
-             CAST('2026-03-28 10:00:00' AS DATETIME) - INTERVAL '2 03:04:05' DAY TO SECOND, \
-             CAST('1-02' AS INTERVAL YEAR TO MONTH), \
-             CAST('2 03:04:05' AS INTERVAL DAY TO SECOND) \
-             FROM users;",
-        )?;
-
-        assert_eq!(select.columns.len(), 4);
-        assert!(matches!(select.columns[0], SelectItem::Expression(_)));
-        assert!(matches!(select.columns[1], SelectItem::Expression(_)));
-        assert!(matches!(select.columns[2], SelectItem::Expression(_)));
-        assert!(matches!(select.columns[3], SelectItem::Expression(_)));
+        for sql in [
+            "SELECT INTERVAL '1-02' YEAR TO MONTH FROM users;",
+            "SELECT INTERVAL '2 03:04:05' DAY TO SECOND FROM users;",
+            "SELECT CAST('1-02' AS INTERVAL YEAR TO MONTH) FROM users;",
+            "SELECT CAST('2 03:04:05' AS INTERVAL DAY TO SECOND) FROM users;",
+        ] {
+            assert!(parse_select(sql).is_err());
+        }
         Ok(())
     }
 
@@ -1735,7 +1589,7 @@ mod parser_tests {
     #[test]
     fn test_parse_current_numeric_type_names() -> Result<()> {
         let create = parse_create(
-            "CREATE TABLE metrics (id UINT64 PRIMARY KEY, ratio FLOAT32, amount DECIMAL(10, 2), code CHAR(8), tiny INT8, small INT16, exact DECIMAL(6));",
+            "CREATE TABLE metrics (id UINT64 PRIMARY KEY, ratio FLOAT32, amount DECIMAL(10, 2), code VARCHAR(8), tiny INT8, small INT16, exact DECIMAL(6));",
         )?;
         assert_eq!(create.columns[0].data_type, SqlTypeName::UInt64);
         assert_eq!(create.columns[1].data_type, SqlTypeName::Float32);
@@ -1746,7 +1600,7 @@ mod parser_tests {
                 scale: Some(2)
             }
         );
-        assert_eq!(create.columns[3].data_type, SqlTypeName::Char(8));
+        assert_eq!(create.columns[3].data_type, SqlTypeName::VarChar(8));
         assert_eq!(create.columns[4].data_type, SqlTypeName::Int8);
         assert_eq!(create.columns[5].data_type, SqlTypeName::Int16);
         assert_eq!(
@@ -1762,7 +1616,7 @@ mod parser_tests {
     #[test]
     fn test_parse_practical_core_type_names() -> Result<()> {
         let create = parse_create(
-            "CREATE TABLE events (id INT64 PRIMARY KEY, amount DECIMAL(12, 4), payload BLOB, start_date DATE, created_at DATETIME);",
+            "CREATE TABLE events (id INT64 PRIMARY KEY, amount DECIMAL(12, 4), payload BLOB);",
         )?;
         assert_eq!(create.columns[0].data_type, SqlTypeName::Int64);
         assert_eq!(
@@ -1773,8 +1627,10 @@ mod parser_tests {
             }
         );
         assert_eq!(create.columns[2].data_type, SqlTypeName::Blob);
-        assert_eq!(create.columns[3].data_type, SqlTypeName::Date);
-        assert_eq!(create.columns[4].data_type, SqlTypeName::DateTime);
+        assert!(
+            parse_create("CREATE TABLE t (d DATE);").is_err()
+                && parse_create("CREATE TABLE t (d DATETIME);").is_err()
+        );
         Ok(())
     }
 
@@ -1793,45 +1649,72 @@ mod parser_tests {
     #[test]
     fn test_parse_new_integer_type_names() -> Result<()> {
         let create = parse_create(
-            "CREATE TABLE ints (id INT PRIMARY KEY, tiny INT8, small INT16, normal INT32, large INT64, massive INT128);",
+            "CREATE TABLE ints (id INT PRIMARY KEY, tiny INT8, small INT16, normal INT32, large INT64);",
         )?;
         assert_eq!(create.columns[0].data_type, SqlTypeName::Int);
         assert_eq!(create.columns[1].data_type, SqlTypeName::Int8);
         assert_eq!(create.columns[2].data_type, SqlTypeName::Int16);
         assert_eq!(create.columns[3].data_type, SqlTypeName::Int);
         assert_eq!(create.columns[4].data_type, SqlTypeName::Int64);
-        assert_eq!(create.columns[5].data_type, SqlTypeName::Int128);
+        assert!(parse_create("CREATE TABLE ints (id INT PRIMARY KEY, massive INT128);").is_err());
         Ok(())
     }
 
     #[test]
     fn test_parse_unsigned_integer_type_names() -> Result<()> {
         let create = parse_create(
-            "CREATE TABLE uints (id UINT PRIMARY KEY, tiny UINT8, small UINT16, normal UINT32, large UINT64, massive UINT128, canonical UINT64);",
+            "CREATE TABLE uints (id UINT PRIMARY KEY, tiny UINT8, small UINT16, normal UINT32, large UINT64, canonical UINT64);",
         )?;
         assert_eq!(create.columns[0].data_type, SqlTypeName::UInt);
         assert_eq!(create.columns[1].data_type, SqlTypeName::UInt8);
         assert_eq!(create.columns[2].data_type, SqlTypeName::UInt16);
         assert_eq!(create.columns[3].data_type, SqlTypeName::UInt);
         assert_eq!(create.columns[4].data_type, SqlTypeName::UInt64);
-        assert_eq!(create.columns[5].data_type, SqlTypeName::UInt128);
-        assert_eq!(create.columns[6].data_type, SqlTypeName::UInt64);
+        assert_eq!(create.columns[5].data_type, SqlTypeName::UInt64);
+        assert!(
+            parse_create("CREATE TABLE uints (id UINT PRIMARY KEY, massive UINT128);").is_err()
+        );
         Ok(())
     }
 
     #[test]
-    fn test_parse_additional_temporal_binary_and_enum_types() -> Result<()> {
+    fn test_parse_rejects_removed_temporal_binary_and_enum_types() -> Result<()> {
+        for sql in [
+            "CREATE TABLE t (d TIME);",
+            "CREATE TABLE t (d TIME WITH TIME ZONE);",
+            "CREATE TABLE t (code CHAR(8));",
+            "CREATE TABLE t (code BINARY(4));",
+            "CREATE TABLE t (bytes VARBINARY(16));",
+            "CREATE TABLE t (state ENUM('draft', 'live'));",
+        ] {
+            assert!(parse_create(sql).is_err(), "expected {sql} to be rejected");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_removed_type_keywords_are_usable_as_identifiers() -> Result<()> {
         let create = parse_create(
-            "CREATE TABLE typed (id INT PRIMARY KEY, at TIME, stamped DATETIME, zone_time TIME WITH TIME ZONE, code BINARY(4), bytes VARBINARY(16), state ENUM('draft', 'live'));",
+            "CREATE TABLE t (id INT PRIMARY KEY, date INT, time INT, datetime INT, interval INT, char INT, enum INT, binary INT, varbinary INT);",
         )?;
-        assert_eq!(create.columns[1].data_type, SqlTypeName::Time);
-        assert_eq!(create.columns[2].data_type, SqlTypeName::DateTime);
-        assert_eq!(create.columns[3].data_type, SqlTypeName::TimeWithTimeZone);
-        assert_eq!(create.columns[4].data_type, SqlTypeName::Binary(4));
-        assert_eq!(create.columns[5].data_type, SqlTypeName::VarBinary(16));
+        let names: Vec<&str> = create
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect();
         assert_eq!(
-            create.columns[6].data_type,
-            SqlTypeName::Enum(vec!["draft".to_string(), "live".to_string()])
+            names,
+            vec![
+                "id",
+                "date",
+                "time",
+                "datetime",
+                "interval",
+                "char",
+                "enum",
+                "binary",
+                "varbinary",
+            ]
         );
         Ok(())
     }
@@ -2217,18 +2100,6 @@ mod parser_tests {
     }
 
     #[test]
-    fn test_parse_select_with_recursive_cte() -> Result<()> {
-        let select = parse_select(
-            "WITH RECURSIVE nums AS (SELECT n FROM seeds UNION ALL SELECT n + 1 AS n FROM nums WHERE n < 3) SELECT n FROM nums;",
-        )?;
-        assert_eq!(select.with_clause.len(), 1);
-        assert!(select.with_clause[0].recursive);
-        assert_eq!(select.with_clause[0].name, "nums");
-
-        Ok(())
-    }
-
-    #[test]
     fn test_parse_select_with_left_join() -> Result<()> {
         let select = parse_select(
             "SELECT u.name, p.title FROM users u LEFT JOIN posts p ON u.id = p.user_id;",
@@ -2294,7 +2165,7 @@ mod parser_tests {
         let mut lexer = Lexer::new("SHOW VIEWS;");
         lexer.tokenize()?;
         let mut parser = Parser::new(lexer.into_tokens());
-        assert!(matches!(parser.parse()?, Statement::ShowViews));
+        assert!(parser.parse().is_err());
         Ok(())
     }
 
@@ -2307,31 +2178,9 @@ mod parser_tests {
                     && matches!(query.from, TableReference::Table(ref name, None) if name == "users")
         ));
 
-        let create_view = parse_create_view("CREATE VIEW user_names AS SELECT name FROM users;")?;
-        assert_eq!(create_view.view, "user_names");
-        assert!(matches!(
-            create_view.query.from,
-            TableReference::Table(name, None) if name == "users"
-        ));
-
-        let create_trigger = parse_create_trigger(
-            "CREATE TRIGGER audit_users AFTER INSERT ON users AS INSERT INTO audit_log (entry) VALUES (NEW.name);",
-        )?;
-        assert_eq!(create_trigger.trigger, "audit_users");
-        assert_eq!(create_trigger.table, "users");
-        assert_eq!(create_trigger.event, TriggerEvent::Insert);
-        assert!(matches!(*create_trigger.body, Statement::Insert(_)));
-
-        assert!(matches!(
-            parse_statement("DROP VIEW IF EXISTS user_names;")?,
-            Statement::DropView(DropViewStatement { ref view, if_exists })
-                if view == "user_names" && if_exists
-        ));
-        assert!(matches!(
-            parse_statement("DROP TRIGGER IF EXISTS audit_users;")?,
-            Statement::DropTrigger(DropTriggerStatement { ref trigger, if_exists })
-                if trigger == "audit_users" && if_exists
-        ));
+        assert!(parse_statement("CREATE TRIGGER audit_users AFTER INSERT ON users AS INSERT INTO audit_log (entry) VALUES (NEW.name);").is_err());
+        assert!(parse_statement("DROP VIEW IF EXISTS user_names;").is_err());
+        assert!(parse_statement("DROP TRIGGER IF EXISTS audit_users;").is_err());
         assert!(matches!(
             parse_statement("SAVEPOINT before_users;")?,
             Statement::Savepoint(ref name) if name == "before_users"
@@ -2348,18 +2197,12 @@ mod parser_tests {
             parse_statement("SHOW INDEXES FROM users;")?,
             Statement::ShowIndexes(Some(ref table)) if table == "users"
         ));
-        assert!(matches!(
-            parse_statement("SHOW TRIGGERS;")?,
-            Statement::ShowTriggers(None)
-        ));
+        assert!(parse_statement("SHOW TRIGGERS;").is_err());
         assert!(matches!(
             parse_statement("SHOW CREATE TABLE users;")?,
             Statement::ShowCreateTable(ref table) if table == "users"
         ));
-        assert!(matches!(
-            parse_statement("SHOW CREATE VIEW user_names;")?,
-            Statement::ShowCreateView(ref view) if view == "user_names"
-        ));
+        assert!(parse_statement("SHOW CREATE VIEW user_names;").is_err());
         assert!(matches!(
             parse_statement("ALTER TABLE users ADD CONSTRAINT uq_users_email UNIQUE (email);")?,
             Statement::Alter(AlterStatement {

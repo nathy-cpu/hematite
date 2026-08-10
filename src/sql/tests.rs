@@ -1,7 +1,7 @@
 //! Centralized tests for the sql module
 
 mod connection_tests {
-    use crate::catalog::{DataType, DateTimeValue, JournalMode, TimeValue, TimeWithTimeZoneValue};
+    use crate::catalog::{DataType, JournalMode};
     use crate::error::{HematiteError, Result};
     use crate::sql::connection::*;
     use crate::test_utils::TestDbFile;
@@ -176,42 +176,11 @@ mod connection_tests {
     }
 
     #[test]
-    fn test_create_view_allows_wildcard_projection() -> Result<()> {
-        let db = TestDbFile::new("_test_create_view_allows_wildcard_projection");
-        let mut conn = Connection::new(db.path())?;
-
-        conn.execute("CREATE TABLE items (id INT PRIMARY KEY, name TEXT);")?;
-        conn.execute("INSERT INTO items (id, name) VALUES (1, 'a'), (2, 'b');")?;
-        conn.execute("CREATE VIEW item_view AS SELECT * FROM items;")?;
-
-        let result = conn.execute("SELECT * FROM item_view ORDER BY id;")?;
-        assert_eq!(result.columns, vec!["id", "name"]);
-        assert_eq!(
-            result.rows,
-            vec![
-                vec![
-                    crate::catalog::Value::Integer(1),
-                    crate::catalog::Value::Text("a".to_string()),
-                ],
-                vec![
-                    crate::catalog::Value::Integer(2),
-                    crate::catalog::Value::Text("b".to_string()),
-                ],
-            ]
-        );
-
-        conn.close()?;
-        Ok(())
-    }
-
-    #[test]
     fn test_select_into_creates_table_from_query() -> Result<()> {
         let db = TestDbFile::new("_test_select_into_creates_table_from_query");
         let mut conn = Connection::new(db.path())?;
 
-        conn.execute(
-            "CREATE TABLE source (id INT PRIMARY KEY, state ENUM('draft', 'live'), score INT);",
-        )?;
+        conn.execute("CREATE TABLE source (id INT PRIMARY KEY, state TEXT, score INT);")?;
         conn.execute(
             "INSERT INTO source (id, state, score) VALUES (1, 'draft', 10), (2, 'live', 20), (3, 'draft', 5);",
         )?;
@@ -227,11 +196,11 @@ mod connection_tests {
             copied.rows,
             vec![
                 vec![
-                    crate::catalog::Value::Enum("draft".to_string()),
+                    crate::catalog::Value::Text("draft".to_string()),
                     crate::catalog::Value::Integer(10),
                 ],
                 vec![
-                    crate::catalog::Value::Enum("live".to_string()),
+                    crate::catalog::Value::Text("live".to_string()),
                     crate::catalog::Value::Integer(20),
                 ],
             ]
@@ -241,7 +210,7 @@ mod connection_tests {
         assert!(matches!(
             show_create.rows.first().and_then(|row| row.get(1)),
             Some(crate::catalog::Value::Text(sql))
-                if sql.contains("ENUM('draft', 'live')")
+                if sql.contains("state TEXT")
                     && sql.contains("score INT")
         ));
 
@@ -257,7 +226,6 @@ mod connection_tests {
         conn.execute("CREATE TABLE source (id INT PRIMARY KEY, name TEXT);")?;
         conn.execute("INSERT INTO source (id, name) VALUES (1, 'a');")?;
         conn.execute("CREATE TABLE copied_table (id INT PRIMARY KEY, name TEXT);")?;
-        conn.execute("CREATE VIEW copied_view AS SELECT name FROM source;")?;
 
         let table_err = conn
             .execute("SELECT name INTO copied_table FROM source;")
@@ -266,15 +234,6 @@ mod connection_tests {
             table_err,
             crate::error::HematiteError::ParseError(message)
                 if message.contains("Table 'copied_table' already exists")
-        ));
-
-        let view_err = conn
-            .execute("SELECT name INTO copied_view FROM source;")
-            .unwrap_err();
-        assert!(matches!(
-            view_err,
-            crate::error::HematiteError::ParseError(message)
-                if message.contains("Table 'copied_view' already exists")
         ));
 
         conn.close()?;
@@ -298,77 +257,50 @@ mod connection_tests {
     }
 
     #[test]
-    fn test_additional_temporal_binary_and_enum_types_round_trip() -> Result<()> {
-        let db = TestDbFile::new("_test_additional_temporal_binary_and_enum_types_round_trip");
+    fn test_removed_temporal_binary_and_enum_types_are_rejected() -> Result<()> {
+        let db = TestDbFile::new("_test_removed_temporal_binary_and_enum_types_are_rejected");
         let mut conn = Connection::new(db.path())?;
 
-        conn.execute(
-            "CREATE TABLE typed (\
-                id INT PRIMARY KEY,\
-                at TIME,\
-                stamped DATETIME,\
-                zone_time TIME WITH TIME ZONE,\
-                code BINARY(4),\
-                bytes VARBINARY(8),\
-                state ENUM('draft', 'live')\
-            );",
-        )?;
-        conn.execute(
-            "INSERT INTO typed (id, at, stamped, zone_time, code, bytes, state) \
-             VALUES (1, '10:11:12', '2026-03-28 13:14:15', '10:11:12+03:00', 'AB', 'xyz', 'live');",
-        )?;
-
-        let result = conn.execute(
-            "SELECT at, stamped, zone_time, code, bytes, state FROM typed WHERE id = 1;",
-        )?;
-        let row = crate::sql::result::Row::new(result.rows[0].clone());
-        assert_eq!(row.get_time(0)?, TimeValue::parse("10:11:12")?);
-        assert_eq!(
-            row.get_datetime(1)?,
-            DateTimeValue::parse("2026-03-28 13:14:15")?
-        );
-        assert_eq!(
-            row.get_time_with_time_zone(2)?,
-            TimeWithTimeZoneValue::parse("10:11:12+03:00")?
-        );
-        assert_eq!(row.get_blob(3)?, vec![b'A', b'B', 0, 0]);
-        assert_eq!(row.get_blob(4)?, b"xyz".to_vec());
-        assert_eq!(row.get_string(5)?, "live");
+        for sql in [
+            "CREATE TABLE t (at TIME);",
+            "CREATE TABLE t (at DATE);",
+            "CREATE TABLE t (at DATETIME);",
+            "CREATE TABLE t (at TIME WITH TIME ZONE);",
+            "CREATE TABLE t (code CHAR(4));",
+            "CREATE TABLE t (code BINARY(4));",
+            "CREATE TABLE t (bytes VARBINARY(8));",
+            "CREATE TABLE t (state ENUM('draft', 'live'));",
+        ] {
+            let err = conn.execute(sql).unwrap_err();
+            assert!(
+                matches!(err, crate::error::HematiteError::ParseError(_)),
+                "expected {sql} to be rejected, got {err:?}"
+            );
+        }
 
         conn.close()?;
         Ok(())
     }
 
     #[test]
-    fn test_binary_columns_compare_with_zero_padding_semantics() -> Result<()> {
-        let db = TestDbFile::new("_test_binary_columns_compare_with_zero_padding_semantics");
+    fn test_removed_type_keywords_are_usable_as_column_names() -> Result<()> {
+        let db = TestDbFile::new("_test_removed_type_keywords_are_usable_as_column_names");
         let mut conn = Connection::new(db.path())?;
 
         conn.execute(
-            "CREATE TABLE typed (\
-                id INT PRIMARY KEY,\
-                code BINARY(4),\
-                payload VARBINARY(4)\
-            );",
+            "CREATE TABLE t (id INT PRIMARY KEY, date INT, char INT, enum INT, binary INT);",
         )?;
-        conn.execute("INSERT INTO typed (id, code, payload) VALUES (1, X'4142', X'4142');")?;
+        conn.execute("INSERT INTO t (id, date, char, enum, binary) VALUES (1, 2, 3, 4, 5);")?;
 
-        let binary_match = conn.execute("SELECT id FROM typed WHERE code = X'4142';")?;
+        let result = conn.execute("SELECT date, char, enum, binary FROM t WHERE id = 1;")?;
         assert_eq!(
-            binary_match.rows,
-            vec![vec![crate::catalog::Value::Integer(1)]]
-        );
-
-        let varbinary_match = conn.execute("SELECT id FROM typed WHERE payload = X'4142';")?;
-        assert_eq!(
-            varbinary_match.rows,
-            vec![vec![crate::catalog::Value::Integer(1)]]
-        );
-
-        let padded_binary_match = conn.execute("SELECT id FROM typed WHERE code = X'41420000';")?;
-        assert_eq!(
-            padded_binary_match.rows,
-            vec![vec![crate::catalog::Value::Integer(1)]]
+            result.rows,
+            vec![vec![
+                crate::catalog::Value::Integer(2),
+                crate::catalog::Value::Integer(3),
+                crate::catalog::Value::Integer(4),
+                crate::catalog::Value::Integer(5),
+            ]]
         );
 
         conn.close()?;
@@ -418,103 +350,41 @@ mod connection_tests {
         let db = TestDbFile::new("_test_temporal_scalar_functions_and_arithmetic");
         let mut conn = Connection::new(db.path())?;
 
-        conn.execute(
-            "CREATE TABLE typed (\
-                id INT PRIMARY KEY,\
-                event_date DATE,\
-                at TIME,\
-                created_at DATETIME,\
-                stamped DATETIME,\
-                zone_time TIME WITH TIME ZONE\
-            );",
-        )?;
-        conn.execute(
-            "INSERT INTO typed (id, event_date, at, created_at, stamped, zone_time) \
-             VALUES (1, '2026-03-28', '10:11:12', '2026-03-28 13:14:15', '2026-03-28 13:14:15', '10:11:12+03:00');",
-        )?;
+        conn.execute("CREATE TABLE seed (id INT PRIMARY KEY);")?;
+        conn.execute("INSERT INTO seed (id) VALUES (1);")?;
 
-        let result = conn.execute(
-            "SELECT \
-                DATE(created_at), \
-                TIME(created_at), \
-                YEAR(event_date), \
-                MONTH(event_date), \
-                DAY(event_date), \
-                HOUR(at), \
-                MINUTE(at), \
-                SECOND(at), \
-                TIME_TO_SEC(at), \
-                SEC_TO_TIME(3661), \
-                UNIX_TIMESTAMP(stamped), \
-                event_date + 2, \
-                created_at + 45, \
-                stamped - 15, \
-                at + 120, \
-                zone_time + 60, \
-                DATE('2026-03-29 01:02:03'), \
-                TIME('2026-03-29 01:02:03') \
-             FROM typed WHERE id = 1;",
-        )?;
-
-        let row = crate::sql::result::Row::new(result.rows[0].clone());
-        assert_eq!(row.get_date(0)?.to_string(), "2026-03-28");
-        assert_eq!(row.get_time(1)?.to_string(), "13:14:15");
-        assert_eq!(row.get_int(2)?, 2026);
-        assert_eq!(row.get_int(3)?, 3);
-        assert_eq!(row.get_int(4)?, 28);
-        assert_eq!(row.get_int(5)?, 10);
-        assert_eq!(row.get_int(6)?, 11);
-        assert_eq!(row.get_int(7)?, 12);
-        assert_eq!(row.get_bigint(8)?, 36_672);
-        assert_eq!(row.get_time(9)?.to_string(), "01:01:01");
-        assert_eq!(
-            row.get_bigint(10)?,
-            DateTimeValue::parse("2026-03-28 13:14:15")?.seconds_since_epoch()
-        );
-        assert_eq!(row.get_date(11)?.to_string(), "2026-03-30");
-        assert_eq!(row.get_datetime(12)?.to_string(), "2026-03-28 13:15:00");
-        assert_eq!(row.get_datetime(13)?.to_string(), "2026-03-28 13:14:00");
-        assert_eq!(row.get_time(14)?.to_string(), "10:13:12");
-        assert_eq!(
-            row.get_time_with_time_zone(15)?.to_string(),
-            "10:12:12+03:00"
-        );
-        assert_eq!(row.get_date(16)?.to_string(), "2026-03-29");
-        assert_eq!(row.get_time(17)?.to_string(), "01:02:03");
+        for sql in [
+            "SELECT DATE('2026-03-28') FROM seed;",
+            "SELECT TIME('10:11:12') FROM seed;",
+            "SELECT YEAR('2026') FROM seed;",
+            "SELECT UNIX_TIMESTAMP('2026-03-28 13:14:15') FROM seed;",
+        ] {
+            let err = conn.execute(sql).unwrap_err();
+            assert!(matches!(err, crate::error::HematiteError::ParseError(_)));
+        }
 
         conn.close()?;
         Ok(())
     }
 
     #[test]
-    fn test_temporal_interval_arithmetic() -> Result<()> {
+    fn test_temporal_interval_arithmetic_rejected() -> Result<()> {
         let db = TestDbFile::new("_test_temporal_interval_arithmetic");
         let mut conn = Connection::new(db.path())?;
         conn.execute("CREATE TABLE seed (id INT PRIMARY KEY);")?;
         conn.execute("INSERT INTO seed (id) VALUES (1);")?;
 
-        let result = conn.execute(
-            "SELECT \
-                DATE('2026-03-28') + INTERVAL '1-02' YEAR TO MONTH, \
-                DATE('2026-03-28') - INTERVAL '2 00:00:00' DAY TO SECOND, \
-                CAST('2026-03-28 13:14:15' AS DATETIME) + INTERVAL '0-01' YEAR TO MONTH, \
-                CAST('2026-03-28 13:14:15' AS DATETIME) + INTERVAL '1 00:00:45' DAY TO SECOND, \
-                CAST('2026-03-28 13:14:15' AS DATETIME) - INTERVAL '0-02' YEAR TO MONTH, \
-                TIME('10:11:12') + INTERVAL '0 01:02:03' DAY TO SECOND, \
-                INTERVAL '1-02' YEAR TO MONTH + INTERVAL '0-10' YEAR TO MONTH, \
-                INTERVAL '1 00:00:30' DAY TO SECOND - INTERVAL '0 00:00:45' DAY TO SECOND \
-             FROM seed;",
-        )?;
-
-        let row = crate::sql::result::Row::new(result.rows[0].clone());
-        assert_eq!(row.get_date(0)?.to_string(), "2027-05-28");
-        assert_eq!(row.get_date(1)?.to_string(), "2026-03-26");
-        assert_eq!(row.get_datetime(2)?.to_string(), "2026-04-28 13:14:15");
-        assert_eq!(row.get_datetime(3)?.to_string(), "2026-03-29 13:15:00");
-        assert_eq!(row.get_datetime(4)?.to_string(), "2026-01-28 13:14:15");
-        assert_eq!(row.get_time(5)?.to_string(), "11:13:15");
-        assert_eq!(row.get_interval_year_month(6)?.to_string(), "2-00");
-        assert_eq!(row.get_interval_day_second(7)?.to_string(), "0 23:59:45");
+        for sql in [
+            "SELECT INTERVAL '1-02' YEAR TO MONTH FROM seed;",
+            "SELECT INTERVAL '2 03:04:05' DAY TO SECOND FROM seed;",
+            "SELECT DATE('2026-03-28') + INTERVAL '1-02' YEAR TO MONTH FROM seed;",
+        ] {
+            let err = conn.execute(sql).unwrap_err();
+            assert!(
+                matches!(err, crate::error::HematiteError::ParseError(_)),
+                "expected {sql} to be rejected, got {err:?}"
+            );
+        }
 
         conn.close()?;
         Ok(())
@@ -709,290 +579,13 @@ mod connection_tests {
     }
 
     #[test]
-    fn test_create_drop_and_show_views() -> Result<()> {
-        let db = TestDbFile::new("_test_create_drop_and_show_views");
-        let mut conn = Connection::new(db.path())?;
-
-        conn.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);")?;
-        conn.execute("CREATE VIEW user_names AS SELECT name FROM users;")?;
-
-        let show_views = conn.execute("SHOW VIEWS;")?;
-        assert_eq!(show_views.columns, vec!["view_name"]);
-        assert_eq!(
-            show_views.rows,
-            vec![vec![crate::catalog::Value::Text("user_names".to_string())]]
-        );
-
-        conn.execute("DROP VIEW user_names;")?;
-        let show_views = conn.execute("SHOW VIEWS;")?;
-        assert!(show_views.rows.is_empty());
-
-        conn.close()?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_create_view_persists_across_reopen_and_blocks_base_drop() -> Result<()> {
-        let db = TestDbFile::new("_test_create_view_persists_across_reopen_and_blocks_base_drop");
-
-        {
-            let mut conn = Connection::new(db.path())?;
-            conn.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);")?;
-            conn.execute("CREATE VIEW user_names AS SELECT name FROM users;")?;
-            conn.close()?;
-        }
-
-        let mut reopened = Connection::new(db.path())?;
-        let show_views = reopened.execute("SHOW VIEWS;")?;
-        assert_eq!(
-            show_views.rows,
-            vec![vec![crate::catalog::Value::Text("user_names".to_string())]]
-        );
-
-        let drop_result = reopened.execute("DROP TABLE users;");
-        assert!(drop_result.is_err());
-        assert!(drop_result
-            .unwrap_err()
-            .to_string()
-            .contains("depends on it"));
-
-        reopened.close()?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_create_view_rejects_direct_self_reference() -> Result<()> {
-        let db = TestDbFile::new("_test_create_view_rejects_direct_self_reference");
-        let mut conn = Connection::new(db.path())?;
-
-        let result = conn.execute("CREATE VIEW user_names AS SELECT * FROM user_names;");
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("cannot depend on itself"));
-
-        conn.close()?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_drop_view_rejects_dependent_view() -> Result<()> {
-        let db = TestDbFile::new("_test_drop_view_rejects_dependent_view");
-        let mut conn = Connection::new(db.path())?;
-
-        conn.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);")?;
-        conn.execute("CREATE VIEW user_names AS SELECT id, name FROM users;")?;
-        conn.execute("CREATE VIEW user_ids AS SELECT id FROM user_names;")?;
-
-        let result = conn.execute("DROP VIEW user_names;");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("depends on it"));
-
-        conn.close()?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_select_from_view() -> Result<()> {
-        let db = TestDbFile::new("_test_select_from_view");
-        let mut conn = Connection::new(db.path())?;
-
-        conn.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT, active BOOLEAN);")?;
-        conn.execute(
-            "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Bob', FALSE);",
-        )?;
-        conn.execute(
-            "CREATE VIEW active_users AS SELECT id, name FROM users WHERE active = TRUE;",
-        )?;
-
-        let result = conn.execute("SELECT id, name FROM active_users ORDER BY id ASC;")?;
-        assert_eq!(result.columns, vec!["id", "name"]);
-        assert_eq!(
-            result.rows,
-            vec![vec![
-                crate::catalog::Value::Integer(1),
-                crate::catalog::Value::Text("Ada".to_string()),
-            ]]
-        );
-
-        conn.close()?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_select_from_nested_view_and_joined_view() -> Result<()> {
-        let db = TestDbFile::new("_test_select_from_nested_view_and_joined_view");
-        let mut conn = Connection::new(db.path())?;
-
-        conn.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);")?;
-        conn.execute("CREATE TABLE posts (id INT PRIMARY KEY, user_id INT, title TEXT);")?;
-        conn.execute("INSERT INTO users (id, name) VALUES (1, 'Ada'), (2, 'Bob');")?;
-        conn.execute(
-            "INSERT INTO posts (id, user_id, title) VALUES (10, 1, 'Intro'), (11, 1, 'Rust'), (12, 2, 'SQL');",
-        )?;
-        conn.execute("CREATE VIEW user_names AS SELECT id, name FROM users;")?;
-        conn.execute("CREATE VIEW post_counts AS SELECT user_id, COUNT(*) AS total FROM posts GROUP BY user_id;")?;
-
-        let result = conn.execute(
-            "SELECT u.name, p.total \
-             FROM user_names u INNER JOIN post_counts p ON u.id = p.user_id \
-             ORDER BY u.name ASC;",
-        )?;
-        assert_eq!(result.columns, vec!["name", "total"]);
-        assert_eq!(result.rows.len(), 2);
-        assert_eq!(
-            result.rows[0][0],
-            crate::catalog::Value::Text("Ada".to_string())
-        );
-        assert_eq!(
-            result.rows[1][0],
-            crate::catalog::Value::Text("Bob".to_string())
-        );
-
-        conn.close()?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_grouped_query_over_view() -> Result<()> {
-        let db = TestDbFile::new("_test_grouped_query_over_view");
-        let mut conn = Connection::new(db.path())?;
-
-        conn.execute("CREATE TABLE posts (id INT PRIMARY KEY, user_id INT, title TEXT);")?;
-        conn.execute(
-            "INSERT INTO posts (id, user_id, title) VALUES (10, 1, 'Intro'), (11, 1, 'Rust'), (12, 2, 'SQL');",
-        )?;
-        conn.execute("CREATE VIEW post_counts AS SELECT user_id, COUNT(*) AS total FROM posts GROUP BY user_id;")?;
-
-        let result = conn.execute(
-            "SELECT user_id, total FROM post_counts WHERE total >= 1 ORDER BY total DESC, user_id ASC;",
-        )?;
-
-        assert_eq!(result.columns, vec!["user_id", "total"]);
-        assert_eq!(
-            result.rows,
-            vec![
-                vec![
-                    crate::catalog::Value::Integer(1),
-                    crate::catalog::Value::Integer(2)
-                ],
-                vec![
-                    crate::catalog::Value::Integer(2),
-                    crate::catalog::Value::Integer(1)
-                ],
-            ]
-        );
-
-        conn.close()?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_view_in_cte_and_subquery() -> Result<()> {
-        let db = TestDbFile::new("_test_view_in_cte_and_subquery");
-        let mut conn = Connection::new(db.path())?;
-
-        conn.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT, active BOOLEAN);")?;
-        conn.execute(
-            "INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE), (2, 'Bob', FALSE), (3, 'Cara', TRUE);",
-        )?;
-        conn.execute(
-            "CREATE VIEW active_users AS SELECT id, name FROM users WHERE active = TRUE;",
-        )?;
-
-        let cte_result = conn.execute(
-            "WITH named_users AS (SELECT id, name FROM active_users) \
-             SELECT name FROM named_users ORDER BY id ASC;",
-        )?;
-        assert_eq!(cte_result.columns, vec!["name"]);
-        assert_eq!(
-            cte_result.rows,
-            vec![
-                vec![crate::catalog::Value::Text("Ada".to_string())],
-                vec![crate::catalog::Value::Text("Cara".to_string())],
-            ]
-        );
-
-        let subquery_result = conn.execute(
-            "SELECT name FROM (SELECT id, name FROM active_users) filtered WHERE id > 1 ORDER BY id ASC;",
-        )?;
-        assert_eq!(subquery_result.columns, vec!["name"]);
-        assert_eq!(
-            subquery_result.rows,
-            vec![vec![crate::catalog::Value::Text("Cara".to_string())]]
-        );
-
-        conn.close()?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_explain_select_from_view() -> Result<()> {
-        let db = TestDbFile::new("_test_explain_select_from_view");
-        let mut conn = Connection::new(db.path())?;
-
-        conn.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT, active BOOLEAN);")?;
-        conn.execute(
-            "CREATE VIEW active_users AS SELECT id, name FROM users WHERE active = TRUE;",
-        )?;
-
-        let explain = conn.execute("EXPLAIN SELECT id, name FROM active_users WHERE id = 1;")?;
-        assert_eq!(explain.columns, vec!["kind", "detail"]);
-        assert!(!explain.rows.is_empty());
-
-        conn.close()?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_create_drop_trigger_persists_across_reopen() -> Result<()> {
-        let db = TestDbFile::new("_test_create_drop_trigger_persists_across_reopen");
-
-        {
-            let mut conn = Connection::new(db.path())?;
-            conn.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);")?;
-            conn.execute("CREATE TABLE audit_log (id INT PRIMARY KEY, entry TEXT);")?;
-            conn.execute(
-                "CREATE TRIGGER audit_users AFTER INSERT ON users AS INSERT INTO audit_log (id, entry) VALUES (1, NEW.name);",
-            )?;
-            assert!(conn.schema_snapshot()?.trigger("audit_users").is_some());
-            conn.close()?;
-        }
-
-        {
-            let mut reopened = Connection::new(db.path())?;
-            let trigger = reopened
-                .schema_snapshot()?
-                .trigger("audit_users")
-                .cloned()
-                .expect("trigger should persist across reopen");
-            assert_eq!(trigger.table_name, "users");
-            assert_eq!(
-                trigger.body_sql,
-                "INSERT INTO audit_log (id, entry) VALUES (1, NEW.name)"
-            );
-
-            reopened.execute("DROP TRIGGER audit_users;")?;
-            assert!(reopened.schema_snapshot()?.trigger("audit_users").is_none());
-            reopened.close()?;
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_show_indexes_triggers_and_create_statements() -> Result<()> {
+    fn test_show_indexes_and_create_statements() -> Result<()> {
         let db = TestDbFile::new("_test_show_indexes_triggers_and_create_statements");
         let mut conn = Connection::new(db.path())?;
 
         conn.execute("CREATE TABLE users (id INT PRIMARY KEY, email TEXT UNIQUE, org_id INT);")?;
         conn.execute("CREATE INDEX idx_users_org ON users (org_id);")?;
-        conn.execute("CREATE VIEW user_emails AS SELECT id, email FROM users;")?;
         conn.execute("CREATE TABLE audit_log (id INT PRIMARY KEY, entry TEXT);")?;
-        conn.execute(
-            "CREATE TRIGGER audit_users AFTER INSERT ON users AS INSERT INTO audit_log (id, entry) VALUES (1, NEW.email);",
-        )?;
 
         let indexes = conn.execute("SHOW INDEXES FROM users;")?;
         assert_eq!(
@@ -1004,20 +597,6 @@ mod connection_tests {
             .iter()
             .any(|row| { row[1] == crate::catalog::Value::Text("idx_users_org".to_string()) }));
 
-        let triggers = conn.execute("SHOW TRIGGERS FROM users;")?;
-        assert_eq!(
-            triggers.columns,
-            vec!["trigger_name", "table_name", "event"]
-        );
-        assert_eq!(
-            triggers.rows,
-            vec![vec![
-                crate::catalog::Value::Text("audit_users".to_string()),
-                crate::catalog::Value::Text("users".to_string()),
-                crate::catalog::Value::Text("INSERT".to_string()),
-            ]]
-        );
-
         let show_create_table = conn.execute("SHOW CREATE TABLE users;")?;
         assert_eq!(show_create_table.columns, vec!["table_name", "create_sql"]);
         let table_sql = match &show_create_table.rows[0][1] {
@@ -1026,18 +605,6 @@ mod connection_tests {
         };
         assert!(table_sql.contains("CREATE TABLE users"));
         assert!(table_sql.contains("UNIQUE"));
-
-        let show_create_view = conn.execute("SHOW CREATE VIEW user_emails;")?;
-        assert_eq!(show_create_view.columns, vec!["view_name", "create_sql"]);
-        assert_eq!(
-            show_create_view.rows,
-            vec![vec![
-                crate::catalog::Value::Text("user_emails".to_string()),
-                crate::catalog::Value::Text(
-                    "CREATE VIEW user_emails AS SELECT id, email FROM users".to_string()
-                ),
-            ]]
-        );
 
         conn.close()?;
         Ok(())
@@ -1053,11 +620,7 @@ mod connection_tests {
                 "CREATE TABLE users (id INT PRIMARY KEY, email TEXT UNIQUE, org_id INT);",
             )?;
             conn.execute("CREATE INDEX idx_users_org ON users (org_id);")?;
-            conn.execute("CREATE VIEW user_emails AS SELECT id, email FROM users;")?;
             conn.execute("CREATE TABLE audit_log (id INT PRIMARY KEY, entry TEXT);")?;
-            conn.execute(
-                "CREATE TRIGGER audit_users AFTER INSERT ON users AS INSERT INTO audit_log (id, entry) VALUES (1, NEW.email);",
-            )?;
             conn.close()?;
         }
 
@@ -1066,27 +629,11 @@ mod connection_tests {
         let show_tables = reopened.execute("SHOW TABLES;")?;
         assert_eq!(show_tables.rows.len(), 2);
 
-        let show_views = reopened.execute("SHOW VIEWS;")?;
-        assert_eq!(
-            show_views.rows,
-            vec![vec![crate::catalog::Value::Text("user_emails".to_string())]]
-        );
-
         let show_indexes = reopened.execute("SHOW INDEXES FROM users;")?;
         assert!(show_indexes
             .rows
             .iter()
             .any(|row| row[1] == crate::catalog::Value::Text("idx_users_org".to_string())));
-
-        let show_triggers = reopened.execute("SHOW TRIGGERS FROM users;")?;
-        assert_eq!(
-            show_triggers.rows,
-            vec![vec![
-                crate::catalog::Value::Text("audit_users".to_string()),
-                crate::catalog::Value::Text("users".to_string()),
-                crate::catalog::Value::Text("INSERT".to_string()),
-            ]]
-        );
 
         let show_create_table = reopened.execute("SHOW CREATE TABLE users;")?;
         assert_eq!(
@@ -1094,187 +641,7 @@ mod connection_tests {
             crate::catalog::Value::Text("users".to_string())
         );
 
-        let show_create_view = reopened.execute("SHOW CREATE VIEW user_emails;")?;
-        assert_eq!(
-            show_create_view.rows[0][0],
-            crate::catalog::Value::Text("user_emails".to_string())
-        );
-
         reopened.close()?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_trigger_validation_rejects_invalid_old_new_usage() -> Result<()> {
-        let db = TestDbFile::new("_test_trigger_validation_rejects_invalid_old_new_usage");
-        let mut conn = Connection::new(db.path())?;
-
-        conn.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);")?;
-        conn.execute("CREATE TABLE audit_log (id INT PRIMARY KEY, entry TEXT);")?;
-
-        let insert_result = conn.execute(
-            "CREATE TRIGGER bad_insert AFTER INSERT ON users AS INSERT INTO audit_log (id, entry) VALUES (1, OLD.name);",
-        );
-        assert!(insert_result.is_err());
-        assert!(insert_result
-            .unwrap_err()
-            .to_string()
-            .contains("cannot reference OLD"));
-
-        let delete_result = conn.execute(
-            "CREATE TRIGGER bad_delete AFTER DELETE ON users AS INSERT INTO audit_log (id, entry) VALUES (1, NEW.name);",
-        );
-        assert!(delete_result.is_err());
-        assert!(delete_result
-            .unwrap_err()
-            .to_string()
-            .contains("cannot reference NEW"));
-
-        conn.close()?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_trigger_validation_rejects_self_targeting_body() -> Result<()> {
-        let db = TestDbFile::new("_test_trigger_validation_rejects_self_targeting_body");
-        let mut conn = Connection::new(db.path())?;
-
-        conn.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);")?;
-
-        let result = conn.execute(
-            "CREATE TRIGGER audit_users AFTER INSERT ON users AS INSERT INTO users (id, name) VALUES (2, NEW.name);",
-        );
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("cannot target its own table"));
-
-        conn.close()?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_insert_update_delete_triggers_fire_with_old_and_new_values() -> Result<()> {
-        let db =
-            TestDbFile::new("_test_insert_update_delete_triggers_fire_with_old_and_new_values");
-        let mut conn = Connection::new(db.path())?;
-
-        conn.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);")?;
-        conn.execute("CREATE TABLE audit_log (id INT PRIMARY KEY, entry TEXT);")?;
-        conn.execute(
-            "CREATE TRIGGER audit_insert AFTER INSERT ON users AS INSERT INTO audit_log (id, entry) VALUES (NEW.id, NEW.name);",
-        )?;
-        conn.execute(
-            "CREATE TRIGGER audit_update AFTER UPDATE ON users AS INSERT INTO audit_log (id, entry) VALUES (NEW.id + 10, OLD.name);",
-        )?;
-        conn.execute(
-            "CREATE TRIGGER audit_delete AFTER DELETE ON users AS INSERT INTO audit_log (id, entry) VALUES (OLD.id + 20, OLD.name);",
-        )?;
-
-        conn.execute("INSERT INTO users (id, name) VALUES (1, 'Ada');")?;
-        conn.execute("UPDATE users SET name = 'Ada Lovelace' WHERE id = 1;")?;
-        conn.execute("DELETE FROM users WHERE id = 1;")?;
-
-        let audit = conn.execute("SELECT id, entry FROM audit_log ORDER BY id ASC;")?;
-        assert_eq!(
-            audit.rows,
-            vec![
-                vec![
-                    crate::catalog::Value::Integer(1),
-                    crate::catalog::Value::Text("Ada".to_string()),
-                ],
-                vec![
-                    crate::catalog::Value::Integer(11),
-                    crate::catalog::Value::Text("Ada".to_string()),
-                ],
-                vec![
-                    crate::catalog::Value::Integer(21),
-                    crate::catalog::Value::Text("Ada Lovelace".to_string()),
-                ],
-            ]
-        );
-
-        conn.close()?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_trigger_failure_aborts_outer_statement() -> Result<()> {
-        let db = TestDbFile::new("_test_trigger_failure_aborts_outer_statement");
-        let mut conn = Connection::new(db.path())?;
-
-        conn.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);")?;
-        conn.execute("CREATE TABLE audit_log (id INT PRIMARY KEY, entry TEXT);")?;
-        conn.execute(
-            "CREATE TRIGGER audit_insert AFTER INSERT ON users AS INSERT INTO audit_log (id, entry) VALUES (1, NEW.name);",
-        )?;
-
-        conn.execute("INSERT INTO users (id, name) VALUES (1, 'Ada');")?;
-        let result = conn.execute("INSERT INTO users (id, name) VALUES (2, 'Bob');");
-        assert!(result.is_err());
-
-        let users = conn.execute("SELECT id, name FROM users ORDER BY id ASC;")?;
-        assert_eq!(
-            users.rows,
-            vec![vec![
-                crate::catalog::Value::Integer(1),
-                crate::catalog::Value::Text("Ada".to_string()),
-            ]]
-        );
-
-        conn.close()?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_trigger_effects_rollback_with_savepoint() -> Result<()> {
-        let db = TestDbFile::new("_test_trigger_effects_rollback_with_savepoint");
-        let mut conn = Connection::new(db.path())?;
-
-        conn.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);")?;
-        conn.execute("CREATE TABLE audit_log (id INT PRIMARY KEY, entry TEXT);")?;
-        conn.execute(
-            "CREATE TRIGGER audit_insert AFTER INSERT ON users AS INSERT INTO audit_log (id, entry) VALUES (NEW.id, NEW.name);",
-        )?;
-
-        conn.execute("BEGIN;")?;
-        conn.execute("SAVEPOINT before_insert;")?;
-        conn.execute("INSERT INTO users (id, name) VALUES (1, 'Ada');")?;
-        conn.execute("ROLLBACK TO SAVEPOINT before_insert;")?;
-        conn.execute("COMMIT;")?;
-
-        let users = conn.execute("SELECT id, name FROM users;")?;
-        assert!(users.rows.is_empty());
-        let audit = conn.execute("SELECT id, entry FROM audit_log;")?;
-        assert!(audit.rows.is_empty());
-
-        conn.close()?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_trigger_recursion_limit_is_enforced() -> Result<()> {
-        let db = TestDbFile::new("_test_trigger_recursion_limit_is_enforced");
-        let mut conn = Connection::new(db.path())?;
-
-        conn.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);")?;
-        conn.execute("CREATE TABLE audit_log (id INT PRIMARY KEY, entry TEXT);")?;
-        conn.execute(
-            "CREATE TRIGGER audit_users AFTER INSERT ON users AS INSERT INTO audit_log (id, entry) VALUES (NEW.id, NEW.name);",
-        )?;
-        conn.execute(
-            "CREATE TRIGGER audit_log_loop AFTER INSERT ON audit_log AS INSERT INTO users (id, name) VALUES (NEW.id + 100, NEW.entry);",
-        )?;
-
-        let result = conn.execute("INSERT INTO users (id, name) VALUES (1, 'Ada');");
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Trigger recursion limit exceeded"));
-
-        conn.close()?;
         Ok(())
     }
 
@@ -1408,54 +775,6 @@ mod connection_tests {
     }
 
     #[test]
-    fn test_insert_into_view_is_rejected() -> Result<()> {
-        let db = TestDbFile::new("_test_insert_into_view_is_rejected");
-        let mut conn = Connection::new(db.path())?;
-
-        conn.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);")?;
-        conn.execute("CREATE VIEW user_names AS SELECT id, name FROM users;")?;
-
-        let result = conn.execute("INSERT INTO user_names (id, name) VALUES (1, 'Ada');");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("read-only"));
-
-        conn.close()?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_update_view_is_rejected() -> Result<()> {
-        let db = TestDbFile::new("_test_update_view_is_rejected");
-        let mut conn = Connection::new(db.path())?;
-
-        conn.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);")?;
-        conn.execute("CREATE VIEW user_names AS SELECT id, name FROM users;")?;
-
-        let result = conn.execute("UPDATE user_names SET name = 'Ada';");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("read-only"));
-
-        conn.close()?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_delete_from_view_is_rejected() -> Result<()> {
-        let db = TestDbFile::new("_test_delete_from_view_is_rejected");
-        let mut conn = Connection::new(db.path())?;
-
-        conn.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);")?;
-        conn.execute("CREATE VIEW user_names AS SELECT id, name FROM users;")?;
-
-        let result = conn.execute("DELETE FROM user_names;");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("read-only"));
-
-        conn.close()?;
-        Ok(())
-    }
-
-    #[test]
     fn test_mysql_identifier_quoting_and_type_aliases() -> Result<()> {
         let db = TestDbFile::new("_test_mysql_identifier_quoting_and_type_aliases");
         let mut conn = Connection::new(db.path())?;
@@ -1506,7 +825,7 @@ mod connection_tests {
         let mut conn = Connection::new(db.path())?;
 
         conn.execute(
-            "CREATE TABLE metrics (id UINT64 PRIMARY KEY, ratio FLOAT32, amount DECIMAL(10, 2), code CHAR(8), tiny INT8, small INT16, exact DECIMAL(6));",
+            "CREATE TABLE metrics (id UINT64 PRIMARY KEY, ratio FLOAT32, amount DECIMAL(10, 2), code VARCHAR(8), tiny INT8, small INT16, exact DECIMAL(6));",
         )?;
         conn.execute(
             "INSERT INTO metrics (id, ratio, amount, code, tiny, small, exact) VALUES (1, 1.5, 2.5, 'AB', 3, 4, 5.5);",
@@ -1520,7 +839,7 @@ mod connection_tests {
                 crate::catalog::Value::UBigInt(1),
                 crate::catalog::Value::Float32(1.5),
                 crate::catalog::Value::Decimal(crate::catalog::DecimalValue::parse("2.5")?),
-                crate::catalog::Value::Text("AB      ".to_string()),
+                crate::catalog::Value::Text("AB".to_string()),
                 crate::catalog::Value::Integer(3),
                 crate::catalog::Value::Integer(4),
                 crate::catalog::Value::Decimal(crate::catalog::DecimalValue::parse("5.5")?),
@@ -1532,8 +851,8 @@ mod connection_tests {
     }
 
     #[test]
-    fn test_new_integer_type_names_and_int128_round_trip() -> Result<()> {
-        let db = TestDbFile::new("_test_new_integer_type_names_and_int128_round_trip");
+    fn test_new_integer_type_names_and_round_trip() -> Result<()> {
+        let db = TestDbFile::new("_test_new_integer_type_names_and_round_trip");
         let mut conn = Connection::new(db.path())?;
 
         conn.execute(
@@ -1542,18 +861,16 @@ mod connection_tests {
                 tiny INT8,\
                 small INT16,\
                 normal INT32,\
-                large INT64,\
-                massive INT128\
+                large INT64\
             );",
         )?;
         conn.execute(
-            "INSERT INTO ints (id, tiny, small, normal, large, massive) VALUES (\
-                1, 127, 32000, 2147483647, 9223372036854775807, 170141183460469231731687303715884105727\
+            "INSERT INTO ints (id, tiny, small, normal, large) VALUES (\
+                1, 127, 32000, 2147483647, 9223372036854775807\
             );",
         )?;
 
-        let result =
-            conn.execute("SELECT tiny, small, normal, large, massive FROM ints ORDER BY id;")?;
+        let result = conn.execute("SELECT tiny, small, normal, large FROM ints ORDER BY id;")?;
         assert_eq!(
             result.rows,
             vec![vec![
@@ -1561,7 +878,6 @@ mod connection_tests {
                 crate::catalog::Value::Integer(32000),
                 crate::catalog::Value::Integer(2147483647),
                 crate::catalog::Value::BigInt(9223372036854775807),
-                crate::catalog::Value::Int128(170141183460469231731687303715884105727),
             ]]
         );
 
@@ -1573,7 +889,6 @@ mod connection_tests {
                     && sql.contains("small INT16")
                     && sql.contains("normal INT")
                     && sql.contains("large INT64")
-                    && sql.contains("massive INT128")
         ));
 
         conn.close()?;
@@ -1591,22 +906,20 @@ mod connection_tests {
                 tiny UINT8,\
                 small UINT16,\
                 normal UINT32,\
-                large UINT64,\
-                massive UINT128\
+                large UINT64\
             );",
         )?;
         conn.execute(
-            "INSERT INTO uints (id, tiny, small, normal, large, massive) VALUES (\
+            "INSERT INTO uints (id, tiny, small, normal, large) VALUES (\
                 1,\
                 255,\
                 65535,\
                 4294967295,\
-                CAST('18446744073709551615' AS UINT64),\
-                CAST('340282366920938463463374607431768211455' AS UINT128)\
+                CAST('18446744073709551615' AS UINT64)\
             );",
         )?;
 
-        let result = conn.execute("SELECT id, tiny, small, normal, large, massive FROM uints;")?;
+        let result = conn.execute("SELECT id, tiny, small, normal, large FROM uints;")?;
         assert_eq!(
             result.rows,
             vec![vec![
@@ -1615,7 +928,6 @@ mod connection_tests {
                 crate::catalog::Value::UInteger(65535),
                 crate::catalog::Value::UInteger(u32::MAX),
                 crate::catalog::Value::UBigInt(u64::MAX),
-                crate::catalog::Value::UInt128(u128::MAX),
             ]]
         );
 
@@ -1627,7 +939,6 @@ mod connection_tests {
         assert_eq!(row.get_uint(2)?, 65535);
         assert_eq!(row.get_uint(3)?, u32::MAX);
         assert_eq!(row.get_uint64(4)?, u64::MAX);
-        assert_eq!(row.get_uint128(5)?, u128::MAX);
 
         conn.close()?;
         Ok(())
@@ -4129,77 +3440,6 @@ mod connection_tests {
     }
 
     #[test]
-    fn test_recursive_cte_requires_union_shape() -> Result<()> {
-        let db = TestDbFile::new("_test_recursive_cte_requires_union_shape");
-        let mut conn = Connection::new(db.path())?;
-
-        conn.execute("CREATE TABLE seeds (n INT PRIMARY KEY);")?;
-        conn.execute("INSERT INTO seeds (n) VALUES (1);")?;
-
-        let err = conn
-            .execute("WITH RECURSIVE nums AS (SELECT n FROM seeds) SELECT n FROM nums;")
-            .expect_err("recursive CTE without UNION should be rejected");
-        assert!(
-            err.to_string().contains("requires UNION or UNION ALL"),
-            "unexpected error: {err}"
-        );
-
-        conn.close()?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_select_with_recursive_cte_union_all() -> Result<()> {
-        let db = TestDbFile::new("_test_select_with_recursive_cte_union_all");
-        let mut conn = Connection::new(db.path())?;
-
-        conn.execute("CREATE TABLE seeds (n INT PRIMARY KEY);")?;
-        conn.execute("INSERT INTO seeds (n) VALUES (1);")?;
-
-        let result = conn.execute(
-            "WITH RECURSIVE nums AS (\
-             SELECT n FROM seeds \
-             UNION ALL \
-             SELECT n + 1 AS n FROM nums WHERE n < 3\
-             ) \
-             SELECT n FROM nums ORDER BY n ASC;",
-        )?;
-        assert_eq!(
-            result.rows,
-            vec![
-                vec![crate::catalog::Value::Integer(1)],
-                vec![crate::catalog::Value::Integer(2)],
-                vec![crate::catalog::Value::Integer(3)],
-            ]
-        );
-
-        conn.close()?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_select_with_recursive_cte_union_deduplicates() -> Result<()> {
-        let db = TestDbFile::new("_test_select_with_recursive_cte_union_deduplicates");
-        let mut conn = Connection::new(db.path())?;
-
-        conn.execute("CREATE TABLE seeds (n INT PRIMARY KEY);")?;
-        conn.execute("INSERT INTO seeds (n) VALUES (1);")?;
-
-        let result = conn.execute(
-            "WITH RECURSIVE nums AS (\
-             SELECT n FROM seeds \
-             UNION \
-             SELECT n + 0 AS n FROM nums WHERE n <= 1\
-             ) \
-             SELECT n FROM nums;",
-        )?;
-        assert_eq!(result.rows, vec![vec![crate::catalog::Value::Integer(1)]]);
-
-        conn.close()?;
-        Ok(())
-    }
-
-    #[test]
     fn test_select_with_left_join() -> Result<()> {
         let db = TestDbFile::new("_test_select_with_left_join");
         let mut conn = Connection::new(db.path())?;
@@ -4305,221 +3545,6 @@ mod connection_tests {
     }
 
     #[test]
-    fn test_select_with_ranking_window_functions() -> Result<()> {
-        let db = TestDbFile::new("_test_select_with_ranking_window_functions");
-        let mut conn = Connection::new(db.path())?;
-
-        conn.execute(
-            "CREATE TABLE scores (id INT PRIMARY KEY, team TEXT, player TEXT, score INT);",
-        )?;
-        conn.execute("INSERT INTO scores (id, team, player, score) VALUES (1, 'A', 'alice', 10);")?;
-        conn.execute("INSERT INTO scores (id, team, player, score) VALUES (2, 'A', 'amy', 10);")?;
-        conn.execute("INSERT INTO scores (id, team, player, score) VALUES (3, 'A', 'ava', 8);")?;
-        conn.execute("INSERT INTO scores (id, team, player, score) VALUES (4, 'B', 'bob', 7);")?;
-        conn.execute("INSERT INTO scores (id, team, player, score) VALUES (5, 'B', 'bea', 5);")?;
-
-        let result = conn.execute(
-            "SELECT team, player, score, \
-                ROW_NUMBER() OVER (PARTITION BY team ORDER BY score DESC, player ASC) AS row_num, \
-                RANK() OVER (PARTITION BY team ORDER BY score DESC) AS rank_num, \
-                DENSE_RANK() OVER (PARTITION BY team ORDER BY score DESC) AS dense_rank_num \
-             FROM scores \
-             ORDER BY team ASC, score DESC, player ASC;",
-        )?;
-
-        assert_eq!(
-            result.rows,
-            vec![
-                vec![
-                    crate::catalog::Value::Text("A".to_string()),
-                    crate::catalog::Value::Text("alice".to_string()),
-                    crate::catalog::Value::Integer(10),
-                    crate::catalog::Value::Integer(1),
-                    crate::catalog::Value::Integer(1),
-                    crate::catalog::Value::Integer(1),
-                ],
-                vec![
-                    crate::catalog::Value::Text("A".to_string()),
-                    crate::catalog::Value::Text("amy".to_string()),
-                    crate::catalog::Value::Integer(10),
-                    crate::catalog::Value::Integer(2),
-                    crate::catalog::Value::Integer(1),
-                    crate::catalog::Value::Integer(1),
-                ],
-                vec![
-                    crate::catalog::Value::Text("A".to_string()),
-                    crate::catalog::Value::Text("ava".to_string()),
-                    crate::catalog::Value::Integer(8),
-                    crate::catalog::Value::Integer(3),
-                    crate::catalog::Value::Integer(3),
-                    crate::catalog::Value::Integer(2),
-                ],
-                vec![
-                    crate::catalog::Value::Text("B".to_string()),
-                    crate::catalog::Value::Text("bob".to_string()),
-                    crate::catalog::Value::Integer(7),
-                    crate::catalog::Value::Integer(1),
-                    crate::catalog::Value::Integer(1),
-                    crate::catalog::Value::Integer(1),
-                ],
-                vec![
-                    crate::catalog::Value::Text("B".to_string()),
-                    crate::catalog::Value::Text("bea".to_string()),
-                    crate::catalog::Value::Integer(5),
-                    crate::catalog::Value::Integer(2),
-                    crate::catalog::Value::Integer(2),
-                    crate::catalog::Value::Integer(2),
-                ],
-            ]
-        );
-
-        conn.close()?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_select_with_aggregate_window_functions() -> Result<()> {
-        let db = TestDbFile::new("_test_select_with_aggregate_window_functions");
-        let mut conn = Connection::new(db.path())?;
-
-        conn.execute("CREATE TABLE sales (id INT PRIMARY KEY, region TEXT, amount INT);")?;
-        conn.execute("INSERT INTO sales (id, region, amount) VALUES (1, 'east', 5);")?;
-        conn.execute("INSERT INTO sales (id, region, amount) VALUES (2, 'east', 7);")?;
-        conn.execute("INSERT INTO sales (id, region, amount) VALUES (3, 'west', 2);")?;
-
-        let result = conn.execute(
-            "SELECT region, amount, \
-                COUNT(*) OVER (PARTITION BY region) AS region_count, \
-                SUM(amount) OVER (PARTITION BY region) AS region_total, \
-                MAX(amount) OVER (PARTITION BY region) AS region_max \
-             FROM sales \
-             ORDER BY region ASC, amount ASC;",
-        )?;
-
-        assert_eq!(
-            result.rows,
-            vec![
-                vec![
-                    crate::catalog::Value::Text("east".to_string()),
-                    crate::catalog::Value::Integer(5),
-                    crate::catalog::Value::Integer(2),
-                    crate::catalog::Value::Integer(12),
-                    crate::catalog::Value::Integer(7),
-                ],
-                vec![
-                    crate::catalog::Value::Text("east".to_string()),
-                    crate::catalog::Value::Integer(7),
-                    crate::catalog::Value::Integer(2),
-                    crate::catalog::Value::Integer(12),
-                    crate::catalog::Value::Integer(7),
-                ],
-                vec![
-                    crate::catalog::Value::Text("west".to_string()),
-                    crate::catalog::Value::Integer(2),
-                    crate::catalog::Value::Integer(1),
-                    crate::catalog::Value::Integer(2),
-                    crate::catalog::Value::Integer(2),
-                ],
-            ]
-        );
-
-        conn.close()?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_window_functions_over_view_source() -> Result<()> {
-        let db = TestDbFile::new("_test_window_functions_over_view_source");
-        let mut conn = Connection::new(db.path())?;
-
-        conn.execute(
-            "CREATE TABLE scores (id INT PRIMARY KEY, team TEXT, player TEXT, score INT);",
-        )?;
-        conn.execute(
-            "INSERT INTO scores (id, team, player, score) VALUES \
-             (1, 'A', 'alice', 10), \
-             (2, 'A', 'amy', 8), \
-             (3, 'B', 'bob', 7);",
-        )?;
-        conn.execute(
-            "CREATE VIEW ranked_source AS SELECT team, player, score FROM scores WHERE score >= 7;",
-        )?;
-
-        let result = conn.execute(
-            "SELECT team, player, \
-                ROW_NUMBER() OVER (PARTITION BY team ORDER BY score DESC) AS row_num, \
-                COUNT(*) OVER (PARTITION BY team) AS team_count \
-             FROM ranked_source \
-             ORDER BY team ASC, score DESC;",
-        )?;
-
-        assert_eq!(
-            result.rows,
-            vec![
-                vec![
-                    crate::catalog::Value::Text("A".to_string()),
-                    crate::catalog::Value::Text("alice".to_string()),
-                    crate::catalog::Value::Integer(1),
-                    crate::catalog::Value::Integer(2),
-                ],
-                vec![
-                    crate::catalog::Value::Text("A".to_string()),
-                    crate::catalog::Value::Text("amy".to_string()),
-                    crate::catalog::Value::Integer(2),
-                    crate::catalog::Value::Integer(2),
-                ],
-                vec![
-                    crate::catalog::Value::Text("B".to_string()),
-                    crate::catalog::Value::Text("bob".to_string()),
-                    crate::catalog::Value::Integer(1),
-                    crate::catalog::Value::Integer(1),
-                ],
-            ]
-        );
-
-        conn.close()?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_trigger_on_table_referenced_by_view() -> Result<()> {
-        let db = TestDbFile::new("_test_trigger_on_table_referenced_by_view");
-        let mut conn = Connection::new(db.path())?;
-
-        conn.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT, active BOOLEAN);")?;
-        conn.execute("CREATE TABLE audit_log (id INT PRIMARY KEY, entry TEXT);")?;
-        conn.execute(
-            "CREATE VIEW active_users AS SELECT id, name FROM users WHERE active = TRUE;",
-        )?;
-        conn.execute(
-            "CREATE TRIGGER audit_users AFTER INSERT ON users AS INSERT INTO audit_log (id, entry) VALUES (NEW.id, NEW.name);",
-        )?;
-
-        conn.execute("INSERT INTO users (id, name, active) VALUES (1, 'Ada', TRUE);")?;
-
-        let view_rows = conn.execute("SELECT id, name FROM active_users;")?;
-        assert_eq!(
-            view_rows.rows,
-            vec![vec![
-                crate::catalog::Value::Integer(1),
-                crate::catalog::Value::Text("Ada".to_string()),
-            ]]
-        );
-
-        let audit_rows = conn.execute("SELECT id, entry FROM audit_log;")?;
-        assert_eq!(
-            audit_rows.rows,
-            vec![vec![
-                crate::catalog::Value::Integer(1),
-                crate::catalog::Value::Text("Ada".to_string()),
-            ]]
-        );
-
-        conn.close()?;
-        Ok(())
-    }
-
-    #[test]
     fn test_joined_update_respects_unique_constraints() -> Result<()> {
         let db = TestDbFile::new("_test_joined_update_respects_unique_constraints");
         let mut conn = Connection::new(db.path())?;
@@ -4582,11 +3607,7 @@ mod connection_tests {
             )?;
             conn.execute("ALTER TABLE users DROP CONSTRAINT uq_users_email;")?;
             conn.execute("CREATE INDEX idx_users_org ON users (org_id);")?;
-            conn.execute("CREATE VIEW user_ids AS SELECT id FROM users;")?;
             conn.execute("CREATE TABLE audit_log (id INT PRIMARY KEY, entry TEXT);")?;
-            conn.execute(
-                "CREATE TRIGGER audit_users AFTER INSERT ON users AS INSERT INTO audit_log (id, entry) VALUES (NEW.id, NEW.email);",
-            )?;
             conn.close()?;
         }
 
@@ -4605,12 +3626,6 @@ mod connection_tests {
             .rows
             .iter()
             .any(|row| row[1] == crate::catalog::Value::Text("idx_users_org".to_string())));
-
-        let show_views = reopened.execute("SHOW VIEWS;")?;
-        assert_eq!(show_views.rows.len(), 1);
-
-        let show_triggers = reopened.execute("SHOW TRIGGERS FROM users;")?;
-        assert_eq!(show_triggers.rows.len(), 1);
 
         reopened.close()?;
         Ok(())
@@ -4743,8 +3758,6 @@ mod connection_tests {
 
         let result = conn.execute(
             "SELECT \
-                CAST('1-02' AS INTERVAL YEAR TO MONTH) AS ym_interval,\
-                CAST('2 03:04:05' AS INTERVAL DAY TO SECOND) AS ds_interval,\
                 CAST('1.5' AS DECIMAL) + CAST('2.25' AS FLOAT) AS decimal_float_sum,\
                 -CAST('5.5' AS DECIMAL) AS negated_decimal \
              FROM one_row;",
@@ -4753,35 +3766,32 @@ mod connection_tests {
         assert_eq!(
             result.rows,
             vec![vec![
-                crate::catalog::Value::IntervalYearMonth(
-                    crate::catalog::IntervalYearMonthValue::parse("1-02")?
-                ),
-                crate::catalog::Value::IntervalDaySecond(
-                    crate::catalog::IntervalDaySecondValue::parse("2 03:04:05")?
-                ),
                 crate::catalog::Value::Float(3.75),
                 crate::catalog::Value::Decimal(crate::catalog::DecimalValue::parse("-5.5")?),
             ]]
         );
 
+        for sql in [
+            "SELECT CAST('1-02' AS INTERVAL YEAR TO MONTH) FROM one_row;",
+            "SELECT CAST('2 03:04:05' AS INTERVAL DAY TO SECOND) FROM one_row;",
+        ] {
+            let err = conn.execute(sql).unwrap_err();
+            assert!(matches!(err, crate::error::HematiteError::ParseError(_)));
+        }
+
         conn.close()?;
         Ok(())
     }
-
     #[test]
-    fn test_exact_numeric_arithmetic_supports_large_signed_unsigned_and_decimal_values(
-    ) -> Result<()> {
-        let db = TestDbFile::new(
-            "_test_exact_numeric_arithmetic_supports_large_signed_unsigned_and_decimal_values",
-        );
+    fn test_exact_numeric_arithmetic_overflows_and_decimal_values() -> Result<()> {
+        let db = TestDbFile::new("_test_exact_numeric_arithmetic_overflows_and_decimal_values");
         let mut conn = Connection::new(db.path())?;
+
         conn.execute("CREATE TABLE one_row (id INT PRIMARY KEY);")?;
         conn.execute("INSERT INTO one_row (id) VALUES (1);")?;
 
         let result = conn.execute(
             "SELECT \
-                CAST('9223372036854775807' AS INT64) + 1 AS signed_promoted,\
-                CAST('18446744073709551615' AS UINT64) + CAST('1' AS UINT64) AS unsigned_promoted,\
                 CAST('10' AS UINT64) - CAST('12' AS UINT64) AS unsigned_negative,\
                 CAST('5.5' AS DECIMAL) + CAST('2.25' AS DECIMAL) AS decimal_sum,\
                 CAST('5.5' AS DECIMAL) % CAST('2' AS DECIMAL) AS decimal_mod,\
@@ -4792,14 +3802,21 @@ mod connection_tests {
         assert_eq!(
             result.rows,
             vec![vec![
-                crate::catalog::Value::Int128(9_223_372_036_854_775_808),
-                crate::catalog::Value::UInt128(18_446_744_073_709_551_616),
                 crate::catalog::Value::Integer(-2),
                 crate::catalog::Value::Decimal(crate::catalog::DecimalValue::parse("7.75")?),
                 crate::catalog::Value::Decimal(crate::catalog::DecimalValue::parse("1.5")?),
                 crate::catalog::Value::Decimal(crate::catalog::DecimalValue::parse("0.25")?),
             ]]
         );
+
+        assert!(conn
+            .execute("SELECT CAST('9223372036854775807' AS INT64) + 1 FROM one_row;")
+            .is_err());
+        assert!(conn
+            .execute(
+                "SELECT CAST('18446744073709551615' AS UINT64) + CAST('1' AS UINT64) FROM one_row;"
+            )
+            .is_err());
 
         conn.close()?;
         Ok(())
@@ -4845,33 +3862,24 @@ mod connection_tests {
             "CREATE TABLE typed (\
                 id INT64 PRIMARY KEY,\
                 amount DECIMAL(10, 2),\
-                payload BLOB,\
-                event_date DATE,\
-                created_at DATETIME\
+                payload BLOB\
             );",
         )?;
         conn.execute(
-            "INSERT INTO typed (id, amount, payload, event_date, created_at) VALUES (\
+            "INSERT INTO typed (id, amount, payload) VALUES (\
                 CAST('5000000000' AS INT64),\
                 CAST('12.3400' AS DECIMAL),\
-                CAST('abc' AS BLOB),\
-                '2026-03-27',\
-                '2026-03-27 10:11:12'\
+                CAST('abc' AS BLOB)\
             );",
         )?;
 
-        let result =
-            conn.execute("SELECT id, amount, payload, event_date, created_at FROM typed;")?;
+        let result = conn.execute("SELECT id, amount, payload FROM typed;")?;
         assert_eq!(
             result.rows,
             vec![vec![
                 crate::catalog::Value::BigInt(5_000_000_000),
                 crate::catalog::Value::Decimal(crate::catalog::DecimalValue::parse("12.34")?),
                 crate::catalog::Value::Blob(b"abc".to_vec()),
-                crate::catalog::Value::Date(crate::catalog::DateValue::parse("2026-03-27")?),
-                crate::catalog::Value::DateTime(crate::catalog::DateTimeValue::parse(
-                    "2026-03-27 10:11:12",
-                )?),
             ]]
         );
 
@@ -5370,7 +4378,7 @@ mod connection_tests {
                 id INT PRIMARY KEY,
                 tiny INT8,
                 small INT16,
-                code CHAR(4),
+                code VARCHAR(4),
                 nick VARCHAR(6),
                 amount DECIMAL(5, 2)
             );",
@@ -5417,42 +4425,20 @@ mod connection_tests {
     }
 
     #[test]
-    fn test_char_columns_pad_and_compare_without_trailing_spaces() -> Result<()> {
-        let db = TestDbFile::new("_test_char_columns_pad_and_compare_without_trailing_spaces");
-        let mut conn = Connection::new(db.path())?;
-
-        conn.execute("CREATE TABLE typed (id INT PRIMARY KEY, code CHAR(4));")?;
-        conn.execute("INSERT INTO typed (id, code) VALUES (1, 'AB');")?;
-
-        let stored = conn.execute("SELECT code FROM typed WHERE id = 1;")?;
-        assert_eq!(
-            stored.rows,
-            vec![vec![crate::catalog::Value::Text("AB  ".to_string())]]
-        );
-
-        let lookup = conn.execute("SELECT id FROM typed WHERE code = 'AB';")?;
-        assert_eq!(lookup.rows, vec![vec![crate::catalog::Value::Integer(1)]]);
-
-        conn.close()?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_cast_into_char_and_varchar_accepts_non_text_values() -> Result<()> {
-        let db = TestDbFile::new("_test_cast_into_char_and_varchar_accepts_non_text_values");
+    fn test_cast_into_varchar_accepts_non_text_values() -> Result<()> {
+        let db = TestDbFile::new("_test_cast_into_varchar_accepts_non_text_values");
         let mut conn = Connection::new(db.path())?;
         conn.execute("CREATE TABLE seed (id INT PRIMARY KEY);")?;
         conn.execute("INSERT INTO seed (id) VALUES (1);")?;
 
         let result = conn.execute(
-            "SELECT CAST(42 AS VARCHAR(10)), CAST(TRUE AS CHAR(5)), CAST(DATE('2024-01-02') AS VARCHAR(16)) FROM seed WHERE id = 1;",
+            "SELECT CAST(42 AS VARCHAR(10)), CAST(TRUE AS VARCHAR(5)) FROM seed WHERE id = 1;",
         )?;
         assert_eq!(
             result.rows,
             vec![vec![
                 crate::catalog::Value::Text("42".to_string()),
-                crate::catalog::Value::Text("TRUE ".to_string()),
-                crate::catalog::Value::Text("2024-01-02".to_string()),
+                crate::catalog::Value::Text("TRUE".to_string()),
             ]]
         );
 
@@ -5494,7 +4480,7 @@ mod connection_tests {
         conn.execute(
             "CREATE TABLE users (
                 id INT PRIMARY KEY,
-                code CHAR(4) COLLATE utf8mb4_bin,
+                code VARCHAR(4) COLLATE utf8mb4_bin,
                 name VARCHAR(16) CHARACTER SET utf8mb4 COLLATE NOCASE
             );",
         )?;
@@ -5503,7 +4489,7 @@ mod connection_tests {
             crate::catalog::Value::Text(sql) => sql.clone(),
             other => panic!("expected SHOW CREATE TABLE SQL text, found {:?}", other),
         };
-        assert!(sql.contains("code CHAR(4) COLLATE utf8mb4_bin"));
+        assert!(sql.contains("code VARCHAR(4) COLLATE utf8mb4_bin"));
         assert!(sql.contains("name VARCHAR(16) CHARACTER SET utf8mb4 COLLATE NOCASE"));
 
         conn.close()?;
@@ -5514,7 +4500,7 @@ mod connection_tests {
             crate::catalog::Value::Text(sql) => sql.clone(),
             other => panic!("expected SHOW CREATE TABLE SQL text, found {:?}", other),
         };
-        assert!(sql.contains("code CHAR(4) COLLATE utf8mb4_bin"));
+        assert!(sql.contains("code VARCHAR(4) COLLATE utf8mb4_bin"));
         assert!(sql.contains("name VARCHAR(16) CHARACTER SET utf8mb4 COLLATE NOCASE"));
         reopened.close()?;
         Ok(())
@@ -6074,9 +5060,7 @@ mod interface_tests {
 }
 
 mod result_tests {
-    use crate::catalog::{
-        DateTimeValue, DateValue, DecimalValue, TimeValue, TimeWithTimeZoneValue,
-    };
+    use crate::catalog::DecimalValue;
     use crate::error::Result;
     use crate::query::{QueryResult, Value};
     use crate::sql::result::*;
@@ -6217,12 +5201,7 @@ mod result_tests {
             Value::BigInt(5_000_000_000),
             Value::Decimal(DecimalValue::parse("12.34")?),
             Value::Blob(b"abc".to_vec()),
-            Value::Date(DateValue::parse("2026-03-27")?),
-            Value::DateTime(DateTimeValue::parse("2026-03-27 10:11:12")?),
-            Value::Time(TimeValue::parse("10:11:12")?),
-            Value::DateTime(DateTimeValue::parse("2026-03-27 10:11:12")?),
-            Value::TimeWithTimeZone(TimeWithTimeZoneValue::parse("10:11:12+03:00")?),
-            Value::Enum("live".to_string()),
+            Value::Text("live".to_string()),
         ];
 
         let row = Row::new(values);
@@ -6230,15 +5209,7 @@ mod result_tests {
         assert_eq!(row.get_bigint(0)?, 5_000_000_000);
         assert_eq!(row.get_decimal(1)?.to_string(), "12.34");
         assert_eq!(row.get_blob(2)?, b"abc".to_vec());
-        assert_eq!(row.get_date(3)?.to_string(), "2026-03-27");
-        assert_eq!(row.get_datetime(4)?.to_string(), "2026-03-27 10:11:12");
-        assert_eq!(row.get_time(5)?.to_string(), "10:11:12");
-        assert_eq!(row.get_datetime(6)?.to_string(), "2026-03-27 10:11:12");
-        assert_eq!(
-            row.get_time_with_time_zone(7)?.to_string(),
-            "10:11:12+03:00"
-        );
-        assert_eq!(row.get_string(8)?, "live");
+        assert_eq!(row.get_string(3)?, "live");
 
         Ok(())
     }

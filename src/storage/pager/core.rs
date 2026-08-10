@@ -59,20 +59,21 @@ impl Pager {
                 rollback_free_list.replace(self.file_manager.free_pages().to_vec());
                 // Reuse a pre-allocated RollbackTransaction from the scratch slot when available,
                 // so inner Vec/HashSet/HashMap allocations survive across transaction boundaries.
-                let mut rollback = self.rollback_scratch.take().unwrap_or_else(|| {
-                    RollbackTransaction {
-                        original_file_len: 0,
-                        original_free_pages: Vec::new(),
-                        original_checksums: HashMap::new(),
-                        rollback_next_page_id: 0,
-                        rollback_free_list: crate::storage::free_list::FreeList::new(),
-                        rollback_uninitialized_pages: HashSet::new(),
-                        journaled_pages: HashSet::new(),
-                        page_records: Vec::new(),
-                        savepoints: Vec::new(),
-                        next_savepoint_id: 1,
-                    }
-                });
+                let mut rollback =
+                    self.rollback_scratch
+                        .take()
+                        .unwrap_or_else(|| RollbackTransaction {
+                            original_file_len: 0,
+                            original_free_pages: Vec::new(),
+                            original_checksums: HashMap::new(),
+                            rollback_next_page_id: 0,
+                            rollback_free_list: crate::storage::free_list::FreeList::new(),
+                            rollback_uninitialized_pages: HashSet::new(),
+                            journaled_pages: HashSet::new(),
+                            page_records: Vec::new(),
+                            savepoints: Vec::new(),
+                            next_savepoint_id: 1,
+                        });
                 rollback.original_file_len = self.file_manager.file_len()?;
                 rollback.original_free_pages.clear();
                 rollback
@@ -118,8 +119,10 @@ impl Pager {
                 });
                 wal.wal_next_page_id = visible_state.visible_next_page_id();
                 wal.wal_free_pages.clone_from(&visible_state.free_pages);
-                wal.wal_free_page_set.clone_from(&visible_state.free_page_set);
-                wal.original_checksums.clone_from(&visible_state.page_checksums);
+                wal.wal_free_page_set
+                    .clone_from(&visible_state.free_page_set);
+                wal.original_checksums
+                    .clone_from(&visible_state.page_checksums);
                 PagerTransaction::Wal(wal)
             }
         });

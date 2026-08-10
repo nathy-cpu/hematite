@@ -41,7 +41,6 @@ pub enum Token<'a> {
     Except,
     All,
     With,
-    Recursive,
     Left,
     Right,
     Full,
@@ -61,9 +60,6 @@ pub enum Token<'a> {
     By,
     Asc,
     Desc,
-    Over,
-    Partition,
-    Interval,
     Limit,
     Offset,
     Count,
@@ -78,12 +74,10 @@ pub enum Token<'a> {
     Int8,
     Int16,
     Int64,
-    Int128,
     Int,
     UInt8,
     UInt16,
     UInt64,
-    UInt128,
     UInt32,
     UInt,
     Bool,
@@ -91,15 +85,7 @@ pub enum Token<'a> {
     Float64,
     Decimal,
     Blob,
-    Date,
-    Time,
-    DateTime,
-    Zone,
-    Char,
     Varchar,
-    BinaryType,
-    VarBinary,
-    Enum,
     AutoIncrement,
     Unique,
     Primary,
@@ -197,7 +183,6 @@ impl<'a> Lexer<'a> {
 
             let byte = self.current_byte();
 
-            // Handle identifiers and keywords
             if byte == b'X' && self.peek_byte() == Some(b'\'') {
                 self.read_blob_literal()?;
             } else if is_identifier_start_byte(byte)
@@ -206,17 +191,11 @@ impl<'a> Lexer<'a> {
                 self.read_identifier()?;
             } else if byte == b'`' {
                 self.read_quoted_identifier()?;
-            }
-            // Handle string literals
-            else if byte == b'\'' {
+            } else if byte == b'\'' {
                 self.read_string_literal()?;
-            }
-            // Handle numbers
-            else if byte.is_ascii_digit() {
+            } else if byte.is_ascii_digit() {
                 self.read_number()?;
-            }
-            // Handle operators and punctuation
-            else {
+            } else {
                 self.read_operator_or_punctuation()?;
             }
         }
@@ -329,7 +308,6 @@ impl<'a> Lexer<'a> {
             "EXCEPT" => Token::Except,
             "ALL" => Token::All,
             "WITH" => Token::With,
-            "RECURSIVE" => Token::Recursive,
             "LEFT" => Token::Left,
             "RIGHT" => Token::Right,
             "FULL" => Token::Full,
@@ -349,9 +327,6 @@ impl<'a> Lexer<'a> {
             "BY" => Token::By,
             "ASC" => Token::Asc,
             "DESC" => Token::Desc,
-            "OVER" => Token::Over,
-            "PARTITION" => Token::Partition,
-            "INTERVAL" => Token::Interval,
             "LIMIT" => Token::Limit,
             "OFFSET" => Token::Offset,
             "COUNT" => Token::Count,
@@ -362,13 +337,11 @@ impl<'a> Lexer<'a> {
             "INT8" => Token::Int8,
             "INT16" => Token::Int16,
             "INT64" => Token::Int64,
-            "INT128" => Token::Int128,
             "INT32" => Token::Int32,
             "INT" => Token::Int,
             "UINT8" => Token::UInt8,
             "UINT16" => Token::UInt16,
             "UINT64" => Token::UInt64,
-            "UINT128" => Token::UInt128,
             "UINT32" => Token::UInt32,
             "UINT" => Token::UInt,
             "TEXT" => Token::Text,
@@ -379,15 +352,7 @@ impl<'a> Lexer<'a> {
             "FLOAT64" => Token::Float64,
             "DECIMAL" => Token::Decimal,
             "BLOB" => Token::Blob,
-            "DATE" => Token::Date,
-            "TIME" => Token::Time,
-            "DATETIME" => Token::DateTime,
-            "ZONE" => Token::Zone,
-            "CHAR" => Token::Char,
             "VARCHAR" => Token::Varchar,
-            "BINARY" => Token::BinaryType,
-            "VARBINARY" => Token::VarBinary,
-            "ENUM" => Token::Enum,
             "AUTO_INCREMENT" => Token::AutoIncrement,
             "UNIQUE" => Token::Unique,
             "PRIMARY" => Token::Primary,
@@ -441,7 +406,8 @@ impl<'a> Lexer<'a> {
 
                 let identifier = &input[content_start..self.position];
                 self.advance_char();
-                self.tokens.push(Token::Identifier(Cow::Borrowed(identifier)));
+                self.tokens
+                    .push(Token::Identifier(Cow::Borrowed(identifier)));
                 return Ok(());
             }
 
@@ -498,7 +464,8 @@ impl<'a> Lexer<'a> {
                 }
 
                 let literal = &input[content_start..self.position];
-                self.tokens.push(Token::StringLiteral(Cow::Borrowed(literal)));
+                self.tokens
+                    .push(Token::StringLiteral(Cow::Borrowed(literal)));
                 self.advance_char(); // Skip closing quote
                 return Ok(());
             }

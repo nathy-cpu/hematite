@@ -25,7 +25,7 @@ flowchart TD
 ### Layer Responsibilities
 
 1. **Client Interface (`sql::interface`)**: Exposes the user-facing API (`Hematite` struct).
-2. **SQL Connection (`sql::connection`)**: Manages session state, coordinates autocommit and explicit transaction states, savepoint stacks, and views expansion.
+2. **SQL Connection (`sql::connection`)**: Manages session state, coordinates autocommit and explicit transaction states, savepoint stacks, and statement dispatch.
 3. **SQL Parser (`parser`)**: Lexes raw text into tokens and parses them using a strict, hand-written recursive-descent parser to construct a logical AST.
 4. **Query Planner & Optimizer (`query::planner`, `query::optimizer`)**: Resolves schema bindings, validates expressions, executes constant folding, logical simplifications, and translates the logical AST into a physical execution program.
 5. **Query Executor (`query::executor`)**: Formulates Volcano-style iterator pipelines. Operators pull data lazily via a `next()` pattern, abstracting table/index scans, filtering, aggregation, and sorting.
@@ -129,6 +129,6 @@ Hematite guarantees standard transactional properties (ACID) to ensure database 
 
 Hematite is built with the following core design guidelines:
 
-* **Understandability over Complexity**: The codebase prefers direct, clear code paths. Simplifications are embraced where they do not hurt correctness or safety (e.g. unified decimal numeric calculations, single-statement trigger bodies).
+* **Understandability over Complexity**: The codebase prefers direct, clear code paths. Simplifications are embraced where they do not hurt correctness or safety (e.g. unified decimal numeric calculations, and a compact type system with no temporal, fixed-length, or enumerated types).
 * **Strict Dialect & Case Enforcement**: Enforcing uppercase keywords keeps parsing deterministic, preventing complex and fragile grammar ambiguity rules.
 * **Educational Architecture**: By maintaining clean boundaries between the logical query layer, the physical catalog manager, and the low-level storage engines, developers can learn B-tree internals and physical SQL engine query flow directly from the codebase.

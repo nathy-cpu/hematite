@@ -1,10 +1,10 @@
 #[cfg(test)]
 mod tests {
     use crate::catalog::table::{CheckConstraint, ForeignKeyAction, ForeignKeyConstraint};
-    use crate::catalog::types::{DataType, IntervalDaySecondValue, IntervalYearMonthValue, Value};
+    use crate::catalog::types::{DataType, Value};
     use crate::catalog::{
-        Catalog, CatalogEngine, Column, ColumnId, DatabaseHeader, NamedConstraintKind, Schema,
-        Table, TableId, Trigger, TriggerEvent, View,
+        CatalogEngine, Column, ColumnId, DatabaseHeader, NamedConstraintKind, Schema, Table,
+        TableId,
     };
     use crate::error::Result;
     use crate::storage::Page;
@@ -237,7 +237,7 @@ mod tests {
     #[test]
     fn test_data_type_size() {
         assert_eq!(DataType::Int.size(), 4);
-        assert_eq!(DataType::Int128.size(), 16);
+        assert_eq!(DataType::Int64.size(), 8);
         assert_eq!(DataType::Text.size(), 255);
         assert_eq!(DataType::Blob.size(), 4096);
         assert_eq!(DataType::Boolean.size(), 1);
@@ -247,7 +247,7 @@ mod tests {
     #[test]
     fn test_data_type_name() {
         assert_eq!(DataType::Int.name(), "INT");
-        assert_eq!(DataType::Int128.name(), "INT128");
+        assert_eq!(DataType::Int64.name(), "INT64");
         assert_eq!(DataType::Text.name(), "TEXT");
         assert_eq!(DataType::Boolean.name(), "BOOLEAN");
         assert_eq!(DataType::Float.name(), "FLOAT");
@@ -259,14 +259,6 @@ mod tests {
         assert_eq!(Value::Text("hello".to_string()).data_type(), DataType::Text);
         assert_eq!(Value::Boolean(true).data_type(), DataType::Boolean);
         assert_eq!(Value::Float(3.14).data_type(), DataType::Float);
-        assert_eq!(
-            Value::IntervalYearMonth(IntervalYearMonthValue::new(14)).data_type(),
-            DataType::IntervalYearMonth
-        );
-        assert_eq!(
-            Value::IntervalDaySecond(IntervalDaySecondValue::new(86_401)).data_type(),
-            DataType::IntervalDaySecond
-        );
         assert_eq!(Value::Null.data_type(), DataType::Text); // NULL maps to Text
     }
 
@@ -555,32 +547,6 @@ mod tests {
     }
 
     #[test]
-    fn test_view_metadata_validation() -> Result<()> {
-        let view = View {
-            name: "active_users".to_string(),
-            query_sql: "SELECT id, name FROM users WHERE active = TRUE".to_string(),
-            column_names: vec!["id".to_string(), "name".to_string()],
-            dependencies: vec!["users".to_string()],
-        };
-        view.validate()?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_trigger_metadata_validation() -> Result<()> {
-        let trigger = Trigger {
-            name: "audit_users_insert".to_string(),
-            table_name: "users".to_string(),
-            event: TriggerEvent::Insert,
-            body_sql: "INSERT INTO audit_log (entry) VALUES (NEW.name)".to_string(),
-            old_alias: None,
-            new_alias: Some("NEW".to_string()),
-        };
-        trigger.validate()?;
-        Ok(())
-    }
-
-    #[test]
     fn test_table_lists_named_constraints() -> Result<()> {
         let columns = vec![
             Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true),
@@ -619,57 +585,6 @@ mod tests {
             constraint.name == "fk_users_org" && constraint.kind == NamedConstraintKind::ForeignKey
         }));
 
-        Ok(())
-    }
-
-    #[test]
-    fn test_schema_create_list_and_drop_views_and_triggers() -> Result<()> {
-        let mut schema = Schema::new();
-        let table_id = schema.create_table(
-            "users".to_string(),
-            vec![
-                Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true),
-                Column::new(ColumnId::new(2), "name".to_string(), DataType::Text),
-            ],
-        )?;
-
-        schema.create_view(View {
-            name: "user_names".to_string(),
-            query_sql: "SELECT name FROM users".to_string(),
-            column_names: vec!["name".to_string()],
-            dependencies: vec!["users".to_string()],
-        })?;
-        schema.create_trigger(Trigger {
-            name: "audit_users_insert".to_string(),
-            table_name: "users".to_string(),
-            event: TriggerEvent::Insert,
-            body_sql: "INSERT INTO audit_log (entry) VALUES (NEW.name)".to_string(),
-            old_alias: None,
-            new_alias: Some("NEW".to_string()),
-        })?;
-
-        assert_eq!(schema.list_views(), vec!["user_names".to_string()]);
-        assert_eq!(
-            schema.list_triggers(),
-            vec!["audit_users_insert".to_string()]
-        );
-        assert_eq!(
-            schema.view("user_names").unwrap().dependencies,
-            vec!["users"]
-        );
-        assert_eq!(
-            schema.trigger("audit_users_insert").unwrap().table_name,
-            "users"
-        );
-
-        let dropped_trigger = schema.drop_trigger("audit_users_insert")?;
-        let dropped_view = schema.drop_view("user_names")?;
-        assert_eq!(dropped_trigger.name, "audit_users_insert");
-        assert_eq!(dropped_view.name, "user_names");
-        assert!(schema.trigger("audit_users_insert").is_none());
-        assert!(schema.view("user_names").is_none());
-
-        schema.drop_table(table_id)?;
         Ok(())
     }
 
@@ -725,50 +640,6 @@ mod tests {
             schema.drop_named_constraint(table_id, "uq_users_email")?,
             NamedConstraintKind::Unique
         );
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_catalog_create_list_and_drop_views_and_triggers() -> Result<()> {
-        let mut catalog = Catalog::open_in_memory()?;
-        catalog.create_table(
-            "users",
-            vec![
-                Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true),
-                Column::new(ColumnId::new(2), "name".to_string(), DataType::Text),
-            ],
-        )?;
-
-        catalog.create_view(View {
-            name: "user_names".to_string(),
-            query_sql: "SELECT name FROM users".to_string(),
-            column_names: vec!["name".to_string()],
-            dependencies: vec!["users".to_string()],
-        })?;
-        catalog.create_trigger(Trigger {
-            name: "audit_users_insert".to_string(),
-            table_name: "users".to_string(),
-            event: TriggerEvent::Insert,
-            body_sql: "INSERT INTO audit_log (entry) VALUES (NEW.name)".to_string(),
-            old_alias: None,
-            new_alias: Some("NEW".to_string()),
-        })?;
-
-        assert_eq!(catalog.list_views()?, vec!["user_names".to_string()]);
-        assert_eq!(
-            catalog.list_triggers()?,
-            vec!["audit_users_insert".to_string()]
-        );
-        assert!(catalog.get_view("user_names")?.is_some());
-        assert!(catalog.get_trigger("audit_users_insert")?.is_some());
-
-        let dropped_trigger = catalog.drop_trigger("audit_users_insert")?;
-        let dropped_view = catalog.drop_view("user_names")?;
-        assert_eq!(dropped_trigger.name, "audit_users_insert");
-        assert_eq!(dropped_view.name, "user_names");
-        assert!(catalog.get_trigger("audit_users_insert")?.is_none());
-        assert!(catalog.get_view("user_names")?.is_none());
 
         Ok(())
     }
@@ -928,20 +799,6 @@ mod tests {
             Column::new(ColumnId::new(5), "name".to_string(), DataType::Text),
         ];
         let table2_id = original_schema.create_table("products".to_string(), columns2)?;
-        original_schema.insert_view(View {
-            name: "active_users".to_string(),
-            query_sql: "SELECT id, name FROM users WHERE active = TRUE".to_string(),
-            column_names: vec!["id".to_string(), "name".to_string()],
-            dependencies: vec!["users".to_string()],
-        })?;
-        original_schema.insert_trigger(Trigger {
-            name: "audit_user_delete".to_string(),
-            table_name: "users".to_string(),
-            event: TriggerEvent::Delete,
-            body_sql: "INSERT INTO audit_log (entry) VALUES (OLD.name)".to_string(),
-            old_alias: Some("OLD".to_string()),
-            new_alias: None,
-        })?;
 
         // Serialize
         let mut buffer = Vec::new();
@@ -958,8 +815,6 @@ mod tests {
         assert!(deserialized_schema.get_table(table2_id).is_some());
         assert!(deserialized_schema.get_table_by_name("users").is_some());
         assert!(deserialized_schema.get_table_by_name("products").is_some());
-        assert!(deserialized_schema.view("active_users").is_some());
-        assert!(deserialized_schema.trigger("audit_user_delete").is_some());
 
         Ok(())
     }
@@ -973,8 +828,6 @@ mod tests {
 
         let deserialized = Schema::deserialize(&buffer)?;
         assert_eq!(deserialized.get_table_count(), 0);
-        assert!(deserialized.list_views().is_empty());
-        assert!(deserialized.list_triggers().is_empty());
 
         Ok(())
     }

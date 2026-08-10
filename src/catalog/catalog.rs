@@ -1,7 +1,7 @@
 //! # Relational Catalog Manager (`catalog`)
 //!
 //! The Catalog is the metadata manager of the database. It translates relational schema concepts
-//! (tables, columns, types, indexes, constraints, views, and triggers) into physical B-Tree structures,
+//! (tables, columns, types, indexes, and constraints) into physical B-Tree structures,
 //! managing metadata serialization and coordinating transactional schema modifications.
 //!
 //! ---
@@ -104,7 +104,7 @@
 use crate::catalog::column::Column;
 use crate::catalog::engine::{CatalogEngine, CatalogEngineSnapshot, CatalogIntegrityReport};
 use crate::catalog::ids::TableId;
-use crate::catalog::object::{NamedConstraintKind, Trigger, View};
+use crate::catalog::object::NamedConstraintKind;
 use crate::catalog::schema::Schema;
 use crate::catalog::table::{CheckConstraint, ForeignKeyConstraint, SecondaryIndex, Table};
 use crate::catalog::JournalMode;
@@ -305,15 +305,9 @@ impl Catalog {
 
     pub fn drop_table(&mut self, table_id: TableId) -> Result<()> {
         self.run_schema_mutation(|catalog| {
-            let table = catalog.schema.get_table(table_id).cloned().ok_or_else(|| {
+            let _table = catalog.schema.get_table(table_id).cloned().ok_or_else(|| {
                 crate::error::HematiteError::StorageError("Table not found".to_string())
             })?;
-            if let Some(view_name) = catalog.first_view_dependency_on(&table.name, None) {
-                return Err(crate::error::HematiteError::ParseError(format!(
-                    "Cannot drop table '{}' because view '{}' depends on it",
-                    table.name, view_name
-                )));
-            }
             catalog.schema.drop_table(table_id)?;
             Ok(())
         })
@@ -396,66 +390,6 @@ impl Catalog {
         Ok(self.schema.list_tables())
     }
 
-    pub fn create_view(&mut self, view: View) -> Result<()> {
-        self.run_schema_mutation(|catalog| {
-            if view
-                .dependencies
-                .iter()
-                .any(|dependency| dependency.eq_ignore_ascii_case(&view.name))
-            {
-                return Err(crate::error::HematiteError::ParseError(format!(
-                    "View '{}' cannot depend on itself",
-                    view.name
-                )));
-            }
-            for dependency in &view.dependencies {
-                if catalog.view_depends_on(dependency, &view.name) {
-                    return Err(crate::error::HematiteError::ParseError(format!(
-                        "Creating view '{}' would introduce a recursive view cycle through '{}'",
-                        view.name, dependency
-                    )));
-                }
-            }
-            catalog.schema.create_view(view)
-        })
-    }
-
-    pub fn drop_view(&mut self, name: &str) -> Result<View> {
-        self.run_schema_mutation(|catalog| {
-            if let Some(view_name) = catalog.first_view_dependency_on(name, Some(name)) {
-                return Err(crate::error::HematiteError::ParseError(format!(
-                    "Cannot drop view '{}' because view '{}' depends on it",
-                    name, view_name
-                )));
-            }
-            catalog.schema.drop_view(name)
-        })
-    }
-
-    pub fn get_view(&self, name: &str) -> Result<Option<View>> {
-        Ok(self.schema.view(name).cloned())
-    }
-
-    pub fn list_views(&self) -> Result<Vec<String>> {
-        Ok(self.schema.list_views())
-    }
-
-    pub fn create_trigger(&mut self, trigger: Trigger) -> Result<()> {
-        self.run_schema_mutation(|catalog| catalog.schema.create_trigger(trigger))
-    }
-
-    pub fn drop_trigger(&mut self, name: &str) -> Result<Trigger> {
-        self.run_schema_mutation(|catalog| catalog.schema.drop_trigger(name))
-    }
-
-    pub fn get_trigger(&self, name: &str) -> Result<Option<Trigger>> {
-        Ok(self.schema.trigger(name).cloned())
-    }
-
-    pub fn list_triggers(&self) -> Result<Vec<String>> {
-        Ok(self.schema.list_triggers())
-    }
-
     pub fn drop_named_constraint(
         &mut self,
         table_id: TableId,
@@ -470,34 +404,6 @@ impl Catalog {
 
     pub fn get_schema(&self) -> &Schema {
         &self.schema
-    }
-
-    fn first_view_dependency_on(
-        &self,
-        object_name: &str,
-        skip_view: Option<&str>,
-    ) -> Option<String> {
-        self.schema
-            .list_views()
-            .into_iter()
-            .filter(|view_name| !skip_view.is_some_and(|skip| view_name.eq_ignore_ascii_case(skip)))
-            .find(|view_name| {
-                self.schema.view(view_name).is_some_and(|view| {
-                    view.dependencies
-                        .iter()
-                        .any(|dependency| dependency.eq_ignore_ascii_case(object_name))
-                })
-            })
-    }
-
-    fn view_depends_on(&self, view_name: &str, target_name: &str) -> bool {
-        let Some(view) = self.schema.view(view_name) else {
-            return false;
-        };
-        view.dependencies.iter().any(|dependency| {
-            dependency.eq_ignore_ascii_case(target_name)
-                || self.view_depends_on(dependency, target_name)
-        })
     }
 
     pub fn clone_schema(&self) -> Schema {

@@ -1,8 +1,6 @@
 //! Metadata result shaping for SQL introspection commands.
 
-use crate::catalog::{
-    table::ForeignKeyAction, Catalog, SecondaryIndex, Table, TriggerEvent, Value,
-};
+use crate::catalog::{table::ForeignKeyAction, Catalog, SecondaryIndex, Table, Value};
 use crate::error::{HematiteError, Result};
 
 use super::runtime::QueryResult;
@@ -67,20 +65,6 @@ pub(crate) fn show_tables(catalog: &Catalog) -> Result<QueryResult> {
     })
 }
 
-pub(crate) fn show_views(catalog: &Catalog) -> Result<QueryResult> {
-    let mut views = catalog.list_views()?;
-    views.sort();
-
-    Ok(QueryResult {
-        affected_rows: 0,
-        columns: vec!["view_name".to_string()],
-        rows: views
-            .into_iter()
-            .map(|name| vec![Value::Text(name)])
-            .collect(),
-    })
-}
-
 pub(crate) fn show_indexes(catalog: &Catalog, table_name: Option<&str>) -> Result<QueryResult> {
     let mut rows = Vec::new();
     let mut tables = catalog.list_tables()?;
@@ -121,39 +105,6 @@ pub(crate) fn show_indexes(catalog: &Catalog, table_name: Option<&str>) -> Resul
     })
 }
 
-pub(crate) fn show_triggers(catalog: &Catalog, table_name: Option<&str>) -> Result<QueryResult> {
-    let mut trigger_names = catalog.list_triggers()?;
-    trigger_names.sort();
-    let mut rows = Vec::new();
-    for trigger_name in trigger_names {
-        let Some(trigger) = catalog.get_trigger(&trigger_name)? else {
-            continue;
-        };
-        if table_name.is_some_and(|filter| filter != trigger.table_name) {
-            continue;
-        }
-        rows.push(vec![
-            Value::Text(trigger.name.clone()),
-            Value::Text(trigger.table_name.clone()),
-            Value::Text(match trigger.event {
-                TriggerEvent::Insert => "INSERT".to_string(),
-                TriggerEvent::Update => "UPDATE".to_string(),
-                TriggerEvent::Delete => "DELETE".to_string(),
-            }),
-        ]);
-    }
-
-    Ok(QueryResult {
-        affected_rows: 0,
-        columns: vec![
-            "trigger_name".to_string(),
-            "table_name".to_string(),
-            "event".to_string(),
-        ],
-        rows,
-    })
-}
-
 pub(crate) fn show_create_table(catalog: &Catalog, table_name: &str) -> Result<QueryResult> {
     let table = catalog.get_table_by_name(table_name)?.ok_or_else(|| {
         HematiteError::ParseError(format!("Table '{}' does not exist", table_name))
@@ -165,21 +116,6 @@ pub(crate) fn show_create_table(catalog: &Catalog, table_name: &str) -> Result<Q
         rows: vec![vec![
             Value::Text(table.name.clone()),
             Value::Text(render_create_table_sql(&table)),
-        ]],
-    })
-}
-
-pub(crate) fn show_create_view(catalog: &Catalog, view_name: &str) -> Result<QueryResult> {
-    let view = catalog
-        .get_view(view_name)?
-        .ok_or_else(|| HematiteError::ParseError(format!("View '{}' does not exist", view_name)))?;
-
-    Ok(QueryResult {
-        affected_rows: 0,
-        columns: vec!["view_name".to_string(), "create_sql".to_string()],
-        rows: vec![vec![
-            Value::Text(view.name.clone()),
-            Value::Text(format!("CREATE VIEW {} AS {}", view.name, view.query_sql)),
         ]],
     })
 }

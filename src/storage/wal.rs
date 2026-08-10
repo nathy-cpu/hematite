@@ -202,18 +202,13 @@ impl WalPageCache {
             self.entries.remove(&lru_page_id);
         }
 
-        self.entries.insert(page_id, WalCacheEntry { data, generation });
+        self.entries
+            .insert(page_id, WalCacheEntry { data, generation });
     }
 
     /// Remove all entries whose page_id does not satisfy the predicate.
     pub fn retain(&mut self, predicate: impl Fn(&PageId) -> bool) {
         self.entries.retain(|page_id, _| predicate(page_id));
-    }
-
-    /// Returns the number of entries currently in the cache.
-    #[allow(dead_code)]
-    pub fn len(&self) -> usize {
-        self.entries.len()
     }
 }
 
@@ -358,9 +353,8 @@ impl VisibleWalState {
         self.page_override_offsets.retain(|page_id, _| {
             *page_id < visible_next_page_id && !free_page_set.contains(page_id)
         });
-        self.page_cache.retain(|page_id| {
-            *page_id < visible_next_page_id && !free_page_set.contains(page_id)
-        });
+        self.page_cache
+            .retain(|page_id| *page_id < visible_next_page_id && !free_page_set.contains(page_id));
 
         for frame in frames {
             if frame.data.len() != PAGE_SIZE {
@@ -671,9 +665,7 @@ fn read_page_from_wal_file_at_offset(
         )));
     }
 
-    Ok(Some(
-        frame_bytes[V3_WAL_FRAME_PREFIX_SIZE..].to_vec(),
-    ))
+    Ok(Some(frame_bytes[V3_WAL_FRAME_PREFIX_SIZE..].to_vec()))
 }
 
 /// Read a specific page's data from the WAL file by scanning for the latest
@@ -693,7 +685,6 @@ fn read_page_from_wal_file(wal_path: &Path, target_page_id: PageId) -> Result<Op
         return Ok(None);
     }
 
-    // Read and validate the header
     let mut header_bytes = [0u8; V3_WAL_HEADER_SIZE];
     file.seek(SeekFrom::Start(0))?;
     file.read_exact(&mut header_bytes)?;
@@ -722,7 +713,6 @@ fn read_page_from_wal_file(wal_path: &Path, target_page_id: PageId) -> Result<Op
         }
 
         if frame_page_id == target_page_id {
-            // Read the page data
             let mut page_data = vec![0u8; PAGE_SIZE];
             file.read_exact(&mut page_data)?;
             latest_data = Some(page_data);

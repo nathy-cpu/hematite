@@ -115,16 +115,6 @@ impl BTreeIndex {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn insert_with_mutation(
-        &mut self,
-        key: BTreeKey,
-        value: BTreeValue,
-    ) -> Result<TreeMutation> {
-        self.insert_replacing_with_mutation(key, value)
-            .map(|(m, _)| m)
-    }
-
     /// Insert a key/value pair and return both the tree mutation metadata
     /// AND the old value that was replaced (if the key already existed).
     ///
@@ -159,17 +149,6 @@ impl BTreeIndex {
             },
             result.old_value,
         ))
-    }
-
-    #[allow(dead_code)]
-    pub fn insert_typed_with_mutation<C: KeyValueCodec>(
-        &mut self,
-        key: &C::Key,
-        value: &C::Value,
-    ) -> Result<TreeMutation> {
-        let encoded_key = C::encode_key(key)?;
-        let encoded_value = C::encode_value(value)?;
-        self.insert_with_mutation(BTreeKey::new(encoded_key), BTreeValue::new(encoded_value))
     }
 
     fn insert_recursive(
@@ -827,7 +806,7 @@ impl BTreeIndex {
     }
 
     pub fn insert(&mut self, key: BTreeKey, value: BTreeValue) -> Result<()> {
-        self.insert_with_mutation(key, value).map(|_| ())
+        self.insert_replacing_with_mutation(key, value).map(|_| ())
     }
 
     pub fn insert_typed<C: KeyValueCodec>(&mut self, key: &C::Key, value: &C::Value) -> Result<()> {

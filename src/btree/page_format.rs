@@ -84,8 +84,6 @@
 //! | `8` | `4` | `rightmost_child` | (Interior pages only) The page ID of the rightmost routing child. |
 //!
 
-#![allow(dead_code)]
-
 use crate::error::{HematiteError, Result};
 use crate::storage::format::{PageKind, DATABASE_HEADER_SIZE};
 use crate::storage::{Page, PAGE_SIZE};
@@ -380,7 +378,6 @@ pub(crate) fn insert_cell(
         let start = header.cell_content_start as usize - cell_len;
         page.data[start..header.cell_content_start as usize].copy_from_slice(cell_bytes);
 
-        // Update cell_content_start.
         write_u16_be(
             &mut page.data,
             header.header_offset + OFFSET_CELL_CONTENT_START,
@@ -397,7 +394,6 @@ pub(crate) fn insert_cell(
         .copy_within(insertion_offset..pointer_end, insertion_offset + 2);
     write_u16_be(&mut page.data, insertion_offset, cell_start as u16);
 
-    // Update cell count.
     write_u16_be(
         &mut page.data,
         header.header_offset + OFFSET_CELL_COUNT,
@@ -433,7 +429,6 @@ pub(crate) fn remove_cell(page: &mut Page, is_page_one: bool, index: usize) -> R
     // Zero out the vacated trailing pointer slot.
     write_u16_be(&mut page.data, pointer_end - 2, 0);
 
-    // Update cell count.
     write_u16_be(
         &mut page.data,
         header.header_offset + OFFSET_CELL_COUNT,
@@ -561,7 +556,6 @@ pub(crate) fn defragment_page(page: &mut Page, is_page_one: bool) -> Result<()> 
         cells.push((i, page.data[offset..offset + size].to_vec()));
     }
 
-    // Clear the cell content area.
     let pointer_area_end = pointer_start + cell_count * 2;
     page.data[pointer_area_end..PAGE_SIZE].fill(0);
 
@@ -629,6 +623,8 @@ fn read_u32_be(bytes: &[u8], offset: usize) -> u32 {
     ])
 }
 
+/// Only reachable from the `#[cfg(test)]` page constructors above.
+#[cfg(test)]
 fn write_u32_be(bytes: &mut [u8], offset: usize, value: u32) {
     bytes[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
 }

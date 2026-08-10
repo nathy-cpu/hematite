@@ -162,43 +162,27 @@ cargo run --bin hematite_cli -- demo.db "SELECT * FROM users;"
 
 ## Advanced SQL Features
 
-Hematite supports powerful SQL constructs that are often missing in "small" databases:
+### Common Table Expressions
 
-### Recursive CTEs
-
-Find all subordinates in an organizational hierarchy.
+Name a subquery and reuse it across the statement.
 
 ```sql
-WITH RECURSIVE subordinates AS (
-    SELECT id, name, manager_id FROM employees WHERE name = 'Alice'
-    UNION ALL
-    SELECT e.id, e.name, e.manager_id 
-    FROM employees e
-    INNER JOIN subordinates s ON s.id = e.manager_id
+WITH high_earners AS (
+    SELECT id, name, salary FROM employees WHERE salary > 100000
 )
-SELECT * FROM subordinates;
+SELECT h.name, d.name AS department
+FROM high_earners h
+INNER JOIN departments d ON d.id = h.department_id;
 ```
 
-### Window Functions
+### Precision Math
 
-Calculate a running total of sales.
-
-```sql
-SELECT 
-    sale_date, 
-    amount, 
-    SUM(amount) OVER (ORDER BY sale_date) as running_total
-FROM sales;
-```
-
-### Precision Math and Intervals
-
-Handle financial calculations and temporal offsets accurately.
+Handle financial calculations accurately with exact decimals.
 
 ```sql
-SELECT 
+SELECT
     price * 1.05 as price_with_tax,
-    current_date + INTERVAL '1-02' YEAR TO MONTH as expiry_date
+    CAST('12.34' AS DECIMAL(5, 2)) as exact_amount
 FROM products;
 ```
 
@@ -233,14 +217,20 @@ expect from an embedded database that are not supported yet.
 - **No import/export tools**: CSV import/export and similar convenience tooling are not built in.
 - **No async API**: The crate is synchronous today.
 
-### Database Features Users May Expect
+### SQL Surface Not Supported
 
-- **Views are read-only**
-- **Trigger bodies are intentionally limited** to single-statement row-level `AFTER` triggers
+- **No temporal types**: `DATE`, `TIME`, `DATETIME`, `TIME WITH TIME ZONE`, and `INTERVAL` do not exist, and neither do temporal functions or clock access (`NOW()`, `CURRENT_DATE`). Model timestamps as `TEXT` or integer epoch offsets.
+- **No fixed-length or enumerated types**: `CHAR(n)`, `BINARY(n)`, `VARBINARY(n)`, and `ENUM(...)` are rejected. Use `VARCHAR(n)`, `TEXT`, and `BLOB`; enumerations can be a `TEXT` column with a `CHECK` constraint.
+- **No views or triggers**
+- **No window functions**: there is no `OVER (...)` clause.
+- **No recursive CTEs**: `WITH` works, `WITH RECURSIVE` does not.
 - **No JSON type or JSON operators**
 - **No stored procedures or user-defined functions**
 - **No generated columns**
 - **No full information-schema subsystem**
+
+None of the removed type keywords are reserved, so `date`, `char`, `enum`, and
+`binary` remain usable as ordinary column and table names.
 
 ### Deployment Model
 

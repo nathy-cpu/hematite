@@ -31,24 +31,17 @@ pub enum Statement {
     Explain(ExplainStatement),
     Describe(DescribeStatement),
     ShowTables,
-    ShowViews,
     ShowIndexes(Option<String>),
-    ShowTriggers(Option<String>),
     ShowCreateTable(String),
-    ShowCreateView(String),
     Select(SelectStatement),
     SelectInto(SelectIntoStatement),
     Update(UpdateStatement),
     Insert(InsertStatement),
     Delete(DeleteStatement),
     Create(CreateStatement),
-    CreateView(CreateViewStatement),
-    CreateTrigger(CreateTriggerStatement),
     CreateIndex(CreateIndexStatement),
     Alter(AlterStatement),
     Drop(DropStatement),
-    DropView(DropViewStatement),
-    DropTrigger(DropTriggerStatement),
     DropIndex(DropIndexStatement),
 }
 
@@ -87,7 +80,6 @@ pub struct SelectStatement {
 #[derive(Debug, Clone)]
 pub struct CommonTableExpression {
     pub name: String,
-    pub recursive: bool,
     pub query: Box<SelectStatement>,
 }
 
@@ -115,10 +107,6 @@ pub enum SelectItem {
         function: AggregateFunction,
         column: String,
     },
-    Window {
-        function: WindowFunction,
-        window: WindowSpec,
-    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,23 +116,6 @@ pub enum AggregateFunction {
     Avg,
     Min,
     Max,
-}
-
-#[derive(Debug, Clone)]
-pub struct WindowSpec {
-    pub partition_by: Vec<Expression>,
-    pub order_by: Vec<OrderByItem>,
-}
-
-#[derive(Debug, Clone)]
-pub enum WindowFunction {
-    RowNumber,
-    Rank,
-    DenseRank,
-    Aggregate {
-        function: AggregateFunction,
-        target: AggregateTarget,
-    },
 }
 
 #[derive(Debug, Clone)]
@@ -204,10 +175,6 @@ pub enum SortDirection {
 pub enum Expression {
     Column(String),
     Literal(LiteralValue),
-    IntervalLiteral {
-        value: String,
-        qualifier: IntervalQualifier,
-    },
     Parameter(usize),
     ScalarSubquery(Box<SelectStatement>),
     Cast {
@@ -275,12 +242,6 @@ pub enum Expression {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IntervalQualifier {
-    YearToMonth,
-    DayToSecond,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArithmeticOperator {
     Add,
     Subtract,
@@ -294,17 +255,6 @@ pub enum ScalarFunction {
     Coalesce,
     IfNull,
     NullIf,
-    DateFn,
-    TimeFn,
-    Year,
-    Month,
-    Day,
-    Hour,
-    Minute,
-    Second,
-    TimeToSec,
-    SecToTime,
-    UnixTimestamp,
     Lower,
     Upper,
     Length,
@@ -429,28 +379,6 @@ pub struct CreateStatement {
 }
 
 #[derive(Debug, Clone)]
-pub struct CreateViewStatement {
-    pub view: String,
-    pub if_not_exists: bool,
-    pub query: SelectStatement,
-}
-
-#[derive(Debug, Clone)]
-pub struct CreateTriggerStatement {
-    pub trigger: String,
-    pub table: String,
-    pub event: TriggerEvent,
-    pub body: Box<Statement>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TriggerEvent {
-    Insert,
-    Update,
-    Delete,
-}
-
-#[derive(Debug, Clone)]
 pub struct CreateIndexStatement {
     pub index_name: String,
     pub table: String,
@@ -462,18 +390,6 @@ pub struct CreateIndexStatement {
 #[derive(Debug, Clone)]
 pub struct DropStatement {
     pub table: String,
-    pub if_exists: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct DropViewStatement {
-    pub view: String,
-    pub if_exists: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct DropTriggerStatement {
-    pub trigger: String,
     pub if_exists: bool,
 }
 
@@ -568,112 +484,14 @@ pub enum ForeignKeyAction {
 }
 
 impl Statement {
-    pub(crate) fn to_sql(&self) -> String {
-        match self {
-            Statement::Select(select) => select.to_sql(),
-            Statement::SelectInto(select_into) => select_into.to_sql(),
-            Statement::Insert(insert) => {
-                let mut sql = format!(
-                    "INSERT INTO {} ({}) ",
-                    insert.table,
-                    insert.columns.join(", ")
-                );
-                match &insert.source {
-                    InsertSource::Values(rows) => {
-                        let rows_sql = join_rendered(rows.iter(), ", ", |row| {
-                            format!("({})", join_rendered(row.iter(), ", ", Expression::to_sql))
-                        });
-                        sql.push_str(&format!("VALUES {rows_sql}"));
-                    }
-                    InsertSource::Select(select) => {
-                        sql.push_str(&select.to_sql());
-                    }
-                }
-                if let Some(assignments) = &insert.on_duplicate {
-                    sql.push_str(" ON DUPLICATE KEY UPDATE ");
-                    sql.push_str(&join_rendered(assignments.iter(), ", ", |assignment| {
-                        format!("{} = {}", assignment.column, assignment.value.to_sql())
-                    }));
-                }
-                sql
-            }
-            Statement::Update(update) => {
-                let source = update.source();
-                let mut sql = format!(
-                    "UPDATE {} SET {}",
-                    source.to_sql(),
-                    join_rendered(update.assignments.iter(), ", ", |assignment| {
-                        format!("{} = {}", assignment.column, assignment.value.to_sql())
-                    })
-                );
-                if let Some(where_clause) = &update.where_clause {
-                    sql.push_str(&format!(
-                        " WHERE {}",
-                        join_rendered(where_clause.conditions.iter(), " AND ", Expression::to_sql)
-                    ));
-                }
-                sql
-            }
-            Statement::Delete(delete) => {
-                let mut sql = match delete.source.as_ref() {
-                    Some(source) => format!(
-                        "DELETE {} FROM {}",
-                        delete.target_binding_name(),
-                        source.to_sql()
-                    ),
-                    None => format!("DELETE FROM {}", delete.table),
-                };
-                if let Some(where_clause) = &delete.where_clause {
-                    sql.push_str(&format!(
-                        " WHERE {}",
-                        join_rendered(where_clause.conditions.iter(), " AND ", Expression::to_sql)
-                    ));
-                }
-                sql
-            }
-            Statement::Explain(explain) => format!("EXPLAIN {}", explain.statement.to_sql()),
-            Statement::Describe(describe) => format!("DESCRIBE {}", describe.table),
-            Statement::ShowTables => "SHOW TABLES".to_string(),
-            Statement::ShowViews => "SHOW VIEWS".to_string(),
-            Statement::ShowIndexes(table) => match table {
-                Some(table) => format!("SHOW INDEXES FROM {table}"),
-                None => "SHOW INDEXES".to_string(),
-            },
-            Statement::ShowTriggers(table) => match table {
-                Some(table) => format!("SHOW TRIGGERS FROM {table}"),
-                None => "SHOW TRIGGERS".to_string(),
-            },
-            Statement::ShowCreateTable(table) => format!("SHOW CREATE TABLE {table}"),
-            Statement::ShowCreateView(view) => format!("SHOW CREATE VIEW {view}"),
-            Statement::Begin => "BEGIN".to_string(),
-            Statement::Commit => "COMMIT".to_string(),
-            Statement::Rollback => "ROLLBACK".to_string(),
-            Statement::Savepoint(name) => format!("SAVEPOINT {name}"),
-            Statement::RollbackToSavepoint(name) => format!("ROLLBACK TO SAVEPOINT {name}"),
-            Statement::ReleaseSavepoint(name) => format!("RELEASE SAVEPOINT {name}"),
-            Statement::Create(_)
-            | Statement::CreateView(_)
-            | Statement::CreateTrigger(_)
-            | Statement::CreateIndex(_)
-            | Statement::Alter(_)
-            | Statement::Drop(_)
-            | Statement::DropView(_)
-            | Statement::DropTrigger(_)
-            | Statement::DropIndex(_) => format!("{self:?}"),
-        }
-    }
-
     pub fn is_read_only(&self) -> bool {
         matches!(
             self,
             Statement::Explain(_)
                 | Statement::Describe(_)
                 | Statement::ShowTables
-                | Statement::ShowViews
                 | Statement::ShowIndexes(_)
-                | Statement::ShowTriggers(_)
                 | Statement::ShowCreateTable(_)
-                | Statement::ShowCreateView(_)
                 | Statement::Select(_)
         )
     }
@@ -683,13 +501,9 @@ impl Statement {
             self,
             Statement::Create(_)
                 | Statement::SelectInto(_)
-                | Statement::CreateView(_)
-                | Statement::CreateTrigger(_)
                 | Statement::CreateIndex(_)
                 | Statement::Alter(_)
                 | Statement::Drop(_)
-                | Statement::DropView(_)
-                | Statement::DropTrigger(_)
                 | Statement::DropIndex(_)
         )
     }
@@ -724,11 +538,8 @@ impl Statement {
             | Statement::ReleaseSavepoint(_)
             | Statement::Describe(_)
             | Statement::ShowTables
-            | Statement::ShowViews
             | Statement::ShowIndexes(_)
-            | Statement::ShowTriggers(_)
-            | Statement::ShowCreateTable(_)
-            | Statement::ShowCreateView(_) => {}
+            | Statement::ShowCreateTable(_) => {}
             Statement::Explain(explain) => explain.statement.visit_parameters(f),
             Statement::Select(select) => {
                 select.visit_parameters(f);
@@ -769,13 +580,9 @@ impl Statement {
                 }
             }
             Statement::Create(_)
-            | Statement::CreateView(_)
-            | Statement::CreateTrigger(_)
             | Statement::CreateIndex(_)
             | Statement::Alter(_)
             | Statement::Drop(_)
-            | Statement::DropView(_)
-            | Statement::DropTrigger(_)
             | Statement::DropIndex(_) => {}
         }
     }
@@ -817,12 +624,6 @@ impl Statement {
                     where_clause.substitute_parameters(parameters)?;
                 }
             }
-            Statement::CreateView(create_view) => {
-                create_view.query.substitute_parameters(parameters)?
-            }
-            Statement::CreateTrigger(create_trigger) => {
-                create_trigger.body.substitute_parameters(parameters)?
-            }
             Statement::Begin
             | Statement::Commit
             | Statement::Rollback
@@ -831,26 +632,15 @@ impl Statement {
             | Statement::ReleaseSavepoint(_)
             | Statement::Describe(_)
             | Statement::ShowTables
-            | Statement::ShowViews
             | Statement::ShowIndexes(_)
-            | Statement::ShowTriggers(_)
             | Statement::ShowCreateTable(_)
-            | Statement::ShowCreateView(_)
             | Statement::Create(_)
             | Statement::CreateIndex(_)
             | Statement::Alter(_)
             | Statement::Drop(_)
-            | Statement::DropView(_)
-            | Statement::DropTrigger(_)
             | Statement::DropIndex(_) => {}
         }
         Ok(())
-    }
-}
-
-impl SelectIntoStatement {
-    fn to_sql(&self) -> String {
-        self.query.to_sql_with_into(&self.table)
     }
 }
 
@@ -872,32 +662,12 @@ impl WhereClause {
     }
 }
 impl SelectItem {
-    fn to_sql(&self) -> String {
-        match self {
-            SelectItem::Wildcard => "*".to_string(),
-            SelectItem::Column(name) => name.clone(),
-            SelectItem::Expression(expr) => expr.to_sql(),
-            SelectItem::CountAll => "COUNT(*)".to_string(),
-            SelectItem::Aggregate { function, column } => {
-                format!("{}({})", function.to_sql(), column)
-            }
-            SelectItem::Window { function, window } => {
-                format!("{} OVER ({})", function.to_sql(), window.to_sql())
-            }
-        }
-    }
-
     fn visit_parameters<F>(&self, f: &mut F)
     where
         F: FnMut(usize),
     {
         match self {
             SelectItem::Expression(expr) => expr.visit_parameters(f),
-            SelectItem::Window { window, .. } => {
-                for expr in &window.partition_by {
-                    expr.visit_parameters(f);
-                }
-            }
             SelectItem::Wildcard
             | SelectItem::Column(_)
             | SelectItem::CountAll
@@ -908,11 +678,6 @@ impl SelectItem {
     fn substitute_parameters(&mut self, parameters: &[LiteralValue]) -> Result<()> {
         match self {
             SelectItem::Expression(expr) => expr.substitute_parameters(parameters)?,
-            SelectItem::Window { window, .. } => {
-                for expr in &mut window.partition_by {
-                    expr.substitute_parameters(parameters)?;
-                }
-            }
             SelectItem::Wildcard
             | SelectItem::Column(_)
             | SelectItem::CountAll
@@ -922,107 +687,7 @@ impl SelectItem {
     }
 }
 
-impl WindowSpec {
-    fn to_sql(&self) -> String {
-        let mut parts = Vec::new();
-        if !self.partition_by.is_empty() {
-            parts.push(format!(
-                "PARTITION BY {}",
-                join_rendered(self.partition_by.iter(), ", ", Expression::to_sql)
-            ));
-        }
-        if !self.order_by.is_empty() {
-            parts.push(format!(
-                "ORDER BY {}",
-                join_rendered(self.order_by.iter(), ", ", |item| format!(
-                    "{} {}",
-                    item.column,
-                    match item.direction {
-                        SortDirection::Asc => "ASC",
-                        SortDirection::Desc => "DESC",
-                    }
-                ))
-            ));
-        }
-        parts.join(" ")
-    }
-}
-
-impl WindowFunction {
-    fn to_sql(&self) -> String {
-        match self {
-            WindowFunction::RowNumber => "ROW_NUMBER()".to_string(),
-            WindowFunction::Rank => "RANK()".to_string(),
-            WindowFunction::DenseRank => "DENSE_RANK()".to_string(),
-            WindowFunction::Aggregate { function, target } => match target {
-                AggregateTarget::All => format!("{}(*)", function.to_sql()),
-                AggregateTarget::Column(column) => format!("{}({})", function.to_sql(), column),
-            },
-        }
-    }
-}
-
 impl Expression {
-    fn collect_dependency_names_into(&self, names: &mut std::collections::BTreeSet<String>) {
-        match self {
-            Expression::ScalarSubquery(subquery) => subquery.collect_dependency_names_into(names),
-            Expression::Case {
-                branches,
-                else_expr,
-            } => {
-                for branch in branches {
-                    branch.condition.collect_dependency_names_into(names);
-                    branch.result.collect_dependency_names_into(names);
-                }
-                if let Some(else_expr) = else_expr {
-                    else_expr.collect_dependency_names_into(names);
-                }
-            }
-            Expression::ScalarFunctionCall { args, .. } => {
-                for arg in args {
-                    arg.collect_dependency_names_into(names);
-                }
-            }
-            Expression::AggregateCall { .. } => {}
-            Expression::Cast { expr, .. }
-            | Expression::UnaryMinus(expr)
-            | Expression::UnaryNot(expr) => expr.collect_dependency_names_into(names),
-            Expression::Binary { left, right, .. }
-            | Expression::Comparison { left, right, .. }
-            | Expression::Logical { left, right, .. } => {
-                left.collect_dependency_names_into(names);
-                right.collect_dependency_names_into(names);
-            }
-            Expression::InList { expr, values, .. } => {
-                expr.collect_dependency_names_into(names);
-                for value in values {
-                    value.collect_dependency_names_into(names);
-                }
-            }
-            Expression::InSubquery { expr, subquery, .. } => {
-                expr.collect_dependency_names_into(names);
-                subquery.collect_dependency_names_into(names);
-            }
-            Expression::Between {
-                expr, lower, upper, ..
-            } => {
-                expr.collect_dependency_names_into(names);
-                lower.collect_dependency_names_into(names);
-                upper.collect_dependency_names_into(names);
-            }
-            Expression::Like { expr, pattern, .. } => {
-                expr.collect_dependency_names_into(names);
-                pattern.collect_dependency_names_into(names);
-            }
-            Expression::Exists { subquery, .. } => subquery.collect_dependency_names_into(names),
-            Expression::NullCheck { expr, .. } => expr.collect_dependency_names_into(names),
-            Expression::Column(_)
-            | Expression::Literal(_)
-            | Expression::IntervalLiteral { .. }
-            | Expression::Parameter(_) => {}
-        }
-    }
-
     fn visit_parameters<F>(&self, f: &mut F)
     where
         F: FnMut(usize),
@@ -1086,8 +751,7 @@ impl Expression {
                 left.visit_parameters(f);
                 right.visit_parameters(f);
             }
-            Expression::Column(_) | Expression::Literal(_) | Expression::IntervalLiteral { .. } => {
-            }
+            Expression::Column(_) | Expression::Literal(_) => {}
         }
     }
 
@@ -1159,20 +823,9 @@ impl Expression {
                 left.substitute_parameters(parameters)?;
                 right.substitute_parameters(parameters)?;
             }
-            Expression::Column(_)
-            | Expression::Literal(_)
-            | Expression::IntervalLiteral { .. } => {}
+            Expression::Column(_) | Expression::Literal(_) => {}
         }
         Ok(())
-    }
-}
-
-impl IntervalQualifier {
-    pub fn to_sql(self) -> &'static str {
-        match self {
-            IntervalQualifier::YearToMonth => "YEAR TO MONTH",
-            IntervalQualifier::DayToSecond => "DAY TO SECOND",
-        }
     }
 }
 
@@ -1254,30 +907,6 @@ impl SelectStatement {
         self.lookup_cte(name).is_some()
     }
 
-    pub(crate) fn references_source_name(&self, name: &str) -> bool {
-        self.from.references_source_name(name)
-            || self.where_clause.as_ref().is_some_and(|where_clause| {
-                where_clause
-                    .conditions
-                    .iter()
-                    .any(|condition| condition.references_source_name(name))
-            })
-            || self
-                .group_by
-                .iter()
-                .any(|expr| expr.references_source_name(name))
-            || self.having_clause.as_ref().is_some_and(|having_clause| {
-                having_clause
-                    .conditions
-                    .iter()
-                    .any(|condition| condition.references_source_name(name))
-            })
-            || self
-                .set_operation
-                .as_ref()
-                .is_some_and(|set_operation| set_operation.right.references_source_name(name))
-    }
-
     pub(crate) fn has_non_table_source(&self) -> bool {
         self.from.has_non_table_source(self)
     }
@@ -1310,7 +939,6 @@ impl SelectStatement {
                 },
                 column
             )),
-            SelectItem::Window { function, .. } => Some(function.to_sql()),
         }
     }
 
@@ -1323,190 +951,6 @@ impl SelectStatement {
                     .get(index)
                     .and_then(|item| Self::default_output_name(item, index))
             })
-    }
-
-    pub(crate) fn dependency_names(&self) -> Vec<String> {
-        let mut names = std::collections::BTreeSet::new();
-        self.collect_dependency_names_into(&mut names);
-        names.into_iter().collect()
-    }
-
-    fn collect_dependency_names_into(&self, names: &mut std::collections::BTreeSet<String>) {
-        for cte in &self.with_clause {
-            cte.query.collect_dependency_names_into(names);
-        }
-        self.from.collect_dependency_names_into(names);
-        if let Some(where_clause) = &self.where_clause {
-            for condition in &where_clause.conditions {
-                condition.collect_dependency_names_into(names);
-            }
-        }
-        for expr in &self.group_by {
-            expr.collect_dependency_names_into(names);
-        }
-        if let Some(having_clause) = &self.having_clause {
-            for condition in &having_clause.conditions {
-                condition.collect_dependency_names_into(names);
-            }
-        }
-        if let Some(set_operation) = &self.set_operation {
-            set_operation.right.collect_dependency_names_into(names);
-        }
-    }
-
-    pub(crate) fn to_sql_with_into(&self, table: &str) -> String {
-        let mut parts = Vec::new();
-        if !self.with_clause.is_empty() {
-            let recursive = self.with_clause.iter().any(|cte| cte.recursive);
-            let ctes = join_rendered(self.with_clause.iter(), ", ", |cte| {
-                format!("{} AS ({})", cte.name, cte.query.to_sql())
-            });
-            parts.push(format!(
-                "WITH {}{}",
-                if recursive { "RECURSIVE " } else { "" },
-                ctes
-            ));
-        }
-
-        let projections = join_rendered(self.columns.iter().enumerate(), ", ", |(index, item)| {
-            let base = item.to_sql();
-            match self
-                .column_aliases
-                .get(index)
-                .and_then(|alias| alias.clone())
-            {
-                Some(alias) => format!("{base} AS {alias}"),
-                None => base,
-            }
-        });
-        parts.push(format!(
-            "SELECT{} {} INTO {}",
-            if self.distinct { " DISTINCT" } else { "" },
-            projections,
-            table
-        ));
-        parts.push(format!("FROM {}", self.from.to_sql()));
-
-        if let Some(where_clause) = &self.where_clause {
-            parts.push(format!(
-                "WHERE {}",
-                join_rendered(where_clause.conditions.iter(), " AND ", Expression::to_sql)
-            ));
-        }
-        if !self.group_by.is_empty() {
-            parts.push(format!(
-                "GROUP BY {}",
-                join_rendered(self.group_by.iter(), ", ", Expression::to_sql)
-            ));
-        }
-        if let Some(having_clause) = &self.having_clause {
-            parts.push(format!(
-                "HAVING {}",
-                join_rendered(having_clause.conditions.iter(), " AND ", Expression::to_sql)
-            ));
-        }
-        if !self.order_by.is_empty() {
-            parts.push(format!(
-                "ORDER BY {}",
-                join_rendered(self.order_by.iter(), ", ", |item| format!(
-                    "{} {}",
-                    item.column,
-                    item.direction.to_sql()
-                ))
-            ));
-        }
-        if let Some(limit) = self.limit {
-            parts.push(format!("LIMIT {}", limit));
-        }
-        if let Some(offset) = self.offset {
-            parts.push(format!("OFFSET {}", offset));
-        }
-        if let Some(set_operation) = &self.set_operation {
-            parts.push(format!(
-                "{} {}",
-                set_operation.operator.to_sql(),
-                set_operation.right.to_sql()
-            ));
-        }
-
-        parts.join(" ")
-    }
-
-    pub(crate) fn to_sql(&self) -> String {
-        let mut parts = Vec::new();
-        if !self.with_clause.is_empty() {
-            let recursive = self.with_clause.iter().any(|cte| cte.recursive);
-            let ctes = join_rendered(self.with_clause.iter(), ", ", |cte| {
-                format!("{} AS ({})", cte.name, cte.query.to_sql())
-            });
-            parts.push(format!(
-                "WITH {}{}",
-                if recursive { "RECURSIVE " } else { "" },
-                ctes
-            ));
-        }
-
-        let projections = join_rendered(self.columns.iter().enumerate(), ", ", |(index, item)| {
-            let base = item.to_sql();
-            match self
-                .column_aliases
-                .get(index)
-                .and_then(|alias| alias.clone())
-            {
-                Some(alias) => format!("{base} AS {alias}"),
-                None => base,
-            }
-        });
-        parts.push(format!(
-            "SELECT{} {}",
-            if self.distinct { " DISTINCT" } else { "" },
-            projections
-        ));
-        parts.push(format!("FROM {}", self.from.to_sql()));
-
-        if let Some(where_clause) = &self.where_clause {
-            parts.push(format!(
-                "WHERE {}",
-                join_rendered(where_clause.conditions.iter(), " AND ", Expression::to_sql)
-            ));
-        }
-        if !self.group_by.is_empty() {
-            parts.push(format!(
-                "GROUP BY {}",
-                join_rendered(self.group_by.iter(), ", ", Expression::to_sql)
-            ));
-        }
-        if let Some(having_clause) = &self.having_clause {
-            parts.push(format!(
-                "HAVING {}",
-                join_rendered(having_clause.conditions.iter(), " AND ", Expression::to_sql)
-            ));
-        }
-        if !self.order_by.is_empty() {
-            parts.push(format!(
-                "ORDER BY {}",
-                join_rendered(self.order_by.iter(), ", ", |item| format!(
-                    "{} {}",
-                    item.column,
-                    item.direction.to_sql()
-                ))
-            ));
-        }
-        if let Some(limit) = self.limit {
-            parts.push(format!("LIMIT {}", limit));
-        }
-        if let Some(offset) = self.offset {
-            parts.push(format!("OFFSET {}", offset));
-        }
-        if let Some(set_operation) = &self.set_operation {
-            parts.push(format!(
-                "{} {}",
-                set_operation.operator.to_sql(),
-                set_operation.right.to_sql()
-            ));
-        }
-
-        parts.join(" ")
     }
 
     pub(crate) fn collect_table_bindings(from: &TableReference) -> Vec<TableBinding> {
@@ -1541,90 +985,6 @@ impl SelectStatement {
 }
 
 impl TableReference {
-    fn collect_dependency_names_into(&self, names: &mut std::collections::BTreeSet<String>) {
-        match self {
-            TableReference::Table(table_name, _) => {
-                names.insert(table_name.clone());
-            }
-            TableReference::Derived { subquery, .. } => {
-                subquery.collect_dependency_names_into(names)
-            }
-            TableReference::CrossJoin(left, right) => {
-                left.collect_dependency_names_into(names);
-                right.collect_dependency_names_into(names);
-            }
-            TableReference::InnerJoin { left, right, on }
-            | TableReference::LeftJoin { left, right, on }
-            | TableReference::RightJoin { left, right, on }
-            | TableReference::FullOuterJoin { left, right, on } => {
-                left.collect_dependency_names_into(names);
-                right.collect_dependency_names_into(names);
-                on.collect_dependency_names_into(names);
-            }
-        }
-    }
-
-    fn to_sql(&self) -> String {
-        match self {
-            TableReference::Table(table_name, Some(alias)) => format!("{table_name} {alias}"),
-            TableReference::Table(table_name, None) => table_name.clone(),
-            TableReference::Derived { subquery, alias } => {
-                format!("({}) {}", subquery.to_sql(), alias)
-            }
-            TableReference::CrossJoin(left, right) => {
-                format!("{}, {}", left.to_sql(), right.to_sql())
-            }
-            TableReference::InnerJoin { left, right, on } => {
-                format!(
-                    "{} INNER JOIN {} ON {}",
-                    left.to_sql(),
-                    right.to_sql(),
-                    on.to_sql()
-                )
-            }
-            TableReference::LeftJoin { left, right, on } => {
-                format!(
-                    "{} LEFT JOIN {} ON {}",
-                    left.to_sql(),
-                    right.to_sql(),
-                    on.to_sql()
-                )
-            }
-            TableReference::RightJoin { left, right, on } => {
-                format!(
-                    "{} RIGHT JOIN {} ON {}",
-                    left.to_sql(),
-                    right.to_sql(),
-                    on.to_sql()
-                )
-            }
-            TableReference::FullOuterJoin { left, right, on } => format!(
-                "{} FULL OUTER JOIN {} ON {}",
-                left.to_sql(),
-                right.to_sql(),
-                on.to_sql()
-            ),
-        }
-    }
-
-    pub(crate) fn references_source_name(&self, name: &str) -> bool {
-        match self {
-            TableReference::Table(table_name, _) => table_name.eq_ignore_ascii_case(name),
-            TableReference::Derived { subquery, .. } => subquery.references_source_name(name),
-            TableReference::CrossJoin(left, right) => {
-                left.references_source_name(name) || right.references_source_name(name)
-            }
-            TableReference::InnerJoin { left, right, on }
-            | TableReference::LeftJoin { left, right, on }
-            | TableReference::RightJoin { left, right, on }
-            | TableReference::FullOuterJoin { left, right, on } => {
-                left.references_source_name(name)
-                    || right.references_source_name(name)
-                    || on.references_source_name(name)
-            }
-        }
-    }
-
     pub(crate) fn has_non_table_source(&self, statement: &SelectStatement) -> bool {
         match self {
             TableReference::Table(table_name, _) => statement.references_cte(table_name),
@@ -1641,64 +1001,6 @@ impl TableReference {
 }
 
 impl Expression {
-    pub(crate) fn references_source_name(&self, name: &str) -> bool {
-        match self {
-            Expression::ScalarSubquery(subquery) => subquery.references_source_name(name),
-            Expression::Case {
-                branches,
-                else_expr,
-            } => {
-                branches.iter().any(|branch| {
-                    branch.condition.references_source_name(name)
-                        || branch.result.references_source_name(name)
-                }) || else_expr
-                    .as_ref()
-                    .is_some_and(|expr| expr.references_source_name(name))
-            }
-            Expression::ScalarFunctionCall { args, .. } => {
-                args.iter().any(|arg| arg.references_source_name(name))
-            }
-            Expression::Cast { expr, .. } => expr.references_source_name(name),
-            Expression::UnaryMinus(expr) => expr.references_source_name(name),
-            Expression::UnaryNot(expr) => expr.references_source_name(name),
-            Expression::Binary { left, right, .. } => {
-                left.references_source_name(name) || right.references_source_name(name)
-            }
-            Expression::Comparison { left, right, .. } => {
-                left.references_source_name(name) || right.references_source_name(name)
-            }
-            Expression::InList { expr, values, .. } => {
-                expr.references_source_name(name)
-                    || values
-                        .iter()
-                        .any(|value| value.references_source_name(name))
-            }
-            Expression::InSubquery { expr, subquery, .. } => {
-                expr.references_source_name(name) || subquery.references_source_name(name)
-            }
-            Expression::Between {
-                expr, lower, upper, ..
-            } => {
-                expr.references_source_name(name)
-                    || lower.references_source_name(name)
-                    || upper.references_source_name(name)
-            }
-            Expression::Like { expr, pattern, .. } => {
-                expr.references_source_name(name) || pattern.references_source_name(name)
-            }
-            Expression::Exists { subquery, .. } => subquery.references_source_name(name),
-            Expression::NullCheck { expr, .. } => expr.references_source_name(name),
-            Expression::Logical { left, right, .. } => {
-                left.references_source_name(name) || right.references_source_name(name)
-            }
-            Expression::Column(_)
-            | Expression::Literal(_)
-            | Expression::IntervalLiteral { .. }
-            | Expression::Parameter(_)
-            | Expression::AggregateCall { .. } => false,
-        }
-    }
-
     pub(crate) fn references_column(&self, column_name: &str, table_name: Option<&str>) -> bool {
         match self {
             Expression::Column(name) => column_name_matches(name, column_name, table_name),
@@ -1756,9 +1058,7 @@ impl Expression {
                 left.references_column(column_name, table_name)
                     || right.references_column(column_name, table_name)
             }
-            Expression::Literal(_)
-            | Expression::IntervalLiteral { .. }
-            | Expression::Parameter(_) => false,
+            Expression::Literal(_) | Expression::Parameter(_) => false,
         }
     }
 
@@ -1844,9 +1144,7 @@ impl Expression {
                 left.rename_column_references(old_name, new_name, table_name);
                 right.rename_column_references(old_name, new_name, table_name);
             }
-            Expression::Literal(_)
-            | Expression::IntervalLiteral { .. }
-            | Expression::Parameter(_) => {}
+            Expression::Literal(_) | Expression::Parameter(_) => {}
         }
     }
 
@@ -1870,13 +1168,6 @@ impl Expression {
                 LiteralValue::Float(f) => f.to_string(),
                 LiteralValue::Null => "NULL".to_string(),
             },
-            Expression::IntervalLiteral { value, qualifier } => {
-                format!(
-                    "INTERVAL '{}' {}",
-                    value.replace('\'', "''"),
-                    qualifier.to_sql()
-                )
-            }
             Expression::Parameter(index) => format!("?{}", index + 1),
             Expression::ScalarSubquery(_) => "(<subquery>)".to_string(),
             Expression::Case {
@@ -2002,17 +1293,6 @@ impl ScalarFunction {
             _ if name.eq_ignore_ascii_case("COALESCE") => Some(Self::Coalesce),
             _ if name.eq_ignore_ascii_case("IFNULL") => Some(Self::IfNull),
             _ if name.eq_ignore_ascii_case("NULLIF") => Some(Self::NullIf),
-            _ if name.eq_ignore_ascii_case("DATE") => Some(Self::DateFn),
-            _ if name.eq_ignore_ascii_case("TIME") => Some(Self::TimeFn),
-            _ if name.eq_ignore_ascii_case("YEAR") => Some(Self::Year),
-            _ if name.eq_ignore_ascii_case("MONTH") => Some(Self::Month),
-            _ if name.eq_ignore_ascii_case("DAY") => Some(Self::Day),
-            _ if name.eq_ignore_ascii_case("HOUR") => Some(Self::Hour),
-            _ if name.eq_ignore_ascii_case("MINUTE") => Some(Self::Minute),
-            _ if name.eq_ignore_ascii_case("SECOND") => Some(Self::Second),
-            _ if name.eq_ignore_ascii_case("TIME_TO_SEC") => Some(Self::TimeToSec),
-            _ if name.eq_ignore_ascii_case("SEC_TO_TIME") => Some(Self::SecToTime),
-            _ if name.eq_ignore_ascii_case("UNIX_TIMESTAMP") => Some(Self::UnixTimestamp),
             _ if name.eq_ignore_ascii_case("LOWER") => Some(Self::Lower),
             _ if name.eq_ignore_ascii_case("UPPER") => Some(Self::Upper),
             _ if name.eq_ignore_ascii_case("LENGTH") => Some(Self::Length),
@@ -2052,17 +1332,6 @@ impl ScalarFunction {
             ScalarFunction::Coalesce => "COALESCE",
             ScalarFunction::IfNull => "IFNULL",
             ScalarFunction::NullIf => "NULLIF",
-            ScalarFunction::DateFn => "DATE",
-            ScalarFunction::TimeFn => "TIME",
-            ScalarFunction::Year => "YEAR",
-            ScalarFunction::Month => "MONTH",
-            ScalarFunction::Day => "DAY",
-            ScalarFunction::Hour => "HOUR",
-            ScalarFunction::Minute => "MINUTE",
-            ScalarFunction::Second => "SECOND",
-            ScalarFunction::TimeToSec => "TIME_TO_SEC",
-            ScalarFunction::SecToTime => "SEC_TO_TIME",
-            ScalarFunction::UnixTimestamp => "UNIX_TIMESTAMP",
             ScalarFunction::Lower => "LOWER",
             ScalarFunction::Upper => "UPPER",
             ScalarFunction::Length => "LENGTH",
@@ -2130,26 +1399,6 @@ impl ArithmeticOperator {
             ArithmeticOperator::Multiply => "*",
             ArithmeticOperator::Divide => "/",
             ArithmeticOperator::Modulo => "%",
-        }
-    }
-}
-
-impl SortDirection {
-    fn to_sql(&self) -> &'static str {
-        match self {
-            SortDirection::Asc => "ASC",
-            SortDirection::Desc => "DESC",
-        }
-    }
-}
-
-impl SetOperator {
-    fn to_sql(&self) -> &'static str {
-        match self {
-            SetOperator::Union => "UNION",
-            SetOperator::UnionAll => "UNION ALL",
-            SetOperator::Intersect => "INTERSECT",
-            SetOperator::Except => "EXCEPT",
         }
     }
 }

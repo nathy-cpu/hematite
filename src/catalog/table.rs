@@ -163,7 +163,6 @@ impl Table {
             ));
         }
 
-        // Validate primary key
         if primary_key_columns.is_empty() {
             return Err(HematiteError::StorageError(
                 "Table must have at least one primary key column".to_string(),
@@ -587,12 +586,10 @@ impl Table {
         // Primary key column count (4 bytes)
         buffer.extend_from_slice(&(self.primary_key_columns.len() as u32).to_le_bytes());
 
-        // Primary key column indices
         for &index in &self.primary_key_columns {
             buffer.extend_from_slice(&(index as u32).to_le_bytes());
         }
 
-        // Secondary indexes
         buffer.extend_from_slice(&(self.secondary_indexes.len() as u32).to_le_bytes());
         for index in &self.secondary_indexes {
             let name_bytes = index.name.as_bytes();
@@ -681,7 +678,6 @@ impl Table {
         ]);
         *offset += 4;
 
-        // Column count
         let column_count = u32::from_le_bytes([
             buffer[*offset],
             buffer[*offset + 1],
@@ -696,7 +692,6 @@ impl Table {
             columns.push(Column::deserialize(buffer, offset)?);
         }
 
-        // Primary key column count
         if *offset + 4 > buffer.len() {
             return Err(HematiteError::CorruptedData(
                 "Invalid primary key count".to_string(),
@@ -710,7 +705,6 @@ impl Table {
         ]) as usize;
         *offset += 4;
 
-        // Primary key column indices
         let mut primary_key_columns = Vec::with_capacity(pk_count);
         for _ in 0..pk_count {
             if *offset + 4 > buffer.len() {

@@ -100,8 +100,6 @@
 //! 2. **Lookahead Consumability**: The parser's `position` index must advance monotonically. Infinite loops
 //!    in token consumption are prevented by ensuring every routing branch either consumes at least one token
 //!    or returns a syntax error.
-//! 3. **Single-Statement trigger bodies**: Grammar rules limit trigger bodies to a single UPDATE, INSERT,
-//!    or DELETE statement, avoiding procedural control parser complexity.
 //!
 
 use crate::error::{HematiteError, Result};
@@ -240,7 +238,9 @@ impl<'a> Parser<'a> {
             Token::Views => {
                 self.consume_token(&Token::Views)?;
                 self.consume_token(&Token::Semicolon)?;
-                Ok(Statement::ShowViews)
+                Err(HematiteError::ParseError(
+                    "SHOW VIEWS is not supported".to_string(),
+                ))
             }
             Token::Indexes => {
                 self.consume_token(&Token::Indexes)?;
@@ -253,17 +253,9 @@ impl<'a> Parser<'a> {
                 self.consume_token(&Token::Semicolon)?;
                 Ok(Statement::ShowIndexes(table))
             }
-            Token::Triggers => {
-                self.consume_token(&Token::Triggers)?;
-                let table = if matches!(self.peek_token(), Ok(&Token::From)) {
-                    self.consume_token(&Token::From)?;
-                    Some(self.parse_identifier()?)
-                } else {
-                    None
-                };
-                self.consume_token(&Token::Semicolon)?;
-                Ok(Statement::ShowTriggers(table))
-            }
+            Token::Triggers => Err(HematiteError::ParseError(
+                "SHOW TRIGGERS is not supported".to_string(),
+            )),
             Token::Create => {
                 self.consume_token(&Token::Create)?;
                 match self.peek_token()? {
@@ -273,14 +265,8 @@ impl<'a> Parser<'a> {
                         self.consume_token(&Token::Semicolon)?;
                         Ok(Statement::ShowCreateTable(table))
                     }
-                    Token::View => {
-                        self.consume_token(&Token::View)?;
-                        let view = self.parse_identifier()?;
-                        self.consume_token(&Token::Semicolon)?;
-                        Ok(Statement::ShowCreateView(view))
-                    }
                     token => Err(HematiteError::ParseError(format!(
-                        "Expected TABLE or VIEW after SHOW CREATE, found: {:?}",
+                        "Expected TABLE after SHOW CREATE, found: {:?}",
                         token
                     ))),
                 }
@@ -436,12 +422,6 @@ impl<'a> Parser<'a> {
 
     fn parse_with_clause(&mut self) -> Result<Vec<CommonTableExpression>> {
         self.consume_token(&Token::With)?;
-        let recursive = if matches!(self.peek_token(), Ok(&Token::Recursive)) {
-            self.consume_token(&Token::Recursive)?;
-            true
-        } else {
-            false
-        };
         let mut ctes = Vec::new();
 
         loop {
@@ -452,7 +432,6 @@ impl<'a> Parser<'a> {
             self.consume_token(&Token::RightParen)?;
             ctes.push(CommonTableExpression {
                 name,
-                recursive,
                 query: Box::new(query),
             });
 
@@ -499,16 +478,7 @@ impl<'a> Parser<'a> {
         match token {
             Token::Count | Token::Sum | Token::Avg | Token::Min | Token::Max => {
                 let expr = self.parse_aggregate_expression()?;
-                if matches!(self.peek_token(), Ok(&Token::Over)) {
-                    self.parse_window_select_item(expr)
-                } else {
-                    self.aggregate_expression_to_select_item(expr)
-                }
-            }
-            Token::Identifier(ref name)
-                if self.next_token_is(&Token::LeftParen) && is_window_only_function_name(name) =>
-            {
-                self.parse_window_only_select_item()
+                self.aggregate_expression_to_select_item(expr)
             }
             Token::Identifier(_)
             | Token::StringLiteral(_)
@@ -521,10 +491,6 @@ impl<'a> Parser<'a> {
             | Token::LeftParen
             | Token::Case
             | Token::Cast
-            | Token::Interval
-            | Token::Date
-            | Token::Time
-            | Token::DateTime
             | Token::Left
             | Token::Right
             | Token::Minus => {
@@ -605,59 +571,6 @@ impl<'a> Parser<'a> {
                 "aggregate expression parser returned a non-aggregate expression".to_string(),
             )),
         }
-    }
-
-    fn parse_window_only_select_item(&mut self) -> Result<SelectItem> {
-        let function_name = self.parse_identifier()?;
-        self.consume_token(&Token::LeftParen)?;
-        self.consume_token(&Token::RightParen)?;
-        let function = parse_window_function_name(&function_name).ok_or_else(|| {
-            HematiteError::ParseError(format!("Unsupported window function '{}'", function_name))
-        })?;
-        self.parse_window_item(function)
-    }
-
-    fn parse_window_select_item(&mut self, expression: Expression) -> Result<SelectItem> {
-        let Expression::AggregateCall { function, target } = expression else {
-            return Err(HematiteError::ParseError(
-                "OVER(...) currently requires a ranking or aggregate function".to_string(),
-            ));
-        };
-        self.parse_window_item(WindowFunction::Aggregate { function, target })
-    }
-
-    fn parse_window_item(&mut self, function: WindowFunction) -> Result<SelectItem> {
-        self.consume_token(&Token::Over)?;
-        self.consume_token(&Token::LeftParen)?;
-        let partition_by = if matches!(self.peek_token(), Ok(&Token::Partition)) {
-            self.consume_token(&Token::Partition)?;
-            self.consume_token(&Token::By)?;
-            let mut exprs = Vec::new();
-            loop {
-                exprs.push(self.parse_expression()?);
-                if matches!(self.peek_token(), Ok(&Token::Comma)) {
-                    self.consume_token(&Token::Comma)?;
-                    continue;
-                }
-                break;
-            }
-            exprs
-        } else {
-            Vec::new()
-        };
-        let order_by = if matches!(self.peek_token(), Ok(&Token::Order)) {
-            self.parse_order_by_clause()?
-        } else {
-            Vec::new()
-        };
-        self.consume_token(&Token::RightParen)?;
-        Ok(SelectItem::Window {
-            function,
-            window: WindowSpec {
-                partition_by,
-                order_by,
-            },
-        })
     }
 
     fn parse_from_clause(&mut self) -> Result<TableReference> {
@@ -1124,12 +1037,6 @@ impl<'a> Parser<'a> {
         match token {
             Token::Cast => self.parse_cast_expression(),
             Token::Case => self.parse_case_expression(),
-            Token::Interval => self.parse_interval_literal(),
-            Token::Date | Token::Time | Token::DateTime
-                if self.next_token_is(&Token::LeftParen) =>
-            {
-                self.parse_scalar_function_expression()
-            }
             Token::Left | Token::Right if self.next_token_is(&Token::LeftParen) => {
                 self.parse_scalar_function_expression()
             }
@@ -1191,43 +1098,6 @@ impl<'a> Parser<'a> {
                 token
             ))),
         }
-    }
-
-    fn parse_interval_literal(&mut self) -> Result<Expression> {
-        self.consume_token(&Token::Interval)?;
-        let value = match self.peek_token()? {
-            Token::StringLiteral(value) => {
-                let value = value.clone().into_owned();
-                self.advance();
-                value
-            }
-            token => {
-                return Err(HematiteError::ParseError(format!(
-                    "Expected INTERVAL string literal, found: {:?}",
-                    token
-                )))
-            }
-        };
-        let leading = self.parse_identifier()?;
-        self.consume_token(&Token::To)?;
-        let trailing = self.parse_identifier()?;
-
-        let qualifier = match () {
-            _ if leading.eq_ignore_ascii_case("YEAR") && trailing.eq_ignore_ascii_case("MONTH") => {
-                IntervalQualifier::YearToMonth
-            }
-            _ if leading.eq_ignore_ascii_case("DAY") && trailing.eq_ignore_ascii_case("SECOND") => {
-                IntervalQualifier::DayToSecond
-            }
-            _ => {
-                return Err(HematiteError::ParseError(format!(
-                    "Unsupported INTERVAL qualifier '{} TO {}'",
-                    leading, trailing
-                )))
-            }
-        };
-
-        Ok(Expression::IntervalLiteral { value, qualifier })
     }
 
     fn parse_case_expression(&mut self) -> Result<Expression> {
@@ -1301,18 +1171,6 @@ impl<'a> Parser<'a> {
     fn parse_scalar_function_name(&mut self) -> Result<String> {
         match self.peek_token()? {
             Token::Identifier(_) => self.parse_identifier(),
-            Token::Date => {
-                self.consume_token(&Token::Date)?;
-                Ok("DATE".to_string())
-            }
-            Token::Time => {
-                self.consume_token(&Token::Time)?;
-                Ok("TIME".to_string())
-            }
-            Token::DateTime => {
-                self.consume_token(&Token::DateTime)?;
-                Ok("DATETIME".to_string())
-            }
             Token::Left => {
                 self.consume_token(&Token::Left)?;
                 Ok("LEFT".to_string())
@@ -1566,61 +1424,14 @@ impl<'a> Parser<'a> {
                 }))
             }
             Token::View => {
-                if unique {
-                    return Err(HematiteError::ParseError(
-                        "CREATE UNIQUE VIEW is not supported".to_string(),
-                    ));
-                }
-                self.consume_token(&Token::View)?;
-                let if_not_exists = self.parse_if_not_exists_clause()?;
-                let view = self.parse_identifier()?;
-                self.consume_token(&Token::As)?;
-                let query = self.parse_query_statement(true, false)?.0;
-                Ok(Statement::CreateView(CreateViewStatement {
-                    view,
-                    if_not_exists,
-                    query,
-                }))
+                return Err(HematiteError::ParseError(
+                    "CREATE VIEW is not supported".to_string(),
+                ));
             }
             Token::Trigger => {
-                if unique {
-                    return Err(HematiteError::ParseError(
-                        "CREATE UNIQUE TRIGGER is not supported".to_string(),
-                    ));
-                }
-                self.consume_token(&Token::Trigger)?;
-                let trigger = self.parse_identifier()?;
-                self.consume_token(&Token::After)?;
-                let event = match self.peek_token()? {
-                    Token::Insert => {
-                        self.consume_token(&Token::Insert)?;
-                        TriggerEvent::Insert
-                    }
-                    Token::Update => {
-                        self.consume_token(&Token::Update)?;
-                        TriggerEvent::Update
-                    }
-                    Token::Delete => {
-                        self.consume_token(&Token::Delete)?;
-                        TriggerEvent::Delete
-                    }
-                    token => {
-                        return Err(HematiteError::ParseError(format!(
-                            "Expected INSERT, UPDATE, or DELETE after AFTER, found: {:?}",
-                            token
-                        )))
-                    }
-                };
-                self.consume_token(&Token::On)?;
-                let table = self.parse_identifier()?;
-                self.consume_token(&Token::As)?;
-                let body = Box::new(self.parse()?);
-                Ok(Statement::CreateTrigger(CreateTriggerStatement {
-                    trigger,
-                    table,
-                    event,
-                    body,
-                }))
+                return Err(HematiteError::ParseError(
+                    "CREATE TRIGGER is not supported".to_string(),
+                ));
             }
             Token::Index | Token::Key => {
                 if matches!(self.peek_token(), Ok(&Token::Index)) {
@@ -1677,21 +1488,14 @@ impl<'a> Parser<'a> {
                 Ok(Statement::Drop(DropStatement { table, if_exists }))
             }
             Token::View => {
-                self.consume_token(&Token::View)?;
-                let if_exists = self.parse_if_exists_clause()?;
-                let view = self.parse_identifier()?;
-                self.consume_token(&Token::Semicolon)?;
-                Ok(Statement::DropView(DropViewStatement { view, if_exists }))
+                return Err(HematiteError::ParseError(
+                    "DROP VIEW is not supported".to_string(),
+                ));
             }
             Token::Trigger => {
-                self.consume_token(&Token::Trigger)?;
-                let if_exists = self.parse_if_exists_clause()?;
-                let trigger = self.parse_identifier()?;
-                self.consume_token(&Token::Semicolon)?;
-                Ok(Statement::DropTrigger(DropTriggerStatement {
-                    trigger,
-                    if_exists,
-                }))
+                return Err(HematiteError::ParseError(
+                    "DROP TRIGGER is not supported".to_string(),
+                ));
             }
             Token::Index => {
                 self.consume_token(&Token::Index)?;
@@ -2330,12 +2134,10 @@ impl<'a> Parser<'a> {
                 return self.parse_integer_type(token.clone(), SqlTypeName::Int)
             }
             Token::Int64 => return self.parse_integer_type(Token::Int64, SqlTypeName::Int64),
-            Token::Int128 => return self.parse_integer_type(Token::Int128, SqlTypeName::Int128),
             Token::UInt8 => SqlTypeName::UInt8,
             Token::UInt16 => SqlTypeName::UInt16,
             Token::UInt32 | Token::UInt => SqlTypeName::UInt,
             Token::UInt64 => SqlTypeName::UInt64,
-            Token::UInt128 => SqlTypeName::UInt128,
             Token::Text => SqlTypeName::Text,
             Token::Boolean | Token::Bool => SqlTypeName::Boolean,
             Token::Float32 => SqlTypeName::Float32,
@@ -2346,70 +2148,9 @@ impl<'a> Parser<'a> {
                 return Ok(SqlTypeName::Decimal { precision, scale });
             }
             Token::Blob => SqlTypeName::Blob,
-            Token::Date => SqlTypeName::Date,
-            Token::Interval => {
+            Token::Varchar => {
                 self.consume_token(&token)?;
-                let start = match self.peek_token()? {
-                    Token::Identifier(name) => {
-                        let name_clone = name.clone();
-                        self.advance();
-                        name_clone
-                    }
-                    other => {
-                        return Err(HematiteError::ParseError(format!(
-                            "Expected INTERVAL qualifier after INTERVAL, found: {:?}",
-                            other
-                        )))
-                    }
-                };
-                self.consume_token(&Token::To)?;
-                let end = match self.peek_token()? {
-                    Token::Identifier(name) => {
-                        let name_clone = name.clone();
-                        self.advance();
-                        name_clone
-                    }
-                    other => {
-                        return Err(HematiteError::ParseError(format!(
-                            "Expected INTERVAL qualifier after TO, found: {:?}",
-                            other
-                        )))
-                    }
-                };
-                return match (start.as_ref(), end.as_ref()) {
-                    ("YEAR", "MONTH") => Ok(SqlTypeName::IntervalYearMonth),
-                    ("DAY", "SECOND") => Ok(SqlTypeName::IntervalDaySecond),
-                    _ => Err(HematiteError::ParseError(format!(
-                        "Unsupported INTERVAL data type qualifier '{} TO {}'",
-                        start, end
-                    ))),
-                };
-            }
-            Token::Time => {
-                self.consume_token(&token)?;
-                if matches!(self.peek_token(), Ok(&Token::With)) {
-                    self.consume_token(&Token::With)?;
-                    self.consume_token(&Token::Time)?;
-                    self.consume_token(&Token::Zone)?;
-                    return Ok(SqlTypeName::TimeWithTimeZone);
-                }
-                return Ok(SqlTypeName::Time);
-            }
-            Token::DateTime => SqlTypeName::DateTime,
-            Token::Varchar | Token::Char | Token::BinaryType | Token::VarBinary => {
-                self.consume_token(&token)?;
-                let length = self.parse_type_length()?;
-                return Ok(match &token {
-                    Token::Varchar => SqlTypeName::VarChar(length),
-                    Token::Char => SqlTypeName::Char(length),
-                    Token::BinaryType => SqlTypeName::Binary(length),
-                    Token::VarBinary => SqlTypeName::VarBinary(length),
-                    _ => unreachable!(),
-                });
-            }
-            Token::Enum => {
-                self.consume_token(&token)?;
-                return Ok(SqlTypeName::Enum(self.parse_enum_variants()?));
+                return Ok(SqlTypeName::VarChar(self.parse_type_length()?));
             }
             Token::Identifier(name) => {
                 if let Some(keyword) = uppercase_keyword_match(name, &DATA_TYPE_KEYWORDS) {
@@ -2442,50 +2183,6 @@ impl<'a> Parser<'a> {
     ) -> Result<SqlTypeName> {
         self.consume_token(&token)?;
         Ok(signed_type)
-    }
-
-    fn parse_enum_variants(&mut self) -> Result<Vec<String>> {
-        self.consume_token(&Token::LeftParen)?;
-        let mut variants = Vec::new();
-        loop {
-            match self.peek_token()? {
-                Token::StringLiteral(value) => {
-                    let value = value.clone().into_owned();
-                    self.advance();
-                    variants.push(value);
-                }
-                token => {
-                    return Err(HematiteError::ParseError(format!(
-                        "Expected ENUM string literal, found: {:?}",
-                        token
-                    )))
-                }
-            }
-
-            match self.peek_token()? {
-                Token::Comma => {
-                    self.consume_token(&Token::Comma)?;
-                }
-                Token::RightParen => {
-                    self.consume_token(&Token::RightParen)?;
-                    break;
-                }
-                token => {
-                    return Err(HematiteError::ParseError(format!(
-                        "Expected ',' or ')' in ENUM type, found: {:?}",
-                        token
-                    )))
-                }
-            }
-        }
-
-        if variants.is_empty() {
-            return Err(HematiteError::ParseError(
-                "ENUM type requires at least one variant".to_string(),
-            ));
-        }
-
-        Ok(variants)
     }
 
     fn parse_type_length(&mut self) -> Result<u32> {
@@ -2707,9 +2404,16 @@ fn parse_number_literal(value: &str) -> Result<LiteralValue> {
             .map_err(|_| HematiteError::ParseError(format!("Invalid float literal '{}'", value)))?;
         Ok(LiteralValue::Float(normalize_float_literal(value)))
     } else {
-        Ok(LiteralValue::Integer(value.parse::<i128>().map_err(
-            |_| HematiteError::ParseError(format!("Invalid integer literal '{}'", value)),
-        )?))
+        let parsed = value.parse::<i128>().map_err(|_| {
+            HematiteError::ParseError(format!("Invalid integer literal '{}'", value))
+        })?;
+        if parsed.unsigned_abs() > u64::MAX as u128 {
+            return Err(HematiteError::ParseError(format!(
+                "Integer literal '{}' is out of 64-bit range",
+                value
+            )));
+        }
+        Ok(LiteralValue::Integer(parsed))
     }
 }
 
@@ -2767,7 +2471,6 @@ const ALL_UPPERCASE_KEYWORDS: &[&str] = &[
     "EXCEPT",
     "ALL",
     "WITH",
-    "RECURSIVE",
     "LEFT",
     "RIGHT",
     "FULL",
@@ -2787,9 +2490,6 @@ const ALL_UPPERCASE_KEYWORDS: &[&str] = &[
     "BY",
     "ASC",
     "DESC",
-    "OVER",
-    "PARTITION",
-    "INTERVAL",
     "LIMIT",
     "OFFSET",
     "COUNT",
@@ -2802,13 +2502,11 @@ const ALL_UPPERCASE_KEYWORDS: &[&str] = &[
     "INT",
     "INT32",
     "INT64",
-    "INT128",
     "UINT8",
     "UINT16",
     "UINT",
     "UINT32",
     "UINT64",
-    "UINT128",
     "TEXT",
     "BOOLEAN",
     "FLOAT",
@@ -2817,15 +2515,7 @@ const ALL_UPPERCASE_KEYWORDS: &[&str] = &[
     "BOOL",
     "DECIMAL",
     "BLOB",
-    "DATE",
-    "TIME",
-    "DATETIME",
-    "ZONE",
-    "CHAR",
     "VARCHAR",
-    "BINARY",
-    "VARBINARY",
-    "ENUM",
     "AUTO_INCREMENT",
     "UNIQUE",
     "PRIMARY",
@@ -2864,34 +2554,8 @@ const ALL_UPPERCASE_KEYWORDS: &[&str] = &[
 ];
 
 const DATA_TYPE_KEYWORDS: &[&str] = &[
-    "INT8",
-    "INT16",
-    "INT",
-    "INT32",
-    "INT64",
-    "INT128",
-    "UINT8",
-    "UINT16",
-    "UINT",
-    "UINT32",
-    "UINT64",
-    "UINT128",
-    "TEXT",
-    "BOOLEAN",
-    "BOOL",
-    "FLOAT",
-    "FLOAT32",
-    "FLOAT64",
-    "DECIMAL",
-    "BLOB",
-    "DATE",
-    "TIME",
-    "DATETIME",
-    "CHAR",
-    "VARCHAR",
-    "BINARY",
-    "VARBINARY",
-    "ENUM",
+    "INT8", "INT16", "INT", "INT32", "INT64", "UINT8", "UINT16", "UINT", "UINT32", "UINT64",
+    "TEXT", "BOOLEAN", "BOOL", "FLOAT", "FLOAT32", "FLOAT64", "DECIMAL", "BLOB", "VARCHAR",
 ];
 
 fn uppercase_keyword_match<'a>(name: &str, keywords: &'a [&'a str]) -> Option<&'a str> {
@@ -2906,18 +2570,6 @@ fn capitalization_hint_for_token(token: &Token<'_>) -> Option<String> {
         Token::Identifier(name) => uppercase_keyword_match(name, ALL_UPPERCASE_KEYWORDS)
             .map(|keyword| format!("Keyword '{}' must be capitalized as '{}'", name, keyword)),
         _ => None,
-    }
-}
-
-fn parse_window_function_name(name: &str) -> Option<WindowFunction> {
-    if name.eq_ignore_ascii_case("ROW_NUMBER") {
-        Some(WindowFunction::RowNumber)
-    } else if name.eq_ignore_ascii_case("RANK") {
-        Some(WindowFunction::Rank)
-    } else if name.eq_ignore_ascii_case("DENSE_RANK") {
-        Some(WindowFunction::DenseRank)
-    } else {
-        None
     }
 }
 
@@ -2957,7 +2609,6 @@ fn token_keyword_name(token: &Token<'_>) -> Option<&'static str> {
         Token::Except => Some("EXCEPT"),
         Token::All => Some("ALL"),
         Token::With => Some("WITH"),
-        Token::Recursive => Some("RECURSIVE"),
         Token::Left => Some("LEFT"),
         Token::Right => Some("RIGHT"),
         Token::Full => Some("FULL"),
@@ -2977,9 +2628,6 @@ fn token_keyword_name(token: &Token<'_>) -> Option<&'static str> {
         Token::By => Some("BY"),
         Token::Asc => Some("ASC"),
         Token::Desc => Some("DESC"),
-        Token::Over => Some("OVER"),
-        Token::Partition => Some("PARTITION"),
-        Token::Interval => Some("INTERVAL"),
         Token::Limit => Some("LIMIT"),
         Token::Offset => Some("OFFSET"),
         Token::Count => Some("COUNT"),
@@ -2996,26 +2644,16 @@ fn token_keyword_name(token: &Token<'_>) -> Option<&'static str> {
         Token::Int8 => Some("INT8"),
         Token::Int16 => Some("INT16"),
         Token::Int64 => Some("INT64"),
-        Token::Int128 => Some("INT128"),
         Token::Int => Some("INT"),
         Token::UInt8 => Some("UINT8"),
         Token::UInt16 => Some("UINT16"),
         Token::UInt64 => Some("UINT64"),
-        Token::UInt128 => Some("UINT128"),
         Token::UInt32 => Some("UINT32"),
         Token::UInt => Some("UINT"),
         Token::Bool => Some("BOOL"),
         Token::Decimal => Some("DECIMAL"),
         Token::Blob => Some("BLOB"),
-        Token::Date => Some("DATE"),
-        Token::Time => Some("TIME"),
-        Token::DateTime => Some("DATETIME"),
-        Token::Zone => Some("ZONE"),
-        Token::Char => Some("CHAR"),
         Token::Varchar => Some("VARCHAR"),
-        Token::BinaryType => Some("BINARY"),
-        Token::VarBinary => Some("VARBINARY"),
-        Token::Enum => Some("ENUM"),
         Token::AutoIncrement => Some("AUTO_INCREMENT"),
         Token::Unique => Some("UNIQUE"),
         Token::Primary => Some("PRIMARY"),
@@ -3046,8 +2684,4 @@ fn token_keyword_name(token: &Token<'_>) -> Option<&'static str> {
         Token::Or => Some("OR"),
         _ => None,
     }
-}
-
-fn is_window_only_function_name(name: &str) -> bool {
-    parse_window_function_name(name).is_some()
 }

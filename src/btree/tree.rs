@@ -16,9 +16,7 @@ use crate::btree::value_store::StoredValueLayout;
 use crate::btree::NodeType;
 use crate::error::{HematiteError, Result};
 use crate::storage::overflow::collect_overflow_page_ids;
-use crate::storage::{
-    PageId, Pager, DB_HEADER_PAGE_ID, INVALID_PAGE_ID, STORAGE_METADATA_PAGE_ID,
-};
+use crate::storage::{PageId, Pager, DB_HEADER_PAGE_ID, INVALID_PAGE_ID, STORAGE_METADATA_PAGE_ID};
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 

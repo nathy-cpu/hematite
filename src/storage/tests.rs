@@ -119,8 +119,7 @@ mod wal_tests {
     }
 
     #[test]
-    fn wal_offset_read_returns_latest_committed_frame_across_commits() -> crate::error::Result<()>
-    {
+    fn wal_offset_read_returns_latest_committed_frame_across_commits() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_wal_offset_read_returns_latest_frame");
         let wal_path = std::path::PathBuf::from(format!("{}.wal", test_db.path()));
         let page_id = 5;
@@ -134,9 +133,19 @@ mod wal_tests {
             header: WalHeader::default(),
             frames: vec![
                 WalFrame::committed(page_id, 6, 1, first_page),
-                WalFrame::committed(STORAGE_METADATA_PAGE_ID, 6, 1, valid_metadata_frame_bytes()?),
+                WalFrame::committed(
+                    STORAGE_METADATA_PAGE_ID,
+                    6,
+                    1,
+                    valid_metadata_frame_bytes()?,
+                ),
                 WalFrame::committed(page_id, 6, 2, second_page.clone()),
-                WalFrame::committed(STORAGE_METADATA_PAGE_ID, 6, 2, valid_metadata_frame_bytes()?),
+                WalFrame::committed(
+                    STORAGE_METADATA_PAGE_ID,
+                    6,
+                    2,
+                    valid_metadata_frame_bytes()?,
+                ),
             ],
         };
         fs::write(&wal_path, wal.encode()?)?;
@@ -151,13 +160,15 @@ mod wal_tests {
         .expect("visible state should be loaded from the WAL file");
 
         let offset = state.page_override_offsets[&page_id];
-        assert_ne!(offset, 0, "a real frame offset should be recorded, not the sentinel");
+        assert_ne!(
+            offset, 0,
+            "a real frame offset should be recorded, not the sentinel"
+        );
 
         // The recorded offset must point at the *second* (later) commit's
         // frame, not the first -- i.e. "latest wins" for offsets, matching
         // the existing "latest wins" semantics for cached page data.
-        let frame_size =
-            crate::storage::wal::V3_WAL_FRAME_PREFIX_SIZE as u64 + PAGE_SIZE as u64;
+        let frame_size = crate::storage::wal::V3_WAL_FRAME_PREFIX_SIZE as u64 + PAGE_SIZE as u64;
         let first_frame_offset = crate::storage::wal::V3_WAL_HEADER_SIZE as u64;
         let second_frame_offset = first_frame_offset + frame_size;
         assert!(
@@ -167,7 +178,10 @@ mod wal_tests {
             second_frame_offset
         );
 
-        assert_eq!(state.read_page_data_readonly(page_id)?, Some(second_page.clone()));
+        assert_eq!(
+            state.read_page_data_readonly(page_id)?,
+            Some(second_page.clone())
+        );
         assert_eq!(state.read_page_data(page_id)?, Some(second_page));
         Ok(())
     }
@@ -186,21 +200,32 @@ mod wal_tests {
             header: WalHeader::default(),
             frames: vec![
                 WalFrame::committed(page_id, 8, 1, page_bytes.clone()),
-                WalFrame::committed(STORAGE_METADATA_PAGE_ID, 8, 1, valid_metadata_frame_bytes()?),
+                WalFrame::committed(
+                    STORAGE_METADATA_PAGE_ID,
+                    8,
+                    1,
+                    valid_metadata_frame_bytes()?,
+                ),
             ],
         };
         fs::write(&wal_path, wal.encode()?)?;
 
         // Sentinel offset (0) should still work via the legacy full-file scan.
-        let mut sentinel_state =
-            VisibleWalState::from_database_state(file_len_for_next_page_id(8), Vec::new(), HashMap::new());
+        let mut sentinel_state = VisibleWalState::from_database_state(
+            file_len_for_next_page_id(8),
+            Vec::new(),
+            HashMap::new(),
+        );
         sentinel_state.wal_path = Some(wal_path.clone());
         sentinel_state.page_override_offsets.insert(page_id, 0);
         assert_eq!(sentinel_state.read_page_data(page_id)?, Some(page_bytes));
 
         // An out-of-bounds offset should be treated as a miss, not a panic/error.
-        let mut oob_state =
-            VisibleWalState::from_database_state(file_len_for_next_page_id(8), Vec::new(), HashMap::new());
+        let mut oob_state = VisibleWalState::from_database_state(
+            file_len_for_next_page_id(8),
+            Vec::new(),
+            HashMap::new(),
+        );
         oob_state.wal_path = Some(wal_path.clone());
         oob_state.page_override_offsets.insert(page_id, 10_000_000);
         assert_eq!(oob_state.read_page_data(page_id)?, None);
@@ -208,11 +233,13 @@ mod wal_tests {
         // An in-bounds offset that doesn't actually point at `page_id`'s frame
         // (here, the metadata frame's offset) must be reported as corruption,
         // not silently returned as if it were the requested page's data.
-        let frame_size =
-            crate::storage::wal::V3_WAL_FRAME_PREFIX_SIZE as u64 + PAGE_SIZE as u64;
+        let frame_size = crate::storage::wal::V3_WAL_FRAME_PREFIX_SIZE as u64 + PAGE_SIZE as u64;
         let metadata_frame_offset = crate::storage::wal::V3_WAL_HEADER_SIZE as u64 + frame_size;
-        let mut mismatched_state =
-            VisibleWalState::from_database_state(file_len_for_next_page_id(8), Vec::new(), HashMap::new());
+        let mut mismatched_state = VisibleWalState::from_database_state(
+            file_len_for_next_page_id(8),
+            Vec::new(),
+            HashMap::new(),
+        );
         mismatched_state.wal_path = Some(wal_path);
         mismatched_state
             .page_override_offsets

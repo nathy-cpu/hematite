@@ -16,10 +16,10 @@ To keep lexing and parsing simple and unambiguous, Hematite enforces uppercase c
 
 ### Unified Exact Numeric System
 
-Hematite handles all exact numeric calculations (`INT8` through `INT128`, unsigned counterparts, and `DECIMAL`) using an intermediate high-precision decimal representation:
+Hematite handles all exact numeric calculations (`INT8` through `INT64`, unsigned counterparts, and `DECIMAL`) using an intermediate high-precision decimal representation:
 
-1. **Promotion to Decimal**: Any arithmetic operation involving exact numerics (e.g. adding a `UINT8` to an `INT128`) automatically promotes both operands to `DecimalValue` before performing the calculation, preventing overflow or underflow.
-2. **Automatic Down-scaling**: After the calculation, the engine evaluates the resulting value and down-scales it back to the smallest integer type capable of safely representing the value (e.g., trying to fit into `i32`, then `i64`, then `i128`).
+1. **Promotion to Decimal**: Any arithmetic operation involving exact numerics (e.g. adding a `UINT8` to an `INT64`) automatically promotes both operands to `DecimalValue` before performing the calculation, preventing overflow or underflow.
+2. **Automatic Down-scaling**: After the calculation, the engine evaluates the resulting value and down-scales it back to the smallest integer type capable of safely representing the value (e.g., trying to fit into `i32`, then `i64`).
 3. **Rounding**: Divisions on exact decimal types employ nearest-neighbor rounding (round-half-up).
 
 ---
@@ -28,8 +28,8 @@ Hematite handles all exact numeric calculations (`INT8` through `INT128`, unsign
 
 ### Integer Types
 
-* Signed: `INT8` (1 byte), `INT16` (2 bytes), `INT`/`INT32` (4 bytes), `INT64` (8 bytes), `INT128` (16 bytes).
-* Unsigned: `UINT8` (1 byte), `UINT16` (2 bytes), `UINT`/`UINT32` (4 bytes), `UINT64` (8 bytes), `UINT128` (16 bytes).
+* Signed: `INT8` (1 byte), `INT16` (2 bytes), `INT`/`INT32` (4 bytes), `INT64` (8 bytes).
+* Unsigned: `UINT8` (1 byte), `UINT16` (2 bytes), `UINT`/`UINT32` (4 bytes), `UINT64` (8 bytes).
 
 ### Floating-Point Types
 
@@ -40,25 +40,27 @@ Hematite handles all exact numeric calculations (`INT8` through `INT128`, unsign
 
 * `DECIMAL` / `DECIMAL(precision, scale)`: Fixed-point exact decimals.
 * `TEXT`: Variable-length UTF-8 encoded string.
-* `CHAR(n)`: Fixed-length blank-padded character string of length `n`.
 * `VARCHAR(n)`: Variable-length character string with maximum length `n`.
-* `ENUM('val1', 'val2', ...)`: Internally persisted string enumeration.
 * `BOOLEAN`/`BOOL`: Boolean states (`TRUE` or `FALSE`).
+
+`TEXT` and `VARCHAR(n)` accept the optional `CHARACTER SET` and `COLLATE` column
+modifiers.
 
 ### Binary Types
 
-* `BINARY(n)`: Fixed-length zero-padded binary array of length `n`.
-* `VARBINARY(n)`: Variable-length binary array with maximum length `n`.
-* `BLOB`: Large binary object.
+* `BLOB`: Binary object. Binary literals are written in hexadecimal form as `X'414243'`.
 
-### Temporal and Interval Types
+### Unsupported Types
 
-* `DATE`: Calendar date (YYYY-MM-DD).
-* `TIME`: Time of day (HH:MM:SS.FFF).
-* `DATETIME`: Combined timestamp.
-* `TIME WITH TIME ZONE`: Time with UTC offset.
-* `INTERVAL YEAR TO MONTH`: Period in years and months.
-* `INTERVAL DAY TO SECOND`: Period in days, hours, minutes, and seconds.
+Hematite has no temporal, fixed-length, or enumerated types. `DATE`, `TIME`,
+`DATETIME`, `TIME WITH TIME ZONE`, `INTERVAL`, `CHAR(n)`, `ENUM(...)`,
+`BINARY(n)`, and `VARBINARY(n)` are all rejected at parse time. None of these
+words are reserved, so they remain available as ordinary identifiers — a column
+may be named `date` or `binary`.
+
+Model dates and times as `TEXT` (for example ISO-8601 strings) or as integer
+epoch offsets, fixed-length strings as `VARCHAR(n)`, enumerations as `TEXT`
+guarded by a `CHECK` constraint, and binary data as `BLOB`.
 
 ---
 
@@ -101,14 +103,6 @@ Hematite handles all exact numeric calculations (`INT8` through `INT128`, unsign
 * **`CEIL(val)` / `FLOOR(val)`**: Rounds up or down to the nearest integer.
 * **`POWER(base, exponent)`**: Raises `base` to the power of `exponent`.
 
-### Temporal Functions
-
-* **`DATE(datetime)` / `TIME(datetime)`**: Extracts the date or time component from a `DATETIME` value.
-* **`YEAR(val)` / `MONTH(val)` / `DAY(val)`**: Extracts the calendar component from a `DATE` or `DATETIME`.
-* **`HOUR(val)` / `MINUTE(val)` / `SECOND(val)`**: Extracts the time component.
-* **`TIME_TO_SEC(time)` / `SEC_TO_TIME(seconds)`**: Converts a time value to/from seconds since midnight.
-* **`UNIX_TIMESTAMP([datetime])`**: Returns the epoch seconds value.
-
 ### Aggregate Functions
 
 * **`COUNT(*)` / `COUNT(column)`**
@@ -117,17 +111,15 @@ Hematite handles all exact numeric calculations (`INT8` through `INT128`, unsign
 * **`MIN(column)`**
 * **`MAX(column)`**
 
-### Window Functions
-
-* **`ROW_NUMBER() OVER (...)`**: Assigns sequential integers starting at 1.
-* **`RANK() OVER (...)`**: Assigns rank integers, leaving gaps in case of ties.
-* **`DENSE_RANK() OVER (...)`**: Assigns dense rank integers, leaving no gaps.
-* **`SUM/AVG/COUNT/MIN/MAX(...) OVER (...)`**: Computes the aggregate over the partition window.
+There are no temporal functions, and no clock access anywhere in the engine —
+`NOW()`, `CURRENT_DATE`, `CURRENT_TIMESTAMP`, and `EXTRACT` do not exist.
 
 ---
 
 ## 4. Syntactic Constraints and Limitations
 
-* **Single-Statement Triggers**: Trigger bodies are limited to a single SQL mutation statement; trigger logic cascades must be modeled without procedural blocks.
-* **Read-Only Views**: Views can be created and queried, but they are read-only and cannot accept write modifications directly.
+* **No Views or Triggers**: Neither can be created; `CREATE VIEW` and `CREATE TRIGGER` are rejected.
+* **No Window Functions**: There is no `OVER (...)` clause, so `ROW_NUMBER`, `RANK`, and windowed aggregates are unavailable.
+* **No Recursive CTEs**: `WITH` is supported, but `WITH RECURSIVE` is not.
+* **No Temporal or Fixed-Length Types**: See "Unsupported Types" in section 2.
 * **No Stored Procedures / User-Defined Functions**: Procedural languages and custom extensions are not supported. All logic must be coordinated via client queries.

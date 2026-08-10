@@ -164,11 +164,9 @@ impl FileManager {
         if let Some(free_page_id) = self.free_list.pop_free_page() {
             Ok(free_page_id)
         } else {
-            // Allocate new page
             let page_id = self.next_page_id;
             self.next_page_id += 1;
 
-            // Initialize new page with zeros
             let page = Page::new(page_id);
             self.write_page(&page)?;
 

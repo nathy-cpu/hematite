@@ -24,8 +24,8 @@
 //! 2. **Filter & Projection**: Evaluates boolean predicates and filters rows; projects and computes target output columns.
 //! 3. **Hash Join**: Evaluates equijoins. It reads all rows from the build-side relation, constructs an in-memory
 //!    hash table based on the join keys, then streams the probe-side relation to locate join matches.
-//! 4. **Window and Aggregate Functions**: Computes aggregates (e.g. `SUM`, `AVG`) over partitions or grouping sets,
-//!    holding running state accumulator values.
+//! 4. **Aggregate Functions**: Computes aggregates (e.g. `SUM`, `AVG`) over grouping sets, holding running
+//!    state accumulator values.
 //!
 //! ### Storage Layer Agnosticism
 //! The Executor operates exclusively on logical relational types (`Value`, `Row`) and interacts with storage
@@ -88,29 +88,26 @@
 //! ## 4. Execution Invariants
 //!
 //! 1. **Iterator State Isolation**: Operators must track all execution state (such as cursor locations, active
-//!    hash-table maps, and window accumulators) within their own instantiated executor structures. Shared execution
-//!    state must not leak between concurrent connection queries.
+//!    hash-table maps, and aggregate accumulators) within their own instantiated executor structures. Shared
+//!    execution state must not leak between concurrent connection queries.
 //! 2. **Autocommit Boundary Verification**: Insert, update, and delete mutations must perform type-checking
 //!    and constraint validations (e.g. check constraints, foreign keys) before updating the B-Tree cursor.
 //! 3. **Resource Lifecycle Integrity**: Cursors opened during scans must be closed/dropped promptly when the
 //!    pipeline completes or encounters an error, releasing pinned page frames in the Pager cache.
 //!
 
-use crate::catalog::column::{collation_is_nocase, pad_text_to_char_length};
+use crate::catalog::column::collation_is_nocase;
 use crate::catalog::table::{
     CheckConstraint, ForeignKeyAction as CatalogForeignKeyAction, ForeignKeyConstraint,
 };
 use crate::catalog::StoredRow;
-use crate::catalog::{
-    Column, DataType, DateTimeValue, DateValue, DecimalValue, IntervalDaySecondValue,
-    IntervalYearMonthValue, Table, TimeValue, TimeWithTimeZoneValue, Value,
-};
+use crate::catalog::{Column, DataType, DecimalValue, Table, Value};
 use crate::error::{HematiteError, Result};
 use crate::parser::ast::*;
 use crate::query::lowering::{lower_literal_value, lower_type_name, raise_literal_value};
 use crate::query::plan::{ExecutionProgram, QueryPlan, SelectAccessPath};
 use crate::query::predicate::extract_literal_equalities;
-pub use crate::query::runtime::{ExecutionContext, MutationEvent, QueryExecutor, QueryResult};
+pub use crate::query::runtime::{ExecutionContext, QueryExecutor, QueryResult};
 use crate::query::validation::{
     projected_column_names, validate_column_reference, validate_statement,
 };
@@ -204,8 +201,6 @@ impl ResolvedSource {
 
 #[derive(Debug, Clone, Copy)]
 struct TextComparisonContext {
-    trim_trailing_spaces: bool,
-    trim_trailing_zero_bytes: bool,
     case_insensitive: bool,
 }
 
@@ -435,9 +430,7 @@ impl SelectExecutor {
         };
         Ok(self
             .source_column_metadata(sources, flat_index)
-            .map(|(data_type, collation)| TextComparisonContext {
-                trim_trailing_spaces: matches!(data_type, DataType::Char(_)),
-                trim_trailing_zero_bytes: matches!(data_type, DataType::Binary(_)),
+            .map(|(_, collation)| TextComparisonContext {
                 case_insensitive: collation_is_nocase(collation.as_deref()),
             }))
     }
@@ -452,9 +445,6 @@ impl SelectExecutor {
         let right_context = self.text_comparison_context_for_expression(sources, right)?;
         Ok(match (left_context, right_context) {
             (Some(left), Some(right)) => Some(TextComparisonContext {
-                trim_trailing_spaces: left.trim_trailing_spaces || right.trim_trailing_spaces,
-                trim_trailing_zero_bytes: left.trim_trailing_zero_bytes
-                    || right.trim_trailing_zero_bytes,
                 case_insensitive: left.case_insensitive || right.case_insensitive,
             }),
             (Some(context), None) | (None, Some(context)) => Some(context),
@@ -654,11 +644,6 @@ impl SelectExecutor {
                 SelectItem::Expression(expr) => {
                     self.bind_expression_outer_references(ctx, &local_from, expr, scopes)?
                 }
-                SelectItem::Window { window, .. } => {
-                    for expr in &mut window.partition_by {
-                        self.bind_expression_outer_references(ctx, &local_from, expr, scopes)?;
-                    }
-                }
                 SelectItem::Wildcard
                 | SelectItem::Column(_)
                 | SelectItem::CountAll
@@ -852,7 +837,6 @@ impl SelectExecutor {
             }
             Expression::AggregateCall { .. }
             | Expression::Literal(_)
-            | Expression::IntervalLiteral { .. }
             | Expression::Parameter(_) => {}
         }
 
@@ -947,7 +931,6 @@ impl SelectExecutor {
                 }
                 SelectItem::CountAll => {}
                 SelectItem::Aggregate { .. } => {}
-                SelectItem::Window { .. } => {}
             }
         }
 
@@ -1223,137 +1206,10 @@ impl SelectExecutor {
             return Ok(Arc::clone(result));
         }
 
-        let result = if cte.recursive {
-            self.execute_recursive_cte(ctx, cte)?
-        } else {
-            self.execute_subquery(ctx, &cte.query, None, None)?
-        };
+        let result = self.execute_subquery(ctx, &cte.query, None, None)?;
         let result = Arc::new(result);
         Arc::make_mut(&mut self.materialized_ctes).insert(key, Arc::clone(&result));
         Ok(result)
-    }
-
-    fn execute_recursive_cte(
-        &mut self,
-        ctx: &mut ExecutionContext<'_>,
-        cte: &CommonTableExpression,
-    ) -> Result<QueryResult> {
-        const MAX_RECURSIVE_CTE_ITERATIONS: usize = 1024;
-
-        let mut anchor = (*cte.query).clone();
-        let set_operation = anchor.set_operation.take().ok_or_else(|| {
-            HematiteError::ParseError(format!(
-                "Recursive CTE '{}' requires UNION or UNION ALL",
-                cte.name
-            ))
-        })?;
-
-        let operator = set_operation.operator;
-        let mut recursive_term = *set_operation.right;
-        recursive_term.with_clause.push(CommonTableExpression {
-            name: cte.name.clone(),
-            recursive: false,
-            query: Box::new(anchor.clone()),
-        });
-        let anchor_result = self.execute_subquery(ctx, &anchor, None, None)?;
-        let columns = anchor_result.columns.clone();
-        let mut rows = match operator {
-            SetOperator::Union => deduplicate_rows(anchor_result.rows),
-            SetOperator::UnionAll => anchor_result.rows,
-            _ => {
-                return Err(HematiteError::ParseError(format!(
-                    "Recursive CTE '{}' requires UNION or UNION ALL",
-                    cte.name
-                )))
-            }
-        };
-        let mut seen_union_rows = if matches!(operator, SetOperator::Union) {
-            Some(build_row_lookup(rows.clone()))
-        } else {
-            None
-        };
-        let mut delta = rows.clone();
-
-        let key = Self::cte_key(&cte.name);
-        let mut converged = false;
-        for _ in 0..MAX_RECURSIVE_CTE_ITERATIONS {
-            Arc::make_mut(&mut self.materialized_ctes).insert(
-                key.clone(),
-                Arc::new(QueryResult {
-                    affected_rows: delta.len(),
-                    columns: columns.clone(),
-                    rows: delta.clone(),
-                }),
-            );
-
-            let mut recursive_executor =
-                SelectExecutor::new(recursive_term.clone(), SelectAccessPath::JoinScan);
-            recursive_executor.outer_scopes = self.outer_scopes.clone();
-            recursive_executor.materialized_ctes = self.materialized_ctes.clone();
-            recursive_executor.table_row_counts = self.table_row_counts.clone();
-            let next_rows = recursive_executor.execute_body(ctx)?.rows;
-            if next_rows.is_empty() {
-                converged = true;
-                break;
-            }
-
-            delta = match operator {
-                SetOperator::Union => {
-                    let seen_rows = seen_union_rows.as_mut().expect("initialized above");
-                    let mut unique_rows = Vec::new();
-                    let mut round_rows = HashMap::new();
-                    for row in next_rows {
-                        if row_lookup_contains(seen_rows, &row)
-                            || row_lookup_contains(&round_rows, &row)
-                        {
-                            continue;
-                        }
-                        round_rows
-                            .entry(hash_row(&row))
-                            .or_insert_with(Vec::new)
-                            .push(row.clone());
-                        unique_rows.push(row);
-                    }
-                    for row in &unique_rows {
-                        seen_rows
-                            .entry(hash_row(row))
-                            .or_insert_with(Vec::new)
-                            .push(row.clone());
-                    }
-                    unique_rows
-                }
-                SetOperator::UnionAll => next_rows,
-                _ => Vec::new(),
-            };
-
-            if delta.is_empty() {
-                converged = true;
-                break;
-            }
-            rows.extend(delta.clone());
-        }
-
-        Arc::make_mut(&mut self.materialized_ctes).insert(
-            key,
-            Arc::new(QueryResult {
-                affected_rows: rows.len(),
-                columns: columns.clone(),
-                rows: rows.clone(),
-            }),
-        );
-
-        if !converged {
-            return Err(HematiteError::ParseError(format!(
-                "Recursive CTE '{}' exceeded the maximum recursion depth of {}",
-                cte.name, MAX_RECURSIVE_CTE_ITERATIONS
-            )));
-        }
-
-        Ok(QueryResult {
-            affected_rows: rows.len(),
-            columns,
-            rows,
-        })
     }
 
     fn materialize_reference(
@@ -1589,14 +1445,6 @@ impl SelectExecutor {
             return self.execute_grouped(ctx, &mut subquery_cache, &sources, filtered_rows);
         }
 
-        if self.has_window_projection() {
-            let mut projected_rows =
-                self.project_rows_with_windows(ctx, &mut subquery_cache, &sources, &filtered_rows)?;
-            apply_distinct_if_needed(self.statement.distinct, &mut projected_rows);
-            self.apply_select_window(&mut projected_rows);
-            return Ok(self.build_query_result(self.get_column_names(&sources), projected_rows));
-        }
-
         let mut projected_rows = Vec::new();
         for row in filtered_rows {
             projected_rows.push(self.project_row(ctx, &mut subquery_cache, &sources, &row)?);
@@ -1660,209 +1508,6 @@ impl SelectExecutor {
             .columns
             .iter()
             .any(|item| matches!(item, SelectItem::CountAll | SelectItem::Aggregate { .. }))
-    }
-
-    fn has_window_projection(&self) -> bool {
-        self.statement
-            .columns
-            .iter()
-            .any(|item| matches!(item, SelectItem::Window { .. }))
-    }
-
-    fn project_rows_with_windows(
-        &self,
-        ctx: &mut ExecutionContext<'_>,
-        cache: &mut SubqueryCache,
-        sources: &[ResolvedSource],
-        filtered_rows: &[Vec<Value>],
-    ) -> Result<Vec<Vec<Value>>> {
-        let mut projected_rows = Vec::with_capacity(filtered_rows.len());
-
-        for (row_index, row) in filtered_rows.iter().enumerate() {
-            let mut projected = Vec::with_capacity(self.statement.columns.len());
-
-            for item in &self.statement.columns {
-                match item {
-                    SelectItem::Wildcard => projected.extend(row.iter().cloned()),
-                    SelectItem::Column(name) => {
-                        if let Some(index) = self.resolve_column_index(sources, name)? {
-                            if index < row.len() {
-                                projected.push(row[index].clone());
-                            }
-                        }
-                    }
-                    SelectItem::Expression(expr) => {
-                        projected.push(self.evaluate_expression(ctx, cache, sources, expr, row)?);
-                    }
-                    SelectItem::Window { function, window } => {
-                        projected.push(self.evaluate_window_item(
-                            ctx,
-                            cache,
-                            sources,
-                            filtered_rows,
-                            row_index,
-                            function,
-                            window,
-                        )?)
-                    }
-                    SelectItem::CountAll | SelectItem::Aggregate { .. } => {}
-                }
-            }
-
-            projected_rows.push(projected);
-        }
-
-        Ok(projected_rows)
-    }
-
-    fn evaluate_window_item(
-        &self,
-        ctx: &mut ExecutionContext<'_>,
-        cache: &mut SubqueryCache,
-        sources: &[ResolvedSource],
-        filtered_rows: &[Vec<Value>],
-        row_index: usize,
-        function: &WindowFunction,
-        window: &WindowSpec,
-    ) -> Result<Value> {
-        let partition_key = window
-            .partition_by
-            .iter()
-            .map(|expr| {
-                self.evaluate_expression(ctx, cache, sources, expr, &filtered_rows[row_index])
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        let mut partition_indexes = Vec::new();
-        for (index, row) in filtered_rows.iter().enumerate() {
-            let row_key = window
-                .partition_by
-                .iter()
-                .map(|expr| self.evaluate_expression(ctx, cache, sources, expr, row))
-                .collect::<Result<Vec<_>>>()?;
-            if row_key == partition_key {
-                partition_indexes.push(index);
-            }
-        }
-
-        if !window.order_by.is_empty() {
-            partition_indexes.sort_by(|left_index, right_index| {
-                let left = &filtered_rows[*left_index];
-                let right = &filtered_rows[*right_index];
-
-                for item in &window.order_by {
-                    let Ok(Some(column_index)) = self.resolve_column_index(sources, &item.column)
-                    else {
-                        continue;
-                    };
-
-                    let ordering = self.compare_sort_values(
-                        &left[column_index],
-                        &right[column_index],
-                        self.text_comparison_context_for_expression(
-                            sources,
-                            &Expression::Column(item.column.clone()),
-                        )
-                        .ok()
-                        .flatten(),
-                    );
-                    if ordering != Ordering::Equal {
-                        return match item.direction {
-                            SortDirection::Asc => ordering,
-                            SortDirection::Desc => ordering.reverse(),
-                        };
-                    }
-                }
-
-                left_index.cmp(right_index)
-            });
-        }
-
-        let position = partition_indexes
-            .iter()
-            .position(|index| *index == row_index)
-            .ok_or_else(|| {
-                HematiteError::InternalError(
-                    "Current row not found in window partition".to_string(),
-                )
-            })?;
-
-        match function {
-            WindowFunction::RowNumber => Ok(Value::Integer((position + 1) as i32)),
-            WindowFunction::Rank => {
-                let mut rank = 1usize;
-                for current in 1..=position {
-                    if self.window_sort_key_changed(
-                        sources,
-                        window,
-                        &filtered_rows[partition_indexes[current - 1]],
-                        &filtered_rows[partition_indexes[current]],
-                    )? {
-                        rank = current + 1;
-                    }
-                }
-                Ok(Value::Integer(rank as i32))
-            }
-            WindowFunction::DenseRank => {
-                let mut rank = 1usize;
-                for current in 1..=position {
-                    if self.window_sort_key_changed(
-                        sources,
-                        window,
-                        &filtered_rows[partition_indexes[current - 1]],
-                        &filtered_rows[partition_indexes[current]],
-                    )? {
-                        rank += 1;
-                    }
-                }
-                Ok(Value::Integer(rank as i32))
-            }
-            WindowFunction::Aggregate { function, target } => {
-                let partition_rows = partition_indexes
-                    .iter()
-                    .map(|index| filtered_rows[*index].clone())
-                    .collect::<Vec<_>>();
-                Ok(self
-                    .evaluate_aggregate_value(sources, *function, target, &partition_rows)?
-                    .unwrap_or(Value::Null))
-            }
-        }
-    }
-
-    fn window_sort_key_changed(
-        &self,
-        sources: &[ResolvedSource],
-        window: &WindowSpec,
-        left: &[Value],
-        right: &[Value],
-    ) -> Result<bool> {
-        if window.order_by.is_empty() {
-            return Ok(false);
-        }
-
-        for item in &window.order_by {
-            let index = self
-                .resolve_column_index(sources, &item.column)?
-                .ok_or_else(|| {
-                    HematiteError::ParseError(format!("Column '{}' not found", item.column))
-                })?;
-
-            if self.compare_sort_values(
-                &left[index],
-                &right[index],
-                self.text_comparison_context_for_expression(
-                    sources,
-                    &Expression::Column(item.column.clone()),
-                )
-                .ok()
-                .flatten(),
-            ) != Ordering::Equal
-            {
-                return Ok(true);
-            }
-        }
-
-        Ok(false)
     }
 
     fn apply_select_window(&self, rows: &mut Vec<Vec<Value>>) {
@@ -2148,11 +1793,6 @@ impl SelectExecutor {
                         self.evaluate_aggregate_item(sources, item, group_rows)?
                             .unwrap_or(Value::Null),
                     );
-                }
-                SelectItem::Window { .. } => {
-                    return Err(HematiteError::InternalError(
-                        "Window projections are not supported in grouped execution".to_string(),
-                    ))
                 }
             }
         }
@@ -2755,15 +2395,6 @@ impl QueryExecutor for InsertExecutor {
                 inserted_row.clone(),
                 false,
             )?;
-            if let Some(new_row) = ctx.engine.lookup_row_by_primary_key(
-                &table,
-                &primary_key_values(&table, &inserted_row.values)?,
-            )? {
-                ctx.mutation_events.push(MutationEvent::Insert {
-                    table_name: self.statement.table.clone(),
-                    new_row,
-                });
-            }
         }
 
         Ok(mutation_result(input_rows.len()))
@@ -2882,7 +2513,6 @@ impl QueryExecutor for UpdateExecutor {
         let locator_statement =
             locator_select_statement(self.statement.source(), self.statement.where_clause.clone());
         let select_executor = SelectExecutor::new(locator_statement, self.access_path.clone());
-        let original_rows_snapshot = original_rows.clone();
         let mut updated_rows_data = Vec::with_capacity(original_rows.len());
         let mut updated_rows = 0usize;
         let mut subquery_cache = SubqueryCache::new();
@@ -2941,17 +2571,6 @@ impl QueryExecutor for UpdateExecutor {
 
         for row in &updated_rows_data {
             write_stored_row(ctx, &self.statement.table, &table, row.clone(), true)?;
-        }
-
-        for (old_row, new_row) in original_rows_snapshot
-            .into_iter()
-            .zip(updated_rows_data.into_iter())
-        {
-            ctx.mutation_events.push(MutationEvent::Update {
-                table_name: self.statement.table.clone(),
-                old_row,
-                new_row,
-            });
         }
 
         Ok(mutation_result(updated_rows))
@@ -3227,10 +2846,6 @@ impl QueryExecutor for DeleteExecutor {
 
         for row in &rows_to_delete {
             apply_parent_delete_foreign_key_actions(ctx, &table, &row.values)?;
-            ctx.mutation_events.push(MutationEvent::Delete {
-                table_name: self.statement.table.clone(),
-                old_row: row.clone(),
-            });
             remove_stored_row(ctx, &self.statement.table, &table, row.row_id)?;
         }
 
@@ -3956,66 +3571,23 @@ fn coerce_varchar_value(value: String, max_chars: u32, label: &str) -> Result<Va
     Ok(Value::Text(value))
 }
 
-fn coerce_char_value(value: String, length: u32, label: &str) -> Result<Value> {
-    if value.chars().count() > length as usize {
-        return Err(HematiteError::ParseError(format!(
-            "{} exceeds declared character length {}",
-            label, length
-        )));
-    }
-    Ok(Value::Text(pad_text_to_char_length(&value, length)))
-}
-
 fn cast_value_to_text_string(value: Value) -> Result<String> {
     match value {
         Value::Integer(value) => Ok(value.to_string()),
         Value::BigInt(value) => Ok(value.to_string()),
-        Value::Int128(value) => Ok(value.to_string()),
         Value::UInteger(value) => Ok(value.to_string()),
         Value::UBigInt(value) => Ok(value.to_string()),
-        Value::UInt128(value) => Ok(value.to_string()),
         Value::Float32(value) => Ok(value.to_string()),
         Value::Float(value) => Ok(value.to_string()),
-        Value::Enum(value) | Value::Text(value) => Ok(value),
+        Value::Text(value) => Ok(value),
         Value::Boolean(true) => Ok("TRUE".to_string()),
         Value::Boolean(false) => Ok("FALSE".to_string()),
         Value::Decimal(value) => Ok(value.to_string()),
-        Value::Date(value) => Ok(value.to_string()),
-        Value::Time(value) => Ok(value.to_string()),
-        Value::DateTime(value) => Ok(value.to_string()),
-        Value::TimeWithTimeZone(value) => Ok(value.to_string()),
         Value::Blob(value) => Ok(String::from_utf8_lossy(&value).into_owned()),
         Value::Null => Err(HematiteError::ParseError(
             "Cannot CAST NULL to text without preserving NULL".to_string(),
         )),
-        Value::IntervalYearMonth(value) => Ok(value.to_string()),
-        Value::IntervalDaySecond(value) => Ok(value.to_string()),
     }
-}
-
-fn coerce_binary_value(value: Value, max_len: u32, label: &str, fixed: bool) -> Result<Value> {
-    let mut bytes = match value {
-        Value::Blob(bytes) => bytes,
-        Value::Text(value) => value.into_bytes(),
-        Value::Enum(value) => value.into_bytes(),
-        value => {
-            return Err(HematiteError::ParseError(format!(
-                "Expected binary-compatible value for {}, found {:?}",
-                label, value
-            )))
-        }
-    };
-
-    if bytes.len() > max_len as usize {
-        return Err(HematiteError::ParseError(format!(
-            "{} exceeds declared byte length {}",
-            label, max_len
-        )));
-    }
-    if fixed {
-        bytes.resize(max_len as usize, 0);
-    }
-    Ok(Value::Blob(bytes))
 }
 
 fn coerce_decimal_value(value: Value) -> Result<DecimalValue> {
@@ -4023,10 +3595,8 @@ fn coerce_decimal_value(value: Value) -> Result<DecimalValue> {
         Value::Decimal(value) => Ok(value),
         Value::Integer(value) => Ok(DecimalValue::from_i32(value)),
         Value::BigInt(value) => Ok(DecimalValue::from_i64(value)),
-        Value::Int128(value) => Ok(DecimalValue::from_i128(value)),
         Value::UInteger(value) => Ok(DecimalValue::from_u32(value)),
         Value::UBigInt(value) => Ok(DecimalValue::from_u64(value)),
-        Value::UInt128(value) => Ok(DecimalValue::from_u128(value)),
         Value::Float32(value) => DecimalValue::from_f64(value as f64),
         Value::Float(value) => DecimalValue::from_f64(value),
         Value::Text(value) => DecimalValue::parse(&value),
@@ -4041,10 +3611,8 @@ fn numeric_value_as_f64(value: &Value) -> Option<f64> {
     match value {
         Value::Integer(value) => Some(*value as f64),
         Value::BigInt(value) => Some(*value as f64),
-        Value::Int128(value) => Some(*value as f64),
         Value::UInteger(value) => Some(*value as f64),
         Value::UBigInt(value) => Some(*value as f64),
-        Value::UInt128(value) => Some(*value as f64),
         Value::Float32(value) => Some(*value as f64),
         Value::Float(value) => Some(*value),
         Value::Decimal(value) => value.to_f64(),
@@ -4060,27 +3628,6 @@ fn make_float_value(data_type: &DataType, value: f64) -> Value {
     }
 }
 
-fn coerce_enum_value(value: Value, variants: &[String], label: &str) -> Result<Value> {
-    let value = match value {
-        Value::Enum(value) | Value::Text(value) => value,
-        value => {
-            return Err(HematiteError::ParseError(format!(
-                "Expected ENUM-compatible value for {}, found {:?}",
-                label, value
-            )))
-        }
-    };
-
-    if !variants.contains(&value) {
-        return Err(HematiteError::ParseError(format!(
-            "{} is not a valid ENUM variant",
-            value
-        )));
-    }
-
-    Ok(Value::Enum(value))
-}
-
 fn coerce_column_value(column: &Column, value: Value) -> Result<Value> {
     match (&column.data_type, value) {
         (DataType::Int8, Value::Integer(i)) => i8::try_from(i)
@@ -4089,155 +3636,101 @@ fn coerce_column_value(column: &Column, value: Value) -> Result<Value> {
         (DataType::Int8, Value::BigInt(i)) => i8::try_from(i)
             .map(|value| Value::Integer(value as i32))
             .map_err(|_| out_of_range_error(column, "INT8")),
-        (DataType::Int8, Value::Int128(i)) => i8::try_from(i)
-            .map(|value| Value::Integer(value as i32))
-            .map_err(|_| out_of_range_error(column, "INT8")),
+
         (DataType::Int8, Value::UInteger(i)) => i8::try_from(i)
             .map(|value| Value::Integer(value as i32))
             .map_err(|_| out_of_range_error(column, "INT8")),
         (DataType::Int8, Value::UBigInt(i)) => i8::try_from(i)
             .map(|value| Value::Integer(value as i32))
             .map_err(|_| out_of_range_error(column, "INT8")),
-        (DataType::Int8, Value::UInt128(i)) => i8::try_from(i)
-            .map(|value| Value::Integer(value as i32))
-            .map_err(|_| out_of_range_error(column, "INT8")),
+
         (DataType::Int16, Value::Integer(i)) => i16::try_from(i)
             .map(|_| Value::Integer(i))
             .map_err(|_| out_of_range_error(column, "INT16")),
         (DataType::Int16, Value::BigInt(i)) => i16::try_from(i)
             .map(|value| Value::Integer(value as i32))
             .map_err(|_| out_of_range_error(column, "INT16")),
-        (DataType::Int16, Value::Int128(i)) => i16::try_from(i)
-            .map(|value| Value::Integer(value as i32))
-            .map_err(|_| out_of_range_error(column, "INT16")),
+
         (DataType::Int16, Value::UInteger(i)) => i16::try_from(i)
             .map(|value| Value::Integer(value as i32))
             .map_err(|_| out_of_range_error(column, "INT16")),
         (DataType::Int16, Value::UBigInt(i)) => i16::try_from(i)
             .map(|value| Value::Integer(value as i32))
             .map_err(|_| out_of_range_error(column, "INT16")),
-        (DataType::Int16, Value::UInt128(i)) => i16::try_from(i)
-            .map(|value| Value::Integer(value as i32))
-            .map_err(|_| out_of_range_error(column, "INT16")),
+
         (DataType::Int, Value::Integer(i)) => Ok(Value::Integer(i)),
         (DataType::Int, Value::BigInt(i)) => i32::try_from(i)
             .map(Value::Integer)
             .map_err(|_| out_of_range_error(column, "INT")),
-        (DataType::Int, Value::Int128(i)) => i32::try_from(i)
-            .map(Value::Integer)
-            .map_err(|_| out_of_range_error(column, "INT")),
+
         (DataType::Int, Value::UInteger(i)) => i32::try_from(i)
             .map(Value::Integer)
             .map_err(|_| out_of_range_error(column, "INT")),
         (DataType::Int, Value::UBigInt(i)) => i32::try_from(i)
             .map(Value::Integer)
             .map_err(|_| out_of_range_error(column, "INT")),
-        (DataType::Int, Value::UInt128(i)) => i32::try_from(i)
-            .map(Value::Integer)
-            .map_err(|_| out_of_range_error(column, "INT")),
+
         (DataType::Int64, Value::Integer(i)) => Ok(Value::BigInt(i as i64)),
         (DataType::Int64, Value::BigInt(i)) => Ok(Value::BigInt(i)),
-        (DataType::Int64, Value::Int128(i)) => i64::try_from(i)
-            .map(Value::BigInt)
-            .map_err(|_| out_of_range_error(column, "INT64")),
+
         (DataType::Int64, Value::UInteger(i)) => Ok(Value::BigInt(i as i64)),
         (DataType::Int64, Value::UBigInt(i)) => i64::try_from(i)
             .map(Value::BigInt)
             .map_err(|_| out_of_range_error(column, "INT64")),
-        (DataType::Int64, Value::UInt128(i)) => i64::try_from(i)
-            .map(Value::BigInt)
-            .map_err(|_| out_of_range_error(column, "INT64")),
-        (DataType::Int128, Value::Integer(i)) => Ok(Value::Int128(i as i128)),
-        (DataType::Int128, Value::BigInt(i)) => Ok(Value::Int128(i as i128)),
-        (DataType::Int128, Value::Int128(i)) => Ok(Value::Int128(i)),
-        (DataType::Int128, Value::UInteger(i)) => Ok(Value::Int128(i as i128)),
-        (DataType::Int128, Value::UBigInt(i)) => Ok(Value::Int128(i as i128)),
-        (DataType::Int128, Value::UInt128(i)) => i128::try_from(i)
-            .map(Value::Int128)
-            .map_err(|_| out_of_range_error(column, "INT128")),
+
         (DataType::UInt8, Value::Integer(i)) if i >= 0 => u8::try_from(i)
             .map(|value| Value::UInteger(value as u32))
             .map_err(|_| out_of_range_error(column, "UINT8")),
         (DataType::UInt8, Value::BigInt(i)) if i >= 0 => u8::try_from(i)
             .map(|value| Value::UInteger(value as u32))
             .map_err(|_| out_of_range_error(column, "UINT8")),
-        (DataType::UInt8, Value::Int128(i)) if i >= 0 => u8::try_from(i)
-            .map(|value| Value::UInteger(value as u32))
-            .map_err(|_| out_of_range_error(column, "UINT8")),
+
         (DataType::UInt8, Value::UInteger(i)) => u8::try_from(i)
             .map(|value| Value::UInteger(value as u32))
             .map_err(|_| out_of_range_error(column, "UINT8")),
         (DataType::UInt8, Value::UBigInt(i)) => u8::try_from(i)
             .map(|value| Value::UInteger(value as u32))
             .map_err(|_| out_of_range_error(column, "UINT8")),
-        (DataType::UInt8, Value::UInt128(i)) => u8::try_from(i)
-            .map(|value| Value::UInteger(value as u32))
-            .map_err(|_| out_of_range_error(column, "UINT8")),
+
         (DataType::UInt16, Value::Integer(i)) if i >= 0 => u16::try_from(i)
             .map(|value| Value::UInteger(value as u32))
             .map_err(|_| out_of_range_error(column, "UINT16")),
         (DataType::UInt16, Value::BigInt(i)) if i >= 0 => u16::try_from(i)
             .map(|value| Value::UInteger(value as u32))
             .map_err(|_| out_of_range_error(column, "UINT16")),
-        (DataType::UInt16, Value::Int128(i)) if i >= 0 => u16::try_from(i)
-            .map(|value| Value::UInteger(value as u32))
-            .map_err(|_| out_of_range_error(column, "UINT16")),
+
         (DataType::UInt16, Value::UInteger(i)) => u16::try_from(i)
             .map(|value| Value::UInteger(value as u32))
             .map_err(|_| out_of_range_error(column, "UINT16")),
         (DataType::UInt16, Value::UBigInt(i)) => u16::try_from(i)
             .map(|value| Value::UInteger(value as u32))
             .map_err(|_| out_of_range_error(column, "UINT16")),
-        (DataType::UInt16, Value::UInt128(i)) => u16::try_from(i)
-            .map(|value| Value::UInteger(value as u32))
-            .map_err(|_| out_of_range_error(column, "UINT16")),
+
         (DataType::UInt, Value::Integer(i)) if i >= 0 => Ok(Value::UInteger(i as u32)),
         (DataType::UInt, Value::BigInt(i)) if i >= 0 => u32::try_from(i)
             .map(Value::UInteger)
             .map_err(|_| out_of_range_error(column, "UINT")),
-        (DataType::UInt, Value::Int128(i)) if i >= 0 => u32::try_from(i)
-            .map(Value::UInteger)
-            .map_err(|_| out_of_range_error(column, "UINT")),
+
         (DataType::UInt, Value::UInteger(i)) => Ok(Value::UInteger(i)),
         (DataType::UInt, Value::UBigInt(i)) => u32::try_from(i)
             .map(Value::UInteger)
             .map_err(|_| out_of_range_error(column, "UINT")),
-        (DataType::UInt, Value::UInt128(i)) => u32::try_from(i)
-            .map(Value::UInteger)
-            .map_err(|_| out_of_range_error(column, "UINT")),
+
         (DataType::UInt64, Value::Integer(i)) if i >= 0 => Ok(Value::UBigInt(i as u64)),
         (DataType::UInt64, Value::BigInt(i)) if i >= 0 => Ok(Value::UBigInt(i as u64)),
-        (DataType::UInt64, Value::Int128(i)) if i >= 0 => u64::try_from(i)
-            .map(Value::UBigInt)
-            .map_err(|_| out_of_range_error(column, "UINT64")),
+
         (DataType::UInt64, Value::UInteger(i)) => Ok(Value::UBigInt(i as u64)),
         (DataType::UInt64, Value::UBigInt(i)) => Ok(Value::UBigInt(i)),
-        (DataType::UInt64, Value::UInt128(i)) => u64::try_from(i)
-            .map(Value::UBigInt)
-            .map_err(|_| out_of_range_error(column, "UINT64")),
-        (DataType::UInt128, Value::Integer(i)) if i >= 0 => Ok(Value::UInt128(i as u128)),
-        (DataType::UInt128, Value::BigInt(i)) if i >= 0 => Ok(Value::UInt128(i as u128)),
-        (DataType::UInt128, Value::Int128(i)) if i >= 0 => Ok(Value::UInt128(i as u128)),
-        (DataType::UInt128, Value::UInteger(i)) => Ok(Value::UInt128(i as u128)),
-        (DataType::UInt128, Value::UBigInt(i)) => Ok(Value::UInt128(i as u128)),
-        (DataType::UInt128, Value::UInt128(i)) => Ok(Value::UInt128(i)),
+
         (_, Value::Null) if column.nullable => Ok(Value::Null),
         (_, Value::Null) => Err(HematiteError::ParseError(format!(
             "Column '{}' cannot be NULL",
             column.name
         ))),
         (DataType::Text, Value::Text(s)) => Ok(Value::Text(s)),
-        (DataType::Char(length), Value::Text(s)) => coerce_char_value(s, *length, &column.name),
         (DataType::VarChar(length), Value::Text(s)) => {
             coerce_varchar_value(s, *length, &column.name)
         }
-        (DataType::Binary(length), value) => {
-            coerce_binary_value(value, *length, &column.name, true)
-        }
-        (DataType::VarBinary(length), value) => {
-            coerce_binary_value(value, *length, &column.name, false)
-        }
-        (DataType::Enum(values), value) => coerce_enum_value(value, values, &column.name),
         (DataType::Boolean, Value::Boolean(b)) => Ok(Value::Boolean(b)),
         (data_type @ (DataType::Float32 | DataType::Float), value) => {
             let Some(number) = numeric_value_as_f64(&value) else {
@@ -4265,18 +3758,6 @@ fn coerce_column_value(column: &Column, value: Value) -> Result<Value> {
         (DataType::Blob, Value::BigInt(i)) => Ok(Value::Blob(i.to_le_bytes().to_vec())),
         (DataType::Blob, Value::UInteger(i)) => Ok(Value::Blob(i.to_le_bytes().to_vec())),
         (DataType::Blob, Value::UBigInt(i)) => Ok(Value::Blob(i.to_le_bytes().to_vec())),
-        (DataType::Blob, Value::Int128(i)) => Ok(Value::Blob(i.to_le_bytes().to_vec())),
-        (DataType::Blob, Value::UInt128(i)) => Ok(Value::Blob(i.to_le_bytes().to_vec())),
-        (DataType::Date, Value::Date(s)) => Ok(Value::Date(s)),
-        (DataType::Date, Value::Text(s)) => Ok(Value::Date(validate_date_string(&s)?)),
-        (DataType::Time, Value::Time(s)) => Ok(Value::Time(s)),
-        (DataType::Time, Value::Text(s)) => Ok(Value::Time(validate_time_string(&s)?)),
-        (DataType::DateTime, Value::DateTime(s)) => Ok(Value::DateTime(s)),
-        (DataType::DateTime, Value::Text(s)) => Ok(Value::DateTime(validate_datetime_string(&s)?)),
-        (DataType::TimeWithTimeZone, Value::TimeWithTimeZone(s)) => Ok(Value::TimeWithTimeZone(s)),
-        (DataType::TimeWithTimeZone, Value::Text(s)) => Ok(Value::TimeWithTimeZone(
-            validate_time_with_time_zone_string(&s)?,
-        )),
         (_, value) => Err(HematiteError::ParseError(format!(
             "Type mismatch: column '{}' expects {:?}, got {:?}",
             column.name, column.data_type, value
@@ -4858,10 +4339,6 @@ fn hash_value<H: Hasher>(v: &Value, hasher: &mut H) {
             hasher.write(&[1u8]);
             hasher.write(&i.to_le_bytes());
         }
-        Value::Int128(i) => {
-            hasher.write(&[2u8]);
-            hasher.write(&i.to_le_bytes());
-        }
         Value::UInteger(u) => {
             hasher.write(&[3u8]);
             hasher.write(&u.to_le_bytes());
@@ -4870,16 +4347,8 @@ fn hash_value<H: Hasher>(v: &Value, hasher: &mut H) {
             hasher.write(&[4u8]);
             hasher.write(&u.to_le_bytes());
         }
-        Value::UInt128(u) => {
-            hasher.write(&[5u8]);
-            hasher.write(&u.to_le_bytes());
-        }
         Value::Text(s) => {
             hasher.write(&[6u8]);
-            hasher.write(s.as_bytes());
-        }
-        Value::Enum(s) => {
-            hasher.write(&[7u8]);
             hasher.write(s.as_bytes());
         }
         Value::Boolean(b) => {
@@ -4904,40 +4373,10 @@ fn hash_value<H: Hasher>(v: &Value, hasher: &mut H) {
             hasher.write(&((b.len() as u64).to_le_bytes()));
             hasher.write(b);
         }
-        Value::Date(dt) => {
-            hasher.write(&[13u8]);
-            hasher.write(&dt.days_since_epoch().to_le_bytes());
-        }
-        Value::Time(t) => {
-            hasher.write(&[14u8]);
-            hasher.write(&t.seconds_since_midnight().to_le_bytes());
-        }
-        Value::DateTime(dt) => {
-            hasher.write(&[15u8]);
-            hasher.write(&dt.seconds_since_epoch().to_le_bytes());
-        }
-        Value::TimeWithTimeZone(tz) => {
-            hasher.write(&[16u8]);
-            hasher.write(&tz.seconds_since_midnight().to_le_bytes());
-            hasher.write(&tz.offset_minutes().to_le_bytes());
-        }
-        Value::IntervalYearMonth(iv) => {
-            hasher.write(&[17u8]);
-            hasher.write(&iv.total_months().to_le_bytes());
-        }
-        Value::IntervalDaySecond(iv) => {
-            hasher.write(&[18u8]);
-            hasher.write(&iv.total_seconds().to_le_bytes());
-        }
         Value::Null => {
             hasher.write(&[19u8]);
         }
     }
-}
-
-fn deduplicate_rows(mut rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
-    apply_distinct_if_needed(true, &mut rows);
-    rows
 }
 
 fn locator_select_statement(
@@ -4967,10 +4406,6 @@ fn evaluate_arithmetic_values(
 ) -> Result<Value> {
     if left.is_null() || right.is_null() {
         return Ok(Value::Null);
-    }
-
-    if let Some(value) = evaluate_temporal_arithmetic(operator, &left, &right)? {
-        return Ok(value);
     }
 
     if left.is_float_like() || right.is_float_like() {
@@ -5021,261 +4456,6 @@ fn evaluate_exact_numeric_arithmetic(
     }
 }
 
-fn signed_integral_rhs(operator: &ArithmeticOperator, right: &Value) -> Option<i64> {
-    let val = integral_rhs(right)?;
-    match operator {
-        ArithmeticOperator::Add => Some(val),
-        ArithmeticOperator::Subtract => val.checked_neg(),
-        _ => None,
-    }
-}
-
-fn evaluate_temporal_arithmetic(
-    operator: &ArithmeticOperator,
-    left: &Value,
-    right: &Value,
-) -> Result<Option<Value>> {
-    match (left, right) {
-        (Value::IntervalYearMonth(left), Value::IntervalYearMonth(right)) => {
-            let total_months = match operator {
-                ArithmeticOperator::Add => left.total_months().checked_add(right.total_months()),
-                ArithmeticOperator::Subtract => {
-                    left.total_months().checked_sub(right.total_months())
-                }
-                _ => None,
-            };
-            Ok(total_months
-                .map(|value| Value::IntervalYearMonth(IntervalYearMonthValue::new(value))))
-        }
-        (Value::IntervalDaySecond(left), Value::IntervalDaySecond(right)) => {
-            let total_seconds = match operator {
-                ArithmeticOperator::Add => left.total_seconds().checked_add(right.total_seconds()),
-                ArithmeticOperator::Subtract => {
-                    left.total_seconds().checked_sub(right.total_seconds())
-                }
-                _ => None,
-            };
-            Ok(total_seconds
-                .map(|value| Value::IntervalDaySecond(IntervalDaySecondValue::new(value))))
-        }
-        (Value::Date(left), Value::Date(right))
-            if matches!(operator, ArithmeticOperator::Subtract) =>
-        {
-            Ok(Some(Value::BigInt(
-                left.days_since_epoch() as i64 - right.days_since_epoch() as i64,
-            )))
-        }
-        (Value::Date(left), Value::IntervalYearMonth(interval)) => {
-            let months = signed_interval_months(operator, *interval)?;
-            Ok(Some(Value::Date(add_months_to_date(*left, months)?)))
-        }
-        (Value::Date(left), Value::IntervalDaySecond(interval)) => {
-            let days = whole_days_from_interval(operator, *interval)?;
-            let result = left.days_since_epoch() as i64 + days;
-            let result = i32::try_from(result).map_err(|_| {
-                HematiteError::ParseError("DATE arithmetic overflowed supported range".to_string())
-            })?;
-            Ok(Some(Value::Date(DateValue::from_days_since_epoch(result))))
-        }
-        (Value::Date(left), right) => {
-            let Some(delta) = signed_integral_rhs(operator, right) else {
-                return Ok(None);
-            };
-            let result = left.days_since_epoch() as i64 + delta;
-            let result = i32::try_from(result).map_err(|_| {
-                HematiteError::ParseError("DATE arithmetic overflowed supported range".to_string())
-            })?;
-            Ok(Some(Value::Date(DateValue::from_days_since_epoch(result))))
-        }
-
-        (Value::DateTime(left), Value::DateTime(right))
-            if matches!(operator, ArithmeticOperator::Subtract) =>
-        {
-            Ok(Some(Value::BigInt(
-                left.seconds_since_epoch() - right.seconds_since_epoch(),
-            )))
-        }
-        (Value::DateTime(left), Value::IntervalYearMonth(interval)) => Ok(Some(Value::DateTime(
-            add_months_to_datetime(*left, signed_interval_months(operator, *interval)?)?,
-        ))),
-        (Value::DateTime(left), Value::IntervalDaySecond(interval)) => {
-            let seconds = signed_interval_seconds(operator, *interval)?;
-            Ok(Some(Value::DateTime(
-                DateTimeValue::from_seconds_since_epoch(left.seconds_since_epoch() + seconds),
-            )))
-        }
-        (Value::DateTime(left), right) => {
-            let Some(delta) = signed_integral_rhs(operator, right) else {
-                return Ok(None);
-            };
-            Ok(Some(Value::DateTime(
-                DateTimeValue::from_seconds_since_epoch(left.seconds_since_epoch() + delta),
-            )))
-        }
-
-        (Value::Time(left), Value::Time(right))
-            if matches!(operator, ArithmeticOperator::Subtract) =>
-        {
-            Ok(Some(Value::Integer(
-                left.seconds_since_midnight() as i32 - right.seconds_since_midnight() as i32,
-            )))
-        }
-        (Value::Time(left), Value::IntervalDaySecond(interval)) => {
-            let seconds = signed_interval_seconds(operator, *interval)?;
-            Ok(Some(Value::Time(TimeValue::from_seconds_since_midnight(
-                add_wrapped_seconds(left.seconds_since_midnight(), seconds),
-            ))))
-        }
-        (Value::Time(left), right) => {
-            let Some(delta) = signed_integral_rhs(operator, right) else {
-                return Ok(None);
-            };
-            Ok(Some(Value::Time(TimeValue::from_seconds_since_midnight(
-                add_wrapped_seconds(left.seconds_since_midnight(), delta),
-            ))))
-        }
-        (Value::TimeWithTimeZone(left), Value::IntervalDaySecond(interval)) => {
-            let seconds = signed_interval_seconds(operator, *interval)?;
-            Ok(Some(Value::TimeWithTimeZone(
-                TimeWithTimeZoneValue::from_parts(
-                    add_wrapped_seconds(left.seconds_since_midnight(), seconds),
-                    left.offset_minutes(),
-                ),
-            )))
-        }
-        (Value::TimeWithTimeZone(left), right) => {
-            let Some(delta) = signed_integral_rhs(operator, right) else {
-                return Ok(None);
-            };
-            Ok(Some(Value::TimeWithTimeZone(
-                TimeWithTimeZoneValue::from_parts(
-                    add_wrapped_seconds(left.seconds_since_midnight(), delta),
-                    left.offset_minutes(),
-                ),
-            )))
-        }
-        _ => Ok(None),
-    }
-}
-
-fn add_wrapped_seconds(seconds_since_midnight: u32, delta: i64) -> u32 {
-    (seconds_since_midnight as i64 + delta).rem_euclid(86_400) as u32
-}
-
-fn signed_interval_months(
-    operator: &ArithmeticOperator,
-    interval: IntervalYearMonthValue,
-) -> Result<i32> {
-    match operator {
-        ArithmeticOperator::Add => Ok(interval.total_months()),
-        ArithmeticOperator::Subtract => interval.total_months().checked_neg().ok_or_else(|| {
-            HematiteError::ParseError(
-                "INTERVAL YEAR TO MONTH overflowed supported range".to_string(),
-            )
-        }),
-        _ => Err(HematiteError::ParseError(
-            "INTERVAL YEAR TO MONTH only supports addition and subtraction".to_string(),
-        )),
-    }
-}
-
-fn signed_interval_seconds(
-    operator: &ArithmeticOperator,
-    interval: IntervalDaySecondValue,
-) -> Result<i64> {
-    match operator {
-        ArithmeticOperator::Add => Ok(interval.total_seconds()),
-        ArithmeticOperator::Subtract => interval.total_seconds().checked_neg().ok_or_else(|| {
-            HematiteError::ParseError(
-                "INTERVAL DAY TO SECOND overflowed supported range".to_string(),
-            )
-        }),
-        _ => Err(HematiteError::ParseError(
-            "INTERVAL DAY TO SECOND only supports addition and subtraction".to_string(),
-        )),
-    }
-}
-
-fn whole_days_from_interval(
-    operator: &ArithmeticOperator,
-    interval: IntervalDaySecondValue,
-) -> Result<i64> {
-    let seconds = signed_interval_seconds(operator, interval)?;
-    if seconds % 86_400 != 0 {
-        return Err(HematiteError::ParseError(
-            "DATE arithmetic requires INTERVAL DAY TO SECOND values aligned to whole days"
-                .to_string(),
-        ));
-    }
-    Ok(seconds / 86_400)
-}
-
-fn add_months_to_date(value: DateValue, delta_months: i32) -> Result<DateValue> {
-    let (year, month, day) = value.components();
-    let total_months = year
-        .checked_mul(12)
-        .and_then(|total| total.checked_add(month as i32 - 1))
-        .and_then(|total| total.checked_add(delta_months))
-        .ok_or_else(|| {
-            HematiteError::ParseError(
-                "Temporal month arithmetic overflowed supported range".to_string(),
-            )
-        })?;
-    let new_year = total_months.div_euclid(12);
-    let new_month = total_months.rem_euclid(12) as u32 + 1;
-    let clamped_day = day.min(executor_days_in_month(new_year, new_month));
-    Ok(DateValue::from_days_since_epoch(executor_days_from_civil(
-        new_year,
-        new_month,
-        clamped_day,
-    )))
-}
-
-fn add_months_to_datetime(value: DateTimeValue, delta_months: i32) -> Result<DateTimeValue> {
-    let (date, time) = value.components();
-    let shifted_date = add_months_to_date(date, delta_months)?;
-    Ok(DateTimeValue::from_seconds_since_epoch(
-        shifted_date.days_since_epoch() as i64 * 86_400 + time.seconds_since_midnight() as i64,
-    ))
-}
-
-fn executor_days_in_month(year: i32, month: u32) -> u32 {
-    match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if executor_is_leap_year(year) => 29,
-        2 => 28,
-        _ => unreachable!(),
-    }
-}
-
-fn executor_is_leap_year(year: i32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
-}
-
-fn executor_days_from_civil(year: i32, month: u32, day: u32) -> i32 {
-    let year = year - if month <= 2 { 1 } else { 0 };
-    let era = if year >= 0 { year } else { year - 399 } / 400;
-    let yoe = year - era * 400;
-    let month = month as i32;
-    let day = day as i32;
-    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe - 719468
-}
-
-fn integral_rhs(value: &Value) -> Option<i64> {
-    match value {
-        Value::Integer(value) => Some(*value as i64),
-        Value::BigInt(value) => Some(*value),
-        Value::Int128(value) => i64::try_from(*value).ok(),
-        Value::UInteger(value) => Some(*value as i64),
-        Value::UBigInt(value) => i64::try_from(*value).ok(),
-        Value::UInt128(value) => i64::try_from(*value).ok(),
-        _ => None,
-    }
-}
-
 fn auto_increment_value(column: &Column, next_row_id: u64) -> Result<Value> {
     match column.data_type {
         DataType::Int => i32::try_from(next_row_id)
@@ -5299,18 +4479,14 @@ fn negate_numeric_value(value: Value) -> Result<Value> {
         Value::BigInt(value) => value.checked_neg().map(Value::BigInt).ok_or_else(|| {
             HematiteError::ParseError("INT64 overflow while evaluating unary '-'".to_string())
         }),
-        Value::Int128(value) => value.checked_neg().map(Value::Int128).ok_or_else(|| {
-            HematiteError::ParseError("INT128 overflow while evaluating unary '-'".to_string())
-        }),
         Value::UInteger(value) => Ok(Value::BigInt(-(value as i64))),
-        Value::UBigInt(value) => Ok(Value::Int128(-(value as i128))),
-        Value::UInt128(value) => {
-            if value > i128::MAX as u128 {
+        Value::UBigInt(value) => {
+            if value > i64::MAX as u64 {
                 return Err(HematiteError::ParseError(
-                    "UINT128 overflow while evaluating unary '-'".to_string(),
+                    "UINT64 overflow while evaluating unary '-'".to_string(),
                 ));
             }
-            Ok(Value::Int128(-(value as i128)))
+            Ok(Value::BigInt(-(value as i64)))
         }
         Value::Float32(value) => Ok(Value::Float32(-value)),
         Value::Float(value) => Ok(Value::Float(-value)),
@@ -5353,19 +4529,14 @@ fn is_exact_numeric_value(value: &Value) -> bool {
         value,
         Value::Integer(_)
             | Value::BigInt(_)
-            | Value::Int128(_)
             | Value::UInteger(_)
             | Value::UBigInt(_)
-            | Value::UInt128(_)
             | Value::Decimal(_)
     )
 }
 
 fn is_unsigned_integral_value(value: &Value) -> bool {
-    matches!(
-        value,
-        Value::UInteger(_) | Value::UBigInt(_) | Value::UInt128(_)
-    )
+    matches!(value, Value::UInteger(_) | Value::UBigInt(_))
 }
 
 fn decimal_integral_result_to_value(value: DecimalValue, prefer_unsigned: bool) -> Result<Value> {
@@ -5373,7 +4544,7 @@ fn decimal_integral_result_to_value(value: DecimalValue, prefer_unsigned: bool) 
     if value.negative() {
         return value
             .to_integral_i128()
-            .map(minimal_signed_value)
+            .and_then(minimal_signed_value)
             .ok_or_else(|| {
                 HematiteError::ParseError(
                     "Arithmetic overflowed the supported signed integer range".to_string(),
@@ -5384,7 +4555,7 @@ fn decimal_integral_result_to_value(value: DecimalValue, prefer_unsigned: bool) 
     if prefer_unsigned {
         return value
             .to_integral_u128()
-            .map(minimal_unsigned_value)
+            .and_then(minimal_unsigned_value)
             .ok_or_else(|| {
                 HematiteError::ParseError(
                     "Arithmetic overflowed the supported unsigned integer range".to_string(),
@@ -5393,11 +4564,15 @@ fn decimal_integral_result_to_value(value: DecimalValue, prefer_unsigned: bool) 
     }
 
     if let Some(signed) = value.to_integral_i128() {
-        Ok(minimal_signed_value(signed))
+        minimal_signed_value(signed).ok_or_else(|| {
+            HematiteError::ParseError(
+                "Arithmetic overflowed the supported integer range".to_string(),
+            )
+        })
     } else {
         value
             .to_integral_u128()
-            .map(minimal_unsigned_value)
+            .and_then(minimal_unsigned_value)
             .ok_or_else(|| {
                 HematiteError::ParseError(
                     "Arithmetic overflowed the supported integer range".to_string(),
@@ -5406,23 +4581,23 @@ fn decimal_integral_result_to_value(value: DecimalValue, prefer_unsigned: bool) 
     }
 }
 
-fn minimal_signed_value(value: i128) -> Value {
+fn minimal_signed_value(value: i128) -> Option<Value> {
     if let Ok(value) = i32::try_from(value) {
-        Value::Integer(value)
+        Some(Value::Integer(value))
     } else if let Ok(value) = i64::try_from(value) {
-        Value::BigInt(value)
+        Some(Value::BigInt(value))
     } else {
-        Value::Int128(value)
+        None
     }
 }
 
-fn minimal_unsigned_value(value: u128) -> Value {
+fn minimal_unsigned_value(value: u128) -> Option<Value> {
     if let Ok(value) = u32::try_from(value) {
-        Value::UInteger(value)
+        Some(Value::UInteger(value))
     } else if let Ok(value) = u64::try_from(value) {
-        Value::UBigInt(value)
+        Some(Value::UBigInt(value))
     } else {
-        Value::UInt128(value)
+        None
     }
 }
 
@@ -5438,24 +4613,24 @@ fn cast_out_of_range_error(source: &Value, target_name: &str) -> HematiteError {
     }
 }
 
-fn value_to_i128(value: &Value, width: usize, type_name: &str) -> Result<i128> {
+fn value_to_i64(value: &Value, type_name: &str) -> Result<i64> {
     match value {
-        Value::Integer(v) => Ok(*v as i128),
-        Value::BigInt(v) => Ok(*v as i128),
-        Value::Int128(v) => Ok(*v),
-        Value::UInteger(v) => Ok(*v as i128),
-        Value::UBigInt(v) => Ok(*v as i128),
-        Value::UInt128(v) => {
-            i128::try_from(*v).map_err(|_| cast_out_of_range_error(value, type_name))
+        Value::Integer(v) => Ok(*v as i64),
+        Value::BigInt(v) => Ok(*v),
+        Value::UInteger(v) => {
+            i64::try_from(*v).map_err(|_| cast_out_of_range_error(value, type_name))
         }
-        Value::Float32(v) => Ok(*v as i128),
-        Value::Float(v) => Ok(*v as i128),
+        Value::UBigInt(v) => {
+            i64::try_from(*v).map_err(|_| cast_out_of_range_error(value, type_name))
+        }
+        Value::Float32(v) => Ok(*v as i64),
+        Value::Float(v) => Ok(*v as i64),
         Value::Boolean(true) => Ok(1),
         Value::Boolean(false) => Ok(0),
-        Value::Text(v) => v.parse::<i128>().map_err(|_| {
+        Value::Text(v) => v.parse::<i64>().map_err(|_| {
             HematiteError::ParseError(format!("Cannot CAST '{}' AS {}", v, type_name))
         }),
-        Value::Blob(bytes) => decode_signed_blob(bytes, width, type_name),
+        Value::Blob(bytes) => decode_signed_blob(bytes, type_name),
         _ => Err(HematiteError::ParseError(format!(
             "Cannot CAST '{:?}' AS {}",
             value, type_name
@@ -5463,40 +4638,36 @@ fn value_to_i128(value: &Value, width: usize, type_name: &str) -> Result<i128> {
     }
 }
 
-fn value_to_u128(value: &Value, width: usize, type_name: &str) -> Result<u128> {
+fn value_to_u64(value: &Value, type_name: &str) -> Result<u64> {
     match value {
         Value::Integer(v) => {
-            u128::try_from(*v).map_err(|_| cast_out_of_range_error(value, type_name))
+            u64::try_from(*v).map_err(|_| cast_out_of_range_error(value, type_name))
         }
         Value::BigInt(v) => {
-            u128::try_from(*v).map_err(|_| cast_out_of_range_error(value, type_name))
+            u64::try_from(*v).map_err(|_| cast_out_of_range_error(value, type_name))
         }
-        Value::Int128(v) => {
-            u128::try_from(*v).map_err(|_| cast_out_of_range_error(value, type_name))
-        }
-        Value::UInteger(v) => Ok(*v as u128),
-        Value::UBigInt(v) => Ok(*v as u128),
-        Value::UInt128(v) => Ok(*v),
+        Value::UInteger(v) => Ok(*v as u64),
+        Value::UBigInt(v) => Ok(*v),
         Value::Float32(v) => {
             if *v >= 0.0 {
-                Ok(*v as u128)
+                Ok(*v as u64)
             } else {
                 Err(cast_out_of_range_error(value, type_name))
             }
         }
         Value::Float(v) => {
             if *v >= 0.0 {
-                Ok(*v as u128)
+                Ok(*v as u64)
             } else {
                 Err(cast_out_of_range_error(value, type_name))
             }
         }
         Value::Boolean(true) => Ok(1),
         Value::Boolean(false) => Ok(0),
-        Value::Text(v) => v.parse::<u128>().map_err(|_| {
+        Value::Text(v) => v.parse::<u64>().map_err(|_| {
             HematiteError::ParseError(format!("Cannot CAST '{}' AS {}", v, type_name))
         }),
-        Value::Blob(bytes) => decode_unsigned_blob(bytes, width, type_name),
+        Value::Blob(bytes) => decode_unsigned_blob(bytes, type_name),
         _ => Err(HematiteError::ParseError(format!(
             "Cannot CAST '{:?}' AS {}",
             value, type_name
@@ -5508,10 +4679,8 @@ fn value_to_f64(value: &Value, type_name: &str) -> Result<f64> {
     match value {
         Value::Integer(v) => Ok(*v as f64),
         Value::BigInt(v) => Ok(*v as f64),
-        Value::Int128(v) => Ok(*v as f64),
         Value::UInteger(v) => Ok(*v as f64),
         Value::UBigInt(v) => Ok(*v as f64),
-        Value::UInt128(v) => Ok(*v as f64),
         Value::Float32(v) => Ok(*v as f64),
         Value::Float(v) => Ok(*v),
         Value::Boolean(true) => Ok(1.0),
@@ -5532,68 +4701,54 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
     }
     match data_type.clone() {
         DataType::Int8 => {
-            let val = value_to_i128(&value, 1, "INT8")?;
-            if !(i8::MIN as i128..=i8::MAX as i128).contains(&val) {
+            let val = value_to_i64(&value, "INT8")?;
+            if !(i8::MIN as i64..=i8::MAX as i64).contains(&val) {
                 return Err(cast_out_of_range_error(&value, "INT8"));
             }
             Ok(Value::Integer(val as i32))
         }
         DataType::Int16 => {
-            let val = value_to_i128(&value, 2, "INT16")?;
-            if !(i16::MIN as i128..=i16::MAX as i128).contains(&val) {
+            let val = value_to_i64(&value, "INT16")?;
+            if !(i16::MIN as i64..=i16::MAX as i64).contains(&val) {
                 return Err(cast_out_of_range_error(&value, "INT16"));
             }
             Ok(Value::Integer(val as i32))
         }
         DataType::Int => {
-            let val = value_to_i128(&value, 4, "INT")?;
-            if !(i32::MIN as i128..=i32::MAX as i128).contains(&val) {
+            let val = value_to_i64(&value, "INT")?;
+            if !(i32::MIN as i64..=i32::MAX as i64).contains(&val) {
                 return Err(cast_out_of_range_error(&value, "INT"));
             }
             Ok(Value::Integer(val as i32))
         }
         DataType::Int64 => {
-            let val = value_to_i128(&value, 8, "INT64")?;
-            if !(i64::MIN as i128..=i64::MAX as i128).contains(&val) {
-                return Err(cast_out_of_range_error(&value, "INT64"));
-            }
-            Ok(Value::BigInt(val as i64))
-        }
-        DataType::Int128 => {
-            let val = value_to_i128(&value, 16, "INT128")?;
-            Ok(Value::Int128(val))
+            let val = value_to_i64(&value, "INT64")?;
+            Ok(Value::BigInt(val))
         }
         DataType::UInt8 => {
-            let val = value_to_u128(&value, 1, "UINT8")?;
-            if val > u8::MAX as u128 {
+            let val = value_to_u64(&value, "UINT8")?;
+            if val > u8::MAX as u64 {
                 return Err(cast_out_of_range_error(&value, "UINT8"));
             }
             Ok(Value::UInteger(val as u32))
         }
         DataType::UInt16 => {
-            let val = value_to_u128(&value, 2, "UINT16")?;
-            if val > u16::MAX as u128 {
+            let val = value_to_u64(&value, "UINT16")?;
+            if val > u16::MAX as u64 {
                 return Err(cast_out_of_range_error(&value, "UINT16"));
             }
             Ok(Value::UInteger(val as u32))
         }
         DataType::UInt => {
-            let val = value_to_u128(&value, 4, "UINT")?;
-            if val > u32::MAX as u128 {
+            let val = value_to_u64(&value, "UINT")?;
+            if val > u32::MAX as u64 {
                 return Err(cast_out_of_range_error(&value, "UINT"));
             }
             Ok(Value::UInteger(val as u32))
         }
         DataType::UInt64 => {
-            let val = value_to_u128(&value, 8, "UINT64")?;
-            if val > u64::MAX as u128 {
-                return Err(cast_out_of_range_error(&value, "UINT64"));
-            }
-            Ok(Value::UBigInt(val as u64))
-        }
-        DataType::UInt128 => {
-            let val = value_to_u128(&value, 16, "UINT128")?;
-            Ok(Value::UInt128(val))
+            let val = value_to_u64(&value, "UINT64")?;
+            Ok(Value::UBigInt(val))
         }
         DataType::Float32 => {
             let val = value_to_f64(&value, "FLOAT32")?;
@@ -5618,21 +4773,14 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
             other
                 if matches!(
                     other,
-                    Value::Integer(_)
-                        | Value::BigInt(_)
-                        | Value::Int128(_)
-                        | Value::UInteger(_)
-                        | Value::UBigInt(_)
-                        | Value::UInt128(_)
+                    Value::Integer(_) | Value::BigInt(_) | Value::UInteger(_) | Value::UBigInt(_)
                 ) =>
             {
                 let is_zero = match other {
                     Value::Integer(v) => v == 0,
                     Value::BigInt(v) => v == 0,
-                    Value::Int128(v) => v == 0,
                     Value::UInteger(v) => v == 0,
                     Value::UBigInt(v) => v == 0,
-                    Value::UInt128(v) => v == 0,
                     _ => unreachable!(),
                 };
                 Ok(Value::Boolean(!is_zero))
@@ -5643,15 +4791,9 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
             ))),
         },
         DataType::Text => cast_value_to_text_string(value).map(Value::Text),
-        DataType::Char(length) => {
-            coerce_char_value(cast_value_to_text_string(value)?, length, "CAST")
-        }
         DataType::VarChar(length) => {
             coerce_varchar_value(cast_value_to_text_string(value)?, length, "CAST")
         }
-        DataType::Binary(length) => coerce_binary_value(value, length, "CAST", true),
-        DataType::VarBinary(length) => coerce_binary_value(value, length, "CAST", false),
-        DataType::Enum(variants) => coerce_enum_value(value, &variants, "CAST"),
         DataType::Decimal { precision, scale } => {
             let decimal = coerce_decimal_value(value)?;
             if !decimal.fits_precision_scale(precision, scale) {
@@ -5667,55 +4809,13 @@ fn cast_value_to_type(value: Value, data_type: DataType) -> Result<Value> {
             Value::Text(v) => Ok(Value::Blob(v.into_bytes())),
             Value::Integer(v) => Ok(Value::Blob(v.to_le_bytes().to_vec())),
             Value::BigInt(v) => Ok(Value::Blob(v.to_le_bytes().to_vec())),
-            Value::Int128(v) => Ok(Value::Blob(v.to_le_bytes().to_vec())),
             Value::UInteger(v) => Ok(Value::Blob(v.to_le_bytes().to_vec())),
             Value::UBigInt(v) => Ok(Value::Blob(v.to_le_bytes().to_vec())),
-            Value::UInt128(v) => Ok(Value::Blob(v.to_le_bytes().to_vec())),
             _ => Err(HematiteError::ParseError(format!(
                 "Cannot CAST '{:?}' AS BLOB",
                 value
             ))),
         },
-        DataType::Date => match value {
-            Value::Date(v) => Ok(Value::Date(v)),
-            Value::Text(v) => Ok(Value::Date(validate_date_string(&v)?)),
-            _ => Err(HematiteError::ParseError(format!(
-                "Cannot CAST '{:?}' AS DATE",
-                value
-            ))),
-        },
-        DataType::Time => match value {
-            Value::Time(v) => Ok(Value::Time(v)),
-            Value::Text(v) => Ok(Value::Time(validate_time_string(&v)?)),
-            _ => Err(HematiteError::ParseError(format!(
-                "Cannot CAST '{:?}' AS TIME",
-                value
-            ))),
-        },
-        DataType::DateTime => match value {
-            Value::DateTime(v) => Ok(Value::DateTime(v)),
-            Value::Text(v) => Ok(Value::DateTime(validate_datetime_string(&v)?)),
-            _ => Err(HematiteError::ParseError(format!(
-                "Cannot CAST '{:?}' AS DATETIME",
-                value
-            ))),
-        },
-        DataType::TimeWithTimeZone => match value {
-            Value::TimeWithTimeZone(v) => Ok(Value::TimeWithTimeZone(v)),
-            Value::Text(v) => Ok(Value::TimeWithTimeZone(
-                validate_time_with_time_zone_string(&v)?,
-            )),
-            _ => Err(HematiteError::ParseError(format!(
-                "Cannot CAST '{:?}' AS TIME WITH TIME ZONE",
-                value
-            ))),
-        },
-        DataType::IntervalYearMonth => Ok(Value::IntervalYearMonth(IntervalYearMonthValue::parse(
-            &cast_value_to_text_string(value)?,
-        )?)),
-        DataType::IntervalDaySecond => Ok(Value::IntervalDaySecond(IntervalDaySecondValue::parse(
-            &cast_value_to_text_string(value)?,
-        )?)),
     }
 }
 
@@ -5724,17 +4824,6 @@ fn evaluate_scalar_function(function: ScalarFunction, args: Vec<Value>) -> Resul
         ScalarFunction::Coalesce => evaluate_coalesce(args),
         ScalarFunction::IfNull => evaluate_ifnull(args),
         ScalarFunction::NullIf => evaluate_nullif(args),
-        ScalarFunction::DateFn => evaluate_date_fn(args),
-        ScalarFunction::TimeFn => evaluate_time_fn(args),
-        ScalarFunction::Year => evaluate_year(args),
-        ScalarFunction::Month => evaluate_month(args),
-        ScalarFunction::Day => evaluate_day(args),
-        ScalarFunction::Hour => evaluate_hour(args),
-        ScalarFunction::Minute => evaluate_minute(args),
-        ScalarFunction::Second => evaluate_second(args),
-        ScalarFunction::TimeToSec => evaluate_time_to_sec(args),
-        ScalarFunction::SecToTime => evaluate_sec_to_time(args),
-        ScalarFunction::UnixTimestamp => evaluate_unix_timestamp(args),
         ScalarFunction::Lower => evaluate_lower(args),
         ScalarFunction::Upper => evaluate_upper(args),
         ScalarFunction::Length => evaluate_length(args),
@@ -5776,98 +4865,6 @@ fn evaluate_coalesce(args: Vec<Value>) -> Result<Value> {
     }
 
     Ok(Value::Null)
-}
-
-fn evaluate_date_fn(args: Vec<Value>) -> Result<Value> {
-    expect_unary_temporal_function("DATE", args, |value| {
-        Ok(Value::Date(extract_date_component("DATE", value)?))
-    })
-}
-
-fn evaluate_time_fn(args: Vec<Value>) -> Result<Value> {
-    expect_unary_temporal_function("TIME", args, |value| {
-        Ok(Value::Time(extract_time_component("TIME", value)?))
-    })
-}
-
-fn evaluate_year(args: Vec<Value>) -> Result<Value> {
-    expect_unary_temporal_function("YEAR", args, |value| {
-        let (year, _, _) = extract_date_component("YEAR", value)?.components();
-        Ok(Value::Integer(year))
-    })
-}
-
-fn evaluate_month(args: Vec<Value>) -> Result<Value> {
-    expect_unary_temporal_function("MONTH", args, |value| {
-        let (_, month, _) = extract_date_component("MONTH", value)?.components();
-        Ok(Value::Integer(month as i32))
-    })
-}
-
-fn evaluate_day(args: Vec<Value>) -> Result<Value> {
-    expect_unary_temporal_function("DAY", args, |value| {
-        let (_, _, day) = extract_date_component("DAY", value)?.components();
-        Ok(Value::Integer(day as i32))
-    })
-}
-
-fn evaluate_hour(args: Vec<Value>) -> Result<Value> {
-    expect_unary_temporal_function("HOUR", args, |value| {
-        let (hour, _, _) = extract_time_component("HOUR", value)?.components();
-        Ok(Value::Integer(hour as i32))
-    })
-}
-
-fn evaluate_minute(args: Vec<Value>) -> Result<Value> {
-    expect_unary_temporal_function("MINUTE", args, |value| {
-        let (_, minute, _) = extract_time_component("MINUTE", value)?.components();
-        Ok(Value::Integer(minute as i32))
-    })
-}
-
-fn evaluate_second(args: Vec<Value>) -> Result<Value> {
-    expect_unary_temporal_function("SECOND", args, |value| {
-        let (_, _, second) = extract_time_component("SECOND", value)?.components();
-        Ok(Value::Integer(second as i32))
-    })
-}
-
-fn evaluate_time_to_sec(args: Vec<Value>) -> Result<Value> {
-    expect_unary_temporal_function("TIME_TO_SEC", args, |value| {
-        Ok(Value::BigInt(
-            extract_time_component("TIME_TO_SEC", value)?.seconds_since_midnight() as i64,
-        ))
-    })
-}
-
-fn evaluate_sec_to_time(args: Vec<Value>) -> Result<Value> {
-    if args.len() != 1 {
-        return Err(HematiteError::ParseError(
-            "SEC_TO_TIME requires exactly one argument".to_string(),
-        ));
-    }
-
-    let value = args.into_iter().next().expect("validated arity");
-    match value {
-        Value::Null => Ok(Value::Null),
-        Value::Integer(value) => Ok(Value::Time(TimeValue::from_seconds_since_midnight(
-            add_wrapped_seconds(0, value as i64),
-        ))),
-        Value::BigInt(value) => Ok(Value::Time(TimeValue::from_seconds_since_midnight(
-            add_wrapped_seconds(0, value),
-        ))),
-        value => Err(HematiteError::ParseError(format!(
-            "SEC_TO_TIME requires an integer value, found {:?}",
-            value
-        ))),
-    }
-}
-
-fn evaluate_unix_timestamp(args: Vec<Value>) -> Result<Value> {
-    expect_unary_temporal_function("UNIX_TIMESTAMP", args, |value| {
-        let timestamp = extract_timestamp_component("UNIX_TIMESTAMP", value)?;
-        Ok(Value::BigInt(timestamp.seconds_since_epoch()))
-    })
 }
 
 fn evaluate_ifnull(args: Vec<Value>) -> Result<Value> {
@@ -5943,7 +4940,6 @@ fn evaluate_octet_length(args: Vec<Value>) -> Result<Value> {
     expect_unary_length_function("OCTET_LENGTH", args, |value| {
         let len = match value {
             Value::Text(text) => text.len(),
-            Value::Enum(text) => text.len(),
             Value::Blob(bytes) => bytes.len(),
             value => {
                 return Err(HematiteError::ParseError(format!(
@@ -6018,24 +5014,6 @@ where
     }
 }
 
-fn expect_unary_temporal_function<F>(name: &str, args: Vec<Value>, f: F) -> Result<Value>
-where
-    F: FnOnce(Value) -> Result<Value>,
-{
-    if args.len() != 1 {
-        return Err(HematiteError::ParseError(format!(
-            "{} requires exactly one argument",
-            name
-        )));
-    }
-
-    let value = args.into_iter().next().expect("validated unary arity");
-    match value {
-        Value::Null => Ok(Value::Null),
-        value => f(value),
-    }
-}
-
 fn evaluate_abs(args: Vec<Value>) -> Result<Value> {
     expect_unary_numeric_function("ABS", args, |value| match value {
         Value::Integer(value) => {
@@ -6052,13 +5030,8 @@ fn evaluate_abs(args: Vec<Value>) -> Result<Value> {
             }
             Ok(Value::BigInt(value.abs()))
         }
-        Value::Int128(value) => value
-            .checked_abs()
-            .map(Value::Int128)
-            .ok_or_else(|| HematiteError::ParseError("ABS overflowed INT128".to_string())),
         Value::UInteger(value) => Ok(Value::UInteger(value)),
         Value::UBigInt(value) => Ok(Value::UBigInt(value)),
-        Value::UInt128(value) => Ok(Value::UInt128(value)),
         Value::Float32(value) => Ok(Value::Float32(value.abs())),
         Value::Float(value) => Ok(Value::Float(value.abs())),
         _ => unreachable!("validated numeric input"),
@@ -6088,12 +5061,9 @@ fn evaluate_round(args: Vec<Value>) -> Result<Value> {
 
     match value {
         Value::Null => Ok(Value::Null),
-        value @ (Value::Integer(_)
-        | Value::BigInt(_)
-        | Value::Int128(_)
-        | Value::UInteger(_)
-        | Value::UBigInt(_)
-        | Value::UInt128(_)) => round_integral_value(value, precision),
+        value @ (Value::Integer(_) | Value::BigInt(_) | Value::UInteger(_) | Value::UBigInt(_)) => {
+            round_integral_value(value, precision)
+        }
         Value::Float32(value) => Ok(Value::Float32(round_float(value as f64, precision) as f32)),
         Value::Float(value) => Ok(Value::Float(round_float(value, precision))),
         value => Err(HematiteError::ParseError(format!(
@@ -6237,10 +5207,8 @@ where
         Value::Null => Ok(Value::Null),
         Value::Integer(_)
         | Value::BigInt(_)
-        | Value::Int128(_)
         | Value::UInteger(_)
         | Value::UBigInt(_)
-        | Value::UInt128(_)
         | Value::Float32(_)
         | Value::Float(_) => f(value),
         value => Err(HematiteError::ParseError(format!(
@@ -6272,20 +5240,11 @@ fn expect_numeric_argument(function_name: &str, value: Value) -> Result<f64> {
 fn coerce_value_to_string(function_name: &str, value: Value) -> Result<String> {
     match value {
         Value::Text(text) => Ok(text),
-        Value::Enum(text) => Ok(text),
         Value::Decimal(text) => Ok(text.to_string()),
-        Value::Date(text) => Ok(text.to_string()),
-        Value::Time(text) => Ok(text.to_string()),
-        Value::DateTime(text) => Ok(text.to_string()),
-        Value::TimeWithTimeZone(text) => Ok(text.to_string()),
-        Value::IntervalYearMonth(text) => Ok(text.to_string()),
-        Value::IntervalDaySecond(text) => Ok(text.to_string()),
         Value::Integer(value) => Ok(value.to_string()),
         Value::BigInt(value) => Ok(value.to_string()),
-        Value::Int128(value) => Ok(value.to_string()),
         Value::UInteger(value) => Ok(value.to_string()),
         Value::UBigInt(value) => Ok(value.to_string()),
-        Value::UInt128(value) => Ok(value.to_string()),
         Value::Float32(value) => Ok(value.to_string()),
         Value::Float(value) => Ok(value.to_string()),
         Value::Boolean(true) => Ok("TRUE".to_string()),
@@ -6301,18 +5260,11 @@ fn coerce_value_to_string(function_name: &str, value: Value) -> Result<String> {
 fn expect_text_argument(function_name: &str, value: Value) -> Result<String> {
     match value {
         Value::Text(text) => Ok(text),
-        Value::Enum(text) => Ok(text),
         Value::Decimal(text) => Ok(text.to_string()),
-        Value::Date(text) => Ok(text.to_string()),
-        Value::Time(text) => Ok(text.to_string()),
-        Value::DateTime(text) => Ok(text.to_string()),
-        Value::TimeWithTimeZone(text) => Ok(text.to_string()),
         Value::Integer(value) => Ok(value.to_string()),
         Value::BigInt(value) => Ok(value.to_string()),
-        Value::Int128(value) => Ok(value.to_string()),
         Value::UInteger(value) => Ok(value.to_string()),
         Value::UBigInt(value) => Ok(value.to_string()),
-        Value::UInt128(value) => Ok(value.to_string()),
         Value::Float32(value) => Ok(value.to_string()),
         Value::Float(value) => Ok(value.to_string()),
         value => Err(HematiteError::ParseError(format!(
@@ -6337,14 +5289,6 @@ fn expect_integer_argument(function_name: &str, value: Value, label: &str) -> Re
                 Value::BigInt(value)
             ))
         }),
-        Value::Int128(value) => i32::try_from(value).map_err(|_| {
-            HematiteError::ParseError(format!(
-                "{} {} requires a 32-bit integer value, found {:?}",
-                function_name,
-                label,
-                Value::Int128(value)
-            ))
-        }),
         Value::UInteger(value) => i32::try_from(value).map_err(|_| {
             HematiteError::ParseError(format!(
                 "{} {} requires a 32-bit integer value, found {:?}",
@@ -6361,86 +5305,11 @@ fn expect_integer_argument(function_name: &str, value: Value, label: &str) -> Re
                 Value::UBigInt(value)
             ))
         }),
-        Value::UInt128(value) => i32::try_from(value).map_err(|_| {
-            HematiteError::ParseError(format!(
-                "{} {} requires a 32-bit integer value, found {:?}",
-                function_name,
-                label,
-                Value::UInt128(value)
-            ))
-        }),
         Value::Float32(value) => Ok(value as i32),
         Value::Float(value) => Ok(value as i32),
         value => Err(HematiteError::ParseError(format!(
             "{} {} requires an integer value, found {:?}",
             function_name, label, value
-        ))),
-    }
-}
-
-fn extract_date_component(function_name: &str, value: Value) -> Result<DateValue> {
-    match value {
-        Value::Date(value) => Ok(value),
-        Value::DateTime(value) => Ok(value.components().0),
-        Value::Text(value) | Value::Enum(value) => DateValue::parse(&value)
-            .or_else(|_| DateTimeValue::parse(&value).map(|value| value.components().0))
-            .map_err(|_| {
-                HematiteError::ParseError(format!(
-                    "{} requires a DATE-like value, found '{}'",
-                    function_name, value
-                ))
-            }),
-        value => Err(HematiteError::ParseError(format!(
-            "{} requires a DATE-like value, found {:?}",
-            function_name, value
-        ))),
-    }
-}
-
-fn extract_time_component(function_name: &str, value: Value) -> Result<TimeValue> {
-    match value {
-        Value::Time(value) => Ok(value),
-        Value::TimeWithTimeZone(value) => Ok(value.time()),
-        Value::DateTime(value) => Ok(value.components().1),
-        Value::Text(value) | Value::Enum(value) => TimeValue::parse(&value)
-            .or_else(|_| TimeWithTimeZoneValue::parse(&value).map(|value| value.time()))
-            .or_else(|_| DateTimeValue::parse(&value).map(|value| value.components().1))
-            .map_err(|_| {
-                HematiteError::ParseError(format!(
-                    "{} requires a TIME-like value, found '{}'",
-                    function_name, value
-                ))
-            }),
-        value => Err(HematiteError::ParseError(format!(
-            "{} requires a TIME-like value, found {:?}",
-            function_name, value
-        ))),
-    }
-}
-
-fn extract_timestamp_component(function_name: &str, value: Value) -> Result<DateTimeValue> {
-    match value {
-        Value::DateTime(value) => Ok(value),
-        Value::Date(value) => Ok(DateTimeValue::from_seconds_since_epoch(
-            value.days_since_epoch() as i64 * 86_400,
-        )),
-        Value::Text(value) | Value::Enum(value) => DateTimeValue::parse(&value)
-            .or_else(|_| {
-                DateValue::parse(&value).map(|value| {
-                    DateTimeValue::from_seconds_since_epoch(
-                        value.days_since_epoch() as i64 * 86_400,
-                    )
-                })
-            })
-            .map_err(|_| {
-                HematiteError::ParseError(format!(
-                    "{} requires a DATETIME-like value, found '{}'",
-                    function_name, value
-                ))
-            }),
-        value => Err(HematiteError::ParseError(format!(
-            "{} requires a DATETIME-like value, found {:?}",
-            function_name, value
         ))),
     }
 }
@@ -6613,7 +5482,6 @@ fn evaluate_hex(args: Vec<Value>) -> Result<Value> {
         let bytes = match value {
             Value::Blob(bytes) => bytes,
             Value::Text(text) => text.into_bytes(),
-            Value::Enum(text) => text.into_bytes(),
             value => {
                 return Err(HematiteError::ParseError(format!(
                     "HEX requires a text or blob value, found {:?}",
@@ -6650,10 +5518,8 @@ fn evaluate_ceil(args: Vec<Value>) -> Result<Value> {
     expect_unary_numeric_function("CEIL", args, |value| match value {
         Value::Integer(value) => Ok(Value::Integer(value)),
         Value::BigInt(value) => Ok(Value::BigInt(value)),
-        Value::Int128(value) => Ok(Value::Int128(value)),
         Value::UInteger(value) => Ok(Value::UInteger(value)),
         Value::UBigInt(value) => Ok(Value::UBigInt(value)),
-        Value::UInt128(value) => Ok(Value::UInt128(value)),
         Value::Float32(value) => Ok(Value::Float32(value.ceil())),
         Value::Float(value) => Ok(Value::Float(value.ceil())),
         _ => unreachable!("validated numeric input"),
@@ -6664,10 +5530,8 @@ fn evaluate_floor(args: Vec<Value>) -> Result<Value> {
     expect_unary_numeric_function("FLOOR", args, |value| match value {
         Value::Integer(value) => Ok(Value::Integer(value)),
         Value::BigInt(value) => Ok(Value::BigInt(value)),
-        Value::Int128(value) => Ok(Value::Int128(value)),
         Value::UInteger(value) => Ok(Value::UInteger(value)),
         Value::UBigInt(value) => Ok(Value::UBigInt(value)),
-        Value::UInt128(value) => Ok(Value::UInt128(value)),
         Value::Float32(value) => Ok(Value::Float32(value.floor())),
         Value::Float(value) => Ok(Value::Float(value.floor())),
         _ => unreachable!("validated numeric input"),
@@ -6707,10 +5571,8 @@ fn round_integral_value(value: Value, precision: i32) -> Result<Value> {
     let rounded = match &value {
         Value::Integer(v) => round_float(*v as f64, precision),
         Value::BigInt(v) => round_float(*v as f64, precision),
-        Value::Int128(v) => round_float(*v as f64, precision),
         Value::UInteger(v) => round_float(*v as f64, precision),
         Value::UBigInt(v) => round_float(*v as f64, precision),
-        Value::UInt128(v) => round_float(*v as f64, precision),
         _ => unreachable!("round_integral_value called with non-integral"),
     };
     match value {
@@ -6720,17 +5582,9 @@ fn round_integral_value(value: Value, precision: i32) -> Result<Value> {
             Ok(Value::Integer(r))
         }
         Value::BigInt(_) => {
-            let r = i64::try_from(rounded as i128)
+            let r = i64::try_from(rounded as i64)
                 .map_err(|_| HematiteError::ParseError("ROUND overflowed INT64".to_string()))?;
             Ok(Value::BigInt(r))
-        }
-        Value::Int128(_) => {
-            if !rounded.is_finite() || rounded < i128::MIN as f64 || rounded > i128::MAX as f64 {
-                return Err(HematiteError::ParseError(
-                    "ROUND overflowed INT128".to_string(),
-                ));
-            }
-            Ok(Value::Int128(rounded as i128))
         }
         Value::UInteger(_) => {
             if rounded < 0.0 || rounded > u32::MAX as f64 {
@@ -6747,14 +5601,6 @@ fn round_integral_value(value: Value, precision: i32) -> Result<Value> {
                 ));
             }
             Ok(Value::UBigInt(rounded as u64))
-        }
-        Value::UInt128(_) => {
-            if !rounded.is_finite() || rounded < 0.0 || rounded > u128::MAX as f64 {
-                return Err(HematiteError::ParseError(
-                    "ROUND overflowed UINT128".to_string(),
-                ));
-            }
-            Ok(Value::UInt128(rounded as u128))
         }
         _ => unreachable!(),
     }
@@ -6774,35 +5620,10 @@ fn apply_text_comparison_context(
     value: &str,
     text_context: Option<TextComparisonContext>,
 ) -> String {
-    let mut normalized = if text_context.is_some_and(|context| context.trim_trailing_spaces) {
-        value.trim_end_matches(' ').to_string()
+    if text_context.is_some_and(|context| context.case_insensitive) {
+        value.to_lowercase()
     } else {
         value.to_string()
-    };
-
-    if text_context.is_some_and(|context| context.case_insensitive) {
-        normalized = normalized.to_lowercase();
-    }
-
-    normalized
-}
-
-fn apply_blob_comparison_context(
-    value: &[u8],
-    text_context: Option<TextComparisonContext>,
-) -> Vec<u8> {
-    if text_context.is_some_and(|context| context.trim_trailing_zero_bytes) {
-        value
-            .iter()
-            .copied()
-            .rev()
-            .skip_while(|byte| *byte == 0)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect()
-    } else {
-        value.to_vec()
     }
 }
 
@@ -6831,10 +5652,6 @@ fn sql_values_equal(
         return apply_text_comparison_context(left, text_context)
             == apply_text_comparison_context(right, text_context);
     }
-    if let (Value::Blob(left), Value::Blob(right)) = (left, right) {
-        return apply_blob_comparison_context(left, text_context)
-            == apply_blob_comparison_context(right, text_context);
-    }
 
     left == right
 }
@@ -6856,18 +5673,12 @@ fn sql_partial_cmp(
                 .cmp(&apply_text_comparison_context(right, text_context)),
         );
     }
-    if let (Value::Blob(left), Value::Blob(right)) = (left, right) {
-        return Some(
-            apply_blob_comparison_context(left, text_context)
-                .cmp(&apply_blob_comparison_context(right, text_context)),
-        );
-    }
 
     left.partial_cmp(right)
 }
 
-fn decode_signed_blob(bytes: &[u8], width: usize, target: &str) -> Result<i128> {
-    if bytes.len() > width {
+fn decode_signed_blob(bytes: &[u8], target: &str) -> Result<i64> {
+    if bytes.len() > 8 {
         return Err(HematiteError::ParseError(format!(
             "Cannot CAST blob of {} bytes AS {}",
             bytes.len(),
@@ -6880,13 +5691,13 @@ fn decode_signed_blob(bytes: &[u8], width: usize, target: &str) -> Result<i128> 
         .is_some_and(|byte| (byte & 0x80) != 0)
         .then_some(0xFF)
         .unwrap_or(0);
-    let mut extended = [fill; 16];
+    let mut extended = [fill; 8];
     extended[..bytes.len()].copy_from_slice(bytes);
-    Ok(i128::from_le_bytes(extended))
+    Ok(i64::from_le_bytes(extended))
 }
 
-fn decode_unsigned_blob(bytes: &[u8], width: usize, target: &str) -> Result<u128> {
-    if bytes.len() > width {
+fn decode_unsigned_blob(bytes: &[u8], target: &str) -> Result<u64> {
+    if bytes.len() > 8 {
         return Err(HematiteError::ParseError(format!(
             "Cannot CAST blob of {} bytes AS {}",
             bytes.len(),
@@ -6894,9 +5705,9 @@ fn decode_unsigned_blob(bytes: &[u8], width: usize, target: &str) -> Result<u128
         )));
     }
 
-    let mut extended = [0u8; 16];
+    let mut extended = [0u8; 8];
     extended[..bytes.len()].copy_from_slice(bytes);
-    Ok(u128::from_le_bytes(extended))
+    Ok(u64::from_le_bytes(extended))
 }
 
 fn sql_numeric_pair(left: &Value, right: &Value) -> Option<(f64, f64)> {
@@ -6908,10 +5719,8 @@ fn sql_decimal_cmp(left: &Value, right: &Value) -> Option<Ordering> {
         Value::Decimal(value) => value.clone(),
         Value::Integer(value) => DecimalValue::from_i32(*value),
         Value::BigInt(value) => DecimalValue::from_i64(*value),
-        Value::Int128(value) => DecimalValue::from_i128(*value),
         Value::UInteger(value) => DecimalValue::from_u32(*value),
         Value::UBigInt(value) => DecimalValue::from_u64(*value),
-        Value::UInt128(value) => DecimalValue::from_u128(*value),
         Value::Float32(value) => DecimalValue::from_f64(*value as f64).ok()?,
         Value::Float(value) => DecimalValue::from_f64(*value).ok()?,
         _ => return None,
@@ -6920,31 +5729,13 @@ fn sql_decimal_cmp(left: &Value, right: &Value) -> Option<Ordering> {
         Value::Decimal(value) => value.clone(),
         Value::Integer(value) => DecimalValue::from_i32(*value),
         Value::BigInt(value) => DecimalValue::from_i64(*value),
-        Value::Int128(value) => DecimalValue::from_i128(*value),
         Value::UInteger(value) => DecimalValue::from_u32(*value),
         Value::UBigInt(value) => DecimalValue::from_u64(*value),
-        Value::UInt128(value) => DecimalValue::from_u128(*value),
         Value::Float32(value) => DecimalValue::from_f64(*value as f64).ok()?,
         Value::Float(value) => DecimalValue::from_f64(*value).ok()?,
         _ => return None,
     };
     Some(left.cmp(&right))
-}
-
-fn validate_date_string(input: &str) -> Result<DateValue> {
-    DateValue::parse(input)
-}
-
-fn validate_time_string(input: &str) -> Result<TimeValue> {
-    TimeValue::parse(input)
-}
-
-fn validate_datetime_string(input: &str) -> Result<DateTimeValue> {
-    DateTimeValue::parse(input)
-}
-
-fn validate_time_with_time_zone_string(input: &str) -> Result<TimeWithTimeZoneValue> {
-    TimeWithTimeZoneValue::parse(input)
 }
 
 fn compare_condition_values(
@@ -7455,14 +6246,6 @@ fn evaluate_expression_generic<R: ColumnResolver>(
 ) -> Result<Value> {
     match expr {
         Expression::Literal(value) => Ok(lower_literal_value(value)),
-        Expression::IntervalLiteral { value, qualifier } => match qualifier {
-            IntervalQualifier::YearToMonth => Ok(Value::IntervalYearMonth(
-                IntervalYearMonthValue::parse(value)?,
-            )),
-            IntervalQualifier::DayToSecond => Ok(Value::IntervalDaySecond(
-                IntervalDaySecondValue::parse(value)?,
-            )),
-        },
         Expression::Parameter(index) => Err(HematiteError::ParseError(format!(
             "Unbound parameter {} reached execution",
             index + 1

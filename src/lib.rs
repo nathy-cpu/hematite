@@ -1,8 +1,8 @@
 //! Hematite is a small embeddable SQL database written in Rust.
 //!
 //! It is designed to stay lightweight enough to repurpose and extend while still offering a
-//! surprisingly broad SQL surface: DDL, transactions, views, triggers, joins, aggregates, window
-//! functions, recursive CTEs, savepoints, rich scalar expressions, and a custom type system.
+//! practical SQL surface: DDL, transactions, joins, aggregates, common table expressions,
+//! savepoints, rich scalar expressions, and a compact type system.
 //!
 //! # Quick Start
 //!

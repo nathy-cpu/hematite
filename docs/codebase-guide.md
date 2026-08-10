@@ -53,7 +53,7 @@ src/
 │   ├── ids.rs                    # TableId, ColumnId type wrappers
 │   ├── index_store.rs            # Primary key and secondary index B-tree operations
 │   ├── integrity.rs              # Catalog integrity validation
-│   ├── object.rs                 # Views, triggers, named constraints
+│   ├── object.rs                 # Named constraints
 │   ├── record.rs                 # StoredRow type definition
 │   ├── runtime_metadata.rs       # Runtime table metadata (row counts, next rowid)
 │   ├── cursor.rs                 # Table and index cursor abstractions
@@ -128,15 +128,15 @@ Compiles the AST into an execution plan and runs it.
 * **`validation.rs`**: Resolves table/column names against the schema catalog, infers and enforces SQL types, and rejects semantic invalidity.
 * **`planner.rs`**: Generates a physical execution plan, translating AST filters and projections into concrete runtime operations.
 * **`optimizer.rs` & `rewrite.rs`**: Performs rule-based optimization, constant folding, and selects scan indexes.
-* **`executor.rs`**: A volcano-style pull iterator engine. Every executor (e.g. `FilterExecutor`, `JoinExecutor`) yields rows via a `next()` pattern. It hosts expression evaluation, aggregate operators, window functions, and recursive CTE runtime.
+* **`executor.rs`**: A volcano-style pull iterator engine. Every executor (e.g. `FilterExecutor`, `JoinExecutor`) yields rows via a `next()` pattern. It hosts expression evaluation, aggregate operators, and value coercion.
 
 ### 4. Catalog Layer (`src/catalog/`)
 
 Bridges relational tables and low-level B-Tree bytes.
 
-* **`catalog.rs`**: Manages relational metadata (active tables, schema, views, triggers, and indices).
+* **`catalog.rs`**: Manages relational metadata (active tables, schema, and indices).
 * **`serialization.rs`**: Packs logical records into binary byte-arrays. It serializes data types (`Value`) using a compact, schema-defined packed representation to conserve disk space.
-* **`types.rs`**: Implements high-precision `DecimalValue` math, `DateValue`, `TimeValue`, and interval arithmetic.
+* **`types.rs`**: Defines `DataType` and `Value`, and implements high-precision `DecimalValue` math.
 
 ### 5. B-Tree Layer (`src/btree/`)
 

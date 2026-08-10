@@ -183,11 +183,6 @@ impl QueryOptimizer {
         for item in &mut select.columns {
             match item {
                 SelectItem::Expression(expr) => self.optimize_expression(expr)?,
-                SelectItem::Window { window, .. } => {
-                    for expr in &mut window.partition_by {
-                        self.optimize_expression(expr)?;
-                    }
-                }
                 SelectItem::Wildcard | SelectItem::Column(_) | SelectItem::CountAll => {}
                 SelectItem::Aggregate { .. } => {}
             }
@@ -514,10 +509,7 @@ impl QueryOptimizer {
             Expression::Exists { subquery, .. } => {
                 self.optimize_select(subquery)?;
             }
-            Expression::Column(_)
-            | Expression::Literal(_)
-            | Expression::IntervalLiteral { .. }
-            | Expression::Parameter(_) => {}
+            Expression::Column(_) | Expression::Literal(_) | Expression::Parameter(_) => {}
         }
 
         Ok(())

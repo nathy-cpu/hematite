@@ -23,9 +23,7 @@
 //!   │                    │
 //!   ├──past-end────> Invalid
 //!   │
-//!   ├──save_position──> RequireSeek ──restore_position──> Valid
-//!   │
-//!   └──error──> Fault
+//!   └──save_position──> RequireSeek ──restore_position──> Valid
 //! ```
 use std::cell::OnceCell;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
@@ -47,9 +45,6 @@ pub(crate) enum CursorState {
     Invalid,
     /// Tree was modified; cursor must be restored from saved key before use.
     RequireSeek,
-    /// Unrecoverable error occurred; all operations except `first()`/`seek()` will fail.
-    #[allow(dead_code)]
-    Fault,
 }
 
 #[derive(Debug)]
@@ -73,8 +68,6 @@ pub struct BTreeCursor {
 
 #[derive(Debug, Clone)]
 struct CursorFrame {
-    #[allow(dead_code)]
-    page_id: PageId,
     node: BTreeNode,
     index: usize,
 }
@@ -188,9 +181,6 @@ impl BTreeCursor {
             }
             CursorState::Valid => Ok(()),
             CursorState::Invalid => Ok(()),
-            CursorState::Fault => Err(HematiteError::InternalError(
-                "Cursor is in fault state and cannot be restored".to_string(),
-            )),
         }
     }
 
@@ -282,11 +272,7 @@ impl BTreeCursor {
                 match node.node_type {
                     NodeType::Leaf => {
                         let index = node.lower_bound_index(key)?;
-                        let frame = CursorFrame {
-                            page_id: current_page_id,
-                            node,
-                            index,
-                        };
+                        let frame = CursorFrame { node, index };
                         let reached_end = index >= frame.node.key_count;
                         frames.push(frame);
                         break reached_end;
@@ -295,7 +281,6 @@ impl BTreeCursor {
                         let child_index = node.upper_bound_index(key)?;
                         let next_child = node.get_child_procedural(child_index)?;
                         frames.push(CursorFrame {
-                            page_id: current_page_id,
                             node,
                             index: child_index,
                         });
@@ -462,11 +447,7 @@ impl BTreeCursor {
                 }
             };
 
-            frames.push(CursorFrame {
-                page_id: current_page_id,
-                node,
-                index: 0,
-            });
+            frames.push(CursorFrame { node, index: 0 });
 
             if let Some(next_child) = next_child {
                 current_page_id = next_child;
@@ -506,11 +487,7 @@ impl BTreeCursor {
                 }
             };
 
-            frames.push(CursorFrame {
-                page_id: current_page_id,
-                node,
-                index,
-            });
+            frames.push(CursorFrame { node, index });
 
             if let Some(next_child) = next_child {
                 current_page_id = next_child;

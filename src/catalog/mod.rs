@@ -37,12 +37,9 @@ pub use engine::{
 };
 pub use header::DatabaseHeader;
 pub use ids::{ColumnId, TableId};
-pub use object::{NamedConstraint, NamedConstraintKind, Trigger, TriggerEvent, View};
+pub use object::{NamedConstraint, NamedConstraintKind};
 pub use record::StoredRow;
 pub use schema::Schema;
 pub use serialization::{IndexKeyCodec, RowCodec, RowSerializer};
 pub use table::{SecondaryIndex, Table};
-pub use types::{
-    DataType, DateTimeValue, DateValue, DecimalValue, IntervalDaySecondValue,
-    IntervalYearMonthValue, JournalMode, TimeValue, TimeWithTimeZoneValue, Value,
-};
+pub use types::{DataType, DecimalValue, JournalMode, Value};

@@ -1,8 +1,8 @@
 //! # SQL Session Connection and Transaction Coordinator (`connection`)
 //!
 //! The Connection module acts as the entry-point facade for client sessions. It coordinates statement
-//! parsing, query planning/execution, autocommit boundaries, explicit transaction states, savepoint stacks,
-//! and view expansion.
+//! parsing, query planning/execution, autocommit boundaries, explicit transaction states, and savepoint
+//! stacks.
 //!
 //! ---
 //!
@@ -34,12 +34,6 @@
 //! transaction stack back to that saved state, reverting B-Tree mutations and schema updates made since the
 //! savepoint was established.
 //!
-//! ### View Resolution
-//! Views are logical virtual tables defined by SELECT statements. Since views do not store data physically, the
-//! connection resolves view references during planning. It intercepts table references in the AST, identifies
-//! views registered in the Catalog, and replaces the view reference with a derived table containing the view's
-//! underlying subquery before planning.
-//!
 //! ---
 //!
 //! ## 2. SQL Statement Processing Pipeline
@@ -50,7 +44,7 @@
 //!                       Connection::execute()
 //!                              v
 //!                      +-------+-------+
-//!                      |   SQL Parser  | <---+ Expands view references in AST
+//!                      |   SQL Parser  | <---+ Builds the logical AST
 //!                      +-------+-------+
 //!                              | AST
 //!                              v
@@ -113,17 +107,16 @@
 
 use crate::error::{HematiteError, Result};
 use crate::parser::ast::{
-    ColumnDefinition, CreateStatement, CreateViewStatement, Expression, InsertSource,
-    InsertStatement, SelectIntoStatement, SelectStatement, Statement, TableReference, TriggerEvent,
-    WhereClause,
+    ColumnDefinition, CreateStatement, Expression, InsertSource, InsertStatement,
+    SelectIntoStatement, SelectStatement, Statement, TableReference,
 };
 use crate::parser::{parse_sql_statement, SqlTypeName};
 use crate::query::lowering::raise_literal_value;
 use crate::query::metadata as query_metadata;
-use crate::query::validation::{projected_column_names, source_column_names, validate_statement};
+use crate::query::validation::{source_column_names, validate_statement};
 use crate::query::{
-    Catalog, CatalogEngine, ExecutionContext, JournalMode, MutationEvent, QueryCatalogSnapshot,
-    QueryExecutor, QueryPlanner, QueryResult, Schema, Value,
+    Catalog, CatalogEngine, ExecutionContext, JournalMode, QueryCatalogSnapshot, QueryExecutor,
+    QueryPlanner, QueryResult, Schema, Value,
 };
 use crate::sql::result::ExecutedStatement;
 use crate::sql::script::{split_script_tokens, ScriptIter};
@@ -201,7 +194,6 @@ impl ImplicitMutation {
 pub struct Connection {
     catalog: Arc<Mutex<Catalog>>,
     transaction: Option<ConnectionTransaction>,
-    trigger_depth: usize,
 }
 
 impl Connection {
@@ -269,10 +261,8 @@ impl Connection {
         enum NumericKind {
             Int,
             Int64,
-            Int128,
             UInt,
             UInt64,
-            UInt128,
             Float32,
             Float,
             Decimal,
@@ -281,13 +271,9 @@ impl Connection {
         #[derive(Debug, Clone)]
         enum InferredKind {
             Numeric(NumericKind),
-            String { saw_enum: bool, values: Vec<String> },
+            String,
             Boolean,
             Blob,
-            Date,
-            Time,
-            DateTime,
-            TimeWithTimeZone,
         }
 
         impl InferredKind {
@@ -296,124 +282,59 @@ impl Connection {
                 use NumericKind::*;
                 match (self, value) {
                     (kind, Value::Null) => Ok(kind),
-                    (_, Value::IntervalYearMonth(_)) | (_, Value::IntervalDaySecond(_)) => {
-                        Err(HematiteError::ParseError(format!(
-                            "SELECT INTO cannot infer a stored column type for interval-valued column '{}'",
-                            column_name
-                        )))
-                    }
                     (Numeric(Int), Value::Integer(_)) => Ok(Numeric(Int)),
                     (Numeric(Int), Value::BigInt(_))
                     | (Numeric(Int64), Value::Integer(_))
                     | (Numeric(Int64), Value::BigInt(_)) => Ok(Numeric(Int64)),
-                    (Numeric(Int), Value::Int128(_))
-                    | (Numeric(Int64), Value::Int128(_))
-                    | (Numeric(Int128), Value::Integer(_))
-                    | (Numeric(Int128), Value::BigInt(_))
-                    | (Numeric(Int128), Value::Int128(_)) => Ok(Numeric(Int128)),
                     (Numeric(UInt), Value::UInteger(_)) => Ok(Numeric(UInt)),
                     (Numeric(UInt), Value::UBigInt(_))
                     | (Numeric(UInt64), Value::UInteger(_))
                     | (Numeric(UInt64), Value::UBigInt(_)) => Ok(Numeric(UInt64)),
-                    (Numeric(UInt), Value::UInt128(_))
-                    | (Numeric(UInt64), Value::UInt128(_))
-                    | (Numeric(UInt128), Value::UInteger(_))
-                    | (Numeric(UInt128), Value::UBigInt(_))
-                    | (Numeric(UInt128), Value::UInt128(_)) => Ok(Numeric(UInt128)),
                     (Numeric(Int), Value::UInteger(_))
                     | (Numeric(Int64), Value::UInteger(_))
-                    | (Numeric(Int128), Value::UInteger(_))
                     | (Numeric(UInt), Value::Integer(_))
                     | (Numeric(UInt), Value::BigInt(_))
-                    | (Numeric(UInt), Value::Int128(_))
                     | (Numeric(UInt64), Value::Integer(_))
                     | (Numeric(UInt64), Value::BigInt(_))
-                    | (Numeric(UInt64), Value::Int128(_))
-                    | (Numeric(UInt128), Value::Integer(_))
-                    | (Numeric(UInt128), Value::BigInt(_))
-                    | (Numeric(UInt128), Value::Int128(_))
                     | (Numeric(Int64), Value::UBigInt(_))
-                    | (Numeric(Int128), Value::UBigInt(_))
-                    | (Numeric(Int128), Value::UInt128(_))
+                    | (Numeric(Int), Value::UBigInt(_))
                     => Ok(Numeric(Decimal)),
                     (Numeric(Int), Value::Float32(_))
                     | (Numeric(Int64), Value::Float32(_))
-                    | (Numeric(Int128), Value::Float32(_))
                     | (Numeric(UInt), Value::Float32(_))
                     | (Numeric(UInt64), Value::Float32(_))
-                    | (Numeric(UInt128), Value::Float32(_))
                     | (Numeric(Float32), Value::Integer(_))
                     | (Numeric(Float32), Value::BigInt(_))
-                    | (Numeric(Float32), Value::Int128(_))
                     | (Numeric(Float32), Value::UInteger(_))
                     | (Numeric(Float32), Value::UBigInt(_))
-                    | (Numeric(Float32), Value::UInt128(_))
                     | (Numeric(Float32), Value::Float32(_)) => Ok(Numeric(Float32)),
                     (Numeric(Int), Value::Float(_))
                     | (Numeric(Int64), Value::Float(_))
-                    | (Numeric(Int128), Value::Float(_))
                     | (Numeric(UInt), Value::Float(_))
                     | (Numeric(UInt64), Value::Float(_))
-                    | (Numeric(UInt128), Value::Float(_))
                     | (Numeric(Float32), Value::Float(_))
                     | (Numeric(Float), Value::Integer(_))
                     | (Numeric(Float), Value::BigInt(_))
-                    | (Numeric(Float), Value::Int128(_))
                     | (Numeric(Float), Value::UInteger(_))
                     | (Numeric(Float), Value::UBigInt(_))
-                    | (Numeric(Float), Value::UInt128(_))
                     | (Numeric(Float), Value::Float32(_))
                     | (Numeric(Float), Value::Float(_)) => Ok(Numeric(Float)),
                     (Numeric(Int), Value::Decimal(_))
                     | (Numeric(Int64), Value::Decimal(_))
-                    | (Numeric(Int128), Value::Decimal(_))
                     | (Numeric(UInt), Value::Decimal(_))
                     | (Numeric(UInt64), Value::Decimal(_))
-                    | (Numeric(UInt128), Value::Decimal(_))
                     | (Numeric(Float32), Value::Decimal(_))
                     | (Numeric(Float), Value::Decimal(_))
                     | (Numeric(Decimal), Value::Integer(_))
                     | (Numeric(Decimal), Value::BigInt(_))
-                    | (Numeric(Decimal), Value::Int128(_))
                     | (Numeric(Decimal), Value::UInteger(_))
                     | (Numeric(Decimal), Value::UBigInt(_))
-                    | (Numeric(Decimal), Value::UInt128(_))
                     | (Numeric(Decimal), Value::Float32(_))
                     | (Numeric(Decimal), Value::Float(_))
                     | (Numeric(Decimal), Value::Decimal(_)) => Ok(Numeric(Decimal)),
-                    (
-                        String {
-                            saw_enum,
-                            mut values,
-                        },
-                        Value::Text(text),
-                    ) => {
-                        if !values.iter().any(|candidate| candidate == text) {
-                            values.push(text.clone());
-                        }
-                        Ok(String { saw_enum, values })
-                    }
-                    (
-                        String {
-                            saw_enum: _,
-                            mut values,
-                        },
-                        Value::Enum(text),
-                    ) => {
-                        if !values.iter().any(|candidate| candidate == text) {
-                            values.push(text.clone());
-                        }
-                        Ok(String {
-                            saw_enum: true,
-                            values,
-                        })
-                    }
+                    (String, Value::Text(_)) => Ok(String),
                     (Blob, Value::Blob(_)) => Ok(Blob),
                     (Blob, Value::Text(_)) => Ok(Blob),
-                    (Date, Value::Date(_)) => Ok(Date),
-                    (Time, Value::Time(_)) => Ok(Time),
-                    (DateTime, Value::DateTime(_)) => Ok(DateTime),
-                    (TimeWithTimeZone, Value::TimeWithTimeZone(_)) => Ok(TimeWithTimeZone),
                     (Boolean, Value::Boolean(_)) => Ok(Boolean),
                     (left, right) => Err(HematiteError::ParseError(format!(
                         "SELECT INTO cannot infer a stable column type for '{}': {:?} cannot be combined with {:?}",
@@ -422,40 +343,21 @@ impl Connection {
                 }
             }
 
-            fn from_value(value: &Value, column_name: &str) -> Result<Option<Self>> {
+            fn from_value(value: &Value, _column_name: &str) -> Result<Option<Self>> {
                 use InferredKind::*;
                 use NumericKind::*;
                 let inferred = match value {
                     Value::Null => return Ok(None),
                     Value::Integer(_) => Numeric(Int),
                     Value::BigInt(_) => Numeric(Int64),
-                    Value::Int128(_) => Numeric(Int128),
                     Value::UInteger(_) => Numeric(UInt),
                     Value::UBigInt(_) => Numeric(UInt64),
-                    Value::UInt128(_) => Numeric(UInt128),
                     Value::Float32(_) => Numeric(Float32),
                     Value::Float(_) => Numeric(Float),
                     Value::Decimal(_) => Numeric(Decimal),
-                    Value::Text(text) => String {
-                        saw_enum: false,
-                        values: vec![text.clone()],
-                    },
-                    Value::Enum(text) => String {
-                        saw_enum: true,
-                        values: vec![text.clone()],
-                    },
+                    Value::Text(_) => String,
                     Value::Boolean(_) => Boolean,
                     Value::Blob(_) => Blob,
-                    Value::Date(_) => Date,
-                    Value::Time(_) => Time,
-                    Value::DateTime(_) => DateTime,
-                    Value::TimeWithTimeZone(_) => TimeWithTimeZone,
-                    Value::IntervalYearMonth(_) | Value::IntervalDaySecond(_) => {
-                        return Err(HematiteError::ParseError(format!(
-                            "SELECT INTO cannot infer a stored column type for interval-valued column '{}'",
-                            column_name
-                        )))
-                    }
                 };
                 Ok(Some(inferred))
             }
@@ -464,27 +366,17 @@ impl Connection {
                 match self {
                     InferredKind::Numeric(NumericKind::Int) => SqlTypeName::Int,
                     InferredKind::Numeric(NumericKind::Int64) => SqlTypeName::Int64,
-                    InferredKind::Numeric(NumericKind::Int128) => SqlTypeName::Int128,
                     InferredKind::Numeric(NumericKind::UInt) => SqlTypeName::UInt,
                     InferredKind::Numeric(NumericKind::UInt64) => SqlTypeName::UInt64,
-                    InferredKind::Numeric(NumericKind::UInt128) => SqlTypeName::UInt128,
                     InferredKind::Numeric(NumericKind::Float32) => SqlTypeName::Float32,
                     InferredKind::Numeric(NumericKind::Float) => SqlTypeName::Float,
                     InferredKind::Numeric(NumericKind::Decimal) => SqlTypeName::Decimal {
                         precision: None,
                         scale: None,
                     },
-                    InferredKind::String {
-                        saw_enum: true,
-                        values,
-                    } => SqlTypeName::Enum(values),
-                    InferredKind::String { .. } => SqlTypeName::Text,
+                    InferredKind::String => SqlTypeName::Text,
                     InferredKind::Boolean => SqlTypeName::Boolean,
                     InferredKind::Blob => SqlTypeName::Blob,
-                    InferredKind::Date => SqlTypeName::Date,
-                    InferredKind::Time => SqlTypeName::Time,
-                    InferredKind::DateTime => SqlTypeName::DateTime,
-                    InferredKind::TimeWithTimeZone => SqlTypeName::TimeWithTimeZone,
                 }
             }
         }
@@ -554,18 +446,15 @@ impl Connection {
         Ok(Self {
             catalog: Arc::new(Mutex::new(catalog)),
             transaction: None,
-            trigger_depth: 0,
         })
     }
 
     /// Open a file-based connection with an explicit page-cache capacity (in pages).
     pub fn with_cache_capacity(database_path: &str, cache_capacity: usize) -> Result<Self> {
-        let catalog =
-            Catalog::open_or_create_with_cache_capacity(database_path, cache_capacity)?;
+        let catalog = Catalog::open_or_create_with_cache_capacity(database_path, cache_capacity)?;
         Ok(Self {
             catalog: Arc::new(Mutex::new(catalog)),
             transaction: None,
-            trigger_depth: 0,
         })
     }
 
@@ -574,7 +463,6 @@ impl Connection {
         Ok(Self {
             catalog: Arc::new(Mutex::new(catalog)),
             transaction: None,
-            trigger_depth: 0,
         })
     }
 
@@ -582,199 +470,7 @@ impl Connection {
         parse_sql_statement(sql)
     }
 
-    fn parse_select_sql(sql: &str) -> Result<SelectStatement> {
-        match Self::parse_statement(&format!("{sql};"))? {
-            Statement::Select(select) => Ok(select),
-            other => Err(HematiteError::ParseError(format!(
-                "Expected stored view query to be SELECT, found {:?}",
-                other
-            ))),
-        }
-    }
-
-    fn expand_views_in_statement(statement: Statement, schema: &Schema) -> Result<Statement> {
-        match statement {
-            Statement::Explain(explain) => {
-                Ok(Statement::Explain(crate::parser::ast::ExplainStatement {
-                    statement: Box::new(Self::expand_views_in_statement(
-                        *explain.statement,
-                        schema,
-                    )?),
-                }))
-            }
-            Statement::Select(select) => Ok(Statement::Select(Self::expand_views_in_select(
-                select, schema,
-            )?)),
-            Statement::Insert(mut insert) => {
-                if let InsertSource::Select(select) = insert.source {
-                    insert.source = InsertSource::Select(Box::new(Self::expand_views_in_select(
-                        *select, schema,
-                    )?));
-                }
-                Ok(Statement::Insert(insert))
-            }
-            Statement::CreateView(mut create_view) => {
-                create_view.query = Self::expand_views_in_select(create_view.query, schema)?;
-                Ok(Statement::CreateView(create_view))
-            }
-            other => Ok(other),
-        }
-    }
-
-    fn expand_views_in_select(
-        mut select: SelectStatement,
-        schema: &Schema,
-    ) -> Result<SelectStatement> {
-        for cte in &mut select.with_clause {
-            cte.query = Box::new(Self::expand_views_in_select((*cte.query).clone(), schema)?);
-        }
-        let original_from = select.from.clone();
-        let select_context = select.clone();
-        select.from =
-            Self::expand_views_in_table_reference(original_from, &select_context, schema)?;
-        if let Some(where_clause) = &mut select.where_clause {
-            Self::expand_views_in_where_clause(where_clause, schema)?;
-        }
-        for expr in &mut select.group_by {
-            Self::expand_views_in_expression(expr, schema)?;
-        }
-        if let Some(having_clause) = &mut select.having_clause {
-            Self::expand_views_in_where_clause(having_clause, schema)?;
-        }
-        if let Some(set_operation) = &mut select.set_operation {
-            set_operation.right = Box::new(Self::expand_views_in_select(
-                (*set_operation.right).clone(),
-                schema,
-            )?);
-        }
-        for item in &mut select.columns {
-            if let crate::parser::ast::SelectItem::Expression(expr) = item {
-                Self::expand_views_in_expression(expr, schema)?;
-            }
-        }
-        Ok(select)
-    }
-
-    fn expand_views_in_table_reference(
-        from: TableReference,
-        select: &SelectStatement,
-        schema: &Schema,
-    ) -> Result<TableReference> {
-        match from {
-            TableReference::Table(table_name, alias) => {
-                if select.lookup_cte(&table_name).is_some()
-                    || schema.get_table_by_name(&table_name).is_some()
-                {
-                    Ok(TableReference::Table(table_name, alias))
-                } else if let Some(view) = schema.view(&table_name) {
-                    let subquery = Self::expand_views_in_select(
-                        Self::parse_select_sql(&view.query_sql)?,
-                        schema,
-                    )?;
-                    Ok(TableReference::Derived {
-                        subquery: Box::new(subquery),
-                        alias: alias.unwrap_or(table_name),
-                    })
-                } else {
-                    Ok(TableReference::Table(table_name, alias))
-                }
-            }
-            TableReference::Derived { subquery, alias } => Ok(TableReference::Derived {
-                subquery: Box::new(Self::expand_views_in_select(*subquery, schema)?),
-                alias,
-            }),
-            TableReference::CrossJoin(left, right) => Ok(TableReference::CrossJoin(
-                Box::new(Self::expand_views_in_table_reference(
-                    *left, select, schema,
-                )?),
-                Box::new(Self::expand_views_in_table_reference(
-                    *right, select, schema,
-                )?),
-            )),
-            TableReference::InnerJoin {
-                left,
-                right,
-                mut on,
-            } => {
-                Self::expand_views_in_expression(&mut on, schema)?;
-                Ok(TableReference::InnerJoin {
-                    left: Box::new(Self::expand_views_in_table_reference(
-                        *left, select, schema,
-                    )?),
-                    right: Box::new(Self::expand_views_in_table_reference(
-                        *right, select, schema,
-                    )?),
-                    on,
-                })
-            }
-            TableReference::LeftJoin {
-                left,
-                right,
-                mut on,
-            } => {
-                Self::expand_views_in_expression(&mut on, schema)?;
-                Ok(TableReference::LeftJoin {
-                    left: Box::new(Self::expand_views_in_table_reference(
-                        *left, select, schema,
-                    )?),
-                    right: Box::new(Self::expand_views_in_table_reference(
-                        *right, select, schema,
-                    )?),
-                    on,
-                })
-            }
-            TableReference::RightJoin {
-                left,
-                right,
-                mut on,
-            } => {
-                Self::expand_views_in_expression(&mut on, schema)?;
-                Ok(TableReference::RightJoin {
-                    left: Box::new(Self::expand_views_in_table_reference(
-                        *left, select, schema,
-                    )?),
-                    right: Box::new(Self::expand_views_in_table_reference(
-                        *right, select, schema,
-                    )?),
-                    on,
-                })
-            }
-            TableReference::FullOuterJoin {
-                left,
-                right,
-                mut on,
-            } => {
-                Self::expand_views_in_expression(&mut on, schema)?;
-                Ok(TableReference::FullOuterJoin {
-                    left: Box::new(Self::expand_views_in_table_reference(
-                        *left, select, schema,
-                    )?),
-                    right: Box::new(Self::expand_views_in_table_reference(
-                        *right, select, schema,
-                    )?),
-                    on,
-                })
-            }
-        }
-    }
-
-    fn expand_views_in_where_clause(where_clause: &mut WhereClause, schema: &Schema) -> Result<()> {
-        for condition in &mut where_clause.conditions {
-            Self::expand_views_in_expression(condition, schema)?;
-        }
-        Ok(())
-    }
-
-    fn expand_views_in_expression(expr: &mut Expression, schema: &Schema) -> Result<()> {
-        let mut expand = |subquery: &mut SelectStatement| -> Result<()> {
-            *subquery = Self::expand_views_in_select(subquery.clone(), schema)?;
-            Ok(())
-        };
-        Self::rewrite_nested_subqueries_in_expression(expr, &mut expand)
-    }
-
-    fn normalize_statement(statement: Statement, schema: &Schema) -> Result<Statement> {
-        let mut statement = Self::expand_views_in_statement(statement, schema)?;
+    fn normalize_statement(mut statement: Statement, schema: &Schema) -> Result<Statement> {
         Self::rewrite_select_aliases_in_statement(&mut statement, schema)?;
         Ok(statement)
     }
@@ -794,9 +490,6 @@ impl Connection {
                 }
                 Ok(())
             }
-            Statement::CreateView(create_view) => {
-                Self::rewrite_select_aliases_in_select(&mut create_view.query, schema)
-            }
             _ => Ok(()),
         }
     }
@@ -806,9 +499,7 @@ impl Connection {
         schema: &Schema,
     ) -> Result<()> {
         for cte in &mut select.with_clause {
-            if !cte.recursive {
-                Self::rewrite_select_aliases_in_select(&mut cte.query, schema)?;
-            }
+            Self::rewrite_select_aliases_in_select(&mut cte.query, schema)?;
         }
 
         Self::rewrite_select_aliases_in_table_reference(&mut select.from, schema)?;
@@ -817,11 +508,6 @@ impl Connection {
             match item {
                 crate::parser::ast::SelectItem::Expression(expr) => {
                     Self::rewrite_nested_select_aliases_in_expression(expr, schema)?;
-                }
-                crate::parser::ast::SelectItem::Window { window, .. } => {
-                    for expr in &mut window.partition_by {
-                        Self::rewrite_nested_select_aliases_in_expression(expr, schema)?;
-                    }
                 }
                 crate::parser::ast::SelectItem::Wildcard
                 | crate::parser::ast::SelectItem::Column(_)
@@ -966,7 +652,6 @@ impl Connection {
             Expression::AggregateCall { .. }
             | Expression::Column(_)
             | Expression::Literal(_)
-            | Expression::IntervalLiteral { .. }
             | Expression::Parameter(_) => Ok(()),
         }
     }
@@ -1147,7 +832,6 @@ impl Connection {
             | Expression::InSubquery { .. }
             | Expression::Exists { .. }
             | Expression::Literal(_)
-            | Expression::IntervalLiteral { .. }
             | Expression::Parameter(_) => {}
         }
         Ok(())
@@ -1191,36 +875,14 @@ impl Connection {
             crate::parser::ast::Statement::ShowTables => {
                 return self.execute_show_tables_statement();
             }
-            crate::parser::ast::Statement::ShowViews => {
-                return self.execute_show_views_statement();
-            }
             crate::parser::ast::Statement::ShowIndexes(table_name) => {
                 return self.execute_show_indexes_statement(table_name.as_deref());
-            }
-            crate::parser::ast::Statement::ShowTriggers(table_name) => {
-                return self.execute_show_triggers_statement(table_name.as_deref());
             }
             crate::parser::ast::Statement::ShowCreateTable(table_name) => {
                 return self.execute_show_create_table_statement(&table_name);
             }
-            crate::parser::ast::Statement::ShowCreateView(view_name) => {
-                return self.execute_show_create_view_statement(&view_name);
-            }
             crate::parser::ast::Statement::SelectInto(select_into) => {
                 return self.execute_select_into_statement(select_into);
-            }
-            crate::parser::ast::Statement::CreateView(create_view) => {
-                return self.execute_create_view_statement(create_view);
-            }
-            crate::parser::ast::Statement::DropView(drop_view) => {
-                return self.execute_drop_view_statement(&drop_view.view, drop_view.if_exists);
-            }
-            crate::parser::ast::Statement::CreateTrigger(create_trigger) => {
-                return self.execute_create_trigger_statement(create_trigger);
-            }
-            crate::parser::ast::Statement::DropTrigger(drop_trigger) => {
-                return self
-                    .execute_drop_trigger_statement(&drop_trigger.trigger, drop_trigger.if_exists);
             }
             _ => {}
         }
@@ -1243,7 +905,6 @@ impl Connection {
             other => other,
         };
         let (schema, table_row_counts) = self.read_planning_state()?;
-        let statement = Self::expand_views_in_statement(statement, &schema)?;
         let planner = QueryPlanner::new(schema).with_table_row_counts(table_row_counts);
         let plan = planner.plan(statement)?;
         Ok(QueryResult {
@@ -1272,19 +933,9 @@ impl Connection {
         query_metadata::show_tables(&catalog_guard)
     }
 
-    fn execute_show_views_statement(&mut self) -> Result<QueryResult> {
-        let catalog_guard = self.lock_catalog()?;
-        query_metadata::show_views(&catalog_guard)
-    }
-
     fn execute_show_indexes_statement(&mut self, table_name: Option<&str>) -> Result<QueryResult> {
         let catalog_guard = self.lock_catalog()?;
         query_metadata::show_indexes(&catalog_guard, table_name)
-    }
-
-    fn execute_show_triggers_statement(&mut self, table_name: Option<&str>) -> Result<QueryResult> {
-        let catalog_guard = self.lock_catalog()?;
-        query_metadata::show_triggers(&catalog_guard, table_name)
     }
 
     fn execute_show_create_table_statement(&mut self, table_name: &str) -> Result<QueryResult> {
@@ -1292,19 +943,12 @@ impl Connection {
         query_metadata::show_create_table(&catalog_guard, table_name)
     }
 
-    fn execute_show_create_view_statement(&mut self, view_name: &str) -> Result<QueryResult> {
-        let catalog_guard = self.lock_catalog()?;
-        query_metadata::show_create_view(&catalog_guard, view_name)
-    }
-
     fn execute_select_into_statement(
         &mut self,
         statement: SelectIntoStatement,
     ) -> Result<QueryResult> {
         let (schema, _) = self.read_planning_state()?;
-        if schema.get_table_by_name(&statement.table).is_some()
-            || schema.view(&statement.table).is_some()
-        {
+        if schema.get_table_by_name(&statement.table).is_some() {
             return Err(HematiteError::ParseError(format!(
                 "Table '{}' already exists",
                 statement.table
@@ -1386,193 +1030,6 @@ impl Connection {
         }
     }
 
-    fn execute_create_view_statement(
-        &mut self,
-        statement: crate::parser::ast::CreateViewStatement,
-    ) -> Result<QueryResult> {
-        let mut implicit_mutation = Some(ImplicitMutation::begin(self)?);
-        let result: Result<QueryResult> = (|| {
-            let mut catalog_guard = self.lock_catalog()?;
-            let schema = catalog_guard.clone_schema();
-            let dependencies = statement.query.dependency_names();
-            if dependencies
-                .iter()
-                .any(|dependency| dependency.eq_ignore_ascii_case(&statement.view))
-            {
-                return Err(HematiteError::ParseError(format!(
-                    "View '{}' cannot depend on itself",
-                    statement.view
-                )));
-            }
-            let normalized_query = match Self::normalize_statement(
-                Statement::Select(statement.query.clone()),
-                &schema,
-            )? {
-                Statement::Select(select) => select,
-                _ => unreachable!("normalized create view query should remain a select"),
-            };
-            validate_statement(
-                &crate::parser::ast::Statement::CreateView(CreateViewStatement {
-                    view: statement.view.clone(),
-                    if_not_exists: statement.if_not_exists,
-                    query: normalized_query.clone(),
-                }),
-                &schema,
-            )?;
-
-            if statement.if_not_exists && catalog_guard.get_view(&statement.view)?.is_some() {
-                Ok(Self::mutation_result(0))
-            } else {
-                let column_names = projected_column_names(&normalized_query, &schema)?;
-
-                catalog_guard.create_view(crate::catalog::View {
-                    name: statement.view.clone(),
-                    query_sql: statement.query.to_sql(),
-                    column_names,
-                    dependencies,
-                })?;
-                Ok(Self::mutation_result(0))
-            }
-        })();
-
-        match result {
-            Ok(result) => {
-                implicit_mutation
-                    .take()
-                    .expect("implicit mutation should be present")
-                    .commit(self)?;
-                Ok(result)
-            }
-            Err(err) => {
-                implicit_mutation
-                    .take()
-                    .expect("implicit mutation should be present")
-                    .rollback(self)?;
-                Err(err)
-            }
-        }
-    }
-
-    fn execute_drop_view_statement(
-        &mut self,
-        view_name: &str,
-        if_exists: bool,
-    ) -> Result<QueryResult> {
-        let mut implicit_mutation = Some(ImplicitMutation::begin(self)?);
-        let result: Result<QueryResult> = (|| {
-            let mut catalog_guard = self.lock_catalog()?;
-            if if_exists && catalog_guard.get_view(view_name)?.is_none() {
-                Ok(Self::mutation_result(0))
-            } else {
-                catalog_guard.drop_view(view_name)?;
-                Ok(Self::mutation_result(0))
-            }
-        })();
-
-        match result {
-            Ok(result) => {
-                implicit_mutation
-                    .take()
-                    .expect("implicit mutation should be present")
-                    .commit(self)?;
-                Ok(result)
-            }
-            Err(err) => {
-                implicit_mutation
-                    .take()
-                    .expect("implicit mutation should be present")
-                    .rollback(self)?;
-                Err(err)
-            }
-        }
-    }
-
-    fn execute_create_trigger_statement(
-        &mut self,
-        statement: crate::parser::ast::CreateTriggerStatement,
-    ) -> Result<QueryResult> {
-        let mut implicit_mutation = Some(ImplicitMutation::begin(self)?);
-        let result: Result<QueryResult> = (|| {
-            let mut catalog_guard = self.lock_catalog()?;
-            let schema = catalog_guard.clone_schema();
-            validate_statement(
-                &crate::parser::ast::Statement::CreateTrigger(statement.clone()),
-                &schema,
-            )?;
-
-            catalog_guard.create_trigger(crate::catalog::Trigger {
-                name: statement.trigger.clone(),
-                table_name: statement.table.clone(),
-                event: match statement.event {
-                    TriggerEvent::Insert => crate::catalog::TriggerEvent::Insert,
-                    TriggerEvent::Update => crate::catalog::TriggerEvent::Update,
-                    TriggerEvent::Delete => crate::catalog::TriggerEvent::Delete,
-                },
-                body_sql: statement.body.to_sql(),
-                old_alias: match statement.event {
-                    TriggerEvent::Insert => None,
-                    TriggerEvent::Update | TriggerEvent::Delete => Some("OLD".to_string()),
-                },
-                new_alias: match statement.event {
-                    TriggerEvent::Delete => None,
-                    TriggerEvent::Insert | TriggerEvent::Update => Some("NEW".to_string()),
-                },
-            })?;
-            Ok(Self::mutation_result(0))
-        })();
-
-        match result {
-            Ok(result) => {
-                implicit_mutation
-                    .take()
-                    .expect("implicit mutation should be present")
-                    .commit(self)?;
-                Ok(result)
-            }
-            Err(err) => {
-                implicit_mutation
-                    .take()
-                    .expect("implicit mutation should be present")
-                    .rollback(self)?;
-                Err(err)
-            }
-        }
-    }
-
-    fn execute_drop_trigger_statement(
-        &mut self,
-        trigger_name: &str,
-        if_exists: bool,
-    ) -> Result<QueryResult> {
-        let mut implicit_mutation = Some(ImplicitMutation::begin(self)?);
-        let result: Result<QueryResult> = (|| {
-            let mut catalog_guard = self.lock_catalog()?;
-            if if_exists && catalog_guard.get_trigger(trigger_name)?.is_none() {
-                Ok(Self::mutation_result(0))
-            } else {
-                catalog_guard.drop_trigger(trigger_name)?;
-                Ok(Self::mutation_result(0))
-            }
-        })();
-
-        match result {
-            Ok(result) => {
-                implicit_mutation
-                    .take()
-                    .expect("implicit mutation should be present")
-                    .commit(self)?;
-                Ok(result)
-            }
-            Err(err) => {
-                implicit_mutation
-                    .take()
-                    .expect("implicit mutation should be present")
-                    .rollback(self)?;
-                Err(err)
-            }
-        }
-    }
-
     pub(crate) fn execute_statement_result(
         &mut self,
         statement: crate::parser::ast::Statement,
@@ -1623,12 +1080,12 @@ impl Connection {
             catalog_guard.with_engine(|engine| {
                 let mut ctx = ExecutionContext::for_mutation(&schema, engine);
                 let result = executor.execute(&mut ctx)?;
-                Ok((result, ctx.catalog, ctx.mutation_events))
+                Ok((result, ctx.catalog))
             })
         };
 
         match execution_result {
-            Ok((result, updated_schema, mutation_events)) => {
+            Ok((result, updated_schema)) => {
                 if persists_schema {
                     let mut catalog_guard = self.lock_catalog()?;
                     if let Err(err) = catalog_guard.replace_schema(updated_schema) {
@@ -1638,13 +1095,6 @@ impl Connection {
                         }
                         return Err(err);
                     }
-                }
-
-                if let Err(err) = self.fire_triggers(mutation_events) {
-                    if let Some(implicit_mutation) = implicit_mutation.take() {
-                        implicit_mutation.rollback(self)?;
-                    }
-                    return Err(err);
                 }
 
                 if let Some(implicit_mutation) = implicit_mutation.take() {
@@ -1687,96 +1137,6 @@ impl Connection {
             .iter()
             .map(|(name, metadata)| (name.clone(), metadata.row_count as usize))
             .collect()
-    }
-
-    fn fire_triggers(&mut self, mutation_events: Vec<MutationEvent>) -> Result<()> {
-        if mutation_events.is_empty() {
-            return Ok(());
-        }
-
-        if self.trigger_depth >= 32 {
-            return Err(HematiteError::ParseError(
-                "Trigger recursion limit exceeded".to_string(),
-            ));
-        }
-
-        self.trigger_depth += 1;
-        let result = (|| {
-            for event in mutation_events {
-                let (table_name, event_kind, old_row, new_row) = match event {
-                    MutationEvent::Insert {
-                        table_name,
-                        new_row,
-                    } => (
-                        table_name,
-                        crate::catalog::TriggerEvent::Insert,
-                        None,
-                        Some(new_row),
-                    ),
-                    MutationEvent::Update {
-                        table_name,
-                        old_row,
-                        new_row,
-                    } => (
-                        table_name,
-                        crate::catalog::TriggerEvent::Update,
-                        Some(old_row),
-                        Some(new_row),
-                    ),
-                    MutationEvent::Delete {
-                        table_name,
-                        old_row,
-                    } => (
-                        table_name,
-                        crate::catalog::TriggerEvent::Delete,
-                        Some(old_row),
-                        None,
-                    ),
-                };
-
-                let (table, triggers) = {
-                    let catalog_guard = self.lock_catalog()?;
-                    let table = catalog_guard
-                        .get_table_by_name(&table_name)?
-                        .ok_or_else(|| {
-                            HematiteError::InternalError(format!(
-                                "Table '{}' disappeared while firing triggers",
-                                table_name
-                            ))
-                        })?;
-                    let mut triggers = catalog_guard
-                        .list_triggers()?
-                        .into_iter()
-                        .filter_map(|name| catalog_guard.get_trigger(&name).ok().flatten())
-                        .filter(|trigger| {
-                            trigger.table_name == table_name && trigger.event == event_kind
-                        })
-                        .collect::<Vec<_>>();
-                    triggers.sort_by(|left, right| left.name.cmp(&right.name));
-                    (table, triggers)
-                };
-
-                for trigger in triggers {
-                    let trigger_statement =
-                        Self::parse_statement(&format!("{};", trigger.body_sql))?;
-                    let trigger_statement = substitute_trigger_statement(
-                        trigger_statement,
-                        &table,
-                        old_row.as_ref(),
-                        new_row.as_ref(),
-                    );
-                    if trigger_statement.is_read_only() {
-                        let _ = self.execute_read_statement(trigger_statement)?;
-                    } else {
-                        let _ =
-                            self.execute_mutating_statement_in_scope(trigger_statement, false)?;
-                    }
-                }
-            }
-            Ok(())
-        })();
-        self.trigger_depth -= 1;
-        result
     }
 
     pub fn close(&mut self) -> Result<()> {
@@ -1954,327 +1314,6 @@ impl Connection {
             })?;
         transaction.savepoints.remove(position);
         Ok(())
-    }
-}
-
-fn substitute_trigger_statement(
-    statement: Statement,
-    table: &crate::catalog::Table,
-    old_row: Option<&crate::catalog::StoredRow>,
-    new_row: Option<&crate::catalog::StoredRow>,
-) -> Statement {
-    let mut bindings = HashMap::new();
-    if let Some(old_row) = old_row {
-        for (column, value) in table.columns.iter().zip(old_row.values.iter()) {
-            bindings.insert(format!("OLD.{}", column.name), raise_literal_value(value));
-        }
-    }
-    if let Some(new_row) = new_row {
-        for (column, value) in table.columns.iter().zip(new_row.values.iter()) {
-            bindings.insert(format!("NEW.{}", column.name), raise_literal_value(value));
-        }
-    }
-
-    substitute_statement_bindings(statement, &bindings)
-}
-
-fn substitute_statement_bindings(
-    statement: Statement,
-    bindings: &HashMap<String, crate::parser::types::LiteralValue>,
-) -> Statement {
-    match statement {
-        Statement::Select(select) => {
-            Statement::Select(substitute_select_bindings(select, bindings))
-        }
-        Statement::Insert(insert) => Statement::Insert(crate::parser::ast::InsertStatement {
-            table: insert.table,
-            columns: insert.columns,
-            source: match insert.source {
-                InsertSource::Values(rows) => InsertSource::Values(
-                    rows.into_iter()
-                        .map(|row| {
-                            row.into_iter()
-                                .map(|expr| substitute_expression_bindings(expr, bindings))
-                                .collect()
-                        })
-                        .collect(),
-                ),
-                InsertSource::Select(select) => {
-                    InsertSource::Select(Box::new(substitute_select_bindings(*select, bindings)))
-                }
-            },
-            on_duplicate: insert.on_duplicate.map(|assignments| {
-                assignments
-                    .into_iter()
-                    .map(|assignment| crate::parser::ast::UpdateAssignment {
-                        column: assignment.column,
-                        value: substitute_expression_bindings(assignment.value, bindings),
-                    })
-                    .collect()
-            }),
-        }),
-        Statement::Update(update) => Statement::Update(crate::parser::ast::UpdateStatement {
-            table: update.table,
-            target_binding: update.target_binding,
-            source: update.source,
-            assignments: update
-                .assignments
-                .into_iter()
-                .map(|assignment| crate::parser::ast::UpdateAssignment {
-                    column: assignment.column,
-                    value: substitute_expression_bindings(assignment.value, bindings),
-                })
-                .collect(),
-            where_clause: update
-                .where_clause
-                .map(|where_clause| substitute_where_clause_bindings(where_clause, bindings)),
-        }),
-        Statement::Delete(delete) => Statement::Delete(crate::parser::ast::DeleteStatement {
-            table: delete.table,
-            target_binding: delete.target_binding,
-            source: delete.source,
-            where_clause: delete
-                .where_clause
-                .map(|where_clause| substitute_where_clause_bindings(where_clause, bindings)),
-        }),
-        other => other,
-    }
-}
-
-fn substitute_select_bindings(
-    select: SelectStatement,
-    bindings: &HashMap<String, crate::parser::types::LiteralValue>,
-) -> SelectStatement {
-    SelectStatement {
-        with_clause: select
-            .with_clause
-            .into_iter()
-            .map(|cte| crate::parser::ast::CommonTableExpression {
-                name: cte.name,
-                recursive: cte.recursive,
-                query: Box::new(substitute_select_bindings(*cte.query, bindings)),
-            })
-            .collect(),
-        distinct: select.distinct,
-        columns: select
-            .columns
-            .into_iter()
-            .map(|item| match item {
-                crate::parser::ast::SelectItem::Expression(expr) => {
-                    crate::parser::ast::SelectItem::Expression(substitute_expression_bindings(
-                        expr, bindings,
-                    ))
-                }
-                crate::parser::ast::SelectItem::Column(name) => bindings
-                    .get(&name)
-                    .cloned()
-                    .map(crate::parser::ast::Expression::Literal)
-                    .map(crate::parser::ast::SelectItem::Expression)
-                    .unwrap_or(crate::parser::ast::SelectItem::Column(name)),
-                other => other,
-            })
-            .collect(),
-        column_aliases: select.column_aliases,
-        from: substitute_table_reference_bindings(select.from, bindings),
-        where_clause: select
-            .where_clause
-            .map(|where_clause| substitute_where_clause_bindings(where_clause, bindings)),
-        group_by: select
-            .group_by
-            .into_iter()
-            .map(|expr| substitute_expression_bindings(expr, bindings))
-            .collect(),
-        having_clause: select
-            .having_clause
-            .map(|where_clause| substitute_where_clause_bindings(where_clause, bindings)),
-        order_by: select.order_by,
-        limit: select.limit,
-        offset: select.offset,
-        set_operation: select
-            .set_operation
-            .map(|set_operation| crate::parser::ast::SetOperation {
-                operator: set_operation.operator,
-                right: Box::new(substitute_select_bindings(*set_operation.right, bindings)),
-            }),
-    }
-}
-
-fn substitute_table_reference_bindings(
-    table_reference: TableReference,
-    bindings: &HashMap<String, crate::parser::types::LiteralValue>,
-) -> TableReference {
-    match table_reference {
-        TableReference::Table(name, alias) => TableReference::Table(name, alias),
-        TableReference::Derived { subquery, alias } => TableReference::Derived {
-            subquery: Box::new(substitute_select_bindings(*subquery, bindings)),
-            alias,
-        },
-        TableReference::CrossJoin(left, right) => TableReference::CrossJoin(
-            Box::new(substitute_table_reference_bindings(*left, bindings)),
-            Box::new(substitute_table_reference_bindings(*right, bindings)),
-        ),
-        TableReference::InnerJoin { left, right, on } => TableReference::InnerJoin {
-            left: Box::new(substitute_table_reference_bindings(*left, bindings)),
-            right: Box::new(substitute_table_reference_bindings(*right, bindings)),
-            on: substitute_expression_bindings(on, bindings),
-        },
-        TableReference::LeftJoin { left, right, on } => TableReference::LeftJoin {
-            left: Box::new(substitute_table_reference_bindings(*left, bindings)),
-            right: Box::new(substitute_table_reference_bindings(*right, bindings)),
-            on: substitute_expression_bindings(on, bindings),
-        },
-        TableReference::RightJoin { left, right, on } => TableReference::RightJoin {
-            left: Box::new(substitute_table_reference_bindings(*left, bindings)),
-            right: Box::new(substitute_table_reference_bindings(*right, bindings)),
-            on: substitute_expression_bindings(on, bindings),
-        },
-        TableReference::FullOuterJoin { left, right, on } => TableReference::FullOuterJoin {
-            left: Box::new(substitute_table_reference_bindings(*left, bindings)),
-            right: Box::new(substitute_table_reference_bindings(*right, bindings)),
-            on: substitute_expression_bindings(on, bindings),
-        },
-    }
-}
-
-fn substitute_where_clause_bindings(
-    where_clause: WhereClause,
-    bindings: &HashMap<String, crate::parser::types::LiteralValue>,
-) -> WhereClause {
-    WhereClause {
-        conditions: where_clause
-            .conditions
-            .into_iter()
-            .map(|condition| substitute_expression_bindings(condition, bindings))
-            .collect(),
-    }
-}
-
-fn substitute_expression_bindings(
-    expression: Expression,
-    bindings: &HashMap<String, crate::parser::types::LiteralValue>,
-) -> Expression {
-    match expression {
-        Expression::Column(name) => bindings
-            .get(&name)
-            .cloned()
-            .map(Expression::Literal)
-            .unwrap_or(Expression::Column(name)),
-        Expression::Literal(_) | Expression::IntervalLiteral { .. } | Expression::Parameter(_) => {
-            expression
-        }
-        Expression::ScalarSubquery(subquery) => {
-            Expression::ScalarSubquery(Box::new(substitute_select_bindings(*subquery, bindings)))
-        }
-        Expression::Cast { expr, target_type } => Expression::Cast {
-            expr: Box::new(substitute_expression_bindings(*expr, bindings)),
-            target_type,
-        },
-        Expression::Case {
-            branches,
-            else_expr,
-        } => Expression::Case {
-            branches: branches
-                .into_iter()
-                .map(|branch| crate::parser::ast::CaseWhenClause {
-                    condition: substitute_expression_bindings(branch.condition, bindings),
-                    result: substitute_expression_bindings(branch.result, bindings),
-                })
-                .collect(),
-            else_expr: else_expr
-                .map(|expr| Box::new(substitute_expression_bindings(*expr, bindings))),
-        },
-        Expression::ScalarFunctionCall { function, args } => Expression::ScalarFunctionCall {
-            function,
-            args: args
-                .into_iter()
-                .map(|expr| substitute_expression_bindings(expr, bindings))
-                .collect(),
-        },
-        Expression::AggregateCall { function, target } => {
-            Expression::AggregateCall { function, target }
-        }
-        Expression::UnaryMinus(expr) => {
-            Expression::UnaryMinus(Box::new(substitute_expression_bindings(*expr, bindings)))
-        }
-        Expression::UnaryNot(expr) => {
-            Expression::UnaryNot(Box::new(substitute_expression_bindings(*expr, bindings)))
-        }
-        Expression::Binary {
-            left,
-            operator,
-            right,
-        } => Expression::Binary {
-            left: Box::new(substitute_expression_bindings(*left, bindings)),
-            operator,
-            right: Box::new(substitute_expression_bindings(*right, bindings)),
-        },
-        Expression::Comparison {
-            left,
-            operator,
-            right,
-        } => Expression::Comparison {
-            left: Box::new(substitute_expression_bindings(*left, bindings)),
-            operator,
-            right: Box::new(substitute_expression_bindings(*right, bindings)),
-        },
-        Expression::InList {
-            expr,
-            values,
-            is_not,
-        } => Expression::InList {
-            expr: Box::new(substitute_expression_bindings(*expr, bindings)),
-            values: values
-                .into_iter()
-                .map(|expr| substitute_expression_bindings(expr, bindings))
-                .collect(),
-            is_not,
-        },
-        Expression::InSubquery {
-            expr,
-            subquery,
-            is_not,
-        } => Expression::InSubquery {
-            expr: Box::new(substitute_expression_bindings(*expr, bindings)),
-            subquery: Box::new(substitute_select_bindings(*subquery, bindings)),
-            is_not,
-        },
-        Expression::Between {
-            expr,
-            lower,
-            upper,
-            is_not,
-        } => Expression::Between {
-            expr: Box::new(substitute_expression_bindings(*expr, bindings)),
-            lower: Box::new(substitute_expression_bindings(*lower, bindings)),
-            upper: Box::new(substitute_expression_bindings(*upper, bindings)),
-            is_not,
-        },
-        Expression::Like {
-            expr,
-            pattern,
-            is_not,
-        } => Expression::Like {
-            expr: Box::new(substitute_expression_bindings(*expr, bindings)),
-            pattern: Box::new(substitute_expression_bindings(*pattern, bindings)),
-            is_not,
-        },
-        Expression::Exists { subquery, is_not } => Expression::Exists {
-            subquery: Box::new(substitute_select_bindings(*subquery, bindings)),
-            is_not,
-        },
-        Expression::NullCheck { expr, is_not } => Expression::NullCheck {
-            expr: Box::new(substitute_expression_bindings(*expr, bindings)),
-            is_not,
-        },
-        Expression::Logical {
-            left,
-            operator,
-            right,
-        } => Expression::Logical {
-            left: Box::new(substitute_expression_bindings(*left, bindings)),
-            operator,
-            right: Box::new(substitute_expression_bindings(*right, bindings)),
-        },
     }
 }
 

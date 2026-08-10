@@ -1,8 +1,6 @@
 //! Relational row and index-key encoding.
 
-use crate::catalog::{
-    DateTimeValue, DateValue, DecimalValue, TimeValue, TimeWithTimeZoneValue, Value,
-};
+use crate::catalog::{DecimalValue, Value};
 use crate::error::{HematiteError, Result};
 
 use super::record::StoredRow;
@@ -32,10 +30,6 @@ impl RowCodec {
                     buffer.push(6);
                     buffer.extend_from_slice(&i.to_le_bytes());
                 }
-                Value::Int128(i) => {
-                    buffer.push(17);
-                    buffer.extend_from_slice(&i.to_le_bytes());
-                }
                 Value::UInteger(i) => {
                     buffer.push(18);
                     buffer.extend_from_slice(&i.to_le_bytes());
@@ -44,16 +38,8 @@ impl RowCodec {
                     buffer.push(19);
                     buffer.extend_from_slice(&i.to_le_bytes());
                 }
-                Value::UInt128(i) => {
-                    buffer.push(20);
-                    buffer.extend_from_slice(&i.to_le_bytes());
-                }
                 Value::Text(s) => {
                     buffer.push(2);
-                    write_bytes(&mut buffer, s.as_bytes());
-                }
-                Value::Enum(s) => {
-                    buffer.push(11);
                     write_bytes(&mut buffer, s.as_bytes());
                 }
                 Value::Boolean(b) => {
@@ -75,31 +61,6 @@ impl RowCodec {
                 Value::Blob(bytes) => {
                     buffer.push(8);
                     write_bytes(&mut buffer, bytes);
-                }
-                Value::Date(date) => {
-                    buffer.push(9);
-                    buffer.extend_from_slice(&date.days_since_epoch().to_le_bytes());
-                }
-                Value::Time(time) => {
-                    buffer.push(12);
-                    buffer.extend_from_slice(&time.seconds_since_midnight().to_le_bytes());
-                }
-                Value::DateTime(datetime) => {
-                    buffer.push(10);
-                    buffer.extend_from_slice(&datetime.seconds_since_epoch().to_le_bytes());
-                }
-                Value::TimeWithTimeZone(value) => {
-                    buffer.push(14);
-                    buffer.extend_from_slice(&value.seconds_since_midnight().to_le_bytes());
-                    buffer.extend_from_slice(&value.offset_minutes().to_le_bytes());
-                }
-                Value::IntervalYearMonth(value) => {
-                    buffer.push(15);
-                    buffer.extend_from_slice(&value.total_months().to_le_bytes());
-                }
-                Value::IntervalDaySecond(value) => {
-                    buffer.push(16);
-                    buffer.extend_from_slice(&value.total_seconds().to_le_bytes());
                 }
                 Value::Null => buffer.push(5),
             }
@@ -221,13 +182,6 @@ impl RowCodec {
                     })?;
                     Value::Text(text)
                 }
-                11 => {
-                    let bytes = read_bytes(data, &mut offset, payload_end, "Enum value")?;
-                    let text = String::from_utf8(bytes).map_err(|_| {
-                        HematiteError::CorruptedData("Invalid UTF-8 in enum value".to_string())
-                    })?;
-                    Value::Enum(text)
-                }
                 3 => {
                     let bytes = read_exact(data, &mut offset, payload_end, 1, "Boolean value")?;
                     Value::Boolean(bytes[0] != 0)
@@ -245,10 +199,6 @@ impl RowCodec {
                     let bytes = read_exact(data, &mut offset, payload_end, 8, "BigInt value")?;
                     Value::BigInt(i64::from_le_bytes(bytes.try_into().unwrap()))
                 }
-                17 => {
-                    let bytes = read_exact(data, &mut offset, payload_end, 16, "Int128 value")?;
-                    Value::Int128(i128::from_le_bytes(bytes.try_into().unwrap()))
-                }
                 18 => {
                     let bytes = read_exact(data, &mut offset, payload_end, 4, "UInt value")?;
                     Value::UInteger(u32::from_le_bytes(bytes.try_into().unwrap()))
@@ -257,72 +207,8 @@ impl RowCodec {
                     let bytes = read_exact(data, &mut offset, payload_end, 8, "UInt64 value")?;
                     Value::UBigInt(u64::from_le_bytes(bytes.try_into().unwrap()))
                 }
-                20 => {
-                    let bytes = read_exact(data, &mut offset, payload_end, 16, "UInt128 value")?;
-                    Value::UInt128(u128::from_le_bytes(bytes.try_into().unwrap()))
-                }
                 7 => Value::Decimal(read_decimal(data, &mut offset, payload_end)?),
                 8 => Value::Blob(read_bytes(data, &mut offset, payload_end, "Blob value")?),
-                9 => {
-                    let bytes = read_exact(data, &mut offset, payload_end, 4, "Date value")?;
-                    Value::Date(DateValue::from_days_since_epoch(i32::from_le_bytes(
-                        bytes.try_into().unwrap(),
-                    )))
-                }
-                12 => {
-                    let bytes = read_exact(data, &mut offset, payload_end, 4, "Time value")?;
-                    Value::Time(TimeValue::from_seconds_since_midnight(u32::from_le_bytes(
-                        bytes.try_into().unwrap(),
-                    )))
-                }
-                10 => {
-                    let bytes = read_exact(data, &mut offset, payload_end, 8, "DateTime value")?;
-                    Value::DateTime(DateTimeValue::from_seconds_since_epoch(i64::from_le_bytes(
-                        bytes.try_into().unwrap(),
-                    )))
-                }
-                14 => {
-                    let seconds = u32::from_le_bytes(
-                        read_exact(
-                            data,
-                            &mut offset,
-                            payload_end,
-                            4,
-                            "Time with time zone seconds",
-                        )?
-                        .try_into()
-                        .unwrap(),
-                    );
-                    let offset_minutes = i16::from_le_bytes(
-                        read_exact(
-                            data,
-                            &mut offset,
-                            payload_end,
-                            2,
-                            "Time with time zone offset",
-                        )?
-                        .try_into()
-                        .unwrap(),
-                    );
-                    Value::TimeWithTimeZone(TimeWithTimeZoneValue::from_parts(
-                        seconds,
-                        offset_minutes,
-                    ))
-                }
-                15 => {
-                    let bytes =
-                        read_exact(data, &mut offset, payload_end, 4, "Interval year-month")?;
-                    Value::IntervalYearMonth(crate::catalog::IntervalYearMonthValue::new(
-                        i32::from_le_bytes(bytes.try_into().unwrap()),
-                    ))
-                }
-                16 => {
-                    let bytes =
-                        read_exact(data, &mut offset, payload_end, 8, "Interval day-second")?;
-                    Value::IntervalDaySecond(crate::catalog::IntervalDaySecondValue::new(
-                        i64::from_le_bytes(bytes.try_into().unwrap()),
-                    ))
-                }
                 _ => {
                     return Err(HematiteError::CorruptedData(format!(
                         "Unknown value tag {} in stored row",
@@ -426,20 +312,12 @@ fn encode_key_value(buffer: &mut Vec<u8>, value: &Value) {
             buffer.push(4);
             buffer.extend_from_slice(&(i64::to_be_bytes(*value ^ i64::MIN)));
         }
-        Value::Int128(value) => {
-            buffer.push(17);
-            buffer.extend_from_slice(&(i128::to_be_bytes(*value ^ i128::MIN)));
-        }
         Value::UInteger(value) => {
             buffer.push(18);
             buffer.extend_from_slice(&value.to_be_bytes());
         }
         Value::UBigInt(value) => {
             buffer.push(19);
-            buffer.extend_from_slice(&value.to_be_bytes());
-        }
-        Value::UInt128(value) => {
-            buffer.push(20);
             buffer.extend_from_slice(&value.to_be_bytes());
         }
         Value::Float32(value) => {
@@ -461,38 +339,9 @@ fn encode_key_value(buffer: &mut Vec<u8>, value: &Value) {
             buffer.push(7);
             write_bytes(buffer, value.as_bytes());
         }
-        Value::Enum(value) => {
-            buffer.push(11);
-            write_bytes(buffer, value.as_bytes());
-        }
         Value::Blob(value) => {
             buffer.push(8);
             write_bytes(buffer, value);
-        }
-        Value::Date(value) => {
-            buffer.push(9);
-            buffer.extend_from_slice(&(i32::to_be_bytes(value.days_since_epoch() ^ i32::MIN)));
-        }
-        Value::Time(value) => {
-            buffer.push(12);
-            buffer.extend_from_slice(&value.seconds_since_midnight().to_be_bytes());
-        }
-        Value::DateTime(value) => {
-            buffer.push(10);
-            buffer.extend_from_slice(&(i64::to_be_bytes(value.seconds_since_epoch() ^ i64::MIN)));
-        }
-        Value::TimeWithTimeZone(value) => {
-            buffer.push(14);
-            buffer.extend_from_slice(&value.seconds_since_midnight().to_be_bytes());
-            buffer.extend_from_slice(&(i16::to_be_bytes(value.offset_minutes() ^ i16::MIN)));
-        }
-        Value::IntervalYearMonth(value) => {
-            buffer.push(15);
-            buffer.extend_from_slice(&(i32::to_be_bytes(value.total_months() ^ i32::MIN)));
-        }
-        Value::IntervalDaySecond(value) => {
-            buffer.push(16);
-            buffer.extend_from_slice(&(i64::to_be_bytes(value.total_seconds() ^ i64::MIN)));
         }
     }
 }

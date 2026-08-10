@@ -64,7 +64,9 @@ impl PageCache {
 
     /// Take a zeroed 4KB buffer from the pool, allocating only if the pool is empty.
     pub(crate) fn take_page_buffer(&mut self) -> Vec<u8> {
-        self.free_buffers.pop().unwrap_or_else(|| vec![0u8; PAGE_SIZE])
+        self.free_buffers
+            .pop()
+            .unwrap_or_else(|| vec![0u8; PAGE_SIZE])
     }
 
     #[cfg(test)]
@@ -141,7 +143,6 @@ impl PageCache {
         self.entries.get(&page_id).map(|entry| entry.page.as_ref())
     }
 
-    #[allow(dead_code)]
     pub(crate) fn peek_shared(&self, page_id: PageId) -> Option<Arc<Page>> {
         self.entries.get(&page_id).map(|entry| entry.page.clone())
     }
@@ -267,7 +268,6 @@ impl PageCache {
         self.dirty_len
     }
 
-    #[allow(dead_code)]
     pub(crate) fn mark_journaled(&mut self, page_id: PageId) {
         self.ensure_entry(page_id);
         self.entries
@@ -277,7 +277,6 @@ impl PageCache {
             .journaled = true;
     }
 
-    #[allow(dead_code)]
     pub(crate) fn mark_need_sync(&mut self, page_id: PageId) {
         self.ensure_entry(page_id);
         let was_synced = self
@@ -466,7 +465,10 @@ impl PageCache {
             Err(shared_arc) => {
                 let mut data = self.take_page_buffer();
                 data.copy_from_slice(&shared_arc.data);
-                self.entries.get_mut(&page_id).expect("entry should exist").page = shared_arc;
+                self.entries
+                    .get_mut(&page_id)
+                    .expect("entry should exist")
+                    .page = shared_arc;
                 Page { id: page_id, data }
             }
         }

@@ -2,7 +2,6 @@ use crate::catalog::{Schema, Table};
 use crate::error::{HematiteError, Result};
 use crate::parser::ast::*;
 use crate::parser::{LiteralValue, SqlTypeName};
-use std::collections::HashSet;
 
 #[derive(Debug, Clone)]
 struct SourceBinding {
@@ -22,17 +21,10 @@ pub(crate) fn validate_statement(statement: &Statement, catalog: &Schema) -> Res
         | Statement::ReleaseSavepoint(_) => Ok(()),
         Statement::Explain(explain) => validate_statement(&explain.statement, catalog),
         Statement::Describe(describe) => require_table(catalog, &describe.table).map(|_| ()),
-        Statement::ShowTables
-        | Statement::ShowViews
-        | Statement::ShowIndexes(_)
-        | Statement::ShowTriggers(_)
-        | Statement::ShowCreateTable(_)
-        | Statement::ShowCreateView(_) => Ok(()),
+        Statement::ShowTables | Statement::ShowIndexes(_) | Statement::ShowCreateTable(_) => Ok(()),
         Statement::Select(select) => validate_select(select, catalog),
         Statement::SelectInto(select_into) => {
-            if catalog.get_table_by_name(&select_into.table).is_some()
-                || catalog.view(&select_into.table).is_some()
-            {
+            if catalog.get_table_by_name(&select_into.table).is_some() {
                 return Err(HematiteError::ParseError(format!(
                     "Table '{}' already exists",
                     select_into.table
@@ -44,581 +36,10 @@ pub(crate) fn validate_statement(statement: &Statement, catalog: &Schema) -> Res
         Statement::Insert(insert) => validate_insert(insert, catalog),
         Statement::Delete(delete) => validate_delete(delete, catalog),
         Statement::Create(create) => validate_create(create, catalog),
-        Statement::CreateView(create_view) => validate_select(&create_view.query, catalog),
-        Statement::CreateTrigger(create_trigger) => {
-            require_table(catalog, &create_trigger.table)?;
-            validate_trigger_body(create_trigger, catalog)
-        }
         Statement::CreateIndex(create_index) => validate_create_index(create_index, catalog),
         Statement::Alter(alter) => validate_alter(alter, catalog),
         Statement::Drop(drop) => validate_drop(drop, catalog),
-        Statement::DropView(_) | Statement::DropTrigger(_) => Ok(()),
         Statement::DropIndex(drop_index) => validate_drop_index(drop_index, catalog),
-    }
-}
-
-fn validate_trigger_body(create_trigger: &CreateTriggerStatement, catalog: &Schema) -> Result<()> {
-    match create_trigger.body.as_ref() {
-        Statement::Insert(_)
-        | Statement::Update(_)
-        | Statement::Delete(_)
-        | Statement::Select(_) => {}
-        other => {
-            return Err(HematiteError::ParseError(format!(
-                "Trigger '{}' body must be a single SELECT, INSERT, UPDATE, or DELETE statement, found {:?}",
-                create_trigger.trigger, other
-            )))
-        }
-    }
-
-    if trigger_body_target_table(create_trigger.body.as_ref())
-        .is_some_and(|target| target.eq_ignore_ascii_case(&create_trigger.table))
-    {
-        return Err(HematiteError::ParseError(format!(
-            "Trigger '{}' cannot target its own table '{}'",
-            create_trigger.trigger, create_trigger.table
-        )));
-    }
-
-    let old_refs = trigger_row_alias_references(create_trigger.body.as_ref(), "OLD");
-    let new_refs = trigger_row_alias_references(create_trigger.body.as_ref(), "NEW");
-
-    match create_trigger.event {
-        crate::parser::ast::TriggerEvent::Insert if old_refs => {
-            return Err(HematiteError::ParseError(format!(
-                "Trigger '{}' cannot reference OLD values for INSERT events",
-                create_trigger.trigger
-            )))
-        }
-        crate::parser::ast::TriggerEvent::Delete if new_refs => {
-            return Err(HematiteError::ParseError(format!(
-                "Trigger '{}' cannot reference NEW values for DELETE events",
-                create_trigger.trigger
-            )))
-        }
-        _ => {}
-    }
-
-    if !old_refs && !new_refs {
-        validate_statement(create_trigger.body.as_ref(), catalog)
-    } else {
-        let masked_body = mask_trigger_aliases_in_statement(create_trigger.body.as_ref());
-        validate_statement(&masked_body, catalog)
-    }
-}
-
-fn trigger_body_target_table(statement: &Statement) -> Option<&str> {
-    match statement {
-        Statement::Insert(insert) => Some(insert.table.as_str()),
-        Statement::Update(update) => Some(update.table.as_str()),
-        Statement::Delete(delete) => Some(delete.table.as_str()),
-        _ => None,
-    }
-}
-
-fn trigger_row_alias_references(statement: &Statement, alias: &str) -> bool {
-    let mut seen = HashSet::new();
-    statement_references_prefixed_alias(statement, alias, &mut seen)
-}
-
-fn statement_references_prefixed_alias(
-    statement: &Statement,
-    alias: &str,
-    seen_subqueries: &mut HashSet<*const SelectStatement>,
-) -> bool {
-    match statement {
-        Statement::Explain(explain) => {
-            statement_references_prefixed_alias(&explain.statement, alias, seen_subqueries)
-        }
-        Statement::Select(select) => {
-            select_references_prefixed_alias(select, alias, seen_subqueries)
-        }
-        Statement::Insert(insert) => match &insert.source {
-            InsertSource::Values(rows) => rows
-                .iter()
-                .flatten()
-                .any(|expr| expression_references_prefixed_alias(expr, alias, seen_subqueries)),
-            InsertSource::Select(select) => {
-                select_references_prefixed_alias(select, alias, seen_subqueries)
-            }
-        },
-        Statement::Update(update) => {
-            update.assignments.iter().any(|assignment| {
-                expression_references_prefixed_alias(&assignment.value, alias, seen_subqueries)
-            }) || update.where_clause.as_ref().is_some_and(|where_clause| {
-                where_clause.conditions.iter().any(|condition| {
-                    expression_references_prefixed_alias(condition, alias, seen_subqueries)
-                })
-            })
-        }
-        Statement::Delete(delete) => delete.where_clause.as_ref().is_some_and(|where_clause| {
-            where_clause.conditions.iter().any(|condition| {
-                expression_references_prefixed_alias(condition, alias, seen_subqueries)
-            })
-        }),
-        _ => false,
-    }
-}
-
-fn select_references_prefixed_alias(
-    select: &SelectStatement,
-    alias: &str,
-    seen_subqueries: &mut HashSet<*const SelectStatement>,
-) -> bool {
-    let select_ptr = select as *const SelectStatement;
-    if !seen_subqueries.insert(select_ptr) {
-        return false;
-    }
-
-    select.columns.iter().any(|item| match item {
-        SelectItem::Expression(expr) => {
-            expression_references_prefixed_alias(expr, alias, seen_subqueries)
-        }
-        SelectItem::Aggregate { column, .. } | SelectItem::Column(column) => {
-            column_has_prefixed_alias(column, alias)
-        }
-        SelectItem::Window { window, .. } => {
-            window
-                .partition_by
-                .iter()
-                .any(|expr| expression_references_prefixed_alias(expr, alias, seen_subqueries))
-                || window
-                    .order_by
-                    .iter()
-                    .any(|item| column_has_prefixed_alias(&item.column, alias))
-        }
-        SelectItem::Wildcard | SelectItem::CountAll => false,
-    }) || select
-        .group_by
-        .iter()
-        .any(|expr| expression_references_prefixed_alias(expr, alias, seen_subqueries))
-        || select.where_clause.as_ref().is_some_and(|where_clause| {
-            where_clause.conditions.iter().any(|condition| {
-                expression_references_prefixed_alias(condition, alias, seen_subqueries)
-            })
-        })
-        || select.having_clause.as_ref().is_some_and(|having_clause| {
-            having_clause.conditions.iter().any(|condition| {
-                expression_references_prefixed_alias(condition, alias, seen_subqueries)
-            })
-        })
-        || table_reference_references_prefixed_alias(&select.from, alias, seen_subqueries)
-        || select
-            .with_clause
-            .iter()
-            .any(|cte| select_references_prefixed_alias(&cte.query, alias, seen_subqueries))
-        || select.set_operation.as_ref().is_some_and(|set_operation| {
-            select_references_prefixed_alias(&set_operation.right, alias, seen_subqueries)
-        })
-}
-
-fn table_reference_references_prefixed_alias(
-    table_reference: &TableReference,
-    alias: &str,
-    seen_subqueries: &mut HashSet<*const SelectStatement>,
-) -> bool {
-    match table_reference {
-        TableReference::Table(_, _) => false,
-        TableReference::Derived { subquery, .. } => {
-            select_references_prefixed_alias(subquery, alias, seen_subqueries)
-        }
-        TableReference::CrossJoin(left, right) => {
-            table_reference_references_prefixed_alias(left, alias, seen_subqueries)
-                || table_reference_references_prefixed_alias(right, alias, seen_subqueries)
-        }
-        TableReference::InnerJoin { left, right, on }
-        | TableReference::LeftJoin { left, right, on }
-        | TableReference::RightJoin { left, right, on }
-        | TableReference::FullOuterJoin { left, right, on } => {
-            table_reference_references_prefixed_alias(left, alias, seen_subqueries)
-                || table_reference_references_prefixed_alias(right, alias, seen_subqueries)
-                || expression_references_prefixed_alias(on, alias, seen_subqueries)
-        }
-    }
-}
-
-fn expression_references_prefixed_alias(
-    expression: &Expression,
-    alias: &str,
-    seen_subqueries: &mut HashSet<*const SelectStatement>,
-) -> bool {
-    match expression {
-        Expression::Column(name) => column_has_prefixed_alias(name, alias),
-        Expression::Literal(_) | Expression::IntervalLiteral { .. } | Expression::Parameter(_) => {
-            false
-        }
-        Expression::ScalarSubquery(subquery) => {
-            select_references_prefixed_alias(subquery, alias, seen_subqueries)
-        }
-        Expression::Cast { expr, .. }
-        | Expression::UnaryMinus(expr)
-        | Expression::UnaryNot(expr)
-        | Expression::NullCheck { expr, .. } => {
-            expression_references_prefixed_alias(expr, alias, seen_subqueries)
-        }
-        Expression::Case {
-            branches,
-            else_expr,
-        } => {
-            branches.iter().any(|branch| {
-                expression_references_prefixed_alias(&branch.condition, alias, seen_subqueries)
-                    || expression_references_prefixed_alias(&branch.result, alias, seen_subqueries)
-            }) || else_expr.as_ref().is_some_and(|expr| {
-                expression_references_prefixed_alias(expr, alias, seen_subqueries)
-            })
-        }
-        Expression::ScalarFunctionCall { args, .. } => args
-            .iter()
-            .any(|arg| expression_references_prefixed_alias(arg, alias, seen_subqueries)),
-        Expression::AggregateCall { target, .. } => match target {
-            AggregateTarget::All => false,
-            AggregateTarget::Column(column) => column_has_prefixed_alias(column, alias),
-        },
-        Expression::Binary { left, right, .. }
-        | Expression::Comparison { left, right, .. }
-        | Expression::Logical { left, right, .. } => {
-            expression_references_prefixed_alias(left, alias, seen_subqueries)
-                || expression_references_prefixed_alias(right, alias, seen_subqueries)
-        }
-        Expression::InList { expr, values, .. } => {
-            expression_references_prefixed_alias(expr, alias, seen_subqueries)
-                || values.iter().any(|value| {
-                    expression_references_prefixed_alias(value, alias, seen_subqueries)
-                })
-        }
-        Expression::InSubquery { expr, subquery, .. } => {
-            expression_references_prefixed_alias(expr, alias, seen_subqueries)
-                || select_references_prefixed_alias(subquery, alias, seen_subqueries)
-        }
-        Expression::Between {
-            expr, lower, upper, ..
-        } => {
-            expression_references_prefixed_alias(expr, alias, seen_subqueries)
-                || expression_references_prefixed_alias(lower, alias, seen_subqueries)
-                || expression_references_prefixed_alias(upper, alias, seen_subqueries)
-        }
-        Expression::Like { expr, pattern, .. } => {
-            expression_references_prefixed_alias(expr, alias, seen_subqueries)
-                || expression_references_prefixed_alias(pattern, alias, seen_subqueries)
-        }
-        Expression::Exists { subquery, .. } => {
-            select_references_prefixed_alias(subquery, alias, seen_subqueries)
-        }
-    }
-}
-
-fn column_has_prefixed_alias(column: &str, alias: &str) -> bool {
-    column
-        .strip_prefix(alias)
-        .is_some_and(|remainder| remainder.starts_with('.'))
-}
-
-fn mask_trigger_aliases_in_statement(statement: &Statement) -> Statement {
-    match statement {
-        Statement::Select(select) => Statement::Select(mask_trigger_aliases_in_select(select)),
-        Statement::Insert(insert) => Statement::Insert(InsertStatement {
-            table: insert.table.clone(),
-            columns: insert.columns.clone(),
-            source: match &insert.source {
-                InsertSource::Values(rows) => InsertSource::Values(
-                    rows.iter()
-                        .map(|row| {
-                            row.iter()
-                                .map(mask_trigger_aliases_in_expression)
-                                .collect::<Vec<_>>()
-                        })
-                        .collect(),
-                ),
-                InsertSource::Select(select) => {
-                    InsertSource::Select(Box::new(mask_trigger_aliases_in_select(select)))
-                }
-            },
-            on_duplicate: insert.on_duplicate.as_ref().map(|assignments| {
-                assignments
-                    .iter()
-                    .map(|assignment| UpdateAssignment {
-                        column: assignment.column.clone(),
-                        value: mask_trigger_aliases_in_expression(&assignment.value),
-                    })
-                    .collect()
-            }),
-        }),
-        Statement::Update(update) => Statement::Update(UpdateStatement {
-            table: update.table.clone(),
-            target_binding: update.target_binding.clone(),
-            source: update
-                .source
-                .as_ref()
-                .map(mask_trigger_aliases_in_table_reference),
-            assignments: update
-                .assignments
-                .iter()
-                .map(|assignment| UpdateAssignment {
-                    column: assignment.column.clone(),
-                    value: mask_trigger_aliases_in_expression(&assignment.value),
-                })
-                .collect(),
-            where_clause: update
-                .where_clause
-                .as_ref()
-                .map(mask_trigger_aliases_in_where_clause),
-        }),
-        Statement::Delete(delete) => Statement::Delete(DeleteStatement {
-            table: delete.table.clone(),
-            target_binding: delete.target_binding.clone(),
-            source: delete
-                .source
-                .as_ref()
-                .map(mask_trigger_aliases_in_table_reference),
-            where_clause: delete
-                .where_clause
-                .as_ref()
-                .map(mask_trigger_aliases_in_where_clause),
-        }),
-        other => other.clone(),
-    }
-}
-
-fn mask_trigger_aliases_in_select(select: &SelectStatement) -> SelectStatement {
-    SelectStatement {
-        with_clause: select
-            .with_clause
-            .iter()
-            .map(|cte| CommonTableExpression {
-                name: cte.name.clone(),
-                recursive: cte.recursive,
-                query: Box::new(mask_trigger_aliases_in_select(&cte.query)),
-            })
-            .collect(),
-        distinct: select.distinct,
-        columns: select
-            .columns
-            .iter()
-            .map(|item| match item {
-                SelectItem::Wildcard => SelectItem::Wildcard,
-                SelectItem::Column(name) => SelectItem::Column(name.clone()),
-                SelectItem::Expression(expr) => {
-                    SelectItem::Expression(mask_trigger_aliases_in_expression(expr))
-                }
-                SelectItem::CountAll => SelectItem::CountAll,
-                SelectItem::Aggregate { function, column } => SelectItem::Aggregate {
-                    function: *function,
-                    column: column.clone(),
-                },
-                SelectItem::Window { function, window } => SelectItem::Window {
-                    function: function.clone(),
-                    window: WindowSpec {
-                        partition_by: window
-                            .partition_by
-                            .iter()
-                            .map(mask_trigger_aliases_in_expression)
-                            .collect(),
-                        order_by: window.order_by.clone(),
-                    },
-                },
-            })
-            .collect(),
-        column_aliases: select.column_aliases.clone(),
-        from: mask_trigger_aliases_in_table_reference(&select.from),
-        where_clause: select
-            .where_clause
-            .as_ref()
-            .map(mask_trigger_aliases_in_where_clause),
-        group_by: select
-            .group_by
-            .iter()
-            .map(mask_trigger_aliases_in_expression)
-            .collect(),
-        having_clause: select
-            .having_clause
-            .as_ref()
-            .map(mask_trigger_aliases_in_where_clause),
-        order_by: select.order_by.clone(),
-        limit: select.limit,
-        offset: select.offset,
-        set_operation: select
-            .set_operation
-            .as_ref()
-            .map(|set_operation| SetOperation {
-                operator: set_operation.operator,
-                right: Box::new(mask_trigger_aliases_in_select(&set_operation.right)),
-            }),
-    }
-}
-
-fn mask_trigger_aliases_in_table_reference(table_reference: &TableReference) -> TableReference {
-    match table_reference {
-        TableReference::Table(name, alias) => TableReference::Table(name.clone(), alias.clone()),
-        TableReference::Derived { subquery, alias } => TableReference::Derived {
-            subquery: Box::new(mask_trigger_aliases_in_select(subquery)),
-            alias: alias.clone(),
-        },
-        TableReference::CrossJoin(left, right) => TableReference::CrossJoin(
-            Box::new(mask_trigger_aliases_in_table_reference(left)),
-            Box::new(mask_trigger_aliases_in_table_reference(right)),
-        ),
-        TableReference::InnerJoin { left, right, on } => TableReference::InnerJoin {
-            left: Box::new(mask_trigger_aliases_in_table_reference(left)),
-            right: Box::new(mask_trigger_aliases_in_table_reference(right)),
-            on: mask_trigger_aliases_in_expression(on),
-        },
-        TableReference::LeftJoin { left, right, on } => TableReference::LeftJoin {
-            left: Box::new(mask_trigger_aliases_in_table_reference(left)),
-            right: Box::new(mask_trigger_aliases_in_table_reference(right)),
-            on: mask_trigger_aliases_in_expression(on),
-        },
-        TableReference::RightJoin { left, right, on } => TableReference::RightJoin {
-            left: Box::new(mask_trigger_aliases_in_table_reference(left)),
-            right: Box::new(mask_trigger_aliases_in_table_reference(right)),
-            on: mask_trigger_aliases_in_expression(on),
-        },
-        TableReference::FullOuterJoin { left, right, on } => TableReference::FullOuterJoin {
-            left: Box::new(mask_trigger_aliases_in_table_reference(left)),
-            right: Box::new(mask_trigger_aliases_in_table_reference(right)),
-            on: mask_trigger_aliases_in_expression(on),
-        },
-    }
-}
-
-fn mask_trigger_aliases_in_where_clause(where_clause: &WhereClause) -> WhereClause {
-    WhereClause {
-        conditions: where_clause
-            .conditions
-            .iter()
-            .map(mask_trigger_aliases_in_expression)
-            .collect(),
-    }
-}
-
-fn mask_trigger_aliases_in_expression(expression: &Expression) -> Expression {
-    match expression {
-        Expression::Column(name)
-            if column_has_prefixed_alias(name, "OLD") || column_has_prefixed_alias(name, "NEW") =>
-        {
-            Expression::Literal(LiteralValue::Null)
-        }
-        Expression::Column(name) => Expression::Column(name.clone()),
-        Expression::Literal(value) => Expression::Literal(value.clone()),
-        Expression::IntervalLiteral { value, qualifier } => Expression::IntervalLiteral {
-            value: value.clone(),
-            qualifier: *qualifier,
-        },
-        Expression::Parameter(index) => Expression::Parameter(*index),
-        Expression::ScalarSubquery(subquery) => {
-            Expression::ScalarSubquery(Box::new(mask_trigger_aliases_in_select(subquery)))
-        }
-        Expression::Cast { expr, target_type } => Expression::Cast {
-            expr: Box::new(mask_trigger_aliases_in_expression(expr)),
-            target_type: target_type.clone(),
-        },
-        Expression::Case {
-            branches,
-            else_expr,
-        } => Expression::Case {
-            branches: branches
-                .iter()
-                .map(|branch| CaseWhenClause {
-                    condition: mask_trigger_aliases_in_expression(&branch.condition),
-                    result: mask_trigger_aliases_in_expression(&branch.result),
-                })
-                .collect(),
-            else_expr: else_expr
-                .as_ref()
-                .map(|expr| Box::new(mask_trigger_aliases_in_expression(expr))),
-        },
-        Expression::ScalarFunctionCall { function, args } => Expression::ScalarFunctionCall {
-            function: *function,
-            args: args
-                .iter()
-                .map(mask_trigger_aliases_in_expression)
-                .collect(),
-        },
-        Expression::AggregateCall { function, target } => Expression::AggregateCall {
-            function: *function,
-            target: target.clone(),
-        },
-        Expression::UnaryMinus(expr) => {
-            Expression::UnaryMinus(Box::new(mask_trigger_aliases_in_expression(expr)))
-        }
-        Expression::UnaryNot(expr) => {
-            Expression::UnaryNot(Box::new(mask_trigger_aliases_in_expression(expr)))
-        }
-        Expression::Binary {
-            left,
-            operator,
-            right,
-        } => Expression::Binary {
-            left: Box::new(mask_trigger_aliases_in_expression(left)),
-            operator: *operator,
-            right: Box::new(mask_trigger_aliases_in_expression(right)),
-        },
-        Expression::Comparison {
-            left,
-            operator,
-            right,
-        } => Expression::Comparison {
-            left: Box::new(mask_trigger_aliases_in_expression(left)),
-            operator: operator.clone(),
-            right: Box::new(mask_trigger_aliases_in_expression(right)),
-        },
-        Expression::InList {
-            expr,
-            values,
-            is_not,
-        } => Expression::InList {
-            expr: Box::new(mask_trigger_aliases_in_expression(expr)),
-            values: values
-                .iter()
-                .map(mask_trigger_aliases_in_expression)
-                .collect(),
-            is_not: *is_not,
-        },
-        Expression::InSubquery {
-            expr,
-            subquery,
-            is_not,
-        } => Expression::InSubquery {
-            expr: Box::new(mask_trigger_aliases_in_expression(expr)),
-            subquery: Box::new(mask_trigger_aliases_in_select(subquery)),
-            is_not: *is_not,
-        },
-        Expression::Between {
-            expr,
-            lower,
-            upper,
-            is_not,
-        } => Expression::Between {
-            expr: Box::new(mask_trigger_aliases_in_expression(expr)),
-            lower: Box::new(mask_trigger_aliases_in_expression(lower)),
-            upper: Box::new(mask_trigger_aliases_in_expression(upper)),
-            is_not: *is_not,
-        },
-        Expression::Like {
-            expr,
-            pattern,
-            is_not,
-        } => Expression::Like {
-            expr: Box::new(mask_trigger_aliases_in_expression(expr)),
-            pattern: Box::new(mask_trigger_aliases_in_expression(pattern)),
-            is_not: *is_not,
-        },
-        Expression::Exists { subquery, is_not } => Expression::Exists {
-            subquery: Box::new(mask_trigger_aliases_in_select(subquery)),
-            is_not: *is_not,
-        },
-        Expression::NullCheck { expr, is_not } => Expression::NullCheck {
-            expr: Box::new(mask_trigger_aliases_in_expression(expr)),
-            is_not: *is_not,
-        },
-        Expression::Logical {
-            left,
-            operator,
-            right,
-        } => Expression::Logical {
-            left: Box::new(mask_trigger_aliases_in_expression(left)),
-            operator: operator.clone(),
-            right: Box::new(mask_trigger_aliases_in_expression(right)),
-        },
     }
 }
 
@@ -652,56 +73,7 @@ fn validate_select_with_outer_bindings(
     }
 
     for cte in &select.with_clause {
-        if cte.recursive {
-            let set_operation = cte.query.set_operation.as_ref().ok_or_else(|| {
-                HematiteError::ParseError(format!(
-                    "Recursive CTE '{}' requires UNION or UNION ALL",
-                    cte.name
-                ))
-            })?;
-            if !matches!(
-                set_operation.operator,
-                SetOperator::Union | SetOperator::UnionAll
-            ) {
-                return Err(HematiteError::ParseError(format!(
-                    "Recursive CTE '{}' requires UNION or UNION ALL",
-                    cte.name
-                )));
-            }
-
-            let mut anchor = (*cte.query).clone();
-            anchor.set_operation = None;
-            if anchor.references_source_name(&cte.name) {
-                return Err(HematiteError::ParseError(format!(
-                    "Recursive CTE '{}' anchor term cannot reference itself",
-                    cte.name
-                )));
-            }
-            if !set_operation.right.references_source_name(&cte.name) {
-                return Err(HematiteError::ParseError(format!(
-                    "Recursive CTE '{}' recursive term must reference itself",
-                    cte.name
-                )));
-            }
-            if anchor.columns.len() != set_operation.right.columns.len() {
-                return Err(HematiteError::ParseError(format!(
-                    "Recursive CTE '{}' anchor and recursive terms must project the same number of columns",
-                    cte.name
-                )));
-            }
-
-            validate_select(&anchor, catalog)?;
-
-            let mut recursive_term = (*set_operation.right).clone();
-            recursive_term.with_clause.push(CommonTableExpression {
-                name: cte.name.clone(),
-                recursive: false,
-                query: Box::new(anchor),
-            });
-            validate_select(&recursive_term, catalog)?;
-        } else {
-            validate_select(&cte.query, catalog)?;
-        }
+        validate_select(&cte.query, catalog)?;
     }
 
     let local_bindings = collect_source_bindings(select, catalog, &select.from)?;
@@ -721,30 +93,14 @@ fn validate_select_with_outer_bindings(
     let has_aggregate = select.columns.iter().any(|item| match item {
         SelectItem::CountAll | SelectItem::Aggregate { .. } => true,
         SelectItem::Expression(expr) => expression_contains_aggregate(expr),
-        SelectItem::Window { .. } | SelectItem::Wildcard | SelectItem::Column(_) => false,
+        SelectItem::Wildcard | SelectItem::Column(_) => false,
     }) || select
         .having_clause
         .as_ref()
         .is_some_and(|having| having.conditions.iter().any(expression_contains_aggregate));
-    let has_window = select
-        .columns
-        .iter()
-        .any(|item| matches!(item, SelectItem::Window { .. }));
     if select.distinct && has_aggregate {
         return Err(HematiteError::ParseError(
             "DISTINCT cannot be combined with aggregate select items yet".to_string(),
-        ));
-    }
-    if has_window
-        && (has_aggregate || !select.group_by.is_empty() || select.having_clause.is_some())
-    {
-        return Err(HematiteError::ParseError(
-            "Window functions cannot be combined with grouped aggregation yet".to_string(),
-        ));
-    }
-    if has_window && select.distinct {
-        return Err(HematiteError::ParseError(
-            "DISTINCT cannot be combined with window functions yet".to_string(),
         ));
     }
 
@@ -765,32 +121,6 @@ fn validate_select_with_outer_bindings(
             }
             SelectItem::Aggregate { column, .. } => {
                 validate_column_reference_with_outer(column, &local_bindings, outer_bindings)?;
-            }
-            SelectItem::Window { function, window } => {
-                for expr in &window.partition_by {
-                    validate_expression_with_bindings(
-                        select,
-                        expr,
-                        catalog,
-                        &select.from,
-                        &local_bindings,
-                        outer_bindings,
-                    )?;
-                }
-                for item in &window.order_by {
-                    validate_column_reference_with_outer(
-                        &item.column,
-                        &local_bindings,
-                        outer_bindings,
-                    )?;
-                }
-                if matches!(function, WindowFunction::Rank | WindowFunction::DenseRank)
-                    && window.order_by.is_empty()
-                {
-                    return Err(HematiteError::ParseError(
-                        "RANK() and DENSE_RANK() require ORDER BY in OVER(...)".to_string(),
-                    ));
-                }
             }
             SelectItem::Wildcard | SelectItem::CountAll => {}
         }
@@ -844,11 +174,6 @@ fn validate_select_with_outer_bindings(
                         "Expression select items are not supported with GROUP BY yet".to_string(),
                     ))
                 }
-                SelectItem::Window { .. } => {
-                    return Err(HematiteError::ParseError(
-                        "Window functions cannot be combined with GROUP BY yet".to_string(),
-                    ))
-                }
                 SelectItem::CountAll | SelectItem::Aggregate { .. } => {}
             }
         }
@@ -878,12 +203,6 @@ fn validate_select_with_outer_bindings(
 }
 
 fn validate_insert(insert: &InsertStatement, catalog: &Schema) -> Result<()> {
-    if catalog.view(&insert.table).is_some() {
-        return Err(HematiteError::ParseError(format!(
-            "View '{}' is read-only",
-            insert.table
-        )));
-    }
     let table = catalog.get_table_by_name(&insert.table).ok_or_else(|| {
         HematiteError::ParseError(format!("Table '{}' does not exist", insert.table))
     })?;
@@ -969,12 +288,6 @@ fn validate_insert(insert: &InsertStatement, catalog: &Schema) -> Result<()> {
 }
 
 fn validate_update(update: &UpdateStatement, catalog: &Schema) -> Result<()> {
-    if catalog.view(&update.table).is_some() {
-        return Err(HematiteError::ParseError(format!(
-            "View '{}' is read-only",
-            update.table
-        )));
-    }
     let table = catalog.get_table_by_name(&update.table).ok_or_else(|| {
         HematiteError::ParseError(format!("Table '{}' does not exist", update.table))
     })?;
@@ -1062,12 +375,10 @@ fn validate_create(create: &CreateStatement, catalog: &Schema) -> Result<()> {
                 | SqlTypeName::Int8
                 | SqlTypeName::Int16
                 | SqlTypeName::Int64
-                | SqlTypeName::Int128
                 | SqlTypeName::UInt
                 | SqlTypeName::UInt8
                 | SqlTypeName::UInt16
                 | SqlTypeName::UInt64
-                | SqlTypeName::UInt128
         ) {
             return Err(HematiteError::ParseError(format!(
                 "AUTO_INCREMENT column '{}' must use an integer type",
@@ -1107,12 +418,6 @@ fn validate_create(create: &CreateStatement, catalog: &Schema) -> Result<()> {
 }
 
 fn validate_delete(delete: &DeleteStatement, catalog: &Schema) -> Result<()> {
-    if catalog.view(&delete.table).is_some() {
-        return Err(HematiteError::ParseError(format!(
-            "View '{}' is read-only",
-            delete.table
-        )));
-    }
     let _table = require_table(catalog, &delete.table)?;
     validate_mutation_target_binding(
         &delete.table,
@@ -1180,18 +485,6 @@ fn validate_drop(drop: &DropStatement, catalog: &Schema) -> Result<()> {
         return Ok(());
     }
     let _table = require_table(catalog, &drop.table)?;
-    if let Some(view_name) = catalog.list_views().into_iter().find(|view_name| {
-        catalog.view(view_name).is_some_and(|view| {
-            view.dependencies
-                .iter()
-                .any(|dependency| dependency.eq_ignore_ascii_case(&drop.table))
-        })
-    }) {
-        return Err(HematiteError::ParseError(format!(
-            "Cannot drop table '{}' because view '{}' depends on it",
-            drop.table, view_name
-        )));
-    }
     Ok(())
 }
 
@@ -1751,7 +1044,7 @@ fn validate_expression_with_bindings(
                 outer_bindings,
             )?;
         }
-        Expression::Literal(_) | Expression::IntervalLiteral { .. } | Expression::Parameter(_) => {}
+        Expression::Literal(_) | Expression::Parameter(_) => {}
     }
 
     Ok(())
@@ -1786,9 +1079,7 @@ fn collect_source_bindings_into(
     match from {
         TableReference::Table(table_name, alias) => {
             if let Some(cte) = select.lookup_cte(table_name) {
-                if !cte.recursive {
-                    validate_select(&cte.query, catalog)?;
-                }
+                validate_select(&cte.query, catalog)?;
                 bindings.push(SourceBinding {
                     source_name: table_name.clone(),
                     alias: alias.clone(),
@@ -1841,24 +1132,6 @@ fn cte_projected_column_names(
     cte: &CommonTableExpression,
     catalog: &Schema,
 ) -> Result<Vec<String>> {
-    if cte.recursive {
-        return cte
-            .query
-            .columns
-            .iter()
-            .enumerate()
-            .map(|(index, _)| {
-                cte.query.output_name(index).ok_or_else(|| {
-                    HematiteError::ParseError(format!(
-                        "Recursive CTE '{}' requires a name for projected column {}",
-                        cte.name,
-                        index + 1
-                    ))
-                })
-            })
-            .collect();
-    }
-
     projected_column_names(&cte.query, catalog)
 }
 
@@ -1888,11 +1161,6 @@ pub(crate) fn projected_column_names(
                 }
             }
             SelectItem::CountAll | SelectItem::Aggregate { .. } => {
-                if let Some(name) = SelectStatement::default_output_name(item, index) {
-                    names.push(name);
-                }
-            }
-            SelectItem::Window { .. } => {
                 if let Some(name) = SelectStatement::default_output_name(item, index) {
                     names.push(name);
                 }
@@ -2328,10 +1596,7 @@ fn expression_contains_aggregate(expr: &Expression) -> bool {
                     .any(expression_contains_aggregate)
             })
         }
-        Expression::Column(_)
-        | Expression::Literal(_)
-        | Expression::IntervalLiteral { .. }
-        | Expression::Parameter(_) => false,
+        Expression::Column(_) | Expression::Literal(_) | Expression::Parameter(_) => false,
     }
 }
 
@@ -2347,18 +1612,12 @@ fn sql_type_name_for_catalog_type(data_type: crate::catalog::DataType) -> SqlTyp
         crate::catalog::DataType::Int16 => SqlTypeName::Int16,
         crate::catalog::DataType::Int => SqlTypeName::Int,
         crate::catalog::DataType::Int64 => SqlTypeName::Int64,
-        crate::catalog::DataType::Int128 => SqlTypeName::Int128,
         crate::catalog::DataType::UInt8 => SqlTypeName::UInt8,
         crate::catalog::DataType::UInt16 => SqlTypeName::UInt16,
         crate::catalog::DataType::UInt => SqlTypeName::UInt,
         crate::catalog::DataType::UInt64 => SqlTypeName::UInt64,
-        crate::catalog::DataType::UInt128 => SqlTypeName::UInt128,
         crate::catalog::DataType::Text => SqlTypeName::Text,
-        crate::catalog::DataType::Char(length) => SqlTypeName::Char(length),
         crate::catalog::DataType::VarChar(length) => SqlTypeName::VarChar(length),
-        crate::catalog::DataType::Binary(length) => SqlTypeName::Binary(length),
-        crate::catalog::DataType::VarBinary(length) => SqlTypeName::VarBinary(length),
-        crate::catalog::DataType::Enum(values) => SqlTypeName::Enum(values),
         crate::catalog::DataType::Boolean => SqlTypeName::Boolean,
         crate::catalog::DataType::Float32 => SqlTypeName::Float32,
         crate::catalog::DataType::Float => SqlTypeName::Float,
@@ -2366,14 +1625,6 @@ fn sql_type_name_for_catalog_type(data_type: crate::catalog::DataType) -> SqlTyp
             SqlTypeName::Decimal { precision, scale }
         }
         crate::catalog::DataType::Blob => SqlTypeName::Blob,
-        crate::catalog::DataType::Date => SqlTypeName::Date,
-        crate::catalog::DataType::Time => SqlTypeName::Time,
-        crate::catalog::DataType::DateTime => SqlTypeName::DateTime,
-        crate::catalog::DataType::TimeWithTimeZone => SqlTypeName::TimeWithTimeZone,
-        crate::catalog::DataType::IntervalYearMonth
-        | crate::catalog::DataType::IntervalDaySecond => {
-            panic!("interval runtime types do not map to schema SQL type names")
-        }
     }
 }
 

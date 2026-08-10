@@ -578,7 +578,6 @@ impl BTreeNode {
             );
         }
 
-        // Write header fields.
         write_u16_be(&mut page.data, header_offset + 3, self.keys.len() as u16);
         write_u16_be(&mut page.data, header_offset + 5, content_start as u16);
         page.data[header_offset + 7] = 0;
@@ -762,7 +761,6 @@ impl BTreeNode {
         Self::validate_key_size(&key)?;
         Self::validate_value_size(&value)?;
 
-        // Allocate a fresh leaf page.
         let new_page_id = storage.allocate_page()?;
         let mut new_page = storage.new_page_buffer(new_page_id)?;
         // Initialize page bytes as an empty leaf.
@@ -841,7 +839,6 @@ impl BTreeNode {
         // Encode the new internal cell: [left_child][key_len][key_bytes]
         let cell_bytes = encode_internal_cell_raw(left_child, key);
 
-        // Check free space.
         let needed = cell_bytes.len() + 2; // +2 for the new cell pointer
         let free = pf_total_free_space(page, is_p1)?;
         if free < needed {

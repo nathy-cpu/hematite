@@ -68,22 +68,12 @@ impl DatabaseHeader {
     pub fn serialize(&self, bytes: &mut [u8]) -> Result<()> {
         let offset = 0;
 
-        // Write magic bytes
         bytes[offset..offset + 4].copy_from_slice(&self.magic);
-
-        // Write version
         bytes[offset + 4..offset + 8].copy_from_slice(&self.version.to_le_bytes());
-
-        // Write schema root page ID
         bytes[offset + 8..offset + 12].copy_from_slice(&self.schema_root_page.to_le_bytes());
-
-        // Write next table ID
         bytes[offset + 12..offset + 16].copy_from_slice(&self.next_table_id.to_le_bytes());
-
-        // Write checksum
         bytes[offset + 16..offset + 20].copy_from_slice(&self.checksum.to_le_bytes());
 
-        // Zero out the rest of the header page
         for byte in bytes.iter_mut().skip(20) {
             *byte = 0;
         }
@@ -95,18 +85,14 @@ impl DatabaseHeader {
     pub fn deserialize(bytes: &[u8]) -> Result<Self> {
         let offset = 0;
 
-        // Read magic bytes
         let mut magic = [0u8; 4];
         magic.copy_from_slice(&bytes[offset..offset + 4]);
-
-        // Verify magic bytes
         if magic != Self::MAGIC {
             return Err(crate::error::HematiteError::StorageError(
                 "Invalid database file: wrong magic bytes".to_string(),
             ));
         }
 
-        // Read version
         let version = u32::from_le_bytes([
             bytes[offset + 4],
             bytes[offset + 5],
@@ -121,7 +107,6 @@ impl DatabaseHeader {
             )));
         }
 
-        // Read schema root page ID
         let schema_root_page = u32::from_le_bytes([
             bytes[offset + 8],
             bytes[offset + 9],
@@ -129,7 +114,6 @@ impl DatabaseHeader {
             bytes[offset + 11],
         ]);
 
-        // Read next table ID
         let next_table_id = u32::from_le_bytes([
             bytes[offset + 12],
             bytes[offset + 13],
@@ -137,7 +121,6 @@ impl DatabaseHeader {
             bytes[offset + 15],
         ]);
 
-        // Read checksum
         let checksum = u32::from_le_bytes([
             bytes[offset + 16],
             bytes[offset + 17],
@@ -153,7 +136,6 @@ impl DatabaseHeader {
             checksum,
         };
 
-        // Verify checksum
         if !header.verify_checksum() {
             return Err(crate::error::HematiteError::StorageError(
                 "Database header checksum verification failed".to_string(),
