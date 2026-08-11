@@ -26,6 +26,7 @@ pub(crate) mod page_format;
 pub(crate) mod tree;
 pub mod typed;
 pub(crate) mod value_store;
+pub(crate) mod varint;
 
 /// Re-exported so `catalog` can checksum the database header with the same
 /// function everything else on disk uses. The layer matrix in `src/tests.rs` does

@@ -15,10 +15,16 @@ pub mod engine;
 pub(crate) mod engine_metadata;
 pub mod header;
 pub mod ids;
+/// The v4 index-key encoding. Built and tested ahead of the swap that replaces
+/// [`serialization::IndexKeyCodec`] with it; nothing depends on it yet.
+pub(crate) mod index_key_v4;
 pub(crate) mod index_store;
 pub(crate) mod integrity;
 pub mod object;
 pub mod record;
+/// The v4 record encoding. Built and tested ahead of the swap that replaces
+/// [`serialization::RowCodec`] with it; nothing depends on it yet.
+pub(crate) mod record_v4;
 pub(crate) mod runtime_metadata;
 pub mod schema;
 pub(crate) mod schema_store;
