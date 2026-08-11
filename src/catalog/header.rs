@@ -6,6 +6,7 @@
 //! - Header checksum covers all semantic header fields to detect corruption.
 
 use super::ids::TableId;
+use crate::btree::checksum;
 use crate::error::Result;
 
 /// Database header structure stored on reserved page 0.
@@ -28,8 +29,13 @@ impl DatabaseHeader {
     pub const MAGIC: [u8; 4] = *b"HMTD";
     /// Current database format version.
     ///
-    /// Version 1 is the first version after the M0 storage reset.
-    pub const CURRENT_VERSION: u32 = 1;
+    /// - Version 1: the first version after the M0 storage reset. Checksums were
+    ///   FNV-1a, and the header's own checksum came from `DefaultHasher`.
+    /// - Version 2: every checksum in the file is XXH64. The bytes on disk are
+    ///   otherwise unchanged, but every stored checksum differs, so version 1 files
+    ///   are rejected here — at open, with the retired-format message — rather than
+    ///   surfacing later as a confusing corruption error.
+    pub const CURRENT_VERSION: u32 = 2;
     /// Fixed reserved page ID for the database header.
     pub const HEADER_PAGE_ID: u32 = 0;
 
@@ -46,17 +52,20 @@ impl DatabaseHeader {
         header
     }
 
-    /// Calculate checksum for header integrity
+    /// Calculate checksum for header integrity.
+    ///
+    /// Hashes the semantic fields in their on-disk little-endian form — i.e. the
+    /// first 16 bytes of the serialized header, everything up to the checksum
+    /// itself. This used to run the fields through `DefaultHasher`, whose output is
+    /// explicitly not guaranteed stable across Rust releases, so a database written
+    /// by one toolchain could fail header verification under another.
     pub fn calculate_checksum(&self) -> u32 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        self.magic.hash(&mut hasher);
-        self.version.hash(&mut hasher);
-        self.schema_root_page.hash(&mut hasher);
-        self.next_table_id.hash(&mut hasher);
-        hasher.finish() as u32
+        let mut fields = [0u8; 16];
+        fields[0..4].copy_from_slice(&self.magic);
+        fields[4..8].copy_from_slice(&self.version.to_le_bytes());
+        fields[8..12].copy_from_slice(&self.schema_root_page.to_le_bytes());
+        fields[12..16].copy_from_slice(&self.next_table_id.to_le_bytes());
+        checksum::hash32(0, &fields)
     }
 
     /// Verify header integrity

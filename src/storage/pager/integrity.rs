@@ -1,5 +1,6 @@
 use super::Pager;
 use crate::error::Result;
+use crate::storage::checksum;
 use crate::storage::{
     next_page_id_for_file_len, Page, PageId, PagerIntegrityReport, DB_HEADER_PAGE_ID,
     STORAGE_METADATA_PAGE_ID,
@@ -123,11 +124,6 @@ impl Pager {
     }
 
     pub(super) fn calculate_page_checksum(page: &Page) -> u32 {
-        let mut hash: u32 = 0x811C9DC5;
-        for byte in &page.data {
-            hash ^= u32::from(*byte);
-            hash = hash.wrapping_mul(0x01000193);
-        }
-        hash
+        checksum::hash32(0, &page.data)
     }
 }

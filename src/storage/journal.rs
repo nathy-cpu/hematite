@@ -1,6 +1,7 @@
 //! Rollback-journal semantic types and binary codec.
 
 use crate::error::{HematiteError, Result};
+use crate::storage::checksum;
 use crate::storage::next_page_id_for_file_len;
 use crate::storage::{file_len_for_next_page_id, PageId, PAGE_SIZE};
 use std::collections::BTreeSet;
@@ -429,20 +430,13 @@ fn validate_record_set(records: &[JournalFileRecord]) -> Result<()> {
 }
 
 fn record_checksum(page_number: PageId, checksum_seed: u32, page_bytes: &[u8]) -> u32 {
-    let mut bytes = Vec::with_capacity(8 + page_bytes.len());
-    bytes.extend_from_slice(&page_number.to_be_bytes());
-    bytes.extend_from_slice(&checksum_seed.to_be_bytes());
-    bytes.extend_from_slice(page_bytes);
-    checksum_bytes(&bytes)
-}
-
-fn checksum_bytes(bytes: &[u8]) -> u32 {
-    let mut hash: u32 = 0x811C9DC5;
-    for byte in bytes {
-        hash ^= u32::from(*byte);
-        hash = hash.wrapping_mul(0x01000193);
-    }
-    hash
+    // Feeding the record header through the hash seed instead of concatenating it
+    // with the page image removes the 4104-byte scratch `Vec` this used to build
+    // for every journaled page.
+    let mut header = [0u8; 8];
+    header[0..4].copy_from_slice(&page_number.to_be_bytes());
+    header[4..8].copy_from_slice(&checksum_seed.to_be_bytes());
+    checksum::hash32(checksum::hash64(0, &header), page_bytes)
 }
 
 fn read_u32_be(bytes: &[u8], offset: usize) -> u32 {

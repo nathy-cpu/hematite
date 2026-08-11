@@ -19,3 +19,23 @@ name = "hematite_cli"
 path = "src/main.rs"
 
 [dependencies]
+
+# The crate itself stays dependency-free. These are build-time only and are not
+# visible to downstream consumers.
+[dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+proptest = "1"
+
+[[bench]]
+name = "storage_micro"
+harness = false
+
+[[bench]]
+name = "storage_workloads"
+harness = false
+
+# Benchmarks are the project's measurement instrument, so they must be compiled the
+# way a performance-sensitive embedder would compile the library.
+[profile.release]
+lto = "thin"
+codegen-units = 1

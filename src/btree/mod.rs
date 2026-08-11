@@ -27,6 +27,11 @@ pub(crate) mod tree;
 pub mod typed;
 pub(crate) mod value_store;
 
+/// Re-exported so `catalog` can checksum the database header with the same
+/// function everything else on disk uses. The layer matrix in `src/tests.rs` does
+/// not permit `catalog` to name `crate::storage` directly, and page 0 is still
+/// owned by `catalog`, so the route runs through here.
+pub(crate) use crate::storage::checksum;
 pub use crate::storage::{JournalMode, PageId, PagerIntegrityReport};
 pub(crate) use bytes::ByteTreeStoreSnapshot;
 pub use bytes::{ByteTree, ByteTreeCursor, ByteTreeStore};

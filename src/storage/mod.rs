@@ -29,6 +29,9 @@
 //!   representation can evolve without leaking into higher layers;
 //! - this is the storage half of the future generic fork point.
 
+/// Public so the benchmark crate can measure the algorithm choice against its
+/// alternatives; the numbers are the justification for it.
+pub mod checksum;
 pub(crate) mod file_manager;
 pub(crate) mod format;
 pub(crate) mod free_list;

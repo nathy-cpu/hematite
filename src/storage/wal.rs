@@ -101,6 +101,7 @@
 //!*/
 
 use crate::error::{HematiteError, Result};
+use crate::storage::checksum;
 use crate::storage::metadata_page;
 use crate::storage::pager::JournalMode;
 use crate::storage::pager_metadata::PersistedPagerState;
@@ -811,13 +812,11 @@ fn visible_next_page_id(file_len: u64) -> PageId {
     next_page_id_for_file_len(file_len)
 }
 
+/// Must stay identical to `Pager::calculate_page_checksum`: the values computed
+/// here are stored in the same per-page checksum map the main file uses, and a
+/// checkpoint moves pages between the two without recomputing them.
 fn page_checksum(bytes: &[u8]) -> u32 {
-    let mut hash: u32 = 0x811C9DC5;
-    for byte in bytes {
-        hash ^= u32::from(*byte);
-        hash = hash.wrapping_mul(0x01000193);
-    }
-    hash
+    checksum::hash32(0, bytes)
 }
 
 /// Groups `frames` by contiguous commit-sequence runs that include a
@@ -1190,24 +1189,17 @@ fn frame_checksum(
     salt_2: u32,
     data: &[u8],
 ) -> u32 {
-    let mut hash: u32 = 0x811C9DC5;
-    macro_rules! feed_bytes {
-        ($slice:expr) => {
-            for b in $slice {
-                hash ^= u32::from(*b);
-                hash = hash.wrapping_mul(0x01000193);
-            }
-        };
-    }
+    // The frame header is hashed into the seed rather than concatenated with the
+    // page image, so the 4 KiB payload is hashed straight out of its own buffer
+    // with no intermediate copy.
+    let mut header = [0u8; 24];
+    header[0..4].copy_from_slice(&page_id.to_be_bytes());
+    header[4..8].copy_from_slice(&database_page_count.to_be_bytes());
+    header[8..16].copy_from_slice(&commit_sequence.to_be_bytes());
+    header[16..20].copy_from_slice(&salt_1.to_be_bytes());
+    header[20..24].copy_from_slice(&salt_2.to_be_bytes());
 
-    feed_bytes!(&page_id.to_be_bytes());
-    feed_bytes!(&database_page_count.to_be_bytes());
-    feed_bytes!(&commit_sequence.to_be_bytes());
-    feed_bytes!(&salt_1.to_be_bytes());
-    feed_bytes!(&salt_2.to_be_bytes());
-    feed_bytes!(data);
-
-    hash
+    checksum::hash32(checksum::hash64(0, &header), data)
 }
 
 fn read_u32_be(bytes: &[u8], offset: usize) -> u32 {

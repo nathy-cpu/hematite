@@ -276,7 +276,11 @@ mod pager_tests {
     use std::sync::{Arc, Barrier, RwLock};
     use std::thread;
 
-    fn checksum_for_test(data: &[u8]) -> u32 {
+    /// The retired FNV-1a checksum, kept only to fabricate a plausible *legacy*
+    /// sidecar file. Current checksums are XXH64 (`storage::checksum`); this
+    /// deliberately does not track them, because the file it builds is meant to look
+    /// like one written by an older version.
+    fn legacy_fnv_checksum(data: &[u8]) -> u32 {
         let mut hash: u32 = 0x811C9DC5;
         for byte in data {
             hash ^= u32::from(*byte);
@@ -1177,7 +1181,7 @@ mod pager_tests {
         let page_id = pager.allocate_page()?;
         let mut page = Page::new(page_id);
         page.data[0] = 42;
-        let checksum = checksum_for_test(&page.data);
+        let checksum = legacy_fnv_checksum(&page.data);
         pager.write_page(page)?;
         pager.flush()?;
         drop(pager);
