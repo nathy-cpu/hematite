@@ -3406,35 +3406,12 @@ mod cursor_tests {
     }
 }
 
-mod serialization_tests {
-    use crate::catalog::serialization::*;
-    use crate::catalog::Value;
-    use crate::error::{HematiteError, Result};
-
-    #[test]
-    fn test_roundtrip_row() -> Result<()> {
-        let row = vec![
-            Value::Integer(1),
-            Value::Text("hello".to_string()),
-            Value::Boolean(true),
-            Value::Float(3.5),
-            Value::Null,
-        ];
-
-        let bytes = RowSerializer::serialize(&row)?;
-        let len = RowSerializer::read_row_length(&bytes[0..4])?;
-        let decoded = RowSerializer::deserialize(&bytes[4..4 + len])?;
-        assert_eq!(decoded.len(), row.len());
-        Ok(())
-    }
-
-    #[test]
-    fn test_deserialize_truncated_returns_error() {
-        let truncated = vec![1u8, 0, 1];
-        let err = RowSerializer::deserialize(&truncated).unwrap_err();
-        assert!(matches!(err, HematiteError::CorruptedData(_)));
-    }
-}
+// Row serialization used to be tested here, reaching up into `catalog` from a
+// storage test module. Those two tests were written against the old format's
+// four-byte length prefix, which no longer exists, and everything they covered is
+// now covered where the format lives: `catalog::record_v4` round-trips every value
+// type and rejects truncation at every length, and `catalog::serialization` tests
+// the facade.
 
 mod file_manager_tests {
     use crate::storage::file_manager::FileManager;

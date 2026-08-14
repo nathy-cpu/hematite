@@ -1,16 +1,15 @@
 //! The v4 record encoding: how a row's values become bytes.
 //!
-//! Not yet wired in — [`crate::catalog::serialization::RowCodec`] is still the
-//! format on disk. This module exists first so it can be tested and measured on its
-//! own before anything depends on it.
+//! Reached through [`crate::catalog::serialization::RowCodec`], which is the name the
+//! rest of the catalog calls.
 //!
-//! # Why replace the old format
+//! # Why it replaced the old format
 //!
-//! The old encoding spends a fixed width on every value regardless of magnitude: a
+//! The old encoding spent a fixed width on every value regardless of magnitude: a
 //! one-byte tag plus four bytes for any `Integer`, plus an eight-byte record header.
-//! A row of ten small integers costs 58 bytes to hold about ten bytes of
-//! information, and measured end to end (`docs/bench-baseline.md`) a five-integer
-//! row occupies 99 bytes of database file.
+//! A row of ten small integers cost 58 bytes to hold about ten bytes of information,
+//! and measured end to end (`docs/bench-baseline.md`) a five-integer row occupied 99
+//! bytes of database file — 87.7 after this change.
 //!
 //! # Layout
 //!
@@ -64,7 +63,8 @@
 //! Ten small integers: header is 1 byte of `header_len` plus 10 one-byte serial
 //! types, bodies are 1 byte each — 21 bytes, against 58 before.
 
-// Nothing calls this yet; the swap that replaces `RowCodec` comes next.
+// `RecordRef`'s borrowed accessors are exercised by tests but have no production
+// caller until the streaming cursors land and the executor stops materialising rows.
 #![allow(dead_code)]
 
 use crate::btree::varint;
@@ -297,21 +297,73 @@ fn decimal_body_len(decimal: &DecimalValue) -> usize {
         + digits.len().div_ceil(2)
 }
 
-/// Body length implied by a serial type, or `None` if the code is not defined.
-fn body_len(code: u64) -> Option<usize> {
-    if code >= CODE_VARIABLE_BASE {
-        return Some(((code - CODE_VARIABLE_BASE) / 3) as usize);
+/// A serial type after classification: what the value is, and how wide its body is.
+///
+/// Reading a field used to decide this twice — once to learn the body length while
+/// walking the header, and again to build the value. Classifying once and passing
+/// the result along turns two chains of range comparisons per field into one match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Serial {
+    Null,
+    Boolean(bool),
+    /// Positive zero, which carries no body.
+    FloatZero,
+    Float32,
+    Float64,
+    Integer(usize),
+    BigInt(usize),
+    UInteger(usize),
+    UBigInt(usize),
+    Text(usize),
+    Blob(usize),
+    Decimal(usize),
+}
+
+impl Serial {
+    #[inline]
+    fn body_len(self) -> usize {
+        match self {
+            Serial::Null | Serial::Boolean(_) | Serial::FloatZero => 0,
+            Serial::Float32 => 4,
+            Serial::Float64 => 8,
+            Serial::Integer(w)
+            | Serial::BigInt(w)
+            | Serial::UInteger(w)
+            | Serial::UBigInt(w)
+            | Serial::Text(w)
+            | Serial::Blob(w)
+            | Serial::Decimal(w) => w,
+        }
     }
+}
+
+/// Classifies a serial type, or `None` if the code is not defined.
+#[inline]
+fn classify(code: u64) -> Option<Serial> {
+    if code >= CODE_VARIABLE_BASE {
+        let offset = code - CODE_VARIABLE_BASE;
+        let len = (offset / 3) as usize;
+        return Some(match offset % 3 {
+            VARIABLE_TEXT => Serial::Text(len),
+            VARIABLE_BLOB => Serial::Blob(len),
+            _ => Serial::Decimal(len),
+        });
+    }
+
     Some(match code {
-        CODE_NULL | CODE_FALSE | CODE_TRUE | CODE_F64_ZERO => 0,
-        CODE_F32 => 4,
-        CODE_F64 => 8,
+        CODE_NULL => Serial::Null,
+        CODE_FALSE => Serial::Boolean(false),
+        CODE_TRUE => Serial::Boolean(true),
+        CODE_F32 => Serial::Float32,
+        CODE_F64 => Serial::Float64,
+        CODE_F64_ZERO => Serial::FloatZero,
         6 | 7 => return None,
-        c if (CODE_I32_BASE..=CODE_I32_BASE + 4).contains(&c) => (c - CODE_I32_BASE) as usize,
-        c if (CODE_I64_BASE..=CODE_I64_BASE + 8).contains(&c) => (c - CODE_I64_BASE) as usize,
-        c if (CODE_U32_BASE..=CODE_U32_BASE + 4).contains(&c) => (c - CODE_U32_BASE) as usize,
-        c if (CODE_U64_BASE..=CODE_U64_BASE + 8).contains(&c) => (c - CODE_U64_BASE) as usize,
-        _ => return None,
+        c if c <= CODE_I32_BASE + 4 => Serial::Integer((c - CODE_I32_BASE) as usize),
+        c if c <= CODE_I64_BASE + 8 => Serial::BigInt((c - CODE_I64_BASE) as usize),
+        c if c <= CODE_U32_BASE + 4 => Serial::UInteger((c - CODE_U32_BASE) as usize),
+        // Codes 8..36 are fully covered by the four integer families, so anything
+        // that reaches here is the last of them.
+        c => Serial::UBigInt((c - CODE_U64_BASE) as usize),
     })
 }
 
@@ -324,22 +376,29 @@ pub(crate) fn encode(values: &[Value]) -> Vec<u8> {
 
 /// Appends one record to `out`, reusing its allocation.
 pub(crate) fn encode_into(out: &mut Vec<u8>, values: &[Value]) {
-    let types: Vec<(u64, usize)> = values.iter().map(serial_type).collect();
+    // Serial types are recomputed rather than staged in a temporary `Vec`: they are
+    // a match and a leading-zero count, which is cheaper than the heap allocation
+    // that staging them would cost on every row written.
+    let mut types_len = 0usize;
+    let mut body_len = 0usize;
+    for value in values {
+        let (code, len) = serial_type(value);
+        types_len += varint::len_of(code);
+        body_len += len;
+    }
 
     // `header_len` counts itself, so it depends on its own encoded width. Widths
     // only ever grow by one here, and one step of the fixed point always settles it:
     // re-measuring with the larger width cannot make it larger again, because a
     // one-byte increase moves the total by one while a width boundary is 128 apart.
-    let types_len: usize = types.iter().map(|(code, _)| varint::len_of(*code)).sum();
     let mut header_len = types_len + varint::len_of(types_len as u64);
     header_len = types_len + varint::len_of(header_len as u64);
 
-    let body_len: usize = types.iter().map(|(_, len)| len).sum();
     out.reserve(header_len + body_len);
 
     varint::write_to_vec(out, header_len as u64);
-    for (code, _) in &types {
-        varint::write_to_vec(out, *code);
+    for value in values {
+        varint::write_to_vec(out, serial_type(value).0);
     }
 
     for value in values {
@@ -466,51 +525,56 @@ impl<'a> RecordRef<'a> {
 
     /// Takes `self` by value because [`RecordRef`] is `Copy` and only two words
     /// wide, so a reference would cost more than the copy.
-    pub(crate) fn to_values(self) -> Result<Vec<Value>> {
-        self.iter().map(|v| v?.to_value()).collect()
+    ///
+    /// Also returns where the bodies ended, so a caller validating that a record
+    /// consumes its buffer exactly does not need a second pass over the header.
+    fn to_values_and_body_end(self) -> Result<(Vec<Value>, usize)> {
+        // Every serial type is at least one byte, so the header length bounds the
+        // field count from above — and matches it exactly for the small codes that
+        // dominate. One allocation instead of a growth sequence.
+        let mut values = Vec::with_capacity(self.types.len());
+        let mut body_end = 0;
+
+        for entry in self.types() {
+            let (serial, range) = entry?;
+            body_end = range.end;
+            values.push(self.value_at(serial, range)?.to_value()?);
+        }
+        Ok((values, body_end))
     }
 
-    fn value_at(&self, code: u64, range: std::ops::Range<usize>) -> Result<ValueRef<'a>> {
+    pub(crate) fn to_values(self) -> Result<Vec<Value>> {
+        Ok(self.to_values_and_body_end()?.0)
+    }
+
+    #[inline]
+    fn value_at(&self, serial: Serial, range: std::ops::Range<usize>) -> Result<ValueRef<'a>> {
         let body = self
             .body
-            .get(range.clone())
+            .get(range)
             .ok_or_else(|| corrupt("Record body is truncated"))?;
 
-        if code >= CODE_VARIABLE_BASE {
-            return match (code - CODE_VARIABLE_BASE) % 3 {
-                VARIABLE_TEXT => Ok(ValueRef::Text(
-                    std::str::from_utf8(body)
-                        .map_err(|_| corrupt("Invalid UTF-8 in text value"))?,
-                )),
-                VARIABLE_BLOB => Ok(ValueRef::Blob(body)),
-                _ => Ok(ValueRef::Decimal(body)),
-            };
-        }
-
-        Ok(match code {
-            CODE_NULL => ValueRef::Null,
-            CODE_FALSE => ValueRef::Boolean(false),
-            CODE_TRUE => ValueRef::Boolean(true),
-            CODE_F64_ZERO => ValueRef::Float(0.0),
-            CODE_F32 => ValueRef::Float32(f32::from_bits(u32::from_be_bytes(
-                body.try_into().expect("body_len guarantees 4 bytes"),
+        Ok(match serial {
+            Serial::Null => ValueRef::Null,
+            Serial::Boolean(b) => ValueRef::Boolean(b),
+            Serial::FloatZero => ValueRef::Float(0.0),
+            Serial::Float32 => ValueRef::Float32(f32::from_bits(u32::from_be_bytes(
+                body.try_into()
+                    .expect("Serial::body_len guarantees 4 bytes"),
             ))),
-            CODE_F64 => ValueRef::Float(f64::from_bits(u64::from_be_bytes(
-                body.try_into().expect("body_len guarantees 8 bytes"),
+            Serial::Float64 => ValueRef::Float(f64::from_bits(u64::from_be_bytes(
+                body.try_into()
+                    .expect("Serial::body_len guarantees 8 bytes"),
             ))),
-            c if (CODE_I32_BASE..=CODE_I32_BASE + 4).contains(&c) => {
-                ValueRef::Integer(read_signed(body) as i32)
-            }
-            c if (CODE_I64_BASE..=CODE_I64_BASE + 8).contains(&c) => {
-                ValueRef::BigInt(read_signed(body))
-            }
-            c if (CODE_U32_BASE..=CODE_U32_BASE + 4).contains(&c) => {
-                ValueRef::UInteger(read_unsigned(body) as u32)
-            }
-            c if (CODE_U64_BASE..=CODE_U64_BASE + 8).contains(&c) => {
-                ValueRef::UBigInt(read_unsigned(body))
-            }
-            other => return Err(corrupt(format!("Unknown record serial type {other}"))),
+            Serial::Integer(_) => ValueRef::Integer(read_signed(body) as i32),
+            Serial::BigInt(_) => ValueRef::BigInt(read_signed(body)),
+            Serial::UInteger(_) => ValueRef::UInteger(read_unsigned(body) as u32),
+            Serial::UBigInt(_) => ValueRef::UBigInt(read_unsigned(body)),
+            Serial::Text(_) => ValueRef::Text(
+                std::str::from_utf8(body).map_err(|_| corrupt("Invalid UTF-8 in text value"))?,
+            ),
+            Serial::Blob(_) => ValueRef::Blob(body),
+            Serial::Decimal(_) => ValueRef::Decimal(body),
         })
     }
 }
@@ -523,8 +587,9 @@ struct TypeWalk<'a> {
 }
 
 impl Iterator for TypeWalk<'_> {
-    type Item = Result<(u64, std::ops::Range<usize>)>;
+    type Item = Result<(Serial, std::ops::Range<usize>)>;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if self.type_offset >= self.types.len() {
             return None;
@@ -536,14 +601,14 @@ impl Iterator for TypeWalk<'_> {
         };
         self.type_offset += consumed;
 
-        let Some(len) = body_len(code) else {
+        let Some(serial) = classify(code) else {
             self.type_offset = self.types.len();
             return Some(Err(corrupt(format!("Unknown record serial type {code}"))));
         };
 
         let start = self.body_offset;
-        self.body_offset += len;
-        Some(Ok((code, start..self.body_offset)))
+        self.body_offset += serial.body_len();
+        Some(Ok((serial, start..self.body_offset)))
     }
 }
 
@@ -557,15 +622,29 @@ impl<'a> Iterator for RecordIter<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.walk.next()? {
-            Ok((code, range)) => Some(self.record.value_at(code, range)),
+            Ok((serial, range)) => Some(self.record.value_at(serial, range)),
             Err(err) => Some(Err(err)),
         }
     }
 }
 
 /// Decodes a whole record into owned values.
+///
+/// Stricter than [`RecordRef`]: the body must end exactly where the serial types
+/// say it does. A caller decoding a whole record hands over exactly one record's
+/// bytes, so anything left over is corruption — most likely a cell whose length
+/// disagrees with its contents.
 pub(crate) fn decode(bytes: &[u8]) -> Result<Vec<Value>> {
-    RecordRef::new(bytes)?.to_values()
+    let record = RecordRef::new(bytes)?;
+    let (values, body_end) = record.to_values_and_body_end()?;
+
+    if body_end != record.body.len() {
+        return Err(corrupt(format!(
+            "Record body is {} bytes but its serial types account for {body_end}",
+            record.body.len()
+        )));
+    }
+    Ok(values)
 }
 
 #[cfg(test)]

@@ -1583,12 +1583,22 @@ mod catalog_new_tests {
     }
 
     #[test]
-    fn test_index_key_codec_rejects_truncated_rowid_bytes() {
+    fn test_index_key_codec_rejects_malformed_rowid_bytes() {
+        // A primary-key payload is one varint and nothing else. `[1, 2, 3]` decodes
+        // its first byte as a complete varint, so the failure is the trailing bytes.
         let err = IndexKeyCodec::decode_row_id(&[1, 2, 3]).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("Index rowid payload must be exactly 8 bytes"));
+        assert!(
+            err.to_string().contains("trailing bytes"),
+            "unexpected error: {err}"
+        );
 
+        let err = IndexKeyCodec::decode_row_id(&[]).unwrap_err();
+        assert!(
+            err.to_string().contains("truncated"),
+            "unexpected error: {err}"
+        );
+
+        // A secondary key always ends with the eight-byte row id.
         let err = IndexKeyCodec::split_secondary_key(&[1, 2, 3, 4, 5, 6, 7]).unwrap_err();
         assert!(err
             .to_string()

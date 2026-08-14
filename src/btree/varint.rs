@@ -42,9 +42,6 @@
 //! that slack — a standalone record buffer, say — take [`read`]'s tail path, which
 //! copies into a staging array first. Both paths decode identically.
 
-// Reachable only from the v4 codecs, which are not wired in yet.
-#![allow(dead_code)]
-
 /// Largest value representable in the eight-byte form; anything larger takes nine.
 const MAX_PACKED: u64 = (1u64 << 56) - 1;
 
@@ -101,6 +98,12 @@ pub(crate) fn write_to_vec(out: &mut Vec<u8>, value: u64) {
 #[inline]
 pub(crate) fn read(bytes: &[u8], offset: usize) -> Option<(u64, usize)> {
     let tag = *bytes.get(offset)?;
+
+    // The overwhelmingly common case — every serial type below 128, every small
+    // length, every small row id — needs no wide load and no masking at all.
+    if tag & 1 == 1 {
+        return Some(((tag >> 1) as u64, 1));
+    }
 
     if tag == 0 {
         let end = offset.checked_add(9)?;

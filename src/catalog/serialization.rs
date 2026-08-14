@@ -1,6 +1,10 @@
 //! Relational row and index-key encoding.
+//!
+//! The formats themselves live in [`crate::catalog::record_v4`] and
+//! [`crate::catalog::index_key_v4`]; this module is the naming layer the rest of the
+//! catalog calls through.
 
-use crate::catalog::{DecimalValue, Value};
+use crate::catalog::{index_key_v4, record_v4, Value};
 use crate::error::{HematiteError, Result};
 
 use super::record::StoredRow;
@@ -9,87 +13,15 @@ pub struct RowCodec;
 
 impl RowCodec {
     pub fn encode_values(values: &[Value]) -> Result<Vec<u8>> {
-        Self::encode_stored_row(&StoredRow {
-            row_id: 0,
-            values: values.to_vec(),
-        })
+        Ok(record_v4::encode(values))
     }
 
     pub fn encode_stored_row(row: &StoredRow) -> Result<Vec<u8>> {
-        let mut buffer = Vec::new();
-        buffer.extend_from_slice(&(0u32).to_le_bytes());
-        buffer.extend_from_slice(&(row.values.len() as u32).to_le_bytes());
-
-        for value in &row.values {
-            match value {
-                Value::Integer(i) => {
-                    buffer.push(1);
-                    buffer.extend_from_slice(&i.to_le_bytes());
-                }
-                Value::BigInt(i) => {
-                    buffer.push(6);
-                    buffer.extend_from_slice(&i.to_le_bytes());
-                }
-                Value::UInteger(i) => {
-                    buffer.push(18);
-                    buffer.extend_from_slice(&i.to_le_bytes());
-                }
-                Value::UBigInt(i) => {
-                    buffer.push(19);
-                    buffer.extend_from_slice(&i.to_le_bytes());
-                }
-                Value::Text(s) => {
-                    buffer.push(2);
-                    write_bytes(&mut buffer, s.as_bytes());
-                }
-                Value::Boolean(b) => {
-                    buffer.push(3);
-                    buffer.push(u8::from(*b));
-                }
-                Value::Float32(f) => {
-                    buffer.push(21);
-                    buffer.extend_from_slice(&f.to_le_bytes());
-                }
-                Value::Float(f) => {
-                    buffer.push(4);
-                    buffer.extend_from_slice(&f.to_le_bytes());
-                }
-                Value::Decimal(decimal) => {
-                    buffer.push(7);
-                    write_decimal(&mut buffer, decimal);
-                }
-                Value::Blob(bytes) => {
-                    buffer.push(8);
-                    write_bytes(&mut buffer, bytes);
-                }
-                Value::Null => buffer.push(5),
-            }
-        }
-
-        let payload_len = buffer.len() - 4;
-        buffer[0..4].copy_from_slice(&(payload_len as u32).to_le_bytes());
-        Ok(buffer)
+        Ok(record_v4::encode(&row.values))
     }
 
     pub fn decode_values(data: &[u8]) -> Result<Vec<Value>> {
-        let encoded = if data.len() >= 4 {
-            let payload_len = Self::read_payload_length(&data[0..4])?;
-            if payload_len + 4 == data.len() {
-                data.to_vec()
-            } else {
-                let mut encoded = Vec::with_capacity(data.len() + 4);
-                encoded.extend_from_slice(&(data.len() as u32).to_le_bytes());
-                encoded.extend_from_slice(data);
-                encoded
-            }
-        } else {
-            let mut encoded = Vec::with_capacity(data.len() + 4);
-            encoded.extend_from_slice(&(data.len() as u32).to_le_bytes());
-            encoded.extend_from_slice(data);
-            encoded
-        };
-
-        Ok(Self::decode_stored_row(0, &encoded)?.values)
+        record_v4::decode(data)
     }
 
     /// Encodes a `u64` row ID into a lexicographically sortable variable-length byte array.
@@ -118,7 +50,7 @@ impl RowCodec {
             return Err(HematiteError::CorruptedData("Empty rowid key".to_string()));
         }
         let bytes_needed = key[0] as usize;
-        if bytes_needed < 1 || bytes_needed > 8 {
+        if !(1..=8).contains(&bytes_needed) {
             return Err(HematiteError::CorruptedData(format!(
                 "Invalid rowid key prefix length: {}",
                 bytes_needed
@@ -137,100 +69,10 @@ impl RowCodec {
     }
 
     pub fn decode_stored_row(row_id: u64, data: &[u8]) -> Result<StoredRow> {
-        if data.len() < 8 {
-            return Err(HematiteError::CorruptedData(
-                "Stored row header is truncated".to_string(),
-            ));
-        }
-
-        let mut offset = 0usize;
-        let payload_len = Self::read_payload_length(&data[0..4])?;
-        offset += 4;
-
-        if payload_len + 4 > data.len() {
-            return Err(HematiteError::CorruptedData(
-                "Stored row length exceeds available bytes".to_string(),
-            ));
-        }
-
-        let value_count = u32::from_le_bytes(data[offset..offset + 4].try_into().map_err(|_| {
-            HematiteError::CorruptedData("Stored row value count is truncated".to_string())
-        })?) as usize;
-        offset += 4;
-
-        let payload_end = payload_len + 4;
-        let mut values = Vec::with_capacity(value_count);
-
-        for _ in 0..value_count {
-            if offset >= payload_end {
-                return Err(HematiteError::CorruptedData(
-                    "Stored row ended before all values were decoded".to_string(),
-                ));
-            }
-
-            let tag = data[offset];
-            offset += 1;
-            let value = match tag {
-                1 => {
-                    let bytes = read_exact(data, &mut offset, payload_end, 4, "Integer value")?;
-                    Value::Integer(i32::from_le_bytes(bytes.try_into().unwrap()))
-                }
-                2 => {
-                    let bytes = read_bytes(data, &mut offset, payload_end, "Text value")?;
-                    let text = String::from_utf8(bytes).map_err(|_| {
-                        HematiteError::CorruptedData("Invalid UTF-8 in text value".to_string())
-                    })?;
-                    Value::Text(text)
-                }
-                3 => {
-                    let bytes = read_exact(data, &mut offset, payload_end, 1, "Boolean value")?;
-                    Value::Boolean(bytes[0] != 0)
-                }
-                4 => {
-                    let bytes = read_exact(data, &mut offset, payload_end, 8, "Float value")?;
-                    Value::Float(f64::from_le_bytes(bytes.try_into().unwrap()))
-                }
-                21 => {
-                    let bytes = read_exact(data, &mut offset, payload_end, 4, "Float32 value")?;
-                    Value::Float32(f32::from_le_bytes(bytes.try_into().unwrap()))
-                }
-                5 => Value::Null,
-                6 => {
-                    let bytes = read_exact(data, &mut offset, payload_end, 8, "BigInt value")?;
-                    Value::BigInt(i64::from_le_bytes(bytes.try_into().unwrap()))
-                }
-                18 => {
-                    let bytes = read_exact(data, &mut offset, payload_end, 4, "UInt value")?;
-                    Value::UInteger(u32::from_le_bytes(bytes.try_into().unwrap()))
-                }
-                19 => {
-                    let bytes = read_exact(data, &mut offset, payload_end, 8, "UInt64 value")?;
-                    Value::UBigInt(u64::from_le_bytes(bytes.try_into().unwrap()))
-                }
-                7 => Value::Decimal(read_decimal(data, &mut offset, payload_end)?),
-                8 => Value::Blob(read_bytes(data, &mut offset, payload_end, "Blob value")?),
-                _ => {
-                    return Err(HematiteError::CorruptedData(format!(
-                        "Unknown value tag {} in stored row",
-                        tag
-                    )))
-                }
-            };
-
-            values.push(value);
-        }
-
-        Ok(StoredRow { row_id, values })
-    }
-
-    pub fn read_payload_length(prefix: &[u8]) -> Result<usize> {
-        if prefix.len() != 4 {
-            return Err(HematiteError::CorruptedData(
-                "Row length prefix must be 4 bytes".to_string(),
-            ));
-        }
-
-        Ok(u32::from_le_bytes([prefix[0], prefix[1], prefix[2], prefix[3]]) as usize)
+        Ok(StoredRow {
+            row_id,
+            values: record_v4::decode(data)?,
+        })
     }
 }
 
@@ -238,40 +80,30 @@ pub struct IndexKeyCodec;
 
 impl IndexKeyCodec {
     pub fn encode_key(values: &[Value]) -> Result<Vec<u8>> {
-        let mut buffer = Vec::new();
-        for value in values {
-            encode_key_value(&mut buffer, value);
-        }
-        Ok(buffer)
+        Ok(index_key_v4::encode_key(values))
     }
 
     pub fn encode_secondary_key(values: &[Value], row_id: u64) -> Result<Vec<u8>> {
-        let mut key = Self::encode_key(values)?;
-        key.extend_from_slice(&row_id.to_be_bytes());
-        Ok(key)
+        Ok(index_key_v4::encode_secondary_key(values, row_id))
+    }
+
+    /// The payload stored against a primary-key index entry.
+    ///
+    /// A varint, so a small row id costs one byte where it used to cost eight.
+    pub fn encode_row_id_value(row_id: u64) -> Vec<u8> {
+        index_key_v4::encode_row_id_value(row_id)
     }
 
     pub fn decode_row_id(value: &[u8]) -> Result<u64> {
-        if value.len() != 8 {
-            return Err(HematiteError::CorruptedData(
-                "Index rowid payload must be exactly 8 bytes".to_string(),
-            ));
-        }
-        let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(value);
-        Ok(u64::from_be_bytes(bytes))
+        index_key_v4::decode_row_id_value(value)
     }
 
-    pub fn split_secondary_key(key: &[u8]) -> Result<(Vec<u8>, u64)> {
-        if key.len() < 8 {
-            return Err(HematiteError::CorruptedData(
-                "Index entry is missing rowid bytes".to_string(),
-            ));
-        }
-        let mut row_id_bytes = [0u8; 8];
-        row_id_bytes.copy_from_slice(&key[key.len() - 8..]);
-        let row_id = u64::from_be_bytes(row_id_bytes);
-        Ok((key[..key.len() - 8].to_vec(), row_id))
+    /// Splits a secondary-index key into its value prefix and trailing row id.
+    ///
+    /// Borrows the prefix — secondary entries carry no payload at all now, so this
+    /// is the only way to recover the row id, and it runs on every entry of a scan.
+    pub fn split_secondary_key(key: &[u8]) -> Result<(&[u8], u64)> {
+        index_key_v4::split_secondary_key(key)
     }
 }
 
@@ -293,198 +125,6 @@ impl RowSerializer {
     pub fn deserialize_stored_row(row_id: u64, data: &[u8]) -> Result<StoredRow> {
         RowCodec::decode_stored_row(row_id, data)
     }
-
-    pub fn read_row_length(prefix: &[u8]) -> Result<usize> {
-        RowCodec::read_payload_length(prefix)
-    }
-}
-
-fn encode_key_value(buffer: &mut Vec<u8>, value: &Value) {
-    match value {
-        Value::Null => buffer.push(0),
-        Value::Boolean(false) => buffer.push(1),
-        Value::Boolean(true) => buffer.push(2),
-        Value::Integer(value) => {
-            buffer.push(3);
-            buffer.extend_from_slice(&(i32::to_be_bytes(*value ^ i32::MIN)));
-        }
-        Value::BigInt(value) => {
-            buffer.push(4);
-            buffer.extend_from_slice(&(i64::to_be_bytes(*value ^ i64::MIN)));
-        }
-        Value::UInteger(value) => {
-            buffer.push(18);
-            buffer.extend_from_slice(&value.to_be_bytes());
-        }
-        Value::UBigInt(value) => {
-            buffer.push(19);
-            buffer.extend_from_slice(&value.to_be_bytes());
-        }
-        Value::Float32(value) => {
-            buffer.push(21);
-            buffer.extend_from_slice(&ordered_f32_bytes(*value));
-        }
-        Value::Float(value) => {
-            buffer.push(5);
-            buffer.extend_from_slice(&ordered_f64_bytes(*value));
-        }
-        Value::Decimal(value) => {
-            buffer.push(6);
-            buffer.push(u8::from(value.negative()));
-            buffer.extend_from_slice(&value.scale().to_be_bytes());
-            buffer.extend_from_slice(&(value.digit_bytes().len() as u32).to_be_bytes());
-            write_packed_digits(buffer, value.digit_bytes());
-        }
-        Value::Text(value) => {
-            buffer.push(7);
-            write_bytes(buffer, value.as_bytes());
-        }
-        Value::Blob(value) => {
-            buffer.push(8);
-            write_bytes(buffer, value);
-        }
-    }
-}
-
-fn ordered_f64_bytes(value: f64) -> [u8; 8] {
-    let bits = value.to_bits();
-    let transformed = if (bits >> 63) == 0 {
-        bits ^ (1u64 << 63)
-    } else {
-        !bits
-    };
-    transformed.to_be_bytes()
-}
-
-fn ordered_f32_bytes(value: f32) -> [u8; 4] {
-    let bits = value.to_bits();
-    let transformed = if (bits >> 31) == 0 {
-        bits ^ (1u32 << 31)
-    } else {
-        !bits
-    };
-    transformed.to_be_bytes()
-}
-
-fn write_bytes(buffer: &mut Vec<u8>, bytes: &[u8]) {
-    buffer.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-    buffer.extend_from_slice(bytes);
-}
-
-fn read_bytes(data: &[u8], offset: &mut usize, end: usize, label: &str) -> Result<Vec<u8>> {
-    let len_bytes = read_exact(data, offset, end, 4, &format!("{label} length"))?;
-    let len = u32::from_le_bytes(len_bytes.try_into().unwrap()) as usize;
-    Ok(read_exact(data, offset, end, len, label)?.to_vec())
-}
-
-fn read_exact<'a>(
-    data: &'a [u8],
-    offset: &mut usize,
-    end: usize,
-    len: usize,
-    label: &str,
-) -> Result<&'a [u8]> {
-    if *offset + len > end {
-        return Err(HematiteError::CorruptedData(format!(
-            "{} is truncated",
-            label
-        )));
-    }
-    let bytes = &data[*offset..*offset + len];
-    *offset += len;
-    Ok(bytes)
-}
-
-fn write_decimal(buffer: &mut Vec<u8>, value: &DecimalValue) {
-    buffer.push(u8::from(value.negative()));
-    buffer.extend_from_slice(&value.scale().to_le_bytes());
-    buffer.extend_from_slice(&(value.digit_bytes().len() as u32).to_le_bytes());
-    write_packed_digits(buffer, value.digit_bytes());
-}
-
-fn read_decimal(data: &[u8], offset: &mut usize, end: usize) -> Result<DecimalValue> {
-    let sign = read_exact(data, offset, end, 1, "Decimal sign")?[0] != 0;
-    let scale = u32::from_le_bytes(
-        read_exact(data, offset, end, 4, "Decimal scale")?
-            .try_into()
-            .unwrap(),
-    );
-    let digit_count = u32::from_le_bytes(
-        read_exact(data, offset, end, 4, "Decimal digit count")?
-            .try_into()
-            .unwrap(),
-    ) as usize;
-    let packed_len = digit_count.div_ceil(2);
-    let packed = read_exact(data, offset, end, packed_len, "Decimal digits")?;
-    let digits = read_packed_digits(packed, digit_count)?;
-    let mut decimal = DecimalValue::parse(&format_decimal_digits(sign, &digits, scale as usize))?;
-    if decimal.digit_bytes().len() == 1 && decimal.digit_bytes()[0] == 0 {
-        decimal = DecimalValue::zero();
-    }
-    Ok(decimal)
-}
-
-fn format_decimal_digits(negative: bool, digits: &[u8], scale: usize) -> String {
-    let mut out = String::new();
-    if negative && !(digits.len() == 1 && digits[0] == 0) {
-        out.push('-');
-    }
-    let digit_string = digits
-        .iter()
-        .map(|digit| char::from(b'0' + *digit))
-        .collect::<String>();
-    if scale == 0 {
-        out.push_str(&digit_string);
-        return out;
-    }
-    if digit_string.len() <= scale {
-        out.push_str("0.");
-        for _ in 0..scale - digit_string.len() {
-            out.push('0');
-        }
-        out.push_str(&digit_string);
-        return out;
-    }
-    let split = digit_string.len() - scale;
-    out.push_str(&digit_string[..split]);
-    out.push('.');
-    out.push_str(&digit_string[split..]);
-    out
-}
-
-fn write_packed_digits(buffer: &mut Vec<u8>, digits: &[u8]) {
-    for chunk in digits.chunks(2) {
-        let high = chunk[0] & 0x0F;
-        let low = if chunk.len() > 1 {
-            chunk[1] & 0x0F
-        } else {
-            0x0F
-        };
-        buffer.push((high << 4) | low);
-    }
-}
-
-fn read_packed_digits(bytes: &[u8], digit_count: usize) -> Result<Vec<u8>> {
-    let mut digits = Vec::with_capacity(digit_count);
-    for byte in bytes {
-        digits.push((byte >> 4) & 0x0F);
-        if digits.len() == digit_count {
-            break;
-        }
-        let low = byte & 0x0F;
-        if low <= 9 {
-            digits.push(low);
-        }
-        if digits.len() == digit_count {
-            break;
-        }
-    }
-    if digits.len() != digit_count || digits.iter().any(|digit| *digit > 9) {
-        return Err(HematiteError::CorruptedData(
-            "Packed decimal digits are invalid".to_string(),
-        ));
-    }
-    Ok(digits)
 }
 
 #[cfg(test)]
@@ -548,5 +188,37 @@ mod tests {
             let encoded_b = RowCodec::encode_row_id_key(b);
             assert!(encoded_a < encoded_b, "lexicographical sort order violation: key({a}) >= key({b})\n  key({a}) = {:?}\n  key({b}) = {:?}", encoded_a, encoded_b);
         }
+    }
+
+    #[test]
+    fn rows_roundtrip_through_the_facade() {
+        let row = StoredRow {
+            row_id: 42,
+            values: vec![
+                Value::Integer(7),
+                Value::Text("hello".to_string()),
+                Value::Null,
+            ],
+        };
+        let encoded = RowCodec::encode_stored_row(&row).expect("encode");
+        let decoded = RowCodec::decode_stored_row(row.row_id, &encoded).expect("decode");
+        assert_eq!(decoded.row_id, row.row_id);
+        assert_eq!(decoded.values, row.values);
+    }
+
+    /// The old row format carried a four-byte little-endian length prefix, and
+    /// `decode_values` re-framed its input to add one when it was missing. The new
+    /// format has no such prefix — the cell already knows how long its payload is —
+    /// so decoding is a straight parse of exactly the bytes handed over.
+    #[test]
+    fn decoding_does_not_reframe_its_input() {
+        let values = vec![Value::Integer(1), Value::Text("two".to_string())];
+        let encoded = RowCodec::encode_values(&values).expect("encode");
+        assert_eq!(RowCodec::decode_values(&encoded).expect("decode"), values);
+
+        // Trailing bytes are not silently accepted as part of the record.
+        let mut padded = encoded.clone();
+        padded.push(0xFF);
+        assert!(RowCodec::decode_values(&padded).is_err());
     }
 }

@@ -1,7 +1,7 @@
 //! The v4 index-key encoding: how a set of values becomes one sortable byte string.
 //!
-//! Not yet wired in — [`crate::catalog::serialization::IndexKeyCodec`] is still what
-//! writes index trees. This module is built and tested first.
+//! Reached through [`crate::catalog::serialization::IndexKeyCodec`], which is the name
+//! the rest of the catalog calls.
 //!
 //! # The contract
 //!
@@ -19,7 +19,7 @@
 //! Rust variant a number came from, and it uses that freedom to put all integers
 //! into a single order.
 //!
-//! # Three ordering bugs this fixes
+//! # Three ordering bugs this fixed
 //!
 //! - **Text and blob lengths.** The old encoding prefixes bytes with a
 //!   *little-endian* `u32` length. Comparing `"b"` against `"ab"` compares `01` and
@@ -57,9 +57,6 @@
 //! column is one or the other in practice, and making them interleave would mean
 //! choosing a common representation that can hold `u64::MAX` and `f64` exactly,
 //! which no eight-byte encoding does.
-
-// Nothing calls this yet; the swap that replaces `IndexKeyCodec` comes next.
-#![allow(dead_code)]
 
 use crate::btree::varint;
 use crate::catalog::{DecimalValue, Value};

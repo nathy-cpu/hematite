@@ -31,6 +31,7 @@ use crate::storage::{
     FIRST_ALLOCATABLE_PAGE_ID, PAGE_SIZE, STORAGE_METADATA_PAGE_ID,
 };
 use std::fs::{File, OpenOptions};
+#[cfg(not(any(unix, windows)))]
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 
@@ -44,7 +45,6 @@ use std::os::windows::fs::FileExt;
 #[derive(Debug)]
 pub struct FileManager {
     backend: FileBackend,
-    position: u64,
     next_page_id: u32,
     free_list: FreeList,
     #[cfg(test)]
@@ -73,7 +73,6 @@ impl FileManager {
 
         let manager = Self {
             backend: FileBackend::Disk { file },
-            position: 0,
             next_page_id: 0,
             free_list: FreeList::new(),
             #[cfg(test)]
@@ -88,7 +87,6 @@ impl FileManager {
     pub fn new_in_memory() -> Result<Self> {
         let manager = Self {
             backend: FileBackend::Memory(Vec::new()),
-            position: 0,
             next_page_id: 0,
             free_list: FreeList::new(),
             #[cfg(test)]
@@ -152,11 +150,7 @@ impl FileManager {
 
     pub fn write_page(&mut self, page: &Page) -> Result<()> {
         let offset = Self::page_offset(page.id)?;
-
-        self.seek(SeekFrom::Start(offset))?;
-        self.write_all(&page.data)?;
-
-        Ok(())
+        self.write_all_at(offset, &page.data)
     }
 
     pub fn allocate_page(&mut self) -> Result<PageId> {
@@ -344,34 +338,12 @@ impl FileManager {
         Ok(())
     }
 
-    fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
-        match &mut self.backend {
-            FileBackend::Disk { file, .. } => {
-                let position = file.seek(pos)?;
-                self.position = position;
-                Ok(position)
-            }
-            FileBackend::Memory(buffer) => {
-                let len = buffer.len() as i64;
-                let next = match pos {
-                    SeekFrom::Start(offset) => offset as i64,
-                    SeekFrom::End(offset) => len + offset,
-                    SeekFrom::Current(offset) => self.position as i64 + offset,
-                };
-
-                if next < 0 {
-                    return Err(crate::error::HematiteError::StorageError(
-                        "Invalid negative seek in in-memory storage".to_string(),
-                    ));
-                }
-
-                self.position = next as u64;
-                Ok(self.position)
-            }
-        }
-    }
-
-    fn write_all(&mut self, buf: &[u8]) -> Result<()> {
+    /// Writes at an absolute offset without moving a shared file position.
+    ///
+    /// Reads already used positional I/O; writes went through `seek` + `write_all`,
+    /// which cost an extra syscall per page and made every write path depend on a
+    /// mutable cursor that nothing else was allowed to disturb.
+    fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<()> {
         #[cfg(test)]
         if let Some(remaining_writes) = self.fail_on_write_countdown.as_mut() {
             if *remaining_writes == 0 {
@@ -384,17 +356,16 @@ impl FileManager {
             *remaining_writes -= 1;
         }
         match &mut self.backend {
-            FileBackend::Disk { file, .. } => {
-                file.write_all(buf)?;
+            FileBackend::Disk { file } => {
+                write_all_at_position(file, offset, buf)?;
             }
             FileBackend::Memory(buffer) => {
-                let offset = self.position as usize;
+                let offset = offset as usize;
                 let end = offset + buf.len();
                 if end > buffer.len() {
                     buffer.resize(end, 0);
                 }
                 buffer[offset..end].copy_from_slice(buf);
-                self.position = end as u64;
             }
         }
         Ok(())
@@ -410,11 +381,37 @@ impl FileManager {
             }
         }
 
-        if self.position > len {
-            self.position = len;
-        }
-
         Ok(())
+    }
+}
+
+/// Positional write, looping until the whole buffer lands.
+///
+/// On platforms without positional I/O this falls back to seeking a private handle
+/// rather than the shared one, so it still leaves no cursor behind.
+fn write_all_at_position(file: &mut File, offset: u64, buf: &[u8]) -> std::io::Result<()> {
+    #[cfg(any(unix, windows))]
+    {
+        let mut written = 0usize;
+        while written < buf.len() {
+            #[cfg(unix)]
+            let count = file.write_at(&buf[written..], offset + written as u64)?;
+            #[cfg(windows)]
+            let count = file.seek_write(&buf[written..], offset + written as u64)?;
+            if count == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "failed to write whole buffer",
+                ));
+            }
+            written += count;
+        }
+        Ok(())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        file.seek(SeekFrom::Start(offset))?;
+        file.write_all(buf)
     }
 }
 

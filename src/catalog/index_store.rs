@@ -79,7 +79,10 @@ pub(crate) fn register_primary_key_row(
             table.name
         )));
     }
-    tree.insert_with_mutation(&encoded_key, &row.row_id.to_be_bytes())?;
+    tree.insert_with_mutation(
+        &encoded_key,
+        &IndexKeyCodec::encode_row_id_value(row.row_id),
+    )?;
     Ok(())
 }
 
@@ -114,7 +117,7 @@ pub(crate) fn lookup_secondary_index_rowids(
     )?;
     tree.entries_with_prefix(&IndexKeyCodec::encode_key(&key_values)?)?
         .into_iter()
-        .map(|(_key, value)| IndexKeyCodec::decode_row_id(&value))
+        .map(|(key, _value)| Ok(IndexKeyCodec::split_secondary_key(&key)?.1))
         .collect()
 }
 
@@ -134,9 +137,11 @@ pub(crate) fn register_secondary_index_row(
         if index.unique && tree_has_secondary_key(&tree, &key_values)? {
             return Err(unique_index_storage_error(&index.name, &table.name));
         }
+        // No payload: the row id is already the key's trailing eight bytes, so
+        // storing it again would be a second copy of the same number.
         tree.insert_with_mutation(
             &IndexKeyCodec::encode_secondary_key(&key_values, row.row_id)?,
-            &row.row_id.to_be_bytes(),
+            &[],
         )?;
     }
     Ok(())
@@ -166,7 +171,7 @@ pub(crate) fn rebuild_primary_key_index(
         }
         tree.insert_with_mutation(
             &IndexKeyCodec::encode_key(&key_values)?,
-            &row.row_id.to_be_bytes(),
+            &IndexKeyCodec::encode_row_id_value(row.row_id),
         )?;
     }
     Ok(())
@@ -197,7 +202,7 @@ pub(crate) fn rebuild_secondary_indexes(
             }
             tree.insert_with_mutation(
                 &IndexKeyCodec::encode_secondary_key(&key_values, row.row_id)?,
-                &row.row_id.to_be_bytes(),
+                &[],
             )?;
         }
     }
@@ -418,7 +423,7 @@ fn secondary_index_rowids_for_key(
 ) -> Result<Vec<u64>> {
     tree.entries_with_prefix(&IndexKeyCodec::encode_key(key_values)?)?
         .into_iter()
-        .map(|(_key, value)| IndexKeyCodec::decode_row_id(&value))
+        .map(|(key, _value)| Ok(IndexKeyCodec::split_secondary_key(&key)?.1))
         .collect()
 }
 
@@ -439,21 +444,11 @@ pub(crate) fn require_index_root_page(root_page_id: u32, label: &str) -> Result<
     Ok(root_page_id)
 }
 
-fn decode_secondary_entry(key: &[u8], value: &[u8]) -> Result<super::cursor::IndexEntry> {
-    let logical_key = if key.len() >= 8 {
-        IndexKeyCodec::split_secondary_key(key)?.0
-    } else {
-        key.to_vec()
-    };
-
-    let row_id = if value.len() == 8 {
-        IndexKeyCodec::decode_row_id(value)?
-    } else {
-        IndexKeyCodec::split_secondary_key(key)?.1
-    };
-
+/// Secondary entries carry no payload, so both halves come from the key.
+fn decode_secondary_entry(key: &[u8], _value: &[u8]) -> Result<super::cursor::IndexEntry> {
+    let (logical_key, row_id) = IndexKeyCodec::split_secondary_key(key)?;
     Ok(super::cursor::IndexEntry {
         row_id,
-        key: logical_key,
+        key: logical_key.to_vec(),
     })
 }
