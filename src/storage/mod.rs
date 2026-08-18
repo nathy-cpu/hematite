@@ -40,10 +40,13 @@ pub(crate) mod metadata_page;
 pub(crate) mod overflow;
 pub(crate) mod pager;
 pub(crate) mod pager_metadata;
+/// Counters for storage work done, so behaviour can be asserted without a clock.
+pub mod stats;
 pub(crate) mod types;
 pub(crate) mod wal;
 
 pub use pager::{JournalMode, Pager};
+pub use stats::{PagerStats, StatsSnapshot};
 pub use types::{
     file_len_for_next_page_id, next_page_id_for_file_len, Page, PageId, PagerIntegrityReport,
     DB_HEADER_PAGE_ID, FIRST_ALLOCATABLE_PAGE_ID, INVALID_PAGE_ID, PAGE_SIZE,

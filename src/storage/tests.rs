@@ -3731,3 +3731,230 @@ mod wal_codec_tests {
         assert_eq!(decoded.frames[0].commit_sequence, 1);
     }
 }
+
+/// Assertions about *work performed*, not time taken.
+///
+/// These exist because wall-clock benchmarking cannot police this rewrite. On the
+/// development machine the same unchanged code measured 76 ms and 97 ms for one
+/// benchmark twenty minutes apart, and 1.55 ms against 3.97 ms for another. A 10 %
+/// change is invisible under that, and drift that happens to correlate with which
+/// build ran first is indistinguishable from a real regression.
+///
+/// Syscall and page-write counts have none of that problem: they are identical on
+/// every machine under any load, they run in CI without a benchmark harness, and
+/// they fail loudly when a refactor quietly adds an fsync back.
+///
+/// Several of these lock in behaviour that is *known to be bad* — four fsyncs per
+/// rollback commit, for instance. That is deliberate. They are the before-picture
+/// the storage rewrite is measured against, and the phase that improves a number is
+/// expected to update the assertion in the same commit.
+mod work_performed_tests {
+    use crate::storage::{JournalMode, Page, Pager};
+    use crate::test_utils::TestDbFile;
+
+    /// Commits one dirty page and reports the storage work that took.
+    fn commit_one_page(pager: &mut Pager, page_id: u32, fill: u8) -> crate::storage::StatsSnapshot {
+        let before = pager.stats();
+        pager.begin_transaction().expect("begin");
+        let mut page = Page::new(page_id);
+        page.data[0] = fill;
+        pager.write_page(page).expect("write");
+        pager.commit_transaction().expect("commit");
+        pager.stats().since(&before)
+    }
+
+    #[test]
+    fn rollback_commit_fsync_count_is_pinned() {
+        let db = TestDbFile::new("_test_work_rollback_fsyncs");
+        let mut pager = Pager::new(db.path(), 64).expect("open");
+        let page_id = pager.allocate_page().expect("allocate");
+
+        // Warm up: the first commit of a fresh database also initialises metadata.
+        let _ = commit_one_page(&mut pager, page_id, 1);
+        let work = commit_one_page(&mut pager, page_id, 2);
+
+        // Four today: journal sync, flush's journal sync, the database file, and
+        // the journal's commit marker. The 2-fsync design replaces this; when it
+        // lands, this number changes here in the same commit.
+        assert_eq!(
+            work.fsyncs, 4,
+            "rollback commit fsync count changed: {work:?}"
+        );
+    }
+
+    #[test]
+    fn wal_commit_issues_exactly_one_fsync() {
+        let db = TestDbFile::new("_test_work_wal_fsyncs");
+        let mut pager = Pager::new(db.path(), 64).expect("open");
+        pager
+            .set_journal_mode(JournalMode::Wal)
+            .expect("switch to wal");
+        let page_id = pager.allocate_page().expect("allocate");
+
+        let _ = commit_one_page(&mut pager, page_id, 1);
+        let work = commit_one_page(&mut pager, page_id, 2);
+
+        assert_eq!(work.fsyncs, 1, "wal commit fsync count changed: {work:?}");
+    }
+
+    /// WAL commits append frames instead of writing the database file, which is the
+    /// property that makes them cheap. If a change starts writing pages through on
+    /// commit, this catches it.
+    #[test]
+    fn wal_commit_appends_frames_without_writing_the_database_file() {
+        let db = TestDbFile::new("_test_work_wal_frames");
+        let mut pager = Pager::new(db.path(), 64).expect("open");
+        pager
+            .set_journal_mode(JournalMode::Wal)
+            .expect("switch to wal");
+        let page_id = pager.allocate_page().expect("allocate");
+
+        let _ = commit_one_page(&mut pager, page_id, 1);
+        let work = commit_one_page(&mut pager, page_id, 2);
+
+        assert!(work.wal_frames > 0, "no frames appended: {work:?}");
+        assert_eq!(
+            work.page_writes, 0,
+            "wal commit wrote the database file: {work:?}"
+        );
+    }
+
+    /// A transaction touching many pages must write each one once, not once per
+    /// statement and not repeatedly as it is re-dirtied.
+    #[test]
+    fn a_multi_page_transaction_writes_each_dirty_page_once() {
+        let db = TestDbFile::new("_test_work_write_amplification");
+        let mut pager = Pager::new(db.path(), 512).expect("open");
+
+        let mut page_ids = Vec::new();
+        pager.begin_transaction().expect("begin");
+        for _ in 0..50 {
+            let page_id = pager.allocate_page().expect("allocate");
+            // Allocating alone does not dirty the cache, and a transaction that
+            // never dirties a page cannot commit — see the note on the pager's
+            // WriterLocked state in `docs/bench-baseline.md`.
+            pager.write_page(Page::new(page_id)).expect("initialise");
+            page_ids.push(page_id);
+        }
+        pager.commit_transaction().expect("commit");
+
+        let before = pager.stats();
+        pager.begin_transaction().expect("begin");
+        // Dirty every page twice; the second write must not cost a second flush.
+        for pass in 0..2u8 {
+            for &page_id in &page_ids {
+                let mut page = Page::new(page_id);
+                page.data[0] = pass;
+                pager.write_page(page).expect("write");
+            }
+        }
+        pager.commit_transaction().expect("commit");
+        let work = pager.stats().since(&before);
+
+        // 50 data pages plus the metadata page, written once each despite 100
+        // in-transaction mutations.
+        assert!(
+            work.page_writes <= page_ids.len() as u64 + 1,
+            "write amplification: {} writes for {} pages ({work:?})",
+            work.page_writes,
+            page_ids.len()
+        );
+        assert_eq!(work.spills, 0, "unexpected spill: {work:?}");
+    }
+
+    /// A cached page must not go back to the file backend.
+    #[test]
+    fn repeated_reads_of_a_cached_page_do_not_reach_the_backend() {
+        let db = TestDbFile::new("_test_work_cache_hits");
+        let mut pager = Pager::new(db.path(), 64).expect("open");
+        let page_id = pager.allocate_page().expect("allocate");
+        let _ = commit_one_page(&mut pager, page_id, 7);
+
+        // Prime the cache, then measure only the repeats.
+        let _ = pager.read_page(page_id).expect("prime");
+        let before = pager.stats();
+        for _ in 0..20 {
+            let page = pager.read_page(page_id).expect("read");
+            assert_eq!(page.data[0], 7);
+        }
+        let work = pager.stats().since(&before);
+
+        assert_eq!(
+            work.page_reads, 0,
+            "cached page was re-read from the backend: {work:?}"
+        );
+    }
+
+    /// Reading a page that was evicted must fault it back in exactly once.
+    #[test]
+    fn an_evicted_page_faults_in_once_per_read() {
+        let db = TestDbFile::new("_test_work_cache_misses");
+        // Capacity 1 guarantees eviction between reads of different pages.
+        let mut pager = Pager::new(db.path(), 1).expect("open");
+        let first = pager.allocate_page().expect("allocate");
+        let second = pager.allocate_page().expect("allocate");
+        let _ = commit_one_page(&mut pager, first, 1);
+        let _ = commit_one_page(&mut pager, second, 2);
+
+        let before = pager.stats();
+        for _ in 0..5 {
+            let _ = pager.read_page(first).expect("read first");
+            let _ = pager.read_page(second).expect("read second");
+        }
+        let work = pager.stats().since(&before);
+
+        assert!(
+            work.page_reads > 0,
+            "expected faults with a 1-page cache: {work:?}"
+        );
+        assert!(
+            work.page_reads <= 10,
+            "more faults than reads issued: {work:?}"
+        );
+    }
+
+    /// Reading never writes, and never syncs.
+    #[test]
+    fn reads_perform_no_writes_and_no_fsyncs() {
+        let db = TestDbFile::new("_test_work_reads_are_clean");
+        let mut pager = Pager::new(db.path(), 64).expect("open");
+        let page_id = pager.allocate_page().expect("allocate");
+        let _ = commit_one_page(&mut pager, page_id, 3);
+
+        let before = pager.stats();
+        for _ in 0..10 {
+            let _ = pager.read_page(page_id).expect("read");
+        }
+        let work = pager.stats().since(&before);
+
+        assert_eq!(work.page_writes, 0, "read wrote a page: {work:?}");
+        assert_eq!(work.fsyncs, 0, "read issued an fsync: {work:?}");
+    }
+
+    /// A rolled-back transaction must not leave its pages in the database file.
+    #[test]
+    fn rollback_does_not_write_transaction_pages_to_the_database() {
+        let db = TestDbFile::new("_test_work_rollback_writes");
+        let mut pager = Pager::new(db.path(), 512).expect("open");
+        let page_id = pager.allocate_page().expect("allocate");
+        let _ = commit_one_page(&mut pager, page_id, 1);
+
+        let before = pager.stats();
+        pager.begin_transaction().expect("begin");
+        let mut page = Page::new(page_id);
+        page.data[0] = 99;
+        pager.write_page(page).expect("write");
+        pager.rollback_transaction().expect("rollback");
+        let work = pager.stats().since(&before);
+
+        assert_eq!(
+            pager.read_page(page_id).expect("read").data[0],
+            1,
+            "rollback did not restore the page"
+        );
+        assert_eq!(
+            work.spills, 0,
+            "a small rolled-back transaction spilled: {work:?}"
+        );
+    }
+}

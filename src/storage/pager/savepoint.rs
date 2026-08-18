@@ -1,42 +1,75 @@
-use super::{PageCache, Pager, PagerState, PagerTransaction, RollbackSavepoint};
+use super::{Pager, PagerState, PagerTransaction, RollbackSavepoint};
 use crate::error::Result;
 use crate::storage::{file_manager::FileManagerSnapshot, Page, PageId};
 use std::collections::HashMap;
+use std::sync::Arc;
+
+/// The contents of a [`PagerSnapshot::Full`].
+///
+/// Split out and boxed because the enum is only ever as small as its largest
+/// variant: inline, every snapshot cost a 424-byte move, including the
+/// `RollbackSavepoint` case that carries nothing but an id — and one snapshot is
+/// taken per row by `run_atomically`. Boxed, the enum is two words.
+#[derive(Debug, Clone)]
+pub(crate) struct FullSnapshot {
+    pub(crate) file_manager: FileManagerSnapshot,
+    /// Images of the pages that were dirty when the snapshot was taken.
+    ///
+    /// This used to be a clone of the entire [`PageCache`], which is both far
+    /// more than restoring needs and impossible to keep once the cache becomes
+    /// a fixed frame arena rather than a `HashMap` — an arena cannot be cloned.
+    ///
+    /// Only dirty pages differ from what durable storage holds, so only they
+    /// need saving. A clean cached page is byte-identical to the file (or to the
+    /// WAL frame the current snapshot resolves to) and can simply be re-read, so
+    /// copying it would buy nothing.
+    ///
+    /// These are shared rather than copied: taking a snapshot costs one refcount
+    /// bump per *dirty* page, where cloning the cache cost one per *cached* page
+    /// plus a deep copy of the recycled-buffer pool. Holding the `Arc` also pins
+    /// the page for the snapshot's lifetime, which is what stops a later write
+    /// from mutating the image out from under it.
+    pub(crate) dirty_pages: Vec<Arc<Page>>,
+    pub(crate) page_checksums: HashMap<PageId, u32>,
+    pub(crate) transaction: Option<PagerTransaction>,
+    pub(crate) state: PagerState,
+}
 
 #[derive(Debug, Clone)]
 pub(crate) enum PagerSnapshot {
-    Full {
-        file_manager: FileManagerSnapshot,
-        cache: PageCache,
-        page_checksums: HashMap<PageId, u32>,
-        transaction: Option<PagerTransaction>,
-        state: PagerState,
-    },
-    RollbackSavepoint {
-        id: u64,
-    },
+    Full(Box<FullSnapshot>),
+    RollbackSavepoint { id: u64 },
 }
 
 impl PagerSnapshot {
     pub(crate) fn into_transaction_baseline(mut self) -> Self {
-        if let Self::Full {
-            ref mut cache,
-            ref mut transaction,
-            ref mut state,
-            ..
-        } = self
-        {
-            for page_id in cache.dirty_page_ids() {
-                cache.clear_dirty(page_id);
-            }
-            *transaction = None;
-            *state = PagerState::Open;
+        if let Self::Full(full) = &mut self {
+            // A transaction baseline is "nothing is dirty", so restoring it drops
+            // every dirty page rather than reinstating any.
+            full.dirty_pages.clear();
+            full.transaction = None;
+            full.state = PagerState::Open;
         }
         self
     }
 }
 
 impl Pager {
+    /// Shares the current dirty pages without copying them.
+    fn share_dirty_pages(&self) -> Result<Vec<Arc<Page>>> {
+        let mut dirty_pages = Vec::new();
+        for page_id in self.cache_read()?.dirty_page_ids() {
+            let page = self.cache_read()?.peek_shared(page_id).ok_or_else(|| {
+                crate::error::HematiteError::StorageError(format!(
+                    "Dirty page {} missing from page cache",
+                    page_id
+                ))
+            })?;
+            dirty_pages.push(page);
+        }
+        Ok(dirty_pages)
+    }
+
     fn clone_dirty_pages(&self) -> Result<Vec<Page>> {
         let mut dirty_pages = Vec::new();
         for page_id in self.cache_read()?.dirty_page_ids() {
@@ -161,26 +194,44 @@ impl Pager {
             });
         }
 
-        Ok(PagerSnapshot::Full {
+        Ok(PagerSnapshot::Full(Box::new(FullSnapshot {
             file_manager: self.file_manager.snapshot()?,
-            cache: self.cache_mut()?.clone(),
+            dirty_pages: self.share_dirty_pages()?,
             page_checksums: self.page_checksums.clone(),
             transaction: self.transaction.clone(),
             state: self.state,
-        })
+        })))
     }
 
     pub(crate) fn restore_snapshot(&mut self, snapshot: PagerSnapshot) -> Result<()> {
         match snapshot {
-            PagerSnapshot::Full {
-                file_manager,
-                cache,
-                page_checksums,
-                transaction,
-                state,
-            } => {
+            PagerSnapshot::Full(full) => {
+                let FullSnapshot {
+                    file_manager,
+                    dirty_pages,
+                    page_checksums,
+                    transaction,
+                    state,
+                } = *full;
                 self.file_manager.restore_snapshot(file_manager)?;
-                *self.cache_mut()? = cache;
+
+                // Every page that is dirty now is one of two things: it was dirty at
+                // the mark, in which case `dirty_pages` holds the image to put back,
+                // or it was written after the mark, in which case durable storage
+                // already holds the version we are restoring to. Dropping all of them
+                // and reinstating the saved images handles both, and leaves clean
+                // pages — which never diverged — resident.
+                let currently_dirty = self.cache_read()?.dirty_page_ids();
+                for page_id in currently_dirty {
+                    self.cache_mut()?.remove(page_id);
+                }
+                for page in dirty_pages {
+                    let page_id = page.id;
+                    let cache = self.cache_mut()?;
+                    cache.put_shared_with_view(page, 0);
+                    cache.mark_dirty(page_id);
+                }
+
                 self.page_checksums = page_checksums;
                 self.transaction = transaction;
                 self.sync_rollback_journal_from_transaction()?;

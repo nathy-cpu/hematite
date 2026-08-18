@@ -26,6 +26,7 @@
 
 use crate::error::Result;
 use crate::storage::free_list::FreeList;
+use crate::storage::stats::PagerStats;
 use crate::storage::{
     file_len_for_next_page_id, next_page_id_for_file_len, Page, PageId, DB_HEADER_PAGE_ID,
     FIRST_ALLOCATABLE_PAGE_ID, PAGE_SIZE, STORAGE_METADATA_PAGE_ID,
@@ -34,6 +35,7 @@ use std::fs::{File, OpenOptions};
 #[cfg(not(any(unix, windows)))]
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
+use std::sync::Arc;
 
 #[cfg(not(any(unix, windows)))]
 use std::io::Read;
@@ -47,6 +49,9 @@ pub struct FileManager {
     backend: FileBackend,
     next_page_id: u32,
     free_list: FreeList,
+    /// Shared with the `Pager` that owns this backend, so both halves of the
+    /// storage layer report into one set of counters.
+    stats: Arc<PagerStats>,
     #[cfg(test)]
     fail_on_write_countdown: Option<usize>,
 }
@@ -75,6 +80,7 @@ impl FileManager {
             backend: FileBackend::Disk { file },
             next_page_id: 0,
             free_list: FreeList::new(),
+            stats: Arc::new(PagerStats::default()),
             #[cfg(test)]
             fail_on_write_countdown: None,
         };
@@ -89,6 +95,7 @@ impl FileManager {
             backend: FileBackend::Memory(Vec::new()),
             next_page_id: 0,
             free_list: FreeList::new(),
+            stats: Arc::new(PagerStats::default()),
             #[cfg(test)]
             fail_on_write_countdown: None,
         };
@@ -130,6 +137,11 @@ impl FileManager {
         self.load_existing_file(file_len)
     }
 
+    /// The counter set this backend reports into, for the `Pager` to share.
+    pub(crate) fn stats(&self) -> Arc<PagerStats> {
+        Arc::clone(&self.stats)
+    }
+
     pub fn read_page(&self, page_id: PageId) -> Result<Page> {
         self.read_page_with_buf(page_id, vec![0u8; PAGE_SIZE])
     }
@@ -138,6 +150,7 @@ impl FileManager {
     /// The buffer must have a capacity of at least `PAGE_SIZE`; it will be resized.
     pub(crate) fn read_page_with_buf(&self, page_id: PageId, mut data: Vec<u8>) -> Result<Page> {
         let offset = Self::page_offset(page_id)?;
+        PagerStats::bump(&self.stats.page_reads);
         data.resize(PAGE_SIZE, 0);
         self.read_exact_at(offset, &mut data).map_err(|err| {
             crate::error::HematiteError::StorageError(format!(
@@ -150,6 +163,7 @@ impl FileManager {
 
     pub fn write_page(&mut self, page: &Page) -> Result<()> {
         let offset = Self::page_offset(page.id)?;
+        PagerStats::bump(&self.stats.page_writes);
         self.write_all_at(offset, &page.data)
     }
 
@@ -172,6 +186,7 @@ impl FileManager {
         match &mut self.backend {
             FileBackend::Disk { file, .. } => {
                 file.sync_all()?;
+                PagerStats::bump(&self.stats.fsyncs);
             }
             FileBackend::Memory(_) => {}
         }

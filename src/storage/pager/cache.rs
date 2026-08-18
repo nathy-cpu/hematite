@@ -12,7 +12,7 @@ pub(crate) struct CachedPageMeta {
     pub(crate) view_token: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct CachedPageEntry {
     page: Arc<Page>,
     meta: CachedPageMeta,
@@ -22,7 +22,11 @@ struct CachedPageEntry {
     dirty_next: Option<PageId>,
 }
 
-#[derive(Debug, Clone)]
+/// Deliberately not `Clone`. Snapshots capture the dirty pages they need
+/// (see `savepoint.rs`); duplicating the whole cache copied far more than
+/// restoring requires, and the frame arena that replaces this cannot be
+/// cloned at all.
+#[derive(Debug)]
 pub(crate) struct PageCache {
     capacity: usize,
     /// 4KB page data buffers recycled from evicted pages, reused instead of

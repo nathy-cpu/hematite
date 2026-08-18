@@ -180,6 +180,7 @@ use self::state::PagerLockMode;
 use crate::error::Result;
 use crate::storage::free_list::FreeList;
 use crate::storage::journal::JournalRecord;
+use crate::storage::stats::{PagerStats, StatsSnapshot};
 use crate::storage::wal::VisibleWalState;
 use crate::storage::{
     file_len_for_next_page_id, file_manager::FileManager, file_manager::FileManagerSnapshot, Page,
@@ -270,6 +271,9 @@ fn compact_transaction_free_pages(transaction: &mut WalTransaction) {
 #[derive(Debug)]
 pub struct Pager {
     file_manager: FileManager,
+    /// Shared with `file_manager`, so page and fsync counts from both the backend
+    /// and the journal/WAL land in one place.
+    stats: Arc<PagerStats>,
     cache: RwLock<PageCache>,
     page_checksums: HashMap<PageId, u32>,
     journal_mode: JournalMode,
@@ -325,8 +329,10 @@ impl Pager {
         let database_identity = fs::canonicalize(path.as_ref())
             .ok()
             .or_else(|| Some(path.as_ref().to_path_buf()));
+        let stats = file_manager.stats();
         let mut pager = Self {
             file_manager,
+            stats,
             cache: RwLock::new(PageCache::new(cache_capacity)),
             page_checksums: HashMap::new(),
             journal_mode: JournalMode::Rollback,
@@ -360,8 +366,10 @@ impl Pager {
 
     pub fn new_in_memory(cache_capacity: usize) -> Result<Self> {
         let file_manager = FileManager::new_in_memory()?;
+        let stats = file_manager.stats();
         Ok(Self {
             file_manager,
+            stats,
             cache: RwLock::new(PageCache::new(cache_capacity)),
             page_checksums: HashMap::new(),
             journal_mode: JournalMode::Rollback,
@@ -404,6 +412,16 @@ impl Pager {
 
     pub(crate) fn has_pending_changes(&self) -> Result<bool> {
         Ok(self.transaction.is_some() || self.cache_read()?.dirty_count() != 0)
+    }
+
+    /// A point-in-time reading of the storage counters.
+    ///
+    /// Subtract two readings to get the work a single operation performed. This is
+    /// how commit behaviour is asserted — fsyncs per commit, pages written per
+    /// transaction — since wall-clock timings on a loaded machine drift far more
+    /// than the effects being measured.
+    pub fn stats(&self) -> StatsSnapshot {
+        self.stats.snapshot()
     }
 
     pub fn journal_mode(&self) -> JournalMode {

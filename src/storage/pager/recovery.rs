@@ -412,6 +412,7 @@ impl Pager {
             return Ok(());
         };
         file.sync_all()?;
+        crate::storage::stats::PagerStats::bump(&self.stats.fsyncs);
         // BUG-09 fix: only clear need_sync on pages that are already journaled.
         // Pages dirtied after this journal sync started have not had their
         // original images captured yet; clearing need_sync on them would allow
@@ -438,7 +439,9 @@ impl Pager {
             return Ok(());
         };
 
-        mark_journal_committed(file, self.journal_record_count)
+        mark_journal_committed(file, self.journal_record_count)?;
+        crate::storage::stats::PagerStats::bump(&self.stats.fsyncs);
+        Ok(())
     }
 
     /// After a savepoint restore, truncate the journal to match the reduced
@@ -461,6 +464,7 @@ impl Pager {
 
                 write_journal_record_count(file, new_record_count)?;
                 file.sync_all()?;
+                crate::storage::stats::PagerStats::bump(&self.stats.fsyncs);
 
                 self.journal_record_count = new_record_count;
                 self.journal_needs_sync = false;
@@ -622,7 +626,12 @@ impl Pager {
                 &self.page_checksums,
                 &metadata_page.data,
                 &frames,
-            )?
+            )
+            .inspect(|_| {
+                // One fsync per WAL commit, plus the frames just appended.
+                crate::storage::stats::PagerStats::bump(&self.stats.fsyncs);
+                crate::storage::stats::PagerStats::add(&self.stats.wal_frames, frames.len() as u64);
+            })?
         } else {
             std::collections::HashMap::new()
         };
