@@ -38,6 +38,7 @@ pub(crate) mod free_list;
 pub(crate) mod journal;
 pub(crate) mod metadata_page;
 pub(crate) mod overflow;
+pub(crate) mod page_hash;
 pub(crate) mod pager;
 pub(crate) mod pager_metadata;
 /// Counters for storage work done, so behaviour can be asserted without a clock.

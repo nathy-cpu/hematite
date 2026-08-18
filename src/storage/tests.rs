@@ -3883,6 +3883,8 @@ mod work_performed_tests {
             work.page_reads, 0,
             "cached page was re-read from the backend: {work:?}"
         );
+        assert_eq!(work.pool_hits, 20, "expected 20 pool hits: {work:?}");
+        assert_eq!(work.pool_misses, 0, "unexpected pool miss: {work:?}");
     }
 
     /// Reading a page that was evicted must fault it back in exactly once.

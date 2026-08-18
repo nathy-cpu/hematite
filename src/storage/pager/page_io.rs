@@ -19,8 +19,12 @@ impl Pager {
         self.check_error_state()?;
         let view_token = self.cache_view_token();
         if let Some(page) = self.cache_read()?.peek_for_view(page_id, view_token) {
+            crate::storage::stats::PagerStats::bump(&self.stats.pool_hits);
             return Ok(page);
         }
+        // Everything below this point resolves the page some other way and installs
+        // it, so the request has missed the pool however it ends up being served.
+        crate::storage::stats::PagerStats::bump(&self.stats.pool_misses);
 
         if let Some(transaction_next_page_id) = self.rollback_visible_next_page_id() {
             if page_id >= transaction_next_page_id || self.rollback_page_is_free(page_id) {

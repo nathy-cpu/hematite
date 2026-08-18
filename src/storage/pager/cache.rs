@@ -1,5 +1,5 @@
+use crate::storage::page_hash::PageMap;
 use crate::storage::{Page, PageId, PAGE_SIZE};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Default)]
@@ -36,7 +36,7 @@ pub(crate) struct PageCache {
     /// `capacity` at construction would allocate `capacity * PAGE_SIZE`
     /// bytes upfront regardless of how many pages a workload ever touches.
     free_buffers: Vec<Vec<u8>>,
-    entries: HashMap<PageId, CachedPageEntry>,
+    entries: PageMap<CachedPageEntry>,
     lru_head: Option<PageId>,
     lru_tail: Option<PageId>,
     dirty_head: Option<PageId>,
@@ -55,7 +55,7 @@ impl PageCache {
         Self {
             capacity,
             free_buffers: Vec::new(),
-            entries: HashMap::new(),
+            entries: PageMap::default(),
             lru_head: None,
             lru_tail: None,
             dirty_head: None,
