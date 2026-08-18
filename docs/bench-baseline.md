@@ -151,14 +151,10 @@ Rollback mode is 3.2× slower, consistent with 4 fsyncs per commit against WAL's
 
 ## Not yet measurable
 
-The plan's counter-based assertions — fsyncs per commit, pages written per
-transaction, allocations per row, buffer-pool residency across a checkpoint — need
-`PagerStats`, which arrives with the buffer pool in phase S3. Until then these
-benchmarks measure wall time only, and wall time on a machine with a lying disk will
-not notice a regression from 2 fsyncs back to 4.
-
-`benches/support/mod.rs` already carries a counting global allocator
-(`CountingAllocator`, `measure_allocs`) for the allocation half of that, unused so far.
+*Superseded — see the phase S3 section below, which lands `PagerStats` and the
+counter assertions.* The allocation half is still outstanding:
+`benches/support/mod.rs` carries a counting global allocator (`CountingAllocator`,
+`measure_allocs`) that nothing uses yet.
 
 ## Incidental findings
 
@@ -240,3 +236,67 @@ Three index-key ordering bugs fixed. All three produced wrong query results:
 
 Also: `-0.0` and `0.0` produced different keys despite being equal, so a unique index
 would have accepted both.
+
+---
+
+## Phase S3 (partial) — measurement infrastructure and pool groundwork
+
+### `PagerStats`: counters instead of a clock
+
+The most useful thing in this phase is not a speedup. Repeated benchmarking on the
+development machine showed drift large enough to make wall-clock comparison useless
+at the resolution this rewrite operates in:
+
+| what was measured | reading A | reading B |
+|---|---|---|
+| `full_scan`, unchanged code, hours apart | 1.55 ms | 3.97 ms |
+| `delete_heavy/rollback`, unchanged code, ~20 min apart | 78 ms | 92 ms |
+
+A ~12 % "regression" was chased for an hour before an alternating A/B with the order
+reversed showed it was drift that happened to line up with which build ran first.
+
+`Pager::stats()` now reports fsyncs, page reads and writes, pool hits and misses,
+spills and WAL frames. Subtracting two readings gives the work one operation did —
+a number identical on every machine under any load. Eight tests in
+`storage::tests::work_performed` assert on them, several pinning behaviour that is
+known to be bad so the phase that improves it has something to move:
+
+```
+rollback commit issues exactly 4 fsyncs      (measured, not inferred)
+wal commit issues exactly 1 fsync
+wal commit appends frames, writes 0 db pages
+a 100-mutation transaction writes each page once
+20 reads of a cached page cause 0 backend reads and 20 pool hits
+reads perform no writes and no fsyncs
+```
+
+**Rule for the rest of this rewrite: compare alternating builds inside one session,
+and prefer a counter to a stopwatch wherever the change is structural.**
+
+### Snapshot cost
+
+`PagerSnapshot::Full` cloned the entire `PageCache` — including a deep copy of the
+recycled-buffer pool — and `run_atomically` takes one snapshot per row. It now keeps
+shared handles to just the dirty pages, since only those differ from durable storage.
+The variant is also boxed: the enum is as large as its biggest variant, so every
+snapshot moved **424 bytes**, including the `RollbackSavepoint` case that carries
+nothing but an id. Now two words.
+
+This was a prerequisite, not a cleanup — the frame arena cannot be `Clone`, so the
+plan's S3-before-S4 ordering is wrong on this point.
+
+### Page-id hashing
+
+The pool keyed its map with SipHash-1-3. Replaced with Fibonacci hashing, measured
+alternating in one session:
+
+| pass | fib-hash | SipHash |
+|---|---|---|
+| 1 | 112.65 ns | 115.27 ns |
+| 2 | 105.98 ns | 109.68 ns |
+
+**About 3 %** — small, and the number is the point. The cache-hit path is a lock
+acquire, a map probe and an `Arc` clone; only the probe got cheaper. The remaining
+cost sits in the `RwLock` and the refcount, so the frame arena will only pay for
+itself together with the collapse of `Arc<RwLock<Pager>>` to `Arc<Pager>`, which is
+the largest single piece of work left in the storage plan.
