@@ -300,3 +300,47 @@ acquire, a map probe and an `Arc` clone; only the probe got cheaper. The remaini
 cost sits in the `RwLock` and the refcount, so the frame arena will only pay for
 itself together with the collapse of `Arc<RwLock<Pager>>` to `Arc<Pager>`, which is
 the largest single piece of work left in the storage plan.
+
+---
+
+## Phase B8 (partial) — streaming table scans
+
+`read_rows_with_ids` built a `TableCursor`, which already decodes every row into a
+`Vec`, and then walked it cloning each row into a second `Vec`. Every caller paid for
+the whole table twice. Two streaming primitives replace that where callers filter:
+
+- `visit_table_rows` — decodes one row at a time.
+- `visit_table_row_ids` — decodes **no records at all**. Row ids are the tree keys, so
+  collecting them for a `DELETE`/`UPDATE` full scan never needs a row's value; that
+  path used to decode every column of every row and read only `row_id` from each.
+
+Measured alternating in one session, both passes agreeing on sign and rough size:
+
+| benchmark | materializing | streaming | change |
+|---|---|---|---|
+| `full_scan/rollback` | 1.924 / 1.868 ms | 1.716 / 1.620 ms | **−12 %** |
+| `full_scan/wal` | 1.945 / 1.919 ms | 1.803 / 1.698 ms | **−9 %** |
+| `limit_100/rollback` | 1.720 / 1.754 ms | 1.571 / 1.429 ms | **−14 %** |
+| `range_1pct/rollback` | 3.045 / 3.024 ms | 2.986 / 2.783 ms | −5 % |
+| `delete_heavy` | 88.6 / 89.2 ms | 89.3 / 91.0 ms | unchanged |
+
+`delete_heavy` not moving is the expected result, not a disappointment: at ~139 µs per
+row it is bound by four fsyncs per commit, and no amount of decode work matters at
+that scale. It is S6's number, not this phase's.
+
+### What is still materialized, and why it is not a one-liner
+
+`LIMIT 100` still costs about 90 % of a full scan. The remaining cost is
+`SelectAccessPath::FullTableScan`, which calls `read_from_table` and applies the limit
+afterwards, and `locate_rows_for_access_path`, which collects every row before
+filtering.
+
+Both resist the callback treatment for the same reason: the scan borrows
+`ctx.engine` mutably for its whole duration, and the predicate — `conditions_match` —
+needs `ctx` too, because a `WHERE` clause may contain a subquery that runs its own
+query. Materializing is how the current code sidesteps that aliasing.
+
+Fixing it properly needs one of: splitting `ExecutionContext` so the scan and the
+predicate borrow disjoint fields, or pushing the limit down into the access path so
+the scan itself can stop early. Both are query-layer design changes rather than
+storage ones, and neither is a safe incremental edit.
