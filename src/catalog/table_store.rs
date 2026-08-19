@@ -128,22 +128,57 @@ pub(crate) fn open_table_cursor(
     Ok(TableCursor::from_ordered_rows(rows))
 }
 
+/// Streams a table's rows in row-id order, decoding one at a time.
+///
+/// The building block for callers that only want *some* of the rows. Going through
+/// [`read_rows_with_ids`] instead means decoding and holding the entire table before
+/// the first row can be looked at, which for a filter is all wasted.
+pub(crate) fn visit_rows<F>(
+    engine: &mut CatalogEngine,
+    table_name: &str,
+    mut visit: F,
+) -> Result<()>
+where
+    F: FnMut(StoredRow) -> Result<()>,
+{
+    let root_page_id = engine.table_runtime_metadata(table_name)?.root_page_id;
+    engine.visit_tree_entries(root_page_id, |key, value| {
+        let row_id = RowCodec::decode_row_id_key(key)?;
+        visit(RowCodec::decode_stored_row(row_id, value)?)
+    })
+}
+
+/// Streams a table's row ids without decoding any records.
+///
+/// The row id is the tree key, so answering "which rows are there" never needs to
+/// look at a row's value at all. Callers that went through [`visit_rows`] for this
+/// decoded every column of every row and then discarded all of them.
+pub(crate) fn visit_row_ids<F>(
+    engine: &mut CatalogEngine,
+    table_name: &str,
+    mut visit: F,
+) -> Result<()>
+where
+    F: FnMut(u64) -> Result<()>,
+{
+    let root_page_id = engine.table_runtime_metadata(table_name)?.root_page_id;
+    engine.visit_tree_entries(root_page_id, |key, _value| {
+        visit(RowCodec::decode_row_id_key(key)?)
+    })
+}
+
 pub(crate) fn read_rows_with_ids(
     engine: &mut CatalogEngine,
     table_name: &str,
 ) -> Result<Vec<StoredRow>> {
-    let mut cursor = open_table_cursor(engine, table_name)?;
+    // Collects the stream. This used to build a `TableCursor` — which already decodes
+    // every row into a `Vec` — and then walk it cloning each row into a second `Vec`,
+    // so every caller paid for the whole table twice.
     let mut rows = Vec::new();
-    if cursor.first() {
-        loop {
-            if let Some(row) = cursor.current() {
-                rows.push(row.clone());
-            }
-            if !cursor.next() {
-                break;
-            }
-        }
-    }
+    visit_rows(engine, table_name, |row| {
+        rows.push(row);
+        Ok(())
+    })?;
     Ok(rows)
 }
 

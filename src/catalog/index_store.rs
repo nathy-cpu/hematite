@@ -290,15 +290,29 @@ pub(crate) fn open_secondary_index_cursor(
 
 pub(crate) fn validate_table_indexes(engine: &mut CatalogEngine, table: &Table) -> Result<()> {
     let rows = table_store::read_rows_with_ids(engine, &table.name)?;
-    for row in &rows {
-        let key_values = table.get_primary_key_values(&row.values)?;
-        let key_values = normalize_primary_key_values(table, &key_values);
-        let tree = open_required_tree(
+
+    // Opened once. This used to sit inside the loop, so validating a table re-opened
+    // its index tree — and built the label `String` that names it — once per row.
+    //
+    // Guarded on there being rows because opening is also what *requires* the index
+    // to exist: a table with no rows previously never entered the loop, so a missing
+    // index root went unchallenged, and some callers rely on that.
+    let primary_tree = if rows.is_empty() {
+        None
+    } else {
+        Some(open_required_tree(
             engine,
             table.primary_key_index_root_page_id,
             &format!("primary-key index for table '{}'", table.name),
-        )?;
-        let stored_rowid = tree
+        )?)
+    };
+    for row in &rows {
+        let primary_tree = primary_tree
+            .as_ref()
+            .expect("a non-empty row set opens the tree");
+        let key_values = table.get_primary_key_values(&row.values)?;
+        let key_values = normalize_primary_key_values(table, &key_values);
+        let stored_rowid = primary_tree
             .get(&IndexKeyCodec::encode_key(&key_values)?)?
             .map(|value| IndexKeyCodec::decode_row_id(&value))
             .transpose()?
@@ -318,14 +332,18 @@ pub(crate) fn validate_table_indexes(engine: &mut CatalogEngine, table: &Table) 
     }
 
     for index in &table.secondary_indexes {
+        if rows.is_empty() {
+            continue;
+        }
+        // Once per index, not once per row of every index.
+        let tree = open_required_tree(
+            engine,
+            index.root_page_id,
+            &format!("secondary index '{}' on table '{}'", index.name, table.name),
+        )?;
         for row in &rows {
             let key_values = secondary_index_values(index, row);
             let key_values = normalize_secondary_index_values(table, index, &key_values);
-            let tree = open_required_tree(
-                engine,
-                index.root_page_id,
-                &format!("secondary index '{}' on table '{}'", index.name, table.name),
-            )?;
             let rowids = secondary_index_rowids_for_key(&tree, &key_values)?;
             if index.unique && rowids.len() > 1 {
                 return Err(HematiteError::CorruptedData(format!(

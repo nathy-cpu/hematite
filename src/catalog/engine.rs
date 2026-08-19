@@ -592,6 +592,25 @@ not available yet.",
         table_store::read_rows_with_ids(self, table_name)
     }
 
+    /// Streams a table's rows instead of materialising them.
+    ///
+    /// Prefer this wherever the caller filters, counts, or stops early: it decodes
+    /// one row at a time rather than building a `Vec` of the whole table first.
+    pub fn visit_table_rows<F>(&mut self, table_name: &str, visit: F) -> Result<()>
+    where
+        F: FnMut(StoredRow) -> Result<()>,
+    {
+        table_store::visit_rows(self, table_name, visit)
+    }
+
+    /// Streams a table's row ids without decoding any records.
+    pub fn visit_table_row_ids<F>(&mut self, table_name: &str, visit: F) -> Result<()>
+    where
+        F: FnMut(u64) -> Result<()>,
+    {
+        table_store::visit_row_ids(self, table_name, visit)
+    }
+
     pub fn read_from_table(&mut self, table_name: &str) -> Result<Vec<Vec<Value>>> {
         table_store::read_from_table(self, table_name)
     }

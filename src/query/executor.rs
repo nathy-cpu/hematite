@@ -2636,18 +2636,14 @@ fn locate_rowids_for_access_path(
                 .lookup_secondary_index_rowids(table, index_name, &key_values)
         }
         SelectAccessPath::FullTableScan => {
-            let mut table_cursor = ctx.engine.open_table_cursor(table_name)?;
+            // Row ids live in the tree keys, so this never touches a record. It used
+            // to open a cursor, which decodes every column of every row, and then
+            // read nothing but `row_id` from each.
             let mut rowids = Vec::new();
-            if table_cursor.first() {
-                loop {
-                    if let Some(row) = table_cursor.current() {
-                        rowids.push(row.row_id);
-                    }
-                    if !table_cursor.next() {
-                        break;
-                    }
-                }
-            }
+            ctx.engine.visit_table_row_ids(table_name, |row_id| {
+                rowids.push(row_id);
+                Ok(())
+            })?;
             Ok(rowids)
         }
     }
@@ -3320,11 +3316,17 @@ impl QueryExecutor for AlterExecutor {
                         column_name
                     ))
                 })?;
-                let rows = ctx.engine.read_from_table(&self.statement.table)?;
-                if rows
-                    .iter()
-                    .any(|row| row.get(column_index).is_some_and(Value::is_null))
-                {
+                // Streams, and stops at the first NULL. Materialising the table only
+                // to call `.any()` on it decoded every row even when the first one
+                // already answered the question.
+                let mut has_null = false;
+                ctx.engine.visit_table_rows(&self.statement.table, |row| {
+                    if !has_null && row.values.get(column_index).is_some_and(Value::is_null) {
+                        has_null = true;
+                    }
+                    Ok(())
+                })?;
+                if has_null {
                     return Err(HematiteError::ParseError(format!(
                         "Cannot set column '{}' to NOT NULL because existing rows contain NULL",
                         column_name
@@ -4159,17 +4161,23 @@ fn child_rows_referencing_parent_key(
     reference: &ReferencingForeignKey,
     parent_key: &[Value],
 ) -> Result<Vec<StoredRow>> {
+    // Streams the child table rather than materialising it. This runs once per
+    // parent row being deleted or updated, so materialising here meant decoding the
+    // entire child table again for every single parent row, and then discarding all
+    // but the matches.
     let mut matches = Vec::new();
-    for child_row in ctx.engine.read_rows_with_ids(&child_table.name)? {
-        let child_key =
-            foreign_key_values_for_row(child_table, &reference.foreign_key, &child_row.values)?;
-        if child_key.iter().any(Value::is_null) {
-            continue;
-        }
-        if child_key == parent_key {
-            matches.push(child_row);
-        }
-    }
+    ctx.engine
+        .visit_table_rows(&child_table.name, |child_row| {
+            let child_key =
+                foreign_key_values_for_row(child_table, &reference.foreign_key, &child_row.values)?;
+            if child_key.iter().any(Value::is_null) {
+                return Ok(());
+            }
+            if child_key == parent_key {
+                matches.push(child_row);
+            }
+            Ok(())
+        })?;
     Ok(matches)
 }
 
