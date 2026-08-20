@@ -605,14 +605,11 @@ impl BTreeNode {
             return Ok(false);
         }
 
-        let mut target_index = None;
-        for i in 0..self.key_count {
-            if self.get_key_view(i)? == key.as_bytes() {
-                target_index = Some(i);
-                break;
-            }
-        }
-        let Some(index) = target_index else {
+        // Binary search, not a scan. Keys on a page are sorted and `exact_key_index`
+        // has always been here; walking every key to find one was O(n) on the hottest
+        // update path there is — a same-length overwrite, which is what an UPDATE of a
+        // fixed-width column does to every row it touches.
+        let Some(index) = self.exact_key_index(key)? else {
             return Ok(false);
         };
 

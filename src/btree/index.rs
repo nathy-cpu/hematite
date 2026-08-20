@@ -493,8 +493,12 @@ impl BTreeIndex {
     }
 
     fn is_child_underflow(&mut self, pager: &mut Pager, child_page_id: PageId) -> Result<bool> {
+        // No `_decoded`. Underflow is decided by `serialized_size_on_page`, which
+        // sums cell byte ranges straight off the page; decoding first materialised
+        // every key and value into owned `Vec`s to answer a question about a byte
+        // count, on every rebalance check of every delete.
         let shared = pager.read_page_shared(child_page_id)?;
-        let node = BTreeNode::from_shared_page_decoded(shared)?;
+        let node = BTreeNode::from_shared_page(shared)?;
         Ok(node.is_underflow())
     }
 

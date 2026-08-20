@@ -310,9 +310,13 @@ fn collect_tree_space_stats_recursive(
                         collect_overflow_page_ids(pager, Some(layout.overflow_first_page))?;
                     stats.overflow_used_bytes += layout.overflow_len();
                     for overflow_page_id in overflow_page_ids {
-                        if visited.contains(&overflow_page_id)
-                            || stats.overflow_page_ids.contains(&overflow_page_id)
-                        {
+                        // One hash insert decides both duplicate cases. This used to
+                        // scan `stats.overflow_page_ids` linearly inside the loop that
+                        // fills it, making the whole walk quadratic in the number of
+                        // overflow pages. Recording them in `visited` also catches an
+                        // overflow page id colliding with a tree page id, which the
+                        // separate checks could not.
+                        if !visited.insert(overflow_page_id) {
                             return Err(crate::error::HematiteError::CorruptedData(format!(
                                 "Duplicate overflow page {} encountered while collecting tree space stats",
                                 overflow_page_id

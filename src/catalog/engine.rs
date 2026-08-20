@@ -427,12 +427,17 @@ not available yet.",
         schema_store::save_schema(self, schema, current_root)
     }
 
-    pub(crate) fn tree_store(&self) -> ByteTreeStore {
-        self.tree_store.clone()
+    /// Borrows the tree store rather than cloning it.
+    ///
+    /// This returned a clone, and it is called from roughly forty places, several of
+    /// them once per row. `ByteTreeStore` is a handle around an `Arc`, so each call
+    /// was a refcount pair for something the caller only reads through.
+    pub(crate) fn tree_store(&self) -> &ByteTreeStore {
+        &self.tree_store
     }
 
     pub(crate) fn typed_tree_store<C: KeyValueCodec>(&self) -> TypedTreeStore<C> {
-        TypedTreeStore::new(self.tree_store())
+        TypedTreeStore::new(self.tree_store().clone())
     }
 
     pub(crate) fn open_tree(&self, root_page_id: PageId) -> Result<ByteTree> {
