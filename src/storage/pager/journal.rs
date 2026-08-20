@@ -19,8 +19,12 @@ impl Pager {
         // The sync inside `flush` always fires: `initialize_rollback_journal` sets
         // `journal_needs_sync` at BEGIN, so even a transaction that journals no page
         // still gets its header made durable before the database file is touched.
-        self.flush()?;
-        self.mark_rollback_journal_committed()?;
+        self.flush_for_commit()?;
+        // No commit-marker fsync. The journal carries a commit intent — every page
+        // this transaction wrote, with the checksum it must hold — synced before any
+        // database page was overwritten. Recovery reads the database and compares,
+        // so a durable "committed" flag is no longer what distinguishes a finished
+        // commit from an abandoned one.
         self.transition_state(PagerState::WriterFinished)?;
         Ok(())
     }

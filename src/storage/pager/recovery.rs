@@ -1,7 +1,7 @@
 use super::{JournalMode, Pager, WalFileStamp};
 use crate::error::Result;
 use crate::storage::journal::{
-    append_journal_record, initialize_journal_file, mark_journal_committed,
+    append_journal_record, initialize_journal_file, write_commit_intents,
     write_journal_record_count, JournalRecord, JournalState, RollbackJournal,
 };
 use crate::storage::pager_metadata::PersistedPagerState;
@@ -432,15 +432,32 @@ impl Pager {
         Ok(())
     }
 
-    /// Atomically mark the journal as committed by updating just the state byte
-    /// and record count in the header — no full rewrite.
-    pub(super) fn mark_rollback_journal_committed(&mut self) -> Result<()> {
+    /// Records what every page this commit touches must contain once it has landed.
+    ///
+    /// Checksums are computed from the cached pages rather than read out of
+    /// `page_checksums`. That map deliberately has no entry for the storage metadata
+    /// page, and skipping that page here would be a durability hole: it is written
+    /// last and carries the free list, so a commit whose data pages landed but whose
+    /// metadata page did not would be judged complete, pairing new data with stale
+    /// bookkeeping. Recomputing costs one hash per dirty page against a commit that
+    /// is already writing every one of them.
+    pub(super) fn declare_rollback_commit_intent(&mut self) -> Result<()> {
+        let dirty_ids = self.cache_read()?.dirty_page_ids();
+        let mut intents = Vec::with_capacity(dirty_ids.len());
+        for page_id in dirty_ids {
+            let Some(page) = self.cache_read()?.peek_shared(page_id) else {
+                // A dirty page that is not resident cannot be described, so leave the
+                // intent empty and let recovery fall back to rolling back.
+                return Ok(());
+            };
+            intents.push((page_id, Self::calculate_page_checksum(&page)));
+        }
+
         let Some(file) = &mut self.journal_file else {
             return Ok(());
         };
-
-        mark_journal_committed(file, self.journal_record_count)?;
-        crate::storage::stats::PagerStats::bump(&self.stats.fsyncs);
+        write_commit_intents(file, &intents)?;
+        self.journal_needs_sync = true;
         Ok(())
     }
 
@@ -520,14 +537,45 @@ impl Pager {
                 if self.has_live_writer()? {
                     return Ok(());
                 }
-                self.restore_from_journal(&journal)?;
-                self.remove_journal_file()?;
+                if self.commit_intent_was_fulfilled(&journal)? {
+                    // Every page the commit meant to write already holds the contents
+                    // it meant to write. The commit reached the disk; replaying the
+                    // pre-images here would undo a transaction that completed.
+                    self.remove_journal_file()?;
+                } else {
+                    self.restore_from_journal(&journal)?;
+                    self.remove_journal_file()?;
+                }
             }
             JournalState::Committed => {
                 self.remove_journal_file()?;
             }
         }
         Ok(())
+    }
+
+    /// Whether the database already holds everything the commit intended to write.
+    ///
+    /// This is the oracle that replaced the durable commit marker. A journal with no
+    /// intent never got as far as declaring one, so it is by definition unfinished.
+    ///
+    /// Any page that cannot be read — beyond the file's end, say, because the commit
+    /// died before extending it — counts as unfulfilled, which is the safe answer: an
+    /// unfinished commit gets rolled back.
+    fn commit_intent_was_fulfilled(&self, journal: &RollbackJournal) -> Result<bool> {
+        if journal.commit_intents.is_empty() {
+            return Ok(false);
+        }
+
+        for (page_id, expected_checksum) in &journal.commit_intents {
+            let Ok(page) = self.file_manager.read_page(*page_id) else {
+                return Ok(false);
+            };
+            if Self::calculate_page_checksum(&page) != *expected_checksum {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     pub(super) fn rollback_from_active_transaction(&mut self) -> Result<()> {
@@ -551,6 +599,9 @@ impl Pager {
                 .into_iter()
                 .collect::<Vec<_>>(),
             page_records: transaction.page_records,
+            // An in-memory rollback of a live transaction; nothing has been declared
+            // committed, so there is nothing for recovery to weigh up.
+            commit_intents: Vec::new(),
         };
         self.restore_from_journal(&journal)
     }

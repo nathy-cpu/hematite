@@ -152,7 +152,13 @@ impl Pager {
         // silently delete a stale-but-valid rollback journal left from a prior
         // mode switch, destroying crash-recovery evidence.
         if self.journal_mode == JournalMode::Rollback {
-            self.remove_journal_file()?;
+            #[cfg(test)]
+            let keep = self.keep_journal_after_commit;
+            #[cfg(not(test))]
+            let keep = false;
+            if !keep {
+                self.remove_journal_file()?;
+            }
         }
         let old_txn = self.transaction.take();
         self.exit_writer_scope_to_open()?;

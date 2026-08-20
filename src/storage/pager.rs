@@ -308,6 +308,10 @@ pub struct Pager {
     rollback_persisted_fingerprint: Option<Box<[u8]>>,
     #[cfg(test)]
     wal_visible_state_reload_count: usize,
+    /// Leaves the journal on disk after a commit, standing in for a crash in the
+    /// window between the database fsync and the journal being removed.
+    #[cfg(test)]
+    keep_journal_after_commit: bool,
 }
 
 impl Pager {
@@ -357,6 +361,8 @@ impl Pager {
             rollback_persisted_fingerprint: None,
             #[cfg(test)]
             wal_visible_state_reload_count: 0,
+            #[cfg(test)]
+            keep_journal_after_commit: false,
         };
         pager.recover_if_needed()?;
         pager.load_persisted_state()?;
@@ -394,6 +400,8 @@ impl Pager {
             rollback_persisted_fingerprint: None,
             #[cfg(test)]
             wal_visible_state_reload_count: 0,
+            #[cfg(test)]
+            keep_journal_after_commit: false,
         })
     }
 

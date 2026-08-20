@@ -10,11 +10,14 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 
 const V3_JOURNAL_MAGIC: &[u8; 4] = b"HTJ3";
-const V3_JOURNAL_VERSION: u32 = 1;
-const V3_JOURNAL_HEADER_SIZE: usize = 36;
+const V3_JOURNAL_VERSION: u32 = 2;
+const V3_JOURNAL_HEADER_SIZE: usize = 40;
 const V3_JOURNAL_RECORD_PREFIX_SIZE: usize = 8;
-const V3_JOURNAL_STATE_OFFSET: u64 = 8;
 const V3_JOURNAL_RECORD_COUNT_OFFSET: u64 = 32;
+const V3_JOURNAL_INTENT_COUNT_OFFSET: u64 = 36;
+/// One commit-intent entry: page id and the checksum that page must have if the
+/// commit reached the disk.
+const V3_JOURNAL_INTENT_SIZE: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum JournalFileState {
@@ -48,6 +51,12 @@ pub(crate) struct JournalHeader {
     pub(crate) free_page_count: u32,
     pub(crate) checksum_count: u32,
     pub(crate) record_count: u32,
+    /// Number of commit-intent entries following the page records.
+    ///
+    /// Non-zero only once a commit has declared its final page contents. Recovery
+    /// uses it to decide whether the commit reached the disk, which is what removes
+    /// the need for a separately synced "committed" flag.
+    pub(crate) intent_count: u32,
 }
 
 impl Default for JournalHeader {
@@ -61,6 +70,7 @@ impl Default for JournalHeader {
             free_page_count: 0,
             checksum_count: 0,
             record_count: 0,
+            intent_count: 0,
         }
     }
 }
@@ -77,6 +87,7 @@ pub(crate) struct EncodedRollbackJournal {
     pub(crate) original_free_pages: Vec<PageId>,
     pub(crate) original_checksums: Vec<(PageId, u32)>,
     pub(crate) records: Vec<JournalFileRecord>,
+    pub(crate) commit_intents: Vec<(PageId, u32)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +126,10 @@ pub struct RollbackJournal {
     pub original_free_pages: Vec<PageId>,
     pub original_checksums: Vec<(PageId, u32)>,
     pub page_records: Vec<JournalRecord>,
+    /// What every page the commit touched must contain if the commit landed.
+    ///
+    /// Empty until a commit declares it. See [`write_commit_intents`].
+    pub commit_intents: Vec<(PageId, u32)>,
 }
 
 impl RollbackJournal {
@@ -145,6 +160,7 @@ impl RollbackJournal {
                     page_bytes: record.data.clone(),
                 })
                 .collect(),
+            commit_intents: self.commit_intents.clone(),
         }
     }
 
@@ -164,6 +180,7 @@ impl RollbackJournal {
                     data: record.page_bytes,
                 })
                 .collect(),
+            commit_intents: journal.commit_intents,
         }
     }
 }
@@ -296,11 +313,37 @@ pub(crate) fn write_journal_record_count(file: &mut JournalFile, record_count: u
     Ok(())
 }
 
-pub(crate) fn mark_journal_committed(file: &mut JournalFile, record_count: u32) -> Result<()> {
-    file.seek(SeekFrom::Start(V3_JOURNAL_STATE_OFFSET))?;
-    file.write_all(&[JournalFileState::Committed as u8])?;
-    write_journal_record_count(file, record_count)?;
-    file.sync_all()?;
+/// Appends the commit intent: what every page the commit touches must contain if
+/// the commit reached the disk.
+///
+/// This is what lets the third fsync go. Previously a commit had to write a
+/// "committed" flag into the journal header and sync it, purely so recovery could
+/// tell a completed commit from an abandoned one — a whole fsync spent on one byte.
+///
+/// With the intent recorded, recovery answers the same question by reading: if every
+/// listed page already holds its post-commit checksum, the commit's writes reached
+/// the disk and the journal can be discarded; if any does not, the commit was partial
+/// and the pre-images are replayed.
+///
+/// Comparing against the *post* image rather than asking "did this page change" is
+/// what makes it sound. A page whose new contents happen to equal its old contents is
+/// indistinguishable by the latter test, and a torn page matches neither image, so it
+/// is correctly treated as a partial commit.
+pub(crate) fn write_commit_intents(
+    file: &mut JournalFile,
+    intents: &[(PageId, u32)],
+) -> Result<()> {
+    let mut bytes = Vec::with_capacity(intents.len() * V3_JOURNAL_INTENT_SIZE);
+    for (page_id, checksum) in intents {
+        bytes.extend_from_slice(&page_id.to_be_bytes());
+        bytes.extend_from_slice(&checksum.to_be_bytes());
+    }
+    file.seek(SeekFrom::End(0))?;
+    file.write_all(&bytes)?;
+
+    file.seek(SeekFrom::Start(V3_JOURNAL_INTENT_COUNT_OFFSET))?;
+    file.write_all(&(intents.len() as u32).to_be_bytes())?;
+    file.seek(SeekFrom::End(0))?;
     Ok(())
 }
 
@@ -318,6 +361,7 @@ impl JournalHeader {
         bytes[24..28].copy_from_slice(&self.free_page_count.to_be_bytes());
         bytes[28..32].copy_from_slice(&self.checksum_count.to_be_bytes());
         bytes[32..36].copy_from_slice(&self.record_count.to_be_bytes());
+        bytes[36..40].copy_from_slice(&self.intent_count.to_be_bytes());
         bytes
     }
 
@@ -356,6 +400,7 @@ impl JournalHeader {
             free_page_count: read_u32_be(bytes, 24),
             checksum_count: read_u32_be(bytes, 28),
             record_count: read_u32_be(bytes, 32),
+            intent_count: read_u32_be(bytes, 36),
         })
     }
 }
@@ -414,6 +459,7 @@ impl EncodedRollbackJournal {
             free_page_count: self.original_free_pages.len() as u32,
             checksum_count: self.original_checksums.len() as u32,
             record_count: self.records.len() as u32,
+            intent_count: self.commit_intents.len() as u32,
             ..self.header.clone()
         };
         let mut bytes = Vec::with_capacity(
@@ -436,6 +482,11 @@ impl EncodedRollbackJournal {
 
         for record in &self.records {
             bytes.extend_from_slice(&record.encode(header.checksum_seed)?);
+        }
+
+        for (page_id, checksum) in &self.commit_intents {
+            bytes.extend_from_slice(&page_id.to_be_bytes());
+            bytes.extend_from_slice(&checksum.to_be_bytes());
         }
         Ok(bytes)
     }
@@ -473,6 +524,17 @@ impl EncodedRollbackJournal {
             offset += used;
         }
 
+        let mut commit_intents = Vec::with_capacity(header.intent_count as usize);
+        for _ in 0..header.intent_count {
+            if offset + V3_JOURNAL_INTENT_SIZE > bytes.len() {
+                return Err(HematiteError::StorageError(
+                    "v3 rollback journal commit intent is truncated".to_string(),
+                ));
+            }
+            commit_intents.push((read_u32_be(bytes, offset), read_u32_be(bytes, offset + 4)));
+            offset += V3_JOURNAL_INTENT_SIZE;
+        }
+
         if offset != bytes.len() {
             return Err(HematiteError::StorageError(
                 "v3 rollback journal has trailing bytes".to_string(),
@@ -485,6 +547,7 @@ impl EncodedRollbackJournal {
             original_free_pages,
             original_checksums,
             records,
+            commit_intents,
         })
     }
 }

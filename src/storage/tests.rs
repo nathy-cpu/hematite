@@ -797,6 +797,7 @@ mod pager_tests {
             original_file_len: file_len,
             original_free_pages: free_pages,
             original_checksums: checksums,
+            commit_intents: Vec::new(),
             page_records: vec![JournalRecord {
                 page_id,
                 data: vec![1u8; crate::storage::PAGE_SIZE],
@@ -3557,6 +3558,7 @@ mod journal_codec_tests {
     #[test]
     fn v3_rollback_journal_roundtrip() {
         let journal = EncodedRollbackJournal {
+            commit_intents: Vec::new(),
             header: JournalHeader {
                 state: JournalFileState::Committed,
                 original_database_page_count: 12,
@@ -3594,6 +3596,7 @@ mod journal_codec_tests {
     #[test]
     fn v3_rollback_journal_rejects_checksum_corruption() {
         let journal = EncodedRollbackJournal {
+            commit_intents: Vec::new(),
             header: JournalHeader::default(),
             original_free_pages: vec![],
             original_checksums: vec![],
@@ -3616,6 +3619,7 @@ mod journal_codec_tests {
     #[test]
     fn v3_rollback_journal_rejects_duplicate_pages() {
         let journal = EncodedRollbackJournal {
+            commit_intents: Vec::new(),
             header: JournalHeader::default(),
             original_free_pages: vec![],
             original_checksums: vec![],
@@ -3640,6 +3644,7 @@ mod journal_codec_tests {
     #[test]
     fn v3_rollback_journal_rejects_truncated_metadata_sections() {
         let journal = EncodedRollbackJournal {
+            commit_intents: Vec::new(),
             header: JournalHeader::default(),
             original_free_pages: vec![2],
             original_checksums: vec![(3, 10)],
@@ -3773,15 +3778,15 @@ mod work_performed_tests {
         let _ = commit_one_page(&mut pager, page_id, 1);
         let work = commit_one_page(&mut pager, page_id, 2);
 
-        // Three: the journal (once, inside `flush`, after the persisted-state page
-        // has been staged), the database file, and the journal's commit marker.
+        // Two: the journal, once, after the persisted-state page has been staged and
+        // the commit intent recorded; then the database file. That is the floor for a
+        // rollback journal — one sync to make the undo information durable before the
+        // database is touched, one to make the new contents durable.
         //
-        // It was four until the redundant pre-`flush` journal sync was removed. The
-        // last one goes when the per-page `gen` stamp lands: it lets recovery decide
-        // whether a commit completed by comparing page generations, so the commit
-        // marker no longer has to be made durable on its own.
+        // It was four. One went with the redundant pre-`flush` journal sync; the
+        // other with the commit marker, which the journal's commit intent replaced.
         assert_eq!(
-            work.fsyncs, 3,
+            work.fsyncs, 2,
             "rollback commit fsync count changed: {work:?}"
         );
     }
@@ -4240,5 +4245,74 @@ mod crash_recovery_ordering_tests {
             0x33,
             "a partially appended commit was treated as durable"
         );
+    }
+
+    /// A commit that finished, then a crash before the journal was removed, must not
+    /// be rolled back.
+    ///
+    /// This is the durability property the third fsync used to buy. The journal is
+    /// still on disk, full of pre-images, and marked active — the exact shape
+    /// recovery treats as "roll this back". What stops it is the commit intent: every
+    /// page listed already holds the contents the commit meant to write, so recovery
+    /// concludes the commit landed and discards the journal instead of replaying it.
+    ///
+    /// Verified to fail if the intent check is forced to report "not fulfilled".
+    #[test]
+    fn a_finished_commit_survives_a_crash_before_the_journal_is_removed() {
+        let db = TestDbFile::new("_test_commit_then_crash_before_cleanup");
+
+        let page_id = {
+            let mut pager = Pager::new(db.path(), 64).expect("open");
+            let page_id = pager.allocate_page().expect("allocate");
+            commit_fill(&mut pager, page_id, 0x11);
+
+            // Commit for real, but leave the journal behind as a crash would.
+            pager.keep_journal_after_commit();
+            commit_fill(&mut pager, page_id, 0x22);
+            page_id
+        };
+
+        let pager = Pager::new(db.path(), 64).expect("reopen");
+        assert_eq!(
+            pager.read_page(page_id).expect("read").data[0],
+            0x22,
+            "recovery rolled back a committed transaction"
+        );
+    }
+
+    /// The other side of the same coin: an *unfinished* commit that left a journal
+    /// behind must still be rolled back, even though the journal now looks the same.
+    ///
+    /// Together with the test above this pins both directions of the oracle. If it
+    /// answered "fulfilled" unconditionally, this one fails; if it answered "not
+    /// fulfilled" unconditionally, the one above fails.
+    #[test]
+    fn an_unfinished_commit_is_still_rolled_back() {
+        let db = TestDbFile::new("_test_unfinished_commit_rolled_back");
+
+        let (first, second) = {
+            let mut pager = Pager::new(db.path(), 64).expect("open");
+            let first = pager.allocate_page().expect("allocate");
+            let second = pager.allocate_page().expect("allocate");
+            commit_fill(&mut pager, first, 0xA1);
+            commit_fill(&mut pager, second, 0xA2);
+
+            pager.begin_transaction().expect("begin");
+            for (page_id, fill) in [(first, 0xB1), (second, 0xB2)] {
+                let mut page = Page::new(page_id);
+                page.data.fill(fill);
+                pager.write_page(page).expect("write");
+            }
+            pager.inject_io_failure_after(1);
+            assert!(
+                pager.commit_transaction().is_err(),
+                "injected failure did not surface"
+            );
+            (first, second)
+        };
+
+        let pager = Pager::new(db.path(), 64).expect("reopen");
+        assert_eq!(pager.read_page(first).expect("read first").data[0], 0xA1);
+        assert_eq!(pager.read_page(second).expect("read second").data[0], 0xA2);
     }
 }

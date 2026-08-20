@@ -67,6 +67,16 @@ impl Pager {
         Ok(std::fs::metadata(path).map(|m| m.len()).unwrap_or(0))
     }
 
+    /// Leaves the journal in place after a commit, standing in for a crash in the
+    /// window between the database fsync and the journal's removal.
+    ///
+    /// That window is where the commit intent has to do its work: the transaction is
+    /// durable, but a journal full of pre-images is still sitting on disk, and
+    /// recovery must not replay it.
+    pub fn keep_journal_after_commit(&mut self) {
+        self.keep_journal_after_commit = true;
+    }
+
     pub fn inject_io_failure(&mut self) {
         self.file_manager.inject_write_failure();
     }

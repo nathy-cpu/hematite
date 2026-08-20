@@ -220,6 +220,25 @@ impl Pager {
     }
 
     pub fn flush(&mut self) -> Result<()> {
+        self.flush_inner(false)
+    }
+
+    /// Flushes as part of committing a rollback transaction.
+    ///
+    /// The difference from a plain `flush` is the commit intent: the set of pages
+    /// this commit is about to write, with the contents each must end up holding. It
+    /// has to be recorded after the persisted-state page is staged — so the intent
+    /// covers that page's final bytes too — and before the journal is synced, so it
+    /// is durable before any database page is overwritten.
+    ///
+    /// A plain `flush` must never write one. Flushing mid-transaction, or spilling,
+    /// writes database pages while the transaction is still open; declaring an intent
+    /// there would tell recovery a commit had landed when it had not.
+    pub(super) fn flush_for_commit(&mut self) -> Result<()> {
+        self.flush_inner(true)
+    }
+
+    fn flush_inner(&mut self, declare_commit_intent: bool) -> Result<()> {
         self.check_error_state()?;
         if self.journal_mode == JournalMode::Wal && self.transaction.is_some() {
             return Err(crate::error::HematiteError::StorageError(
@@ -229,6 +248,9 @@ impl Pager {
 
         self.stage_persisted_state_page()?;
         if self.active_rollback_transaction().is_some() {
+            if declare_commit_intent {
+                self.declare_rollback_commit_intent()?;
+            }
             self.sync_rollback_journal()?;
             self.apply_rollback_space_overlay_if_needed()?;
         }
