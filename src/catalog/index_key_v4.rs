@@ -41,17 +41,20 @@
 //! | `0x00` | `Null` | — |
 //! | `0x01` | `Boolean(false)` | — |
 //! | `0x02` | `Boolean(true)` | — |
-//! | `0x03` | integer `< 0` | 8 bytes, big-endian `v as u64` |
-//! | `0x04` | integer `>= 0` | 8 bytes, big-endian `v as u64` |
+//! | `0x03` | integer `< 0` | `255 - len`, then `len` complemented bytes |
+//! | `0x04` | integer `>= 0` | `len`, then `len` big-endian bytes |
 //! | `0x05` | float | 8 bytes, total-order transform |
 //! | `0x06` | decimal | see [`encode_decimal`] |
 //! | `0x07` | text | escaped, terminated |
 //! | `0x08` | blob | escaped, terminated |
 //!
 //! Tag order is the type order: nulls first, then booleans, then all numbers, then
-//! text, then blobs. Within the integer tags, `v as u64` is ascending in `v` for
-//! each sign separately — negatives land in `[2^63, 2^64)` in increasing order — and
-//! the tag byte puts every negative before every non-negative.
+//! text, then blobs. The tag byte puts every negative before every non-negative, so
+//! the two integer forms never compare against each other.
+//!
+//! Integers carry only the bytes they need, with the length written first so that it
+//! sorts the same way the digits do. See [`encode_integer`] for why the negative form
+//! is mirrored.
 //!
 //! Floats and integers do not interleave: all integers sort before all floats. A
 //! column is one or the other in practice, and making them interleave would mean
@@ -218,13 +221,47 @@ pub(crate) fn encode_value(out: &mut Vec<u8>, value: &Value) {
     }
 }
 
+/// Writes an integer as a tag, a length, and only the bytes it needs.
+///
+/// Order survives because the length is written before the digits and sorts the same
+/// way they do: a number needing more bytes is larger, and two numbers of equal width
+/// compare correctly as big-endian bytes.
+///
+/// Negatives are mirrored. `!v` maps `-1` to 0 and `i64::MIN` to `2^63 - 1`, so more
+/// negative means a *longer* encoding — the opposite of what the order needs. Writing
+/// `255 - len` and complementing the digits reverses both comparisons, so more
+/// negative sorts earlier. The tag still puts every negative before every
+/// non-negative, so the two schemes never have to compare against each other.
+///
+/// This replaced a fixed eight bytes per integer, which was the one measured
+/// regression the rewrite introduced: index keys grew because a single order now has
+/// to span `i64::MIN..=u64::MAX`. A small integer costs three bytes here rather than
+/// nine, and zero costs two.
 fn encode_integer(out: &mut Vec<u8>, bits: u64, negative: bool) {
-    out.push(if negative {
-        TAG_NEGATIVE_INT
+    if negative {
+        out.push(TAG_NEGATIVE_INT);
+        // Distance below -1, so -1 is the shortest negative and i64::MIN the longest.
+        let magnitude = !bits;
+        let len = significant_bytes(magnitude);
+        out.push(255 - len as u8);
+        for byte in &magnitude.to_be_bytes()[8 - len..] {
+            out.push(!byte);
+        }
     } else {
-        TAG_NON_NEGATIVE_INT
-    });
-    out.extend_from_slice(&bits.to_be_bytes());
+        out.push(TAG_NON_NEGATIVE_INT);
+        let len = significant_bytes(bits);
+        out.push(len as u8);
+        out.extend_from_slice(&bits.to_be_bytes()[8 - len..]);
+    }
+}
+
+/// Bytes needed to represent `value`, and zero for zero.
+fn significant_bytes(value: u64) -> usize {
+    if value == 0 {
+        0
+    } else {
+        8 - (value.leading_zeros() as usize / 8)
+    }
 }
 
 /// Encodes a composite key.
@@ -336,6 +373,31 @@ mod tests {
             Value::Blob(vec![b'a', 1]),
             Value::Blob(vec![b'b']),
         ]);
+    }
+
+    /// Small integers should not cost what large ones do.
+    ///
+    /// The fixed eight-byte body was the one measured regression the rewrite
+    /// introduced: index keys grew because a single order has to span
+    /// `i64::MIN..=u64::MAX`.
+    #[test]
+    fn integer_keys_cost_only_the_bytes_they_need() {
+        // tag + length + digits
+        assert_eq!(key(Value::Integer(0)).len(), 2);
+        assert_eq!(key(Value::Integer(1)).len(), 3);
+        assert_eq!(key(Value::Integer(255)).len(), 3);
+        assert_eq!(key(Value::Integer(256)).len(), 4);
+        // -1 is the shortest negative: its distance below -1 is zero, so there are
+        // no digits to write, exactly as for 0 on the other side.
+        assert_eq!(key(Value::Integer(-1)).len(), 2);
+        assert_eq!(key(Value::Integer(-2)).len(), 3);
+        assert_eq!(key(Value::Integer(-256)).len(), 3);
+        assert_eq!(key(Value::Integer(-257)).len(), 4);
+        assert_eq!(key(Value::BigInt(i64::MAX)).len(), 10);
+        assert_eq!(key(Value::UBigInt(u64::MAX)).len(), 10);
+
+        // A typical indexed integer column, against the nine bytes it used to take.
+        assert!(key(Value::Integer(42)).len() < 9);
     }
 
     #[test]
