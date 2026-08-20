@@ -2034,6 +2034,52 @@ impl SelectExecutor {
         )
     }
 
+    /// How many rows a full scan may stop after, if it may stop at all.
+    ///
+    /// `LIMIT` is applied at the very end, by `apply_select_window`, on rows that
+    /// have already been filtered, grouped and sorted. Pushing it down into the scan
+    /// is only correct when none of those steps can change *which* rows survive, so
+    /// that a prefix of the table is exactly a prefix of the result.
+    ///
+    /// Every clause below is a reason a later row could displace an earlier one:
+    ///
+    /// - `WHERE` — the scan would have to produce `limit` *matching* rows, not
+    ///   `limit` rows;
+    /// - `ORDER BY` — any row in the table might sort into the first `limit`;
+    /// - `GROUP BY`, `HAVING`, aggregates — one output row draws on many input rows;
+    /// - `DISTINCT` — duplicates in the prefix mean fewer output rows than scanned;
+    /// - a set operation — the other side contributes rows.
+    ///
+    /// `OFFSET` is not a blocker but must be included in the cap: the scan has to
+    /// produce the skipped rows too. Projection is per-row and cannot reorder or
+    /// remove rows, so it is safe even when it contains a subquery.
+    ///
+    /// Five of these guards are load-bearing: deleting any of `where_clause`,
+    /// `order_by`, `group_by`, `distinct` or the aggregate check makes a test in
+    /// `sql::tests::limit_pushdown_tests` fail. The `having_clause` and
+    /// `set_operation` checks are defensive — no query could be constructed that
+    /// reaches here with either set — and are kept so that correctness does not
+    /// depend on that routing detail staying true.
+    fn scan_row_cap(&self) -> Option<usize> {
+        let limit = self.statement.limit?;
+        let statement = &self.statement;
+
+        if statement.where_clause.is_some()
+            || !statement.order_by.is_empty()
+            || !statement.group_by.is_empty()
+            || statement.having_clause.is_some()
+            || statement.distinct
+            || statement.set_operation.is_some()
+            || self.has_aggregate_projection()
+        {
+            return None;
+        }
+
+        // Saturating: a limit near `usize::MAX` simply means "no useful cap", and
+        // wrapping here would silently truncate the result.
+        Some(limit.saturating_add(statement.offset.unwrap_or(0)))
+    }
+
     fn materialize_table_access_rows(
         &self,
         ctx: &mut ExecutionContext,
@@ -2083,7 +2129,10 @@ impl SelectExecutor {
                     .map(|row| row.values)
                     .collect())
             }
-            SelectAccessPath::FullTableScan => ctx.engine.read_from_table(table_name),
+            SelectAccessPath::FullTableScan => match self.scan_row_cap() {
+                Some(cap) => ctx.engine.read_from_table_capped(table_name, cap),
+                None => ctx.engine.read_from_table(table_name),
+            },
             SelectAccessPath::JoinScan => Err(HematiteError::InternalError(
                 "Planner selected join scan for direct table access".to_string(),
             )),

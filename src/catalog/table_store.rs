@@ -192,6 +192,29 @@ pub(crate) fn read_from_table(
         .collect())
 }
 
+/// Reads at most `max_rows` rows, stopping the scan once it has them.
+///
+/// Only correct where the first `max_rows` rows of the table *are* the answer — no
+/// `WHERE`, no `ORDER BY`, no grouping or `DISTINCT` — which the caller decides. See
+/// `SelectExecutor::scan_row_cap`.
+pub(crate) fn read_from_table_capped(
+    engine: &mut CatalogEngine,
+    table_name: &str,
+    max_rows: usize,
+) -> Result<Vec<Vec<Value>>> {
+    let root_page_id = engine.table_runtime_metadata(table_name)?.root_page_id;
+    let mut rows = Vec::new();
+    if max_rows == 0 {
+        return Ok(rows);
+    }
+    engine.visit_tree_entries_while(root_page_id, |key, value| {
+        let row_id = RowCodec::decode_row_id_key(key)?;
+        rows.push(RowCodec::decode_stored_row(row_id, value)?.values);
+        Ok(rows.len() < max_rows)
+    })?;
+    Ok(rows)
+}
+
 pub(crate) fn lookup_row_by_rowid(
     engine: &mut CatalogEngine,
     table_name: &str,

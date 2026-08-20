@@ -5278,3 +5278,187 @@ mod result_tests {
         Ok(())
     }
 }
+
+/// `LIMIT` is normally applied at the very end, by `apply_select_window`, on rows
+/// that have already been filtered, grouped and sorted. The executor pushes it down
+/// into a full table scan when — and only when — a prefix of the table is a correct
+/// prefix of the result (`SelectExecutor::scan_row_cap`).
+///
+/// These tests are the guard on that condition. Each blocking clause is one a later
+/// row could use to displace an earlier one, so each gets a case whose answer is
+/// *wrong* if the scan stops early. `ORDER BY` is the sharpest: with the guard
+/// removed, `ORDER BY id DESC LIMIT 1` returns the first row scanned rather than the
+/// largest.
+mod limit_pushdown_tests {
+    use crate::catalog::Value;
+    use crate::error::Result;
+    use crate::sql::connection::Connection;
+    use crate::test_utils::TestDbFile;
+
+    fn seeded(name: &str) -> Result<(TestDbFile, Connection)> {
+        let db = TestDbFile::new(name);
+        let mut conn = Connection::new(db.path())?;
+        conn.execute("CREATE TABLE t (id INT PRIMARY KEY, bucket INT, half INT);")?;
+        // `bucket` cycles 0..4 so GROUP BY has something to collapse.
+        //
+        // `half` is 0 for the first ten rows and 1 for the rest, deliberately *not*
+        // interleaved: a short prefix of the table sees only one of its two values.
+        // A cycling column cannot catch a broken DISTINCT guard, because the first
+        // few rows already cover every distinct value — which is exactly the trap an
+        // earlier version of this test fell into.
+        let values: Vec<String> = (1..=20)
+            .map(|id| format!("({id},{},{})", id % 5, i32::from(id > 10)))
+            .collect();
+        conn.execute(&format!(
+            "INSERT INTO t (id, bucket, half) VALUES {};",
+            values.join(",")
+        ))?;
+        Ok((db, conn))
+    }
+
+    fn ids(conn: &mut Connection, sql: &str) -> Result<Vec<i32>> {
+        let result = conn.execute(sql)?;
+        Ok(result
+            .rows
+            .iter()
+            .map(|row| match &row[0] {
+                Value::Integer(value) => *value,
+                other => panic!("expected an integer id, got {other:?}"),
+            })
+            .collect())
+    }
+
+    fn count_of(conn: &mut Connection, sql: &str) -> Result<i64> {
+        let result = conn.execute(sql)?;
+        assert_eq!(result.rows.len(), 1, "expected exactly one aggregate row");
+        match &result.rows[0][0] {
+            Value::Integer(count) => Ok(i64::from(*count)),
+            Value::BigInt(count) => Ok(*count),
+            other => panic!("expected a count, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plain_limit_returns_a_prefix() -> Result<()> {
+        let (_db, mut conn) = seeded("_test_limit_plain")?;
+        assert_eq!(ids(&mut conn, "SELECT id FROM t LIMIT 3;")?, vec![1, 2, 3]);
+        Ok(())
+    }
+
+    #[test]
+    fn limit_with_offset_skips_before_taking() -> Result<()> {
+        let (_db, mut conn) = seeded("_test_limit_offset")?;
+        // The scan must still produce the skipped rows, so the cap is limit+offset.
+        assert_eq!(
+            ids(&mut conn, "SELECT id FROM t LIMIT 3 OFFSET 5;")?,
+            vec![6, 7, 8]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn limit_beyond_the_table_returns_everything() -> Result<()> {
+        let (_db, mut conn) = seeded("_test_limit_overrun")?;
+        assert_eq!(ids(&mut conn, "SELECT id FROM t LIMIT 500;")?.len(), 20);
+        Ok(())
+    }
+
+    #[test]
+    fn limit_zero_returns_nothing() -> Result<()> {
+        let (_db, mut conn) = seeded("_test_limit_zero")?;
+        assert!(ids(&mut conn, "SELECT id FROM t LIMIT 0;")?.is_empty());
+        Ok(())
+    }
+
+    /// The critical case. A prefix of the table is not a prefix of a sorted result,
+    /// so the scan must not stop early.
+    #[test]
+    fn order_by_still_sees_the_whole_table() -> Result<()> {
+        let (_db, mut conn) = seeded("_test_limit_order_by")?;
+        assert_eq!(
+            ids(&mut conn, "SELECT id FROM t ORDER BY id DESC LIMIT 1;")?,
+            vec![20]
+        );
+        assert_eq!(
+            ids(&mut conn, "SELECT id FROM t ORDER BY id DESC LIMIT 3;")?,
+            vec![20, 19, 18]
+        );
+        Ok(())
+    }
+
+    /// The scan has to yield `limit` *matching* rows, not `limit` rows.
+    #[test]
+    fn where_still_sees_the_whole_table() -> Result<()> {
+        let (_db, mut conn) = seeded("_test_limit_where")?;
+        assert_eq!(
+            ids(&mut conn, "SELECT id FROM t WHERE id > 15 LIMIT 2;")?,
+            vec![16, 17]
+        );
+        // The only match is the very last row, so no short prefix can find it.
+        assert_eq!(
+            ids(&mut conn, "SELECT id FROM t WHERE id = 20 LIMIT 1;")?,
+            vec![20]
+        );
+        Ok(())
+    }
+
+    /// Duplicates in the prefix mean fewer output rows than rows scanned.
+    ///
+    /// Uses `half`, whose second value only appears past row ten, so a two-row cap
+    /// yields one distinct value instead of two.
+    #[test]
+    fn distinct_still_sees_the_whole_table() -> Result<()> {
+        let (_db, mut conn) = seeded("_test_limit_distinct")?;
+        let mut halves = ids(&mut conn, "SELECT DISTINCT half FROM t LIMIT 2;")?;
+        halves.sort_unstable();
+        assert_eq!(halves, vec![0, 1]);
+        Ok(())
+    }
+
+    /// `UNION` with a `LIMIT` returns the right rows.
+    ///
+    /// Unlike the cases above, this one passes with the `set_operation` guard
+    /// removed — set operations evidently do not reach `materialize_table_access_rows`
+    /// carrying the outer statement's limit. The guard is kept anyway, because it
+    /// costs nothing and dropping it would make correctness depend on that routing
+    /// detail staying true. This test therefore documents the behaviour; it does not
+    /// police the guard.
+    #[test]
+    fn set_operations_still_see_the_whole_table() -> Result<()> {
+        let (_db, mut conn) = seeded("_test_limit_union")?;
+        let mut halves = ids(
+            &mut conn,
+            "SELECT half FROM t UNION SELECT half FROM t LIMIT 2;",
+        )?;
+        halves.sort_unstable();
+        assert_eq!(halves, vec![0, 1]);
+        Ok(())
+    }
+
+    /// One output row draws on every input row.
+    #[test]
+    fn aggregates_still_see_the_whole_table() -> Result<()> {
+        let (_db, mut conn) = seeded("_test_limit_aggregate")?;
+        assert_eq!(count_of(&mut conn, "SELECT COUNT(*) FROM t LIMIT 1;")?, 20);
+        Ok(())
+    }
+
+    /// Each group draws on rows spread across the whole table.
+    #[test]
+    fn group_by_still_sees_the_whole_table() -> Result<()> {
+        let (_db, mut conn) = seeded("_test_limit_group_by")?;
+        let result = conn
+            .execute("SELECT bucket, COUNT(*) FROM t GROUP BY bucket ORDER BY bucket LIMIT 2;")?;
+        assert_eq!(result.rows.len(), 2);
+        // Buckets 0 and 1 each hold four of the twenty rows.
+        for row in &result.rows {
+            let count = match &row[1] {
+                Value::Integer(count) => i64::from(*count),
+                Value::BigInt(count) => *count,
+                other => panic!("expected a count, got {other:?}"),
+            };
+            assert_eq!(count, 4);
+        }
+        Ok(())
+    }
+}

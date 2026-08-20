@@ -462,11 +462,31 @@ not available yet.",
     where
         F: FnMut(&[u8], &[u8]) -> Result<()>,
     {
+        self.visit_tree_entries_while(root_page_id, |key, value| {
+            visit(key, value)?;
+            Ok(true)
+        })
+    }
+
+    /// Walks tree entries until the visitor returns `false`.
+    ///
+    /// The early exit is what lets a capped scan stop after the rows it needs
+    /// instead of walking the whole tree and discarding the tail.
+    pub(crate) fn visit_tree_entries_while<F>(
+        &self,
+        root_page_id: PageId,
+        mut visit: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&[u8], &[u8]) -> Result<bool>,
+    {
         let tree = self.open_tree(root_page_id)?;
         let mut cursor = tree.cursor()?;
         cursor.first()?;
         while let Some((key, value)) = cursor.current()? {
-            visit(&key, &value)?;
+            if !visit(&key, &value)? {
+                break;
+            }
             cursor.next()?;
         }
         Ok(())
@@ -613,6 +633,18 @@ not available yet.",
 
     pub fn read_from_table(&mut self, table_name: &str) -> Result<Vec<Vec<Value>>> {
         table_store::read_from_table(self, table_name)
+    }
+
+    /// Reads at most `max_rows` rows, stopping the scan once it has them.
+    ///
+    /// The caller is responsible for establishing that a prefix of the table is a
+    /// correct answer; see `SelectExecutor::scan_row_cap`.
+    pub fn read_from_table_capped(
+        &mut self,
+        table_name: &str,
+        max_rows: usize,
+    ) -> Result<Vec<Vec<Value>>> {
+        table_store::read_from_table_capped(self, table_name, max_rows)
     }
 
     pub fn lookup_row_by_rowid(
