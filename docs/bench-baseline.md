@@ -687,3 +687,57 @@ happened to exercise most visibly and the other was never re-checked — the sum
 said "medium work is done" on the strength of notes rather than a fresh reading of
 `Pager::snapshot`. The lesson is narrow and worth writing down: when a fix targets one
 arm of a branch, the claim covers that arm only.
+
+## Deterministic measurement, and what it found
+
+Every measurement above this line is wall clock, which on this machine drifts far
+enough to invent results: the same unchanged code measured 1.55 ms and 3.97 ms for
+`full_scan` hours apart, and two "regressions" chased during the rewrite turned out
+to be nothing. Alternating same-session A/B made that survivable but not cheap.
+
+Valgrind removes the problem. Instruction counts and allocation counts are exactly
+reproducible, so a change either moves them or it does not. `examples/scan_profile.rs`
+carries the recipe; the short version is two runs at `SCANS=0` and `SCANS=13`, whose
+difference is 13 scans of 20 000 rows with the inserts netted out.
+
+### `SELECT id, a` over a five-column table
+
+| | Ir/row | allocations/row |
+|---|---|---|
+| before | 3 790 | 4.07 |
+| after the projection hoist | 3 052 | 4.07 |
+| after the borrowed scan path | **2 671** | **2.07** |
+
+**−29.5 % of scan instructions, half the allocations.**
+
+### Where the instructions actually were
+
+The first profile contradicted the plan. The rewrite's catalogue is a storage-layer
+document, but a scan's cost was not mostly in storage:
+
+| | Ir/row | share |
+|---|---|---|
+| allocator (`malloc`/`free` and friends) | 1 059 | 28 % |
+| record decode | 682 | 18 % |
+| **column-name resolution** | **675** | **18 %** |
+| memcpy | 219 | 6 % |
+| B-tree cell access | ~185 | 5 % |
+
+Column-name resolution was `split_once('.')` through the UTF-8 char searcher plus a
+SipHash `HashMap` lookup, per projected column per row, computing an answer identical
+for every row of the query. Nothing in the plan's catalogue mentions it. It is now
+gone from the profile entirely.
+
+The allocator is what remains, at 35 % of the smaller total. Two of the four
+allocations per row are gone; the two left are the row's `Vec<Value>` (160 B) and the
+projected `Vec<Value>` (64 B), both inherent to representing a row as `Vec<Value>`.
+Removing them means `RecordRef` reaching the executor, which is the projection-pushdown
+work the audit lists as blocked on splitting `ExecutionContext`.
+
+### Two things this retired
+
+- **Leaf sibling pointers.** Re-descending at a leaf boundary costs about two cache
+  hits per ~50-row leaf: under 1 % of a scan. Arithmetic, not a benchmark, but the
+  margin is wide enough. Not worth the format change on scan grounds alone.
+- **The idea that scans are storage-bound.** At 2 671 Ir/row, storage is now the
+  minority of a scan. The executor is the majority.
