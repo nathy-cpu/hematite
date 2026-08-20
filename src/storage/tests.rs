@@ -4392,3 +4392,58 @@ mod wal_salt_tests {
         assert_ne!((first.salt_1, first.salt_2), (0x48454D41, 0x54495445));
     }
 }
+
+/// Savepoints keep shared handles to the dirty pages rather than copying them,
+/// because `run_atomically` takes one per row and copying every already-dirty page
+/// each time is quadratic across a transaction.
+///
+/// Sharing is only safe because a later write copies the page into a fresh buffer
+/// instead of mutating the one the savepoint holds — the outstanding `Arc` is what
+/// forces that. This checks the property that argument rests on.
+mod savepoint_sharing_tests {
+    use crate::storage::{Page, Pager};
+    use crate::test_utils::TestDbFile;
+
+    #[test]
+    fn a_savepoint_image_survives_later_writes_to_the_same_page() {
+        let db = TestDbFile::new("_test_savepoint_shared_image");
+        let mut pager = Pager::new(db.path(), 64).expect("open");
+
+        let page_id = pager.allocate_page().expect("allocate");
+        pager.begin_transaction().expect("begin");
+        let mut page = Page::new(page_id);
+        page.data.fill(0x11);
+        pager.write_page(page).expect("write");
+        pager.commit_transaction().expect("commit");
+
+        pager.begin_transaction().expect("begin");
+        let mut page = Page::new(page_id);
+        page.data.fill(0x22);
+        pager.write_page(page).expect("write");
+
+        // Savepoint here: the page holds 0x22.
+        let snapshot = pager.snapshot().expect("snapshot");
+
+        // Overwrite it twice more. If the savepoint shared a page the pager then
+        // mutated in place, its image would follow along to 0x44.
+        for fill in [0x33u8, 0x44] {
+            let mut page = Page::new(page_id);
+            page.data.fill(fill);
+            pager.write_page(page).expect("write");
+        }
+
+        pager.restore_snapshot(snapshot).expect("restore");
+        assert_eq!(
+            pager.read_page(page_id).expect("read").data[0],
+            0x22,
+            "the savepoint image was mutated by later writes"
+        );
+
+        pager.rollback_transaction().expect("rollback");
+        assert_eq!(
+            pager.read_page(page_id).expect("read").data[0],
+            0x11,
+            "rollback did not restore the committed value"
+        );
+    }
+}

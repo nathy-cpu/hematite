@@ -70,24 +70,10 @@ impl Pager {
         Ok(dirty_pages)
     }
 
-    fn clone_dirty_pages(&self) -> Result<Vec<Page>> {
-        let mut dirty_pages = Vec::new();
-        for page_id in self.cache_read()?.dirty_page_ids() {
-            let page = self.cache_read()?.peek(page_id).cloned().ok_or_else(|| {
-                crate::error::HematiteError::StorageError(format!(
-                    "Dirty page {} missing from page cache",
-                    page_id
-                ))
-            })?;
-            dirty_pages.push(page);
-        }
-        Ok(dirty_pages)
-    }
-
     pub(crate) fn create_rollback_savepoint(&mut self) -> Result<u64> {
         let file_manager = self.file_manager.snapshot()?;
         let page_checksums = self.page_checksums.clone();
-        let dirty_pages = self.clone_dirty_pages()?;
+        let dirty_pages = self.share_dirty_pages()?;
         let dirty_page_ids = dirty_pages
             .iter()
             .map(|page| page.id)
@@ -155,7 +141,7 @@ impl Pager {
         for page in savepoint.dirty_pages.iter().cloned() {
             let page_id = page.id;
             let cache = self.cache_mut()?;
-            cache.put(page);
+            cache.put_shared_with_view(page, 0);
             cache.mark_dirty(page_id);
         }
         for record in &savepoint.page_records {

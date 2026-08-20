@@ -220,7 +220,15 @@ struct RollbackSavepoint {
     rollback_free_page_set: HashSet<PageId>,
     rollback_uninitialized_pages: HashSet<PageId>,
     page_checksums: HashMap<PageId, u32>,
-    dirty_pages: Vec<Page>,
+    /// Images of the pages that were dirty when the savepoint was taken.
+    ///
+    /// Shared, not copied. `run_atomically` takes a savepoint per row, so deep-copying
+    /// every dirty page here cost one 4 KiB memcpy per already-dirty page per row —
+    /// quadratic across a transaction, since dirty pages accumulate as it runs.
+    ///
+    /// Holding the `Arc` also pins the page, which is what keeps the image stable: a
+    /// later write copies the page into a fresh buffer rather than mutating this one.
+    dirty_pages: Vec<Arc<Page>>,
     page_records: Vec<JournalRecord>,
     captured_page_ids: HashSet<PageId>,
 }
