@@ -911,9 +911,15 @@ impl SelectStatement {
         self.from.has_non_table_source(self)
     }
 
+    /// Splits `table.column` into its qualifier and column name.
+    ///
+    /// Scans bytes rather than going through `split_once('.')`, whose char-pattern
+    /// searcher is UTF-8 aware and showed up as 3 % of a full scan's instructions.
+    /// `.` is ASCII, so a byte position is always a char boundary and the slices
+    /// below cannot split a multi-byte character.
     pub(crate) fn split_column_reference(name: &str) -> (Option<&str>, &str) {
-        match name.split_once('.') {
-            Some((qualifier, column_name)) => (Some(qualifier), column_name),
+        match name.as_bytes().iter().position(|&byte| byte == b'.') {
+            Some(dot) => (Some(&name[..dot]), &name[dot + 1..]),
             None => (None, name),
         }
     }
