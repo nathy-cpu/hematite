@@ -294,7 +294,7 @@ pub struct Pager {
     wal_scratch: Option<WalTransaction>,
     state: PagerState,
     /// Open handle to the rollback journal file for incremental appending.
-    journal_file: Option<File>,
+    journal_file: Option<crate::storage::journal::JournalFile>,
     /// Number of page records appended to the current journal file.
     journal_record_count: u32,
     /// Byte offset in the journal file where page records begin (after header + metadata).

@@ -3965,24 +3965,26 @@ mod work_performed_tests {
     }
 }
 
-/// Recovery from a commit that died partway through writing pages.
+/// Crash recovery, including the write-ahead ordering a rollback commit depends on.
 ///
-/// **These do not test fsync ordering, and cannot.** That was the original intent,
-/// and it does not work: dropping a `Pager` is a process exit, not a power loss, so
-/// writes that were never synced are still in the OS page cache and reopening reads
-/// them back intact. Moving the journal sync to *after* the page writes — breaking
-/// the write-ahead rule outright — leaves both tests below passing. That was checked
-/// deliberately rather than assumed.
+/// The rule: a page's original image must be in a *synced* journal before that page
+/// is overwritten in the database file. Overwrite first and a power loss leaves a
+/// half-applied transaction that can no longer be undone.
 ///
-/// Testing the ordering needs a storage backend that discards unsynced writes on
-/// demand, which is the fault-injecting `Storage` the rewrite plan calls for and
-/// which does not exist yet. It would also have to cover the journal file, which is
-/// a separate handle that does not go through `FileManager`.
+/// Two of these tests cannot see that rule at all, and it is worth being precise
+/// about why. Dropping a `Pager` is a process exit, not a power loss: writes that
+/// were never synced are still in the OS page cache and reopening reads them back.
+/// Moving the journal sync to after the page writes leaves both of them passing —
+/// checked deliberately. They cover recovery *logic*: a half-applied commit is undone,
+/// a dead transaction's allocations are truncated away.
 ///
-/// What these *do* test is worth having: that a half-applied commit is fully undone
-/// on reopen, and that a dead transaction's page allocations are truncated away. They
-/// would catch a journal that failed to capture a pre-image, or recovery that
-/// replayed the wrong records — just not one that captured them too late.
+/// `a_power_loss_that_drops_unsynced_journal_writes_still_recovers` is the one that
+/// pins the ordering. `JournalFile` remembers what was durable at the last `sync_all`,
+/// so the test can throw away everything written since — exactly what a power loss
+/// does — and then demand that recovery still works. It fails when the sync is moved
+/// after the page writes.
+///
+/// The database file has no equivalent yet, so only journal ordering is covered.
 mod crash_recovery_ordering_tests {
     use crate::storage::{Page, Pager};
     use crate::test_utils::TestDbFile;
@@ -4077,6 +4079,61 @@ mod crash_recovery_ordering_tests {
             pager.file_len().expect("len"),
             baseline_len,
             "recovery did not truncate the pages the dead transaction allocated"
+        );
+    }
+
+    /// The discriminating test: a power loss that throws away every journal write not
+    /// yet synced must still leave the database recoverable.
+    ///
+    /// This is the one that actually pins the write-ahead ordering. If the journal is
+    /// synced before the database pages are written, the pre-images survive the power
+    /// loss and recovery undoes the half-applied commit. If the sync happens after
+    /// the page writes, the pre-images are among the bytes thrown away, and the
+    /// database is left with a partially-applied transaction it can no longer undo.
+    ///
+    /// Verified to fail when the sync is moved after the page writes.
+    #[test]
+    fn a_power_loss_that_drops_unsynced_journal_writes_still_recovers() {
+        let db = TestDbFile::new("_test_power_loss_unsynced_journal");
+
+        let (first, second) = {
+            let mut pager = Pager::new(db.path(), 64).expect("open");
+            let first = pager.allocate_page().expect("allocate");
+            let second = pager.allocate_page().expect("allocate");
+            commit_fill(&mut pager, first, 0xA1);
+            commit_fill(&mut pager, second, 0xA2);
+
+            pager.begin_transaction().expect("begin");
+            for (page_id, fill) in [(first, 0xB1), (second, 0xB2)] {
+                let mut page = Page::new(page_id);
+                page.data.fill(fill);
+                pager.write_page(page).expect("write");
+            }
+
+            // Stop the commit once one page has reached the database file, then take
+            // away every journal byte that was never synced.
+            pager.inject_io_failure_after(1);
+            assert!(
+                pager.commit_transaction().is_err(),
+                "injected failure did not surface"
+            );
+            pager
+                .simulate_journal_power_loss()
+                .expect("simulate power loss");
+
+            (first, second)
+        };
+
+        let pager = Pager::new(db.path(), 64).expect("reopen");
+        assert_eq!(
+            pager.read_page(first).expect("read first").data[0],
+            0xA1,
+            "pre-image was not durable when the database page was overwritten"
+        );
+        assert_eq!(
+            pager.read_page(second).expect("read second").data[0],
+            0xA2,
+            "second page was not restored"
         );
     }
 }

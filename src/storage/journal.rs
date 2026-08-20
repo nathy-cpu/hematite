@@ -168,12 +168,85 @@ impl RollbackJournal {
     }
 }
 
+/// The rollback journal's file handle.
+///
+/// A thin wrapper over `File` in release builds. In test builds it also remembers
+/// what the file contained at the last `sync_all`, so [`JournalFile::lose_unsynced_writes`]
+/// can throw away everything written since — which is what a power loss does.
+///
+/// This exists because no ordinary test can tell a synced write from an unsynced one.
+/// Dropping a `Pager` is a process exit: the kernel still has the unsynced bytes and
+/// hands them straight back on reopen. Moving the journal sync after the page writes,
+/// which breaks the write-ahead rule outright, therefore leaves every process-level
+/// recovery test passing. Only discarding the unsynced bytes exposes it.
+#[derive(Debug)]
+pub(crate) struct JournalFile {
+    file: File,
+    /// Contents as of the last successful `sync_all`.
+    ///
+    /// Re-read whole rather than tracked incrementally: journals in tests are a few
+    /// pages, and reading the file back is obviously correct where replaying a list
+    /// of pending writes would be another thing to get wrong.
+    #[cfg(test)]
+    durable: Vec<u8>,
+}
+
+impl JournalFile {
+    fn new(file: File) -> Self {
+        Self {
+            file,
+            #[cfg(test)]
+            durable: Vec::new(),
+        }
+    }
+
+    pub(crate) fn write_all(&mut self, bytes: &[u8]) -> Result<()> {
+        self.file.write_all(bytes)?;
+        Ok(())
+    }
+
+    pub(crate) fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
+        Ok(self.file.seek(pos)?)
+    }
+
+    pub(crate) fn set_len(&mut self, len: u64) -> Result<()> {
+        self.file.set_len(len)?;
+        Ok(())
+    }
+
+    pub(crate) fn sync_all(&mut self) -> Result<()> {
+        self.file.sync_all()?;
+        #[cfg(test)]
+        {
+            use std::io::Read;
+            let mut durable = Vec::new();
+            let position = self.file.stream_position()?;
+            self.file.seek(SeekFrom::Start(0))?;
+            self.file.read_to_end(&mut durable)?;
+            self.file.seek(SeekFrom::Start(position))?;
+            self.durable = durable;
+        }
+        Ok(())
+    }
+
+    /// Discards every write since the last `sync_all`, as a power loss would.
+    #[cfg(test)]
+    pub(crate) fn lose_unsynced_writes(&mut self) -> Result<()> {
+        self.file.set_len(self.durable.len() as u64)?;
+        self.file.seek(SeekFrom::Start(0))?;
+        self.file.write_all(&self.durable)?;
+        self.file.sync_all()?;
+        self.file.seek(SeekFrom::End(0))?;
+        Ok(())
+    }
+}
+
 pub(crate) fn initialize_journal_file(
     path: &Path,
     original_file_len: u64,
     original_free_pages: &[PageId],
     original_checksums: &[(PageId, u32)],
-) -> Result<(File, u64)> {
+) -> Result<(JournalFile, u64)> {
     let header = JournalHeader {
         state: JournalFileState::Active,
         original_database_page_count: next_page_id_for_file_len(original_file_len),
@@ -203,10 +276,10 @@ pub(crate) fn initialize_journal_file(
         .truncate(true)
         .open(path)?;
     file.write_all(&bytes)?;
-    Ok((file, header_len))
+    Ok((JournalFile::new(file), header_len))
 }
 
-pub(crate) fn append_journal_record(file: &mut File, record: &JournalRecord) -> Result<()> {
+pub(crate) fn append_journal_record(file: &mut JournalFile, record: &JournalRecord) -> Result<()> {
     let encoded = JournalFileRecord {
         page_number: record.page_id,
         page_bytes: record.data.clone(),
@@ -216,14 +289,14 @@ pub(crate) fn append_journal_record(file: &mut File, record: &JournalRecord) -> 
     Ok(())
 }
 
-pub(crate) fn write_journal_record_count(file: &mut File, record_count: u32) -> Result<()> {
+pub(crate) fn write_journal_record_count(file: &mut JournalFile, record_count: u32) -> Result<()> {
     file.seek(SeekFrom::Start(V3_JOURNAL_RECORD_COUNT_OFFSET))?;
     file.write_all(&record_count.to_be_bytes())?;
     file.seek(SeekFrom::End(0))?;
     Ok(())
 }
 
-pub(crate) fn mark_journal_committed(file: &mut File, record_count: u32) -> Result<()> {
+pub(crate) fn mark_journal_committed(file: &mut JournalFile, record_count: u32) -> Result<()> {
     file.seek(SeekFrom::Start(V3_JOURNAL_STATE_OFFSET))?;
     file.write_all(&[JournalFileState::Committed as u8])?;
     write_journal_record_count(file, record_count)?;
