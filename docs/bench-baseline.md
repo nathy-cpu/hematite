@@ -433,16 +433,21 @@ completed. Replacing it needs the per-page `gen` stamp from the format-v4 page
 trailer, so recovery can decide whether a commit landed by comparing page generations
 instead of reading a durable flag.
 
-### A testing gap worth naming
+### A testing gap, and closing it
 
-Nothing in the suite tests fsync *ordering*, and the two recovery tests added
-alongside this change say so in their own documentation. Dropping a `Pager` is a
-process exit, not a power loss: unsynced writes are still in the OS page cache, so
-reopening reads them back regardless. Moving the journal sync to after the page
-writes — breaking the write-ahead rule outright — leaves those tests passing, which
-was checked rather than assumed.
+Nothing in the suite could test fsync *ordering*. Dropping a `Pager` is a process
+exit, not a power loss: unsynced writes are still in the OS page cache, so reopening
+reads them back regardless. Moving the journal sync to after the page writes —
+breaking the write-ahead rule outright — left every recovery test passing.
 
-Covering it needs a storage backend that discards unsynced writes on demand, and it
-would have to cover the journal file too, which is a separate handle that does not go
-through `FileManager`. Until that exists, changes to sync ordering are safe by
-construction or not safe at all.
+That is now closed for the journal. `JournalFile` remembers what the file contained
+at the last `sync_all`, and `lose_unsynced_writes` discards everything written since.
+`a_power_loss_that_drops_unsynced_journal_writes_still_recovers` stops a commit once
+one page has reached the database file, throws away the unsynced journal bytes, and
+requires that reopening restores both originals. It passes today and fails when the
+sync is moved after the page writes — both directions checked.
+
+It is the first test in the codebase that can observe fsync ordering, which is what
+makes the remaining 3→2 fsync work and the format-v4 flag day verifiable rather than
+argued. The database file has no equivalent yet, so only journal ordering is covered;
+the WAL has none at all.
