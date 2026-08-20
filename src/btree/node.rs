@@ -222,6 +222,12 @@ impl BTreeNode {
         Ok(header_size + self.key_count * 2 + cell_body_bytes)
     }
 
+    /// Whether this node's decoded contents fit in a page.
+    ///
+    /// Test-only now. `can_merge_with` used to reach it by building the merged node;
+    /// it answers from byte counts instead, and this survives as the slow, obvious
+    /// reference implementation that the differential merge test checks against.
+    #[cfg(test)]
     pub fn will_fit_in_page(&self) -> bool {
         self.estimate_serialized_size() + page_header_offset(self.page_id) <= PAGE_SIZE
     }
@@ -627,7 +633,18 @@ impl BTreeNode {
         if self.is_decoded {
             self.values[index] = new_value.clone();
         }
-        self.raw_page = Some(Arc::new(page.clone()));
+        // The page has been mutated, so this node's borrowed view of it is stale. It is
+        // dropped rather than refreshed: refreshing meant `Arc::new(page.clone())`, a
+        // full 4 KiB copy plus an allocation, immediately after the byte edit this
+        // whole path exists to make cheap — and the caller then handed the same page
+        // to `write_page`, which wraps it in an `Arc` again. Two page-sized
+        // allocations for a single-cell change.
+        //
+        // Every caller writes the page and returns, so nothing reads through the node
+        // afterwards. Anything that tries gets a clean error from the view accessors
+        // rather than stale bytes, and the failure paths above return before mutating,
+        // so the `decode()` fallback still has its page.
+        self.raw_page = None;
         Ok(true)
     }
 
@@ -673,7 +690,8 @@ impl BTreeNode {
         pf_insert_cell(page, is_p1, pos, &cell_bytes)?;
 
         // Invalidate the lazy node state so the next read re-parses.
-        self.raw_page = Some(Arc::new(page.clone()));
+        // Dropped, not refreshed; see `try_update_leaf_in_place` for why.
+        self.raw_page = None;
         self.is_decoded = false;
         let header = BTreePageHeaderV3::parse(page, is_p1)?;
         self.key_count = header.cell_count as usize;
@@ -703,7 +721,8 @@ impl BTreeNode {
         pf_remove_cell(page, is_p1, index)?;
 
         // Refresh lazy state from the updated page.
-        self.raw_page = Some(Arc::new(page.clone()));
+        // Dropped, not refreshed; see `try_update_leaf_in_place` for why.
+        self.raw_page = None;
         self.is_decoded = false;
         let header = BTreePageHeaderV3::parse(page, is_p1)?;
         self.key_count = header.cell_count as usize;
@@ -860,7 +879,8 @@ impl BTreeNode {
         }
 
         // Refresh lazy state (same pattern as try_insert_leaf_in_place).
-        self.raw_page = Some(Arc::new(page.clone()));
+        // Dropped, not refreshed; see `try_update_leaf_in_place` for why.
+        self.raw_page = None;
         self.is_decoded = false;
         self.key_count = new_header.cell_count as usize;
         let mut offsets = Vec::with_capacity(new_header.cell_count as usize);
@@ -1151,25 +1171,44 @@ impl BTreeNode {
         Ok(left)
     }
 
-    pub fn can_merge_with(&self, other: &BTreeNode) -> bool {
-        if self.node_type != other.node_type {
-            return false;
-        }
-        match self.node_type {
-            NodeType::Leaf => {
-                let mut merged = self.clone();
-                let mut other = other.clone();
-                merged.decode().ok();
-                other.decode().ok();
-                merged.keys.extend(other.keys);
-                merged.values.extend(other.values);
-                merged.key_count = merged.keys.len();
-                merged.keys.len() <= MAX_KEYS && merged.will_fit_in_page()
-            }
-            NodeType::Internal => false,
-        }
+    /// Space the two nodes would occupy merged, from their byte counts alone.
+    ///
+    /// A merged page keeps one header and carries both nodes' pointer arrays and cell
+    /// bodies, so its size is the two sizes less one header. `serialized_size_on_page`
+    /// answers for a lazy node by summing cell ranges off the page, so neither node
+    /// has to be decoded — or cloned.
+    ///
+    /// `None` when either size cannot be read, which callers treat as "do not merge".
+    /// Refusing to merge is always safe; merging when it does not fit is not.
+    fn merged_size_with(&self, other: &BTreeNode, header_size: usize) -> Option<usize> {
+        let mine = self.serialized_size_on_page().ok()?;
+        let theirs = other.serialized_size_on_page().ok()?;
+        mine.checked_add(theirs)?.checked_sub(header_size)
     }
 
+    /// Whether two leaves fit in one page.
+    ///
+    /// This used to clone both nodes, decode the clones — materialising every key and
+    /// value into owned `Vec`s — and concatenate them, purely to measure the result.
+    /// `merge_leaf` then called it a second time, so a single rebalance decision cost
+    /// four node clones and four full decodes.
+    pub fn can_merge_with(&self, other: &BTreeNode) -> bool {
+        if self.node_type != other.node_type || self.node_type != NodeType::Leaf {
+            return false;
+        }
+        if self.key_count + other.key_count > MAX_KEYS {
+            return false;
+        }
+        let Some(merged) = self.merged_size_with(other, LEAF_HEADER_SIZE) else {
+            return false;
+        };
+        merged + page_header_offset(self.page_id) <= PAGE_SIZE
+    }
+
+    /// Whether two interior nodes plus the separator between them fit in one page.
+    ///
+    /// The separator becomes an ordinary cell in the merged node, so it costs its own
+    /// cell plus the two-byte pointer that indexes it.
     pub fn can_merge_internal_with_separator(
         &self,
         other: &BTreeNode,
@@ -1178,15 +1217,14 @@ impl BTreeNode {
         if self.node_type != NodeType::Internal || other.node_type != NodeType::Internal {
             return false;
         }
-        let mut merged = self.clone();
-        let mut other = other.clone();
-        merged.decode().ok();
-        other.decode().ok();
-        merged.keys.push_back(separator_key.clone());
-        merged.keys.extend(other.keys);
-        merged.children.extend(other.children);
-        merged.key_count = merged.keys.len();
-        merged.keys.len() <= MAX_KEYS && merged.will_fit_in_page()
+        if self.key_count + other.key_count + 1 > MAX_KEYS {
+            return false;
+        }
+        let Some(merged) = self.merged_size_with(other, INTERIOR_HEADER_SIZE) else {
+            return false;
+        };
+        merged + internal_cell_size(separator_key) + 2 + page_header_offset(self.page_id)
+            <= PAGE_SIZE
     }
 
     pub fn merge_leaf(&mut self, other: &mut BTreeNode, storage: &mut Pager) -> Result<()> {

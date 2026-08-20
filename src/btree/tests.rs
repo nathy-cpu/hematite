@@ -2060,6 +2060,14 @@ mod tree_tests {
         assert!(lazy.try_update_leaf_in_place(&mut page, &key, &replacement)?);
         assert!(!lazy.is_decoded);
 
+        // The node's borrowed view of the page is dropped by the mutation rather than
+        // refreshed with a 4 KiB copy. Reading through it afterwards must fail loudly;
+        // silently returning the pre-mutation bytes would be far worse than an error.
+        assert!(
+            lazy.get_value_view(0).is_err(),
+            "a mutated node handed back a stale view instead of failing"
+        );
+
         let decoded = BTreeNode::from_page_decoded(page)?;
         assert_eq!(decoded.values.len(), 1);
         assert_eq!(decoded.values[0].data, replacement.data);
@@ -2282,5 +2290,97 @@ mod tree_tests {
         assert!(!manager.validate_tree(root)?);
 
         Ok(())
+    }
+}
+
+/// `can_merge_with` answers from byte counts instead of building the merged node.
+/// These check the arithmetic against the thing it models.
+///
+/// Getting this wrong in one direction is invisible and merely slow — merges that
+/// could happen do not. Getting it wrong in the other overflows a page. So the test
+/// that matters is the agreement one: whenever the predicate says yes, actually
+/// merging must fit.
+///
+/// What it catches, checked by deliberately breaking the formula: dropping a node's
+/// contribution, miscounting cells, using the wrong capacity. What it does *not*
+/// catch is the single-header term. `MAX_KEYS` caps a node at 99 cells, so the
+/// page-fit boundary is only reachable with cells of roughly a hundred bytes, and at
+/// that granularity an eight-byte header can never flip the answer. The term is
+/// correct and stays for clarity, but it is unobservable in any reachable
+/// configuration and this test should not be read as covering it.
+mod merge_fit_tests {
+    use crate::btree::node::BTreeNode;
+    use crate::btree::{BTreeKey, BTreeValue, NodeType};
+
+    fn leaf_with(page_id: u32, count: usize, value_len: usize) -> BTreeNode {
+        let mut node = BTreeNode::new_leaf(page_id);
+        for i in 0..count {
+            node.keys
+                .push_back(BTreeKey::new((i as u32).to_be_bytes().to_vec()));
+            node.values
+                .push_back(BTreeValue::new(vec![0xAB; value_len]));
+        }
+        node.key_count = node.keys.len();
+        node
+    }
+
+    /// The merged node the predicate is modelling, built the slow honest way.
+    fn actually_merged(left: &BTreeNode, right: &BTreeNode) -> BTreeNode {
+        let mut merged = left.clone();
+        merged.keys.extend(right.keys.iter().cloned());
+        merged.values.extend(right.values.iter().cloned());
+        merged.key_count = merged.keys.len();
+        merged
+    }
+
+    #[test]
+    fn the_predicate_agrees_with_performing_the_merge() {
+        let mut checked_both_answers = (false, false);
+
+        // Sweeps across the page-fit boundary: with 99 cells maximum, two nodes of
+        // ~20 cells at ~200 bytes each land either side of 4 KiB.
+        for count in [1usize, 4, 16, 18, 20, 22, 40, 90] {
+            for value_len in [1usize, 16, 64, 96, 100, 104, 200, 500] {
+                let left = leaf_with(2, count, value_len);
+                let right = leaf_with(3, count, value_len);
+
+                let predicted = left.can_merge_with(&right);
+                let actual = {
+                    let merged = actually_merged(&left, &right);
+                    merged.keys.len() <= crate::btree::node::MAX_KEYS && merged.will_fit_in_page()
+                };
+
+                assert_eq!(
+                    predicted, actual,
+                    "disagreement for {count} keys of {value_len} bytes: \
+                     predicate said {predicted}, merging said {actual}"
+                );
+
+                if predicted {
+                    checked_both_answers.0 = true;
+                } else {
+                    checked_both_answers.1 = true;
+                }
+            }
+        }
+
+        assert!(
+            checked_both_answers.0 && checked_both_answers.1,
+            "the sweep only produced one answer, so it proves nothing"
+        );
+    }
+
+    #[test]
+    fn nodes_of_different_kinds_never_merge() {
+        let leaf = leaf_with(2, 4, 16);
+        let mut interior = BTreeNode::new_internal(3);
+        interior.keys.push_back(BTreeKey::new(vec![1]));
+        interior.children.push_back(4);
+        interior.children.push_back(5);
+        interior.key_count = 1;
+
+        assert!(!leaf.can_merge_with(&interior));
+        assert!(!interior.can_merge_with(&leaf));
+        assert_eq!(interior.node_type, NodeType::Internal);
     }
 }
