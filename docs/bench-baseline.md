@@ -451,3 +451,58 @@ It is the first test in the codebase that can observe fsync ordering, which is w
 makes the remaining 3→2 fsync work and the format-v4 flag day verifiable rather than
 argued. The database file has no equivalent yet, so only journal ordering is covered;
 the WAL has none at all.
+
+---
+
+## Phase S6 (rest) + B7 — two fsyncs, and large values out of the leaf
+
+### Rollback commits now issue two fsyncs
+
+The third existed only so recovery could tell a finished commit from an abandoned
+one: it wrote a "committed" flag into the journal header and synced it, a whole fsync
+for one byte. The journal now records a **commit intent** instead — every page the
+commit is about to write, with the checksum that page must hold once it has — synced
+before any database page is overwritten. Recovery reads the database and compares.
+
+Comparing against the *post* image rather than asking "did this page change" is what
+makes it sound: a page whose new contents equal its old is indistinguishable by the
+latter, and a torn page matches neither image, so it reads as partial.
+
+**The plan expected this to require the format-v4 per-page `gen` stamp, and therefore
+a flag day. It does not** — the journal alone can answer the question.
+
+Two fsyncs is the floor for a rollback journal: one to make the undo information
+durable before the database is touched, one to make the new contents durable.
+
+**Clock: still no measurable change**, consistent with the 4→3 result. `delete_heavy`
+and `append_heavy` are flat across both passes. The syncs being removed are of a small,
+already-mostly-flushed journal file, and on this hardware they are close to free. On a
+device that honours barriers they are not, which is why the count is tracked separately.
+
+### Large values
+
+`MIN_LOCAL_PAYLOAD` drops from 489 to 32, and overflow chains are read in one pass
+rather than two. Measured against the commit before this round, two passes each:
+
+| benchmark | before | after | change |
+|---|---|---|---|
+| `large_row/rollback_scan_without_body` | 229.9 / 231.0 µs | 199.3 / 192.9 µs | **−15 %** |
+| `large_row/rollback_scan_with_body` | 249.4 / 258.5 µs | 216.4 / 207.2 µs | **−16 %** |
+| `large_row/wal_scan_without_body` | 242.8 µs | 212.5 / 199.1 µs | ~−15 % |
+| `delete_heavy`, `append_heavy` | — | — | flat |
+
+### What did not improve, and why
+
+The baseline observed that skipping an unprojected 2 KB column saves only 9 %, and
+predicted denser leaves would turn that into roughly 12×. **It did not.** The saving
+is still about 8 %: both figures dropped by 15 %, but their ratio barely moved.
+
+The reason is that not projecting a column does not avoid reading it. The executor
+materialises whole rows and projects afterwards, so `SELECT id, tag` hydrates `body`
+anyway — chain walk included. Denser leaves make every scan cheaper; they cannot make
+an unread column free while it is still being decoded.
+
+Getting that win needs projection pushdown: deciding which fields to decode before
+decoding them. `RecordRef` was built for exactly this — field offsets come from a
+header walk with no body access — but nothing uses it yet. That is the piece of work,
+not the spill rule.
