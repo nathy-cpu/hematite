@@ -506,3 +506,63 @@ Getting that win needs projection pushdown: deciding which fields to decode befo
 decoding them. `RecordRef` was built for exactly this — field offsets come from a
 header walk with no body access — but nothing uses it yet. That is the piece of work,
 not the spill rule.
+
+---
+
+# Cumulative: the whole branch against pre-rewrite `main`
+
+Measured by building `main` in a git worktree — with this branch's bench harness
+copied in, since `main` predates it — and running both alternately, twice each. These
+are the numbers to quote; per-phase deltas cannot be multiplied together, because the
+machine drifts more between sessions than most of the individual changes are worth.
+
+Medians of two passes. 5 000-row fixture.
+
+## Disk space
+
+Deterministic, so no drift caveat applies.
+
+| fixture | before | after | change |
+|---|---|---|---|
+| five small integers | 99.1 bytes/row | **87.7** | **−11.5 %** |
+| `int + 2 text + bool` | 123.7 bytes/row | **105.7** | **−14.6 %** |
+
+## Time
+
+| benchmark | before | after | change |
+|---|---|---|---|
+| `limit_100/rollback` | 1 386 µs | **54.7 µs** | **25×** |
+| `limit_100/wal` | 1 473 µs | **59.1 µs** | **25×** |
+| `append_heavy/wal_batch100` | 9.90 ms | 6.05 ms | **−39 %** |
+| `append_heavy/wal_batch1` | 49.1 ms | 33.5 ms | **−32 %** |
+| `append_heavy/rollback_batch1` | 62.8 ms | 43.5 ms | **−31 %** |
+| `append_heavy/rollback_batch100` | 16.1 ms | 11.4 ms | **−29 %** |
+| `large_row/rollback_scan_with_body` | 321.6 µs | 209 µs | **−35 %** |
+| `large_row/rollback_scan_without_body` | 292.3 µs | 197 µs | **−33 %** |
+| `large_row/wal_scan_*` | ~310 µs | ~220 µs | **−29 %** |
+| `delete_heavy/wal` | 25.2 ms | 22.6 ms | −10 % |
+| `delete_heavy/rollback` | 87.5 ms | 82.1 ms | −6 % |
+| `full_scan/rollback` | 1.550 ms | 1.577 ms | flat |
+| `full_scan/wal` | 1.576 ms | 1.610 ms | flat |
+| `point_lookup` (both modes) | 29.9 / 34.8 µs | 30.4 / 35.0 µs | flat |
+| `range_1pct` (both modes) | ~2.76 ms | ~2.78 ms | flat |
+| **`secondary_index/rollback`** | 168.2 µs | 174.9 µs | **+4 %** |
+| **`secondary_index/wal`** | 173.6 µs | 186.4 µs | **+7 %** |
+
+## Reading this honestly
+
+**Full scans did not get faster.** B8's streaming was worth −12 %, and B2's
+variable-width record decoding cost about +16 %; they cancel. The rewrite bought disk
+space and `LIMIT` on that path, not raw scan throughput. Making scans genuinely faster
+needs projection pushdown and the B-tree page format, neither of which has landed.
+
+**Secondary-index lookups got slower**, consistently and in both modes. The cause is
+known: index keys carry integers as a tag plus eight big-endian bytes where the old
+format used four, because one order now covers `i64::MIN..=u64::MAX` — which is what
+fixed the bug where every `i32` sorted below every `i64`. Dropping the redundant rowid
+copy from the entry value pays some of that back, but not all. Correctness was worth
+it; the size is recoverable later by varint-encoding the integer key body.
+
+**Where the wins actually came from.** Appends: fewer bytes to encode and journal,
+plus two fewer fsyncs. Large rows: values out of the leaf and single-pass chain reads.
+`LIMIT`: the scan stops instead of materialising the table.
