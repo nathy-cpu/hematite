@@ -1635,7 +1635,7 @@ mod index_extra_tests {
 
 mod value_store_tests {
     use crate::btree::value_store::{
-        StoredValueLayout, MAX_LOCAL_PAYLOAD, STORED_VALUE_HEADER_SIZE,
+        inline_payload, StoredValueLayout, MAX_LOCAL_PAYLOAD, STORED_VALUE_HEADER_SIZE,
     };
     use crate::storage::INVALID_PAGE_ID;
 
@@ -1677,6 +1677,52 @@ mod value_store_tests {
         bad_inline[5..7].copy_from_slice(&0u16.to_le_bytes());
         bad_inline[7..11].copy_from_slice(&7u32.to_le_bytes());
         assert!(StoredValueLayout::decode(&bad_inline).is_err());
+    }
+
+    /// The borrowed decode has to agree with the owning one, since scans now take
+    /// the borrowed path and everything else still takes the owning one.
+    #[test]
+    fn test_borrowed_decode_agrees_with_owned() -> crate::error::Result<()> {
+        let inline = StoredValueLayout::new_inline(b"hello world")?.encode()?;
+        let spilled = StoredValueLayout::new_overflow(
+            MAX_LOCAL_PAYLOAD + 123,
+            vec![0xAB; MAX_LOCAL_PAYLOAD],
+            77,
+        )?
+        .encode()?;
+
+        for encoded in [&inline, &spilled] {
+            let owned = StoredValueLayout::decode(encoded)?;
+            let (borrowed, payload) = StoredValueLayout::decode_borrowed(encoded)?;
+
+            assert_eq!(borrowed.total_len, owned.total_len);
+            assert_eq!(borrowed.overflow_first_page, owned.overflow_first_page);
+            assert_eq!(payload, owned.local_payload.as_slice());
+        }
+        Ok(())
+    }
+
+    /// `inline_payload` is what decides whether a scan can skip the copy and the
+    /// pager lock, so it has to say "no" on exactly the values that spill.
+    #[test]
+    fn test_inline_payload_borrows_only_unspilled_values() -> crate::error::Result<()> {
+        let inline = StoredValueLayout::new_inline(b"hello world")?.encode()?;
+        assert_eq!(inline_payload(&inline)?, Some(b"hello world".as_slice()));
+
+        let spilled = StoredValueLayout::new_overflow(
+            MAX_LOCAL_PAYLOAD + 123,
+            vec![0xAB; MAX_LOCAL_PAYLOAD],
+            77,
+        )?
+        .encode()?;
+        assert_eq!(
+            inline_payload(&spilled)?,
+            None,
+            "a spilled value's bytes are not all in the page, so they cannot be borrowed"
+        );
+
+        assert!(inline_payload(&[0u8; STORED_VALUE_HEADER_SIZE - 1]).is_err());
+        Ok(())
     }
 }
 

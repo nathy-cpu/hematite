@@ -488,8 +488,11 @@ not available yet.",
         let tree = self.open_tree(root_page_id)?;
         let mut cursor = tree.cursor()?;
         cursor.first()?;
-        while let Some((key, value)) = cursor.current()? {
-            if !visit(&key, &value)? {
+        // `with_current` rather than `current`: the visitor only borrows, and
+        // `current` would allocate a key copy and a hydrated value per entry to
+        // produce the same bytes.
+        while let Some(keep_going) = cursor.with_current(&mut visit)? {
+            if !keep_going {
                 break;
             }
             cursor.next()?;

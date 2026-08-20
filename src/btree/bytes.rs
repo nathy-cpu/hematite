@@ -45,7 +45,7 @@ use crate::btree::tree::{
     collect_tree_page_ids, collect_tree_space_stats, reset_tree_pages, BTreeManager, TreeSpaceStats,
 };
 use crate::btree::value_store::{
-    free_stored_value_overflow, hydrate_stored_value, materialize_stored_value, StoredValueLayout,
+    free_stored_value_overflow, hydrate_stored_value, inline_payload, materialize_stored_value, StoredValueLayout,
 };
 use crate::btree::NodeType;
 use crate::btree::{BTreeKey, BTreeValue};
@@ -602,6 +602,34 @@ impl ByteTreeCursor {
             }
             _ => Ok(None),
         }
+    }
+
+    /// Hands the current entry's bytes to `visit`, borrowed from the page.
+    ///
+    /// [`current`](Self::current) allocates twice per entry — once to copy the key
+    /// out and once for the hydrated value — which on a scan is two of the four
+    /// allocations a row costs, both of them purely to widen a borrow the caller
+    /// immediately drops. Here the key is passed straight through, and so is the
+    /// value whenever it fits in the page; only a spilled value is assembled into a
+    /// buffer, because only then are its bytes not contiguous.
+    ///
+    /// Returns `None` if the cursor is not on an entry, matching `current`.
+    pub fn with_current<R>(
+        &self,
+        visit: impl FnOnce(&[u8], &[u8]) -> Result<R>,
+    ) -> Result<Option<R>> {
+        let (Some(key), Some(value)) = (self.inner.key_view(), self.inner.value_view()) else {
+            return Ok(None);
+        };
+
+        if let Some(payload) = inline_payload(value)? {
+            return visit(key, payload).map(Some);
+        }
+
+        let storage = self.lock_storage()?;
+        let hydrated = hydrate_stored_value(&storage, value)?;
+        drop(storage);
+        visit(key, &hydrated).map(Some)
     }
 
     pub fn collect_all(&mut self) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {

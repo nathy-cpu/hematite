@@ -141,7 +141,13 @@ impl StoredValueLayout {
         Ok(out)
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<Self> {
+    /// Validates a stored value's header and borrows its local payload.
+    ///
+    /// [`decode`](Self::decode) is this plus a copy of the payload into an owned
+    /// `Vec`. Readers that only look at the bytes do not need that copy, and on an
+    /// inline value — the common case, since a row only spills past
+    /// [`MIN_LOCAL_PAYLOAD`] — the borrowed slice is the whole value.
+    pub fn decode_borrowed(bytes: &[u8]) -> Result<(Self, &[u8])> {
         if bytes.len() < STORED_VALUE_HEADER_SIZE {
             return Err(HematiteError::CorruptedData(
                 "Stored value header is truncated".to_string(),
@@ -190,10 +196,21 @@ impl StoredValueLayout {
             _ => {}
         }
 
+        Ok((
+            Self {
+                total_len,
+                local_payload: Vec::new(),
+                overflow_first_page,
+            },
+            &bytes[STORED_VALUE_HEADER_SIZE..],
+        ))
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        let (layout, local_payload) = Self::decode_borrowed(bytes)?;
         Ok(Self {
-            total_len,
-            local_payload: bytes[STORED_VALUE_HEADER_SIZE..].to_vec(),
-            overflow_first_page,
+            local_payload: local_payload.to_vec(),
+            ..layout
         })
     }
 }
@@ -217,6 +234,24 @@ pub fn materialize_stored_value(storage: &mut Pager, logical_value: &[u8]) -> Re
 
     StoredValueLayout::new_overflow(logical_value.len(), local_payload, overflow_first_page)?
         .encode()
+}
+
+/// Borrows a stored value's bytes when they all live in the page.
+///
+/// Returns `None` when the value spills, in which case the caller has to go through
+/// [`hydrate_stored_value`] and pay for the chain walk and the owned buffer.
+///
+/// This exists because scans dominate reads and almost never spill: hydrating an
+/// inline value allocated a `Vec` per row purely to hand back bytes that were
+/// already contiguous in the page. It also needs no pager lock, since there is no
+/// overflow chain to read.
+pub fn inline_payload(stored_value: &[u8]) -> Result<Option<&[u8]>> {
+    let (layout, local_payload) = StoredValueLayout::decode_borrowed(stored_value)?;
+    if layout.overflow_first_page == INVALID_PAGE_ID {
+        Ok(Some(local_payload))
+    } else {
+        Ok(None)
+    }
 }
 
 pub fn hydrate_stored_value(storage: &Pager, stored_value: &[u8]) -> Result<Vec<u8>> {
