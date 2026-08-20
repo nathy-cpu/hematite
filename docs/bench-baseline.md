@@ -652,3 +652,38 @@ metadata page can be updated without reading and rewriting the whole page. That 
 larger change than the payoff justifies today, and shaving only the clone would be
 churn for something unmeasurable. Same reasoning as declining `read_reserved_blob`
 earlier, and noted here so the next person does not have to rediscover it.
+
+---
+
+## Rollback savepoints stop copying dirty pages
+
+`PagerSnapshot::Full` was fixed earlier to share dirty pages instead of cloning the
+cache. The other branch was not. `Pager::snapshot` takes the `RollbackSavepoint` path
+whenever a rollback transaction is open — the common case for rollback mode — and that
+path still deep-copied every dirty page.
+
+`run_atomically` takes a savepoint per row and dirty pages accumulate as a transaction
+runs, so row N copied roughly N pages: quadratic across a transaction, which is exactly
+the cost the earlier fix was meant to remove.
+
+| benchmark | rows per transaction | before | after | change |
+|---|---|---|---|---|
+| `delete_heavy/rollback` | ~1 250 | 72.7 ms | 50.6 / 52.6 ms | **−30 %** |
+| `append_heavy/rollback_batch100` | 100 | 11.31 ms | 9.16 ms | **−19 %** |
+| `append_heavy/rollback_batch1` | 1 | 40.8 / 41.3 ms | 40.1 / 40.1 ms | −2 % |
+
+The effect scaling with rows-per-transaction is the quadratic signature: with one row
+per transaction nothing accumulates and there is nothing to save, and the win grows
+with batch size. That pattern is better evidence than any single number here, because
+it is what the explanation predicts and noise would not produce it.
+
+Two of the six readings had intervals wide enough to discard (`[10.4, 19.8, 34.5] ms`);
+the table quotes the tight ones.
+
+### How this was missed
+
+It was reported as done. The earlier change fixed the branch the tests and benchmarks
+happened to exercise most visibly and the other was never re-checked — the summary
+said "medium work is done" on the strength of notes rather than a fresh reading of
+`Pager::snapshot`. The lesson is narrow and worth writing down: when a fix targets one
+arm of a branch, the claim covers that arm only.
