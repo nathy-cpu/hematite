@@ -3773,11 +3773,15 @@ mod work_performed_tests {
         let _ = commit_one_page(&mut pager, page_id, 1);
         let work = commit_one_page(&mut pager, page_id, 2);
 
-        // Four today: journal sync, flush's journal sync, the database file, and
-        // the journal's commit marker. The 2-fsync design replaces this; when it
-        // lands, this number changes here in the same commit.
+        // Three: the journal (once, inside `flush`, after the persisted-state page
+        // has been staged), the database file, and the journal's commit marker.
+        //
+        // It was four until the redundant pre-`flush` journal sync was removed. The
+        // last one goes when the per-page `gen` stamp lands: it lets recovery decide
+        // whether a commit completed by comparing page generations, so the commit
+        // marker no longer has to be made durable on its own.
         assert_eq!(
-            work.fsyncs, 4,
+            work.fsyncs, 3,
             "rollback commit fsync count changed: {work:?}"
         );
     }
@@ -3957,6 +3961,122 @@ mod work_performed_tests {
         assert_eq!(
             work.spills, 0,
             "a small rolled-back transaction spilled: {work:?}"
+        );
+    }
+}
+
+/// Recovery from a commit that died partway through writing pages.
+///
+/// **These do not test fsync ordering, and cannot.** That was the original intent,
+/// and it does not work: dropping a `Pager` is a process exit, not a power loss, so
+/// writes that were never synced are still in the OS page cache and reopening reads
+/// them back intact. Moving the journal sync to *after* the page writes — breaking
+/// the write-ahead rule outright — leaves both tests below passing. That was checked
+/// deliberately rather than assumed.
+///
+/// Testing the ordering needs a storage backend that discards unsynced writes on
+/// demand, which is the fault-injecting `Storage` the rewrite plan calls for and
+/// which does not exist yet. It would also have to cover the journal file, which is
+/// a separate handle that does not go through `FileManager`.
+///
+/// What these *do* test is worth having: that a half-applied commit is fully undone
+/// on reopen, and that a dead transaction's page allocations are truncated away. They
+/// would catch a journal that failed to capture a pre-image, or recovery that
+/// replayed the wrong records — just not one that captured them too late.
+mod crash_recovery_ordering_tests {
+    use crate::storage::{Page, Pager};
+    use crate::test_utils::TestDbFile;
+
+    /// Fills `page_id` with `fill` and commits.
+    fn commit_fill(pager: &mut Pager, page_id: u32, fill: u8) {
+        pager.begin_transaction().expect("begin");
+        let mut page = Page::new(page_id);
+        page.data.fill(fill);
+        pager.write_page(page).expect("write");
+        pager.commit_transaction().expect("commit");
+    }
+
+    /// A commit that dies partway through writing pages must leave the database
+    /// exactly as it was, not half-updated.
+    ///
+    /// The failure is injected after one page has already reached the file, so
+    /// recovery has real work to undo rather than merely finding an untouched
+    /// database.
+    #[test]
+    fn a_commit_that_dies_midway_is_undone_on_reopen() {
+        let db = TestDbFile::new("_test_crash_midway_rollback");
+
+        let (first, second) = {
+            let mut pager = Pager::new(db.path(), 64).expect("open");
+            let first = pager.allocate_page().expect("allocate");
+            let second = pager.allocate_page().expect("allocate");
+            commit_fill(&mut pager, first, 0xA1);
+            commit_fill(&mut pager, second, 0xA2);
+
+            // Overwrite both, then fail after the first page write reaches the file.
+            pager.begin_transaction().expect("begin");
+            for (page_id, fill) in [(first, 0xB1), (second, 0xB2)] {
+                let mut page = Page::new(page_id);
+                page.data.fill(fill);
+                pager.write_page(page).expect("write");
+            }
+            pager.inject_io_failure_after(1);
+            assert!(
+                pager.commit_transaction().is_err(),
+                "injected failure did not surface"
+            );
+
+            // Dropping without rollback is the stand-in for the process dying: the
+            // journal stays on disk in its active state.
+            (first, second)
+        };
+
+        let pager = Pager::new(db.path(), 64).expect("reopen");
+        assert_eq!(
+            pager.read_page(first).expect("read first").data[0],
+            0xA1,
+            "first page kept its half-committed value"
+        );
+        assert_eq!(
+            pager.read_page(second).expect("read second").data[0],
+            0xA2,
+            "second page kept its half-committed value"
+        );
+    }
+
+    /// The same, for a transaction that only allocates pages and journals none of
+    /// them. The journal still has to be durable, because its header carries the
+    /// file length recovery truncates back to.
+    #[test]
+    fn a_dead_allocating_transaction_does_not_grow_the_file() {
+        let db = TestDbFile::new("_test_crash_allocating");
+
+        let baseline_len = {
+            let mut pager = Pager::new(db.path(), 64).expect("open");
+            let page_id = pager.allocate_page().expect("allocate");
+            commit_fill(&mut pager, page_id, 0x5A);
+            let baseline_len = pager.file_len().expect("len");
+
+            pager.begin_transaction().expect("begin");
+            for _ in 0..8 {
+                let fresh = pager.allocate_page().expect("allocate");
+                let mut page = Page::new(fresh);
+                page.data.fill(0xCC);
+                pager.write_page(page).expect("write");
+            }
+            pager.inject_io_failure_after(1);
+            assert!(
+                pager.commit_transaction().is_err(),
+                "injected failure did not surface"
+            );
+            baseline_len
+        };
+
+        let pager = Pager::new(db.path(), 64).expect("reopen");
+        assert_eq!(
+            pager.file_len().expect("len"),
+            baseline_len,
+            "recovery did not truncate the pages the dead transaction allocated"
         );
     }
 }
