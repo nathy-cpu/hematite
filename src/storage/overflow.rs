@@ -114,56 +114,6 @@ pub struct OverflowChainReport {
     pub payload_len: usize,
 }
 
-#[derive(Debug, Clone, Default)]
-pub(crate) struct OverflowReadCache {
-    first_page: Option<PageId>,
-    expected_len: usize,
-    page_ids: Vec<PageId>,
-    #[cfg(test)]
-    hits: usize,
-    #[cfg(test)]
-    misses: usize,
-}
-
-impl OverflowReadCache {
-    fn clear(&mut self) {
-        self.first_page = None;
-        self.expected_len = 0;
-        self.page_ids.clear();
-    }
-
-    fn cached_page_ids(
-        &mut self,
-        first_page: Option<PageId>,
-        expected_len: usize,
-    ) -> Option<&[PageId]> {
-        if self.first_page == first_page && self.expected_len == expected_len {
-            #[cfg(test)]
-            {
-                self.hits = self.hits.saturating_add(1);
-            }
-            Some(&self.page_ids)
-        } else {
-            None
-        }
-    }
-
-    fn store(&mut self, first_page: Option<PageId>, expected_len: usize, page_ids: Vec<PageId>) {
-        self.first_page = first_page;
-        self.expected_len = expected_len;
-        self.page_ids = page_ids;
-        #[cfg(test)]
-        {
-            self.misses = self.misses.saturating_add(1);
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn stats(&self) -> (usize, usize) {
-        (self.hits, self.misses)
-    }
-}
-
 pub fn write_overflow_chain(storage: &mut Pager, payload: &[u8]) -> Result<Option<PageId>> {
     if payload.is_empty() {
         return Ok(None);
@@ -281,48 +231,48 @@ pub fn collect_overflow_page_ids(
     Ok(ids)
 }
 
-pub(crate) fn read_overflow_chain_cached_with_cache(
+/// Reads a spilled payload, visiting each overflow page once.
+///
+/// This used to walk the chain twice — `collect_overflow_page_ids` to learn the page
+/// ids, then again to read the payload out of each — and memoise the id list to take
+/// the edge off. Appending as it walks halves the page reads on a cold chain and
+/// makes the memo pointless, so it is gone.
+pub(crate) fn read_overflow_chain(
     storage: &Pager,
     first_page: Option<PageId>,
     expected_len: usize,
-    cache: &mut OverflowReadCache,
 ) -> Result<Vec<u8>> {
     if expected_len == 0 {
-        cache.clear();
         return Ok(Vec::new());
     }
 
-    let page_ids = if let Some(page_ids) = cache.cached_page_ids(first_page, expected_len) {
-        page_ids.to_vec()
-    } else {
-        let page_ids = collect_overflow_page_ids(storage, first_page)?;
-        cache.store(first_page, expected_len, page_ids.clone());
-        page_ids
-    };
-
-    let expected_page_count = expected_len.div_ceil(OVERFLOW_PAYLOAD_CAPACITY);
-    if page_ids.len() != expected_page_count {
-        return Err(HematiteError::StorageError(format!(
-            "v3 overflow chain expected {} pages but received {}",
-            expected_page_count,
-            page_ids.len()
-        )));
-    }
-
     let mut payload = Vec::with_capacity(expected_len);
-    for (index, page_id) in page_ids.iter().copied().enumerate() {
-        let page = storage.read_page_shared(page_id)?;
-        let remaining = expected_len - payload.len();
-        let expected_chunk_len = remaining.min(OVERFLOW_PAYLOAD_CAPACITY);
-        let decoded = OverflowPage::decode(page.as_ref(), expected_chunk_len)?;
-        let expected_next_page_id = page_ids.get(index + 1).copied().unwrap_or(0);
-        if decoded.next_page_id != expected_next_page_id {
-            return Err(HematiteError::StorageError(format!(
-                "overflow page {} points to {} but expected {}",
-                page_id, decoded.next_page_id, expected_next_page_id
+    let mut current = first_page.unwrap_or(0);
+
+    while payload.len() < expected_len {
+        if current == 0 {
+            return Err(HematiteError::CorruptedData(format!(
+                "Overflow chain ended after {} of {} bytes",
+                payload.len(),
+                expected_len
             )));
         }
+
+        let page = storage.read_page_shared(current)?;
+        let remaining = expected_len - payload.len();
+        let decoded =
+            OverflowPage::decode(page.as_ref(), remaining.min(OVERFLOW_PAYLOAD_CAPACITY))?;
         payload.extend_from_slice(&decoded.payload_chunk);
+        current = decoded.next_page_id;
+    }
+
+    // A cycle cannot spin forever: every hop appends a chunk, so the loop is bounded
+    // by the expected length. It shows up here instead, as a chain that still has
+    // pages after the payload is complete.
+    if current != 0 {
+        return Err(HematiteError::CorruptedData(
+            "Overflow chain continues past the end of the payload".to_string(),
+        ));
     }
 
     Ok(payload)

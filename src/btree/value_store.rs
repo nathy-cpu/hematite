@@ -18,10 +18,7 @@
 //! layers to manage overflow pages themselves.
 
 use crate::error::{HematiteError, Result};
-use crate::storage::overflow::{
-    free_overflow_chain, read_overflow_chain_cached_with_cache, write_overflow_chain,
-    OverflowReadCache, OVERFLOW_PAYLOAD_CAPACITY,
-};
+use crate::storage::overflow::{free_overflow_chain, read_overflow_chain, write_overflow_chain};
 use crate::storage::{Pager, INVALID_PAGE_ID, PAGE_SIZE};
 
 pub const STORED_VALUE_INLINE_TAG: u8 = 0;
@@ -32,25 +29,29 @@ pub const STORED_VALUE_HEADER_SIZE: usize = 11;
 /// For 4096-byte pages: (4096 - 12) * 64 / 255 - 23 = 1001.
 pub const MAX_LOCAL_PAYLOAD: usize = (PAGE_SIZE - 12) * 64 / 255 - 23;
 
-/// Minimum bytes of payload stored locally when overflow is needed.
-/// For 4096-byte pages: (4096 - 12) * 32 / 255 - 23 = 489.
-pub const MIN_LOCAL_PAYLOAD: usize = (PAGE_SIZE - 12) * 32 / 255 - 23;
-
-/// Compute how many bytes of `total_payload_len` should be stored locally in
-/// the leaf cell, following SQLite's `btreePayloadToLocal()` algorithm.
+/// Bytes of a spilled payload kept in the leaf cell.
 ///
-/// The formula ensures that overflow pages are kept as full as possible:
-/// - If the entire payload fits in `MAX_LOCAL_PAYLOAD`, store it all locally.
-/// - Otherwise, compute a `surplus` that aligns with the overflow page capacity
-///   so that the last overflow page absorbs any slack.
+/// Was 489, from SQLite's `btreePayloadToLocal`. That formula picks a local size
+/// that makes the *last overflow page* come out full, trading leaf space for
+/// overflow-page packing. It is the wrong trade here.
+///
+/// A leaf is where scans pay. At 489 bytes of every large value held locally, a leaf
+/// fits about eight such rows, so a scan that never looks at the large column still
+/// reads a page for every eight rows. At 32 it fits around a hundred. What the old
+/// formula saved was at most one partly-filled overflow page *per value*, on values
+/// that are already over a kilobyte.
+///
+/// 32 rather than 0 keeps a prefix in the cell, which is a place to answer things
+/// like `LIKE 'abc%'` without following the chain.
+pub const MIN_LOCAL_PAYLOAD: usize = 32;
+
+/// How many bytes of `total_payload_len` live in the leaf cell.
+///
+/// Either all of it, or almost none: there is no longer a surplus calculation, since
+/// the point is to keep leaves dense rather than overflow pages full.
 pub fn local_payload_size(total_payload_len: usize) -> usize {
     if total_payload_len <= MAX_LOCAL_PAYLOAD {
-        return total_payload_len;
-    }
-    let overflow_usable = OVERFLOW_PAYLOAD_CAPACITY;
-    let surplus = MIN_LOCAL_PAYLOAD + (total_payload_len - MIN_LOCAL_PAYLOAD) % overflow_usable;
-    if surplus <= MAX_LOCAL_PAYLOAD {
-        surplus
+        total_payload_len
     } else {
         MIN_LOCAL_PAYLOAD
     }
@@ -219,17 +220,8 @@ pub fn materialize_stored_value(storage: &mut Pager, logical_value: &[u8]) -> Re
 }
 
 pub fn hydrate_stored_value(storage: &Pager, stored_value: &[u8]) -> Result<Vec<u8>> {
-    let mut overflow_cache = OverflowReadCache::default();
-    hydrate_stored_value_with_cache(storage, stored_value, &mut overflow_cache)
-}
-
-pub(crate) fn hydrate_stored_value_with_cache(
-    storage: &Pager,
-    stored_value: &[u8],
-    overflow_cache: &mut OverflowReadCache,
-) -> Result<Vec<u8>> {
     let layout = StoredValueLayout::decode(stored_value)?;
-    let overflow_payload = read_overflow_chain_cached_with_cache(
+    let overflow_payload = read_overflow_chain(
         storage,
         if layout.overflow_first_page == INVALID_PAGE_ID {
             None
@@ -237,7 +229,6 @@ pub(crate) fn hydrate_stored_value_with_cache(
             Some(layout.overflow_first_page)
         },
         layout.overflow_len(),
-        overflow_cache,
     )?;
 
     let mut value = layout.local_payload;

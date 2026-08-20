@@ -271,28 +271,48 @@ mod mod_tests {
     }
 
     #[test]
-    fn test_byte_tree_cursor_reuses_overflow_cache_for_repeated_current_reads() -> Result<()> {
+    fn reading_a_spilled_value_visits_each_overflow_page_once() -> Result<()> {
+        // Replaces a test that asserted an overflow page-id memo was hit. The memo
+        // existed because the read walked the chain twice; now it walks once and the
+        // memo is gone, so the property worth pinning is the page count itself.
+        //
+        // The cache has to be cold for that count to mean anything. An earlier
+        // version of this test reused the store that had just written the value, so
+        // every page was still resident, the backend was never touched, and the
+        // assertion held for any implementation.
         let path = tmp_db();
-        let storage = new_storage(&path)?;
-        let trees = ByteTreeStore::new(storage);
-        let root_page_id = trees.create_tree()?;
-        let mut tree = trees.open_tree(root_page_id)?;
-
         let large_value = vec![0x51; crate::storage::PAGE_SIZE * 2];
-        tree.insert(b"blob", &large_value)?;
+        let root_page_id = {
+            let trees = ByteTreeStore::new(new_storage(&path)?);
+            let root_page_id = trees.create_tree()?;
+            let mut tree = trees.open_tree(root_page_id)?;
+            tree.insert(b"blob", &large_value)?;
+            trees.flush()?;
+            root_page_id
+        };
 
+        // Reopen with room for the descent but not the chain, so the overflow pages
+        // must come from the backend.
+        let trees = ByteTreeStore::new(Pager::new(path.path(), 4)?);
+        let tree = trees.open_tree(root_page_id)?;
+        let before = trees.storage_stats()?;
         let cursor = tree.cursor()?;
-        assert_eq!(cursor.overflow_cache_stats(), (0, 0));
-
-        assert_eq!(
-            cursor.current()?,
-            Some((b"blob".to_vec(), large_value.clone()))
-        );
-        assert_eq!(cursor.overflow_cache_stats(), (0, 1));
-
         assert_eq!(cursor.current()?, Some((b"blob".to_vec(), large_value)));
-        assert_eq!(cursor.overflow_cache_stats(), (1, 1));
+        let work = trees.storage_stats()?.since(&before);
 
+        // Two overflow pages carry the payload that does not fit in the cell, and a
+        // single pass reads each once. The bound is 3 rather than 5 deliberately: the
+        // two-pass read this replaced would fault all four, so a looser bound would
+        // let the regression back in unnoticed.
+        assert!(
+            work.page_reads > 0,
+            "cache was not cold, so this measures nothing"
+        );
+        assert!(
+            work.page_reads <= 3,
+            "expected one pass over the chain, saw {} page reads",
+            work.page_reads
+        );
         Ok(())
     }
 
