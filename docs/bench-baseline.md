@@ -566,3 +566,43 @@ it; the size is recoverable later by varint-encoding the integer key body.
 **Where the wins actually came from.** Appends: fewer bytes to encode and journal,
 plus two fewer fsyncs. Large rows: values out of the leaf and single-pass chain reads.
 `LIMIT`: the scan stops instead of materialising the table.
+
+---
+
+## Small-footprint batch
+
+Five changes of a few lines each, measured against the commit before them, two
+alternating passes in a worktree.
+
+| benchmark | before | after | change |
+|---|---|---|---|
+| `delete_heavy/rollback` | 86.7 / 81.6 ms | 74.6 / 74.0 ms | **−12 %** |
+| `delete_heavy/wal` | 21.3 / 20.8 ms | 23.2 / 19.9 ms | flat |
+| `point_lookup`, `full_scan` | — | — | inconclusive |
+| `secondary_index` | 169 / 165 µs | 183 / 166 µs | **inconclusive** |
+| bytes/row | 87.7 | 87.7 | **unchanged** |
+
+The delete result is the real one and has an obvious cause: `is_child_underflow`
+decoded the child node in full — materialising every key and value into owned `Vec`s
+— to answer a question that `serialized_size_on_page` computes from cell byte ranges
+on the page. That ran on every rebalance check of every delete.
+
+### What did not show up, and what I do not know
+
+The first `AFTER` pass ran slow across every benchmark in it — `point_lookup` 33.2 µs
+against 29.4 in the second pass, `full_scan` 1.73 ms against 1.58 — so the
+`secondary_index` and `full_scan` columns are noise, not signal. Alternating passes
+caught that; a single run would have reported a regression.
+
+**The index-key change did not move bytes/row at all**, and that is a fact rather than
+noise: the figure is deterministic and identical to the digit. Integer keys provably
+shrank — a unit test pins three bytes where nine were used, and 0 and −1 cost two — so
+either the primary-key index is a smaller share of the file than assumed, or an
+`INT PRIMARY KEY` on this engine does not populate a separate index tree whose keys
+would shrink. I have not established which, and the honest summary is that the
+encoding is smaller while the file is not.
+
+The change still stands on correctness: the fixed eight bytes existed to give one
+order spanning `i64::MIN..=u64::MAX`, and shortening it keeps that order while
+undoing the size cost the rewrite introduced. But it should not be quoted as a
+measured space win until the fixture question is answered.
