@@ -344,3 +344,52 @@ Fixing it properly needs one of: splitting `ExecutionContext` so the scan and th
 predicate borrow disjoint fields, or pushing the limit down into the access path so
 the scan itself can stop early. Both are query-layer design changes rather than
 storage ones, and neither is a safe incremental edit.
+
+---
+
+## Phase B9 — pushing `LIMIT` into the scan
+
+The original baseline recorded that **`LIMIT 100` cost 92 % of a full scan** while
+returning 2 % of the rows. `LIMIT` is applied by `apply_select_window` at the very
+end, on rows already filtered, grouped and sorted, so the scan decoded all 5 000 rows
+of the fixture to return 100.
+
+`SelectExecutor::scan_row_cap` now decides when a prefix of the table is a correct
+prefix of the result, and `read_from_table_capped` stops the scan there.
+
+Measured against the previous commit in a git worktree, so both versions were built
+and run without ever touching the live tree:
+
+| benchmark | before | after | change |
+|---|---|---|---|
+| `limit_100/rollback` | 1.503 / 1.489 ms | **59.95 / 56.89 µs** | **25×** |
+| `limit_100/wal` | 1.521 / 1.527 ms | **60.67 / 61.28 µs** | **25×** |
+| `range_1pct/rollback` | 2.929 / 2.786 ms | 3.050 / 2.787 ms | unchanged |
+
+`range_1pct` not moving is the guard working: it has a `WHERE`, so the scan must
+still produce `limit` *matching* rows and pushdown is refused. `LIMIT 100` now costs
+about 3.5 % of a full scan, roughly proportional to the 2 % of rows it returns.
+
+### The guards, and how they are policed
+
+Five are load-bearing — `WHERE`, `ORDER BY`, `GROUP BY`, `DISTINCT`, and aggregate
+projections. Each is a way a later row can displace an earlier one. Each has a test
+in `sql::tests::limit_pushdown_tests` that fails when its guard is deleted, verified
+by deleting them.
+
+One of those tests did not work at first: the `DISTINCT` case passed with its guard
+removed, because the fixture cycled buckets `0..4` and the first five rows already
+covered every distinct value. The fixture now has a column whose second value only
+appears past row ten, so a short prefix genuinely produces the wrong answer.
+
+`having_clause` and `set_operation` are defensive — no query could be constructed
+that reaches this path with either set. They are kept because they cost nothing and
+dropping them would make correctness depend on that routing detail; the `UNION` test
+documents the behaviour and states that it does not police the guard.
+
+### Note on methodology
+
+The two earlier A/B runs used `git stash` to swap versions, and twice an interrupted
+run left the working tree clean with the changes stranded in a stash. This comparison
+used `git worktree add --detach HEAD~1` instead: the old version is built in its own
+directory and the live tree is never modified. That is the pattern to use.
