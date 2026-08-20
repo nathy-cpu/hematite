@@ -393,3 +393,56 @@ The two earlier A/B runs used `git stash` to swap versions, and twice an interru
 run left the working tree clean with the changes stranded in a stash. This comparison
 used `git worktree add --detach HEAD~1` instead: the old version is built in its own
 directory and the live tree is never modified. That is the pattern to use.
+
+---
+
+## Phase S6 (partial) — one fewer fsync per rollback commit
+
+`commit_rollback_transaction` synced the journal, then called `flush`, which stages
+the persisted-state page — journaling it — and syncs again. Only the staging happened
+in between, and it writes no database page, so the first sync was redundant.
+
+**Counter: 4 fsyncs → 3.** The `rollback_commit_fsync_count_is_pinned` test failed on
+the change and its assertion moved with it, which is the workflow those counters exist
+for.
+
+**Clock: no measurable change.** Measured against the previous commit in a worktree,
+two passes each:
+
+| benchmark | 4 fsyncs | 3 fsyncs |
+|---|---|---|
+| `append_heavy/rollback_batch1` | 42.4 / 43.2 ms | 43.8 / 41.3 ms |
+| `append_heavy/rollback_batch100` | 11.6 / 11.7 ms | 12.8 / 11.6 ms |
+| `delete_heavy/rollback` | 82.5 / 76.2 ms | 78.0 / 75.2 ms |
+
+Medians overlap and the sign flips between passes. That is a real result, not a
+failed measurement: the sync that was removed was the *second* sync of the same
+journal file with a few hundred bytes appended in between, so the kernel had almost
+nothing left to flush and the call was nearly free on this hardware. On a device that
+honours barriers, or a filesystem without an SSD's write cache underneath, the same
+call is not free — which is exactly why the count is tracked separately from the time.
+
+Claiming a speedup here would be overclaiming. The honest statement is that a
+redundant syscall is gone and the workload numbers did not move.
+
+### Getting to two
+
+The last fsync is the journal's `Committed` marker, and it cannot be removed by
+reordering: it is what stops recovery rolling back a transaction that already
+completed. Replacing it needs the per-page `gen` stamp from the format-v4 page
+trailer, so recovery can decide whether a commit landed by comparing page generations
+instead of reading a durable flag.
+
+### A testing gap worth naming
+
+Nothing in the suite tests fsync *ordering*, and the two recovery tests added
+alongside this change say so in their own documentation. Dropping a `Pager` is a
+process exit, not a power loss: unsynced writes are still in the OS page cache, so
+reopening reads them back regardless. Moving the journal sync to after the page
+writes — breaking the write-ahead rule outright — leaves those tests passing, which
+was checked rather than assumed.
+
+Covering it needs a storage backend that discards unsynced writes on demand, and it
+would have to cover the journal file too, which is a separate handle that does not go
+through `FileManager`. Until that exists, changes to sync ordering are safe by
+construction or not safe at all.
