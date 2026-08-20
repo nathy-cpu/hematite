@@ -163,6 +163,9 @@ impl Pager {
         let old_txn = self.transaction.take();
         self.exit_writer_scope_to_open()?;
         stash_transaction(&mut self.rollback_scratch, &mut self.wal_scratch, old_txn);
+        // After the transaction is closed out, so the checkpoint sees no active
+        // writer and the commit is already durable whatever happens next.
+        self.autocheckpoint_wal_if_needed();
         Ok(())
     }
 

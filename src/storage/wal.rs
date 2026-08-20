@@ -241,13 +241,43 @@ pub(crate) struct WalHeader {
 
 impl Default for WalHeader {
     fn default() -> Self {
+        let (salt_1, salt_2) = fresh_salts();
         Self {
             page_size: PAGE_SIZE as u16,
             checkpoint_sequence: 0,
-            salt_1: 0x48454D41,
-            salt_2: 0x54495445,
+            salt_1,
+            salt_2,
         }
     }
+}
+
+/// Two values that differ between one WAL generation and the next.
+///
+/// Salts exist so a frame left over from a previous WAL cannot be mistaken for a
+/// current one: every frame carries the header's pair, and a mismatch means the frame
+/// predates this generation. They were the fixed constants `0x48454D41` and
+/// `0x54495445` — "HEMA" and "TITE" — which made every check against them
+/// tautological, so the guard could never fire and a recycled file's stale frames
+/// passed validation.
+///
+/// `RandomState` is seeded by the OS per process, and mixing in the wall clock
+/// separates WAL generations created within one process. Neither is a cryptographic
+/// source and neither needs to be: the requirement is that two generations differ,
+/// not that an adversary cannot guess them.
+fn fresh_salts() -> (u32, u32) {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let mut hasher = RandomState::new().build_hasher();
+    hasher.write_u64(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos() as u64)
+            .unwrap_or(0),
+    );
+    let mixed = hasher.finish();
+    (mixed as u32, (mixed >> 32) as u32)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -4316,3 +4316,79 @@ mod crash_recovery_ordering_tests {
         assert_eq!(pager.read_page(second).expect("read second").data[0], 0xA2);
     }
 }
+
+/// The WAL has to stop growing on its own.
+///
+/// Nothing called `checkpoint_wal` unless the embedding application did, so a
+/// long-running writer grew the file without bound — and every reader whose snapshot
+/// went stale re-read and re-decoded the whole thing to rebuild its page index.
+mod wal_autocheckpoint_tests {
+    use crate::storage::{JournalMode, Page, Pager};
+    use crate::test_utils::TestDbFile;
+
+    #[test]
+    fn a_long_run_of_commits_does_not_grow_the_wal_without_bound() {
+        let db = TestDbFile::new("_test_wal_autocheckpoint");
+        let mut pager = Pager::new(db.path(), 256).expect("open");
+        pager
+            .set_journal_mode(JournalMode::Wal)
+            .expect("switch to wal");
+
+        let mut page_ids = Vec::new();
+        pager.begin_transaction().expect("begin");
+        for _ in 0..16 {
+            let page_id = pager.allocate_page().expect("allocate");
+            pager.write_page(Page::new(page_id)).expect("initialise");
+            page_ids.push(page_id);
+        }
+        pager.commit_transaction().expect("commit");
+
+        // Enough commits to push well past the threshold if nothing checks in.
+        let mut peak = 0u64;
+        for round in 0..120u8 {
+            pager.begin_transaction().expect("begin");
+            for &page_id in &page_ids {
+                let mut page = Page::new(page_id);
+                page.data[0] = round;
+                pager.write_page(page).expect("write");
+            }
+            pager.commit_transaction().expect("commit");
+            peak = peak.max(pager.wal_len().expect("wal len"));
+        }
+
+        // Roughly 2000 frames' worth of writes. Without a checkpoint the file holds
+        // all of them; the bound here is generous enough not to be brittle and tight
+        // enough that never checkpointing fails it.
+        let frame_size = 28 + crate::storage::PAGE_SIZE as u64;
+        let peak_frames = peak / frame_size;
+        assert!(
+            peak_frames < 1600,
+            "wal reached {peak_frames} frames, so it is not being checked in"
+        );
+    }
+}
+
+/// Salts separate one WAL generation from the next.
+///
+/// Every frame carries the header's pair, and a mismatch means the frame predates
+/// this generation. They used to be the fixed constants 0x48454D41 and 0x54495445 —
+/// "HEMA" and "TITE" — so every comparison against them was tautological and the
+/// guard could never fire.
+mod wal_salt_tests {
+    use crate::storage::wal::WalHeader;
+
+    #[test]
+    fn each_wal_generation_gets_its_own_salts() {
+        let first = WalHeader::default();
+        let second = WalHeader::default();
+
+        assert!(
+            first.salt_1 != second.salt_1 || first.salt_2 != second.salt_2,
+            "two generations produced identical salts, so the stale-frame guard \
+             cannot distinguish them"
+        );
+
+        // The retired constants, in case someone reintroduces them as a default.
+        assert_ne!((first.salt_1, first.salt_2), (0x48454D41, 0x54495445));
+    }
+}
