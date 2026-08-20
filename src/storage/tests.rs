@@ -4136,4 +4136,109 @@ mod crash_recovery_ordering_tests {
             "second page was not restored"
         );
     }
+
+    /// A power loss that discards unsynced *database* writes must also recover.
+    ///
+    /// The mirror of the journal case. Here the journal is intact and it is the
+    /// half-written database that has to be repaired, which is the situation the
+    /// rollback journal exists for in the first place.
+    #[test]
+    fn a_power_loss_that_drops_unsynced_database_writes_still_recovers() {
+        let db = TestDbFile::new("_test_power_loss_unsynced_database");
+
+        let (first, second) = {
+            let mut pager = Pager::new(db.path(), 64).expect("open");
+            let first = pager.allocate_page().expect("allocate");
+            let second = pager.allocate_page().expect("allocate");
+            commit_fill(&mut pager, first, 0xA1);
+            commit_fill(&mut pager, second, 0xA2);
+
+            pager.begin_transaction().expect("begin");
+            for (page_id, fill) in [(first, 0xB1), (second, 0xB2)] {
+                let mut page = Page::new(page_id);
+                page.data.fill(fill);
+                pager.write_page(page).expect("write");
+            }
+            pager.inject_io_failure_after(1);
+            assert!(
+                pager.commit_transaction().is_err(),
+                "injected failure did not surface"
+            );
+            pager
+                .simulate_database_power_loss()
+                .expect("simulate power loss");
+
+            (first, second)
+        };
+
+        let pager = Pager::new(db.path(), 64).expect("reopen");
+        assert_eq!(pager.read_page(first).expect("read first").data[0], 0xA1);
+        assert_eq!(pager.read_page(second).expect("read second").data[0], 0xA2);
+    }
+
+    /// Losing both at once — neither the journal nor the database reached the disk
+    /// past their last sync — must still land on the pre-transaction state.
+    #[test]
+    fn a_power_loss_that_drops_both_still_recovers() {
+        let db = TestDbFile::new("_test_power_loss_both");
+
+        let page_id = {
+            let mut pager = Pager::new(db.path(), 64).expect("open");
+            let page_id = pager.allocate_page().expect("allocate");
+            commit_fill(&mut pager, page_id, 0x11);
+
+            pager.begin_transaction().expect("begin");
+            let mut page = Page::new(page_id);
+            page.data.fill(0x22);
+            pager.write_page(page).expect("write");
+            pager.inject_io_failure_after(0);
+            assert!(
+                pager.commit_transaction().is_err(),
+                "failure did not surface"
+            );
+            pager.simulate_journal_power_loss().expect("journal loss");
+            pager.simulate_database_power_loss().expect("database loss");
+            page_id
+        };
+
+        let pager = Pager::new(db.path(), 64).expect("reopen");
+        assert_eq!(pager.read_page(page_id).expect("read").data[0], 0x11);
+    }
+
+    /// A WAL append interrupted partway must not be treated as committed data.
+    ///
+    /// Frames are written and only then synced, so a power loss leaves a partial
+    /// frame at the end of the file. Recovery has to ignore everything past the last
+    /// complete commit — here, the transaction that was torn.
+    #[test]
+    fn a_torn_wal_append_is_ignored_on_reopen() {
+        let db = TestDbFile::new("_test_torn_wal_append");
+
+        let (page_id, committed_len) = {
+            let mut pager = Pager::new(db.path(), 64).expect("open");
+            pager
+                .set_journal_mode(crate::storage::JournalMode::Wal)
+                .expect("switch to wal");
+            let page_id = pager.allocate_page().expect("allocate");
+            commit_fill(&mut pager, page_id, 0x33);
+            let committed_len = pager.wal_len().expect("wal len");
+
+            // A second committed transaction, then tear the file back so that the
+            // second commit is only partly present.
+            commit_fill(&mut pager, page_id, 0x44);
+            let torn_len = committed_len + (pager.wal_len().expect("wal len") - committed_len) / 2;
+            pager
+                .simulate_torn_wal_append(torn_len)
+                .expect("tear the wal");
+            (page_id, committed_len)
+        };
+        assert!(committed_len > 0, "no wal was written");
+
+        let pager = Pager::new(db.path(), 64).expect("reopen");
+        assert_eq!(
+            pager.read_page(page_id).expect("read").data[0],
+            0x33,
+            "a partially appended commit was treated as durable"
+        );
+    }
 }

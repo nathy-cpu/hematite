@@ -38,6 +38,35 @@ impl Pager {
         Ok(())
     }
 
+    /// Throws away every database-file write since the last fsync, as a power loss
+    /// would.
+    pub fn simulate_database_power_loss(&mut self) -> Result<()> {
+        self.file_manager.lose_unsynced_writes()
+    }
+
+    /// Truncates the WAL to `bytes`, modelling an append that was interrupted.
+    ///
+    /// A torn tail is the WAL's characteristic failure: frames are appended and only
+    /// then synced, so a power loss leaves a partial frame at the end. Recovery is
+    /// supposed to ignore everything past the last complete commit.
+    pub fn simulate_torn_wal_append(&self, bytes: u64) -> Result<()> {
+        let Some(path) = &self.wal_path else {
+            return Ok(());
+        };
+        let file = std::fs::OpenOptions::new().write(true).open(path)?;
+        file.set_len(bytes)?;
+        file.sync_all()?;
+        Ok(())
+    }
+
+    /// Current size of the WAL, so a test can tear it at a chosen fraction.
+    pub fn wal_len(&self) -> Result<u64> {
+        let Some(path) = &self.wal_path else {
+            return Ok(0);
+        };
+        Ok(std::fs::metadata(path).map(|m| m.len()).unwrap_or(0))
+    }
+
     pub fn inject_io_failure(&mut self) {
         self.file_manager.inject_write_failure();
     }

@@ -32,7 +32,7 @@ use crate::storage::{
     FIRST_ALLOCATABLE_PAGE_ID, PAGE_SIZE, STORAGE_METADATA_PAGE_ID,
 };
 use std::fs::{File, OpenOptions};
-#[cfg(not(any(unix, windows)))]
+#[cfg(any(test, not(any(unix, windows))))]
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Arc;
@@ -54,6 +54,13 @@ pub struct FileManager {
     stats: Arc<PagerStats>,
     #[cfg(test)]
     fail_on_write_countdown: Option<usize>,
+    /// Contents of the database file as of the last successful `flush`.
+    ///
+    /// Lets a test discard writes that were never synced, which is what a power loss
+    /// does and what no process-level test can otherwise observe — dropping the
+    /// pager is a process exit, and the kernel hands unsynced bytes straight back.
+    #[cfg(test)]
+    durable: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +90,8 @@ impl FileManager {
             stats: Arc::new(PagerStats::default()),
             #[cfg(test)]
             fail_on_write_countdown: None,
+            #[cfg(test)]
+            durable: Vec::new(),
         };
 
         let mut manager = manager;
@@ -98,6 +107,8 @@ impl FileManager {
             stats: Arc::new(PagerStats::default()),
             #[cfg(test)]
             fail_on_write_countdown: None,
+            #[cfg(test)]
+            durable: Vec::new(),
         };
 
         let mut manager = manager;
@@ -190,6 +201,47 @@ impl FileManager {
             }
             FileBackend::Memory(_) => {}
         }
+        #[cfg(test)]
+        self.snapshot_durable_contents()?;
+        Ok(())
+    }
+
+    /// Records what is now durable, for `lose_unsynced_writes` to restore to.
+    ///
+    /// Reads the file back rather than replaying a list of pending writes: databases
+    /// in tests are a handful of pages, and this is obviously correct where tracking
+    /// deltas would be one more thing to get wrong.
+    #[cfg(test)]
+    fn snapshot_durable_contents(&mut self) -> Result<()> {
+        use std::io::Read;
+        match &mut self.backend {
+            FileBackend::Disk { file } => {
+                let mut durable = Vec::new();
+                let position = file.stream_position()?;
+                file.seek(SeekFrom::Start(0))?;
+                file.read_to_end(&mut durable)?;
+                file.seek(SeekFrom::Start(position))?;
+                self.durable = durable;
+            }
+            FileBackend::Memory(buffer) => self.durable = buffer.clone(),
+        }
+        Ok(())
+    }
+
+    /// Discards every database write since the last `flush`, as a power loss would.
+    #[cfg(test)]
+    pub(crate) fn lose_unsynced_writes(&mut self) -> Result<()> {
+        let durable = std::mem::take(&mut self.durable);
+        match &mut self.backend {
+            FileBackend::Disk { file } => {
+                file.set_len(durable.len() as u64)?;
+                file.seek(SeekFrom::Start(0))?;
+                file.write_all(&durable)?;
+                file.sync_all()?;
+            }
+            FileBackend::Memory(buffer) => *buffer = durable.clone(),
+        }
+        self.durable = durable;
         Ok(())
     }
 
