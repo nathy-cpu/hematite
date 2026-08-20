@@ -606,3 +606,49 @@ The change still stands on correctness: the fixed eight bytes existed to give on
 order spanning `i64::MIN..=u64::MAX`, and shortening it keeps that order while
 undoing the size cost the rewrite introduced. But it should not be quoted as a
 measured space win until the fixture question is answered.
+
+---
+
+## Medium batch — page and node clones on the write path
+
+Two costs removed, both paying a page- or node-sized copy for information already
+available:
+
+- all four in-place B-tree fast paths ended by cloning the whole 4 KiB page they had
+  just edited, then handed the same page to `write_page`, which wrapped it in an `Arc`
+  again — two page-sized allocations for a single-cell change;
+- `can_merge_with` cloned both nodes, decoded the clones into owned `Vec`s and
+  concatenated them purely to measure the result, and `merge_leaf` called it a second
+  time, so one rebalance decision cost four clones and four full decodes.
+
+Measured against the previous commit in a worktree, two passes each:
+
+| benchmark | before | after | change |
+|---|---|---|---|
+| `append_heavy/wal_batch100` | 6.14 / 6.06 ms | 5.58 / 5.72 ms | **−7 %** |
+| `append_heavy/rollback_batch100` | 12.02 / 11.58 ms | 11.43 / 11.26 ms | **−4 %** |
+| `append_heavy/wal_batch1` | 33.94 / 33.31 ms | 32.06 / 33.04 ms | −3 % |
+| `delete_heavy` (both modes) | — | — | flat |
+
+Deletes not moving is expected: that path already cleared the node's page view by hand
+before mutating, for exactly this reason, so only the clone afterwards was left — and
+`can_merge_with` runs on a rebalance, not on every delete.
+
+**The first attempt at this measurement was thrown away.** Its confidence intervals
+spanned two to four times the median — `[41.9, 95.7, 165.9] ms` on one benchmark —
+which means the machine was loaded, not that the change did something dramatic. Even
+the re-run has two intervals wide enough to ignore, which is why the table quotes only
+benchmarks that agreed across both passes.
+
+## The third medium item, declined
+
+`save_table_metadata` does a 4 KiB read and a 4 KiB write on every commit, and
+`load_table_metadata` a 4 KiB read on every transaction begin. Both are real, and both
+are ~300 ns of memcpy against a commit that costs tens of microseconds — under a
+tenth of a percent, well below the noise floor everything here is measured at.
+
+Removing the copies properly means partial page writes, so the catalog section of the
+metadata page can be updated without reading and rewriting the whole page. That is a
+larger change than the payoff justifies today, and shaving only the clone would be
+churn for something unmeasurable. Same reasoning as declining `read_reserved_blob`
+earlier, and noted here so the next person does not have to rediscover it.
