@@ -113,7 +113,7 @@ use crate::storage::{
 use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{IoSlice, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -991,7 +991,16 @@ impl WalFrame {
         Ok(bytes)
     }
 
-    pub(crate) fn write_to(&self, header: &WalHeader, file: &mut std::fs::File) -> Result<()> {
+    /// Builds this frame's 28-byte on-disk prefix.
+    ///
+    /// Separate from writing so a whole commit's frames can go out in one
+    /// `writev` rather than two `write` calls each. The prefix has to be
+    /// materialised somewhere regardless, since the checksum covers the page image
+    /// and the header salts.
+    pub(crate) fn encode_prefix(
+        &self,
+        header: &WalHeader,
+    ) -> Result<[u8; V3_WAL_FRAME_PREFIX_SIZE]> {
         if self.data.len() != PAGE_SIZE {
             return Err(HematiteError::StorageError(format!(
                 "v3 WAL frame for page {} has invalid image size {}",
@@ -1017,9 +1026,7 @@ impl WalFrame {
         prefix[20..24].copy_from_slice(&header.salt_2.to_be_bytes());
         prefix[24..28].copy_from_slice(&checksum.to_be_bytes());
 
-        file.write_all(&prefix)?;
-        file.write_all(&self.data)?;
-        Ok(())
+        Ok(prefix)
     }
 
     pub(crate) fn decode(bytes: &[u8], header: &WalHeader) -> Result<(Self, usize)> {
@@ -1173,13 +1180,47 @@ impl WalFile {
         };
 
         let start_offset = file.stream_position()?;
-        for frame in frames {
-            frame.write_to(&header, &mut file)?;
+
+        // One `writev` for the whole batch instead of two `write`s per frame. A
+        // single-row commit appends about three frames, so this was six syscalls
+        // where one will do.
+        let prefixes = frames
+            .iter()
+            .map(|frame| frame.encode_prefix(&header))
+            .collect::<Result<Vec<_>>>()?;
+        let mut slices = Vec::with_capacity(frames.len() * 2);
+        for (frame, prefix) in frames.iter().zip(&prefixes) {
+            slices.push(IoSlice::new(prefix));
+            slices.push(IoSlice::new(&frame.data));
         }
+        write_all_vectored(&mut file, &mut slices)?;
+
         file.sync_all()?;
         Ok((start_offset, header))
     }
 
+}
+
+/// Writes every slice, looping over partial writes.
+///
+/// `Write::write_all_vectored` would do this, but it is still unstable. A single
+/// `write_vectored` is not enough on its own: it may write less than asked, and the
+/// kernel caps a call at `IOV_MAX` slices, so a large batch needs several rounds.
+fn write_all_vectored(file: &mut std::fs::File, slices: &mut [IoSlice<'_>]) -> Result<()> {
+    let mut remaining = slices;
+    while !remaining.is_empty() {
+        match file.write_vectored(remaining) {
+            Ok(0) => {
+                return Err(HematiteError::StorageError(
+                    "WAL append wrote zero bytes with frames still pending".to_string(),
+                ))
+            }
+            Ok(written) => IoSlice::advance_slices(&mut remaining, written),
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(())
 }
 
 fn validate_frame_order(frames: &[WalFrame]) -> Result<()> {
