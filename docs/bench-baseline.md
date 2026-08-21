@@ -741,3 +741,17 @@ work the audit lists as blocked on splitting `ExecutionContext`.
   margin is wide enough. Not worth the format change on scan grounds alone.
 - **The idea that scans are storage-bound.** At 2 671 Ir/row, storage is now the
   minority of a scan. The executor is the majority.
+
+### Wall-clock confirmation
+
+Instruction counts are the authority here, but they are worth confirming against the
+clock once, in case a change trades instructions for syscalls. Alternating same-session
+A/B on `full_scan/rollback`, 5 000 rows, against a worktree at the pre-change commit:
+
+| round | before | after |
+|---|---|---|
+| 1 | 4.4721 ms | 3.2197 ms |
+| 2 | 4.5200 ms | 3.3360 ms |
+
+**−27 %**, with no overlap between the two groups, against −29.5 % of instructions.
+The clock agrees; the instruction count is what to keep measuring.

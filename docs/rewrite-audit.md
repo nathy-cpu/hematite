@@ -42,6 +42,8 @@ worth it), or **deliberate** (present by design, with the reason).
 | Page cache keyed by SipHash | `b1bef12`; ~3 % on a cache hit |
 | Page writes used `seek` + `write_all` | `320c420` |
 | Sync ordering was untestable | `f2a53ba`, `3305589` |
+| Projected column names were re-resolved per row — a UTF-8 char search plus a SipHash lookup, per column | `8046860`; 18 % of a scan's instructions |
+| Scans copied every key out of the page and allocated a buffer for every value, spilled or not | `b4b3a85`; 4.07 → 2.07 allocations per row |
 
 ## Deliberate — a cost with a reason
 
@@ -57,6 +59,7 @@ worth it), or **deliberate** (present by design, with the reason).
 | `read_reserved_blob` copies 4 KiB per call | ~300 ns against a commit costing tens of µs — under 0.1 %, below the noise floor everything here is measured at |
 | `save_table_metadata` reads and writes 4 KiB every commit; `load_table_metadata` reads 4 KiB every `BEGIN` | Same order. Removing the copies needs partial page writes, which is a larger change than the payoff |
 | `compact_transaction_free_pages` sorts and dedups on every WAL deallocation; `mark_page_active` scans linearly | Cold path. A naive `swap_remove` would silently under-compact trailing pages, so it needs restructuring rather than an edit |
+| Cursors re-descend from a parent at every leaf boundary; leaves have no sibling pointers | A re-descent costs about two cache hits per ~50-row leaf — under 1 % of a scan. Arithmetic rather than a benchmark, but the margin is wide enough. Not worth a format change on scan grounds |
 
 ## Live — still present, unmeasured or unaddressed
 
@@ -64,8 +67,7 @@ Ordered by how much is known about them.
 
 | problem | note |
 |---|---|
-| `SelectAccessPath::FullTableScan` materialises; no projection pushdown | The clearest remaining read win. Skipping an unprojected column saves only 8 %, because the executor decodes whole rows and projects afterwards. `RecordRef` was built for this and is unused. Blocked on splitting `ExecutionContext` so the scan and the `WHERE` predicate can borrow disjoint fields |
-| Cursors re-descend from a parent at every leaf boundary; leaves have no sibling pointers | Part of the B-tree page format work |
+| `SelectAccessPath::FullTableScan` materialises; no projection pushdown | The two allocations a scanned row still costs are its `Vec<Value>` and the projected `Vec<Value>`, both inherent to representing a row as `Vec<Value>`. Removing them means `RecordRef` reaching the executor, which is blocked on splitting `ExecutionContext` so the scan and the `WHERE` predicate can borrow disjoint fields. Note that the *resolution* half of this — turning column names into indices — turned out to be the larger cost and is now fixed |
 | `StoredValueLayout` still costs 11 bytes per row | Part of the remaining bytes/row gap: 87.7 against a ~25 target |
 | B-tree cells still use `u16` lengths and no varints | Same |
 | `defragment_page` allocates a `Vec` per cell, up to 99 per call | |
@@ -95,3 +97,11 @@ contradicted an earlier claim of mine:
   fix is elsewhere, not a performance bug.
 - The rollback savepoint copy was found live after being reported fixed, and is now
   the largest single win of the session.
+
+Profiling the scan afterwards then found the largest read cost in the catalogue's
+blind spot. This is a storage-layer plan, but 18 % of a `SELECT id, a` scan was the
+executor resolving column names to indices, once per column per row, recomputing an
+answer identical for every row. Fixing that and the two transient allocations per row
+took the scan from 3 790 to 2 671 instructions per row, **−29.5 %**, confirmed at
+−27 % wall clock. Storage is now the minority of a scan's cost — see
+`docs/bench-baseline.md`.
