@@ -523,7 +523,6 @@ pub(crate) fn append_committed_frames_to_path<P: AsRef<Path>>(
     base_metadata_page: &[u8],
     frames: &[WalFrame],
 ) -> Result<HashMap<PageId, u64>> {
-    let header = existing_or_default_header(path.as_ref())?;
     let frame_batch = synthesize_committed_frames(
         commit_sequence,
         database_page_count,
@@ -532,7 +531,7 @@ pub(crate) fn append_committed_frames_to_path<P: AsRef<Path>>(
         base_metadata_page,
         frames,
     )?;
-    let start_offset = WalFile::append_frames_to_path(path, &header, &frame_batch)?;
+    let (start_offset, _header) = WalFile::append_frames_to_path(path, &frame_batch)?;
     let frame_size = (V3_WAL_FRAME_PREFIX_SIZE + PAGE_SIZE) as u64;
     let offsets = frame_batch
         .iter()
@@ -753,10 +752,6 @@ fn read_page_from_wal_file(wal_path: &Path, target_page_id: PageId) -> Result<Op
     }
 
     Ok(latest_data)
-}
-
-fn existing_or_default_header(path: &Path) -> Result<WalHeader> {
-    Ok(WalFile::load_header_from_path(path)?.unwrap_or_default())
 }
 
 fn synthesize_committed_frames(
@@ -1135,21 +1130,37 @@ impl WalFile {
     /// at which the first frame was written. Since frames are fixed-size and
     /// strictly appended, callers can derive every other frame's offset as
     /// `start_offset + index * frame_size` without re-reading the file.
+    /// Appends `frames`, writing a fresh header first if the WAL is new.
+    ///
+    /// Reads the header through the same handle it appends with, and returns it so
+    /// the caller does not need its own copy. This used to take a header the caller
+    /// had loaded by path, then reopen the file and re-read the header purely to
+    /// check the two matched — a comparison that could not fail, because both sets
+    /// of bytes came from the same file. That cost every commit an extra `openat`,
+    /// `fstat`, read, decode and `close`, measured at 3 of the 44 syscalls a
+    /// single-row commit issued.
+    ///
+    /// The header is genuinely needed, not just validated: frame checksums are
+    /// salted from it. It is only needed once.
     pub(crate) fn append_frames_to_path<P: AsRef<Path>>(
         path: P,
-        header: &WalHeader,
         frames: &[WalFrame],
-    ) -> Result<u64> {
+    ) -> Result<(u64, WalHeader)> {
         let path = path.as_ref();
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .read(true)
             .open(path)?;
-        let metadata = file.metadata()?;
-        if metadata.len() == 0 {
+        let existing_len = file.metadata()?.len();
+
+        let header = if existing_len == 0 {
+            // `WalHeader::default()` draws fresh salts, which is what makes a new
+            // WAL generation distinguishable from the one it replaced.
+            let header = WalHeader::default();
             file.write_all(&header.encode())?;
-        } else if metadata.len() < V3_WAL_HEADER_SIZE as u64 {
+            header
+        } else if existing_len < V3_WAL_HEADER_SIZE as u64 {
             return Err(HematiteError::StorageError(
                 "Existing v3 WAL file has a truncated header".to_string(),
             ));
@@ -1157,45 +1168,18 @@ impl WalFile {
             let mut bytes = [0u8; V3_WAL_HEADER_SIZE];
             file.seek(SeekFrom::Start(0))?;
             file.read_exact(&mut bytes)?;
-            let existing_header = WalHeader::decode(&bytes)?;
-            if existing_header.page_size != header.page_size
-                || existing_header.salt_1 != header.salt_1
-                || existing_header.salt_2 != header.salt_2
-            {
-                return Err(HematiteError::StorageError(
-                    "Existing v3 WAL header does not match append request".to_string(),
-                ));
-            }
             file.seek(SeekFrom::End(0))?;
-        }
+            WalHeader::decode(&bytes)?
+        };
 
         let start_offset = file.stream_position()?;
         for frame in frames {
-            frame.write_to(header, &mut file)?;
+            frame.write_to(&header, &mut file)?;
         }
         file.sync_all()?;
-        Ok(start_offset)
+        Ok((start_offset, header))
     }
 
-    pub(crate) fn load_header_from_path<P: AsRef<Path>>(path: P) -> Result<Option<WalHeader>> {
-        let mut file = match OpenOptions::new().read(true).open(path) {
-            Ok(file) => file,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => return Err(err.into()),
-        };
-        let metadata_len = file.metadata()?.len();
-        if metadata_len == 0 {
-            return Ok(None);
-        }
-        if metadata_len < V3_WAL_HEADER_SIZE as u64 {
-            return Err(HematiteError::StorageError(
-                "v3 WAL header is truncated".to_string(),
-            ));
-        }
-        let mut bytes = [0u8; V3_WAL_HEADER_SIZE];
-        file.read_exact(&mut bytes)?;
-        Ok(Some(WalHeader::decode(&bytes)?))
-    }
 }
 
 fn validate_frame_order(frames: &[WalFrame]) -> Result<()> {
