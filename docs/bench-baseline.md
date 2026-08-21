@@ -755,3 +755,51 @@ A/B on `full_scan/rollback`, 5 000 rows, against a worktree at the pre-change co
 
 **−27 %**, with no overlap between the two groups, against −29.5 % of instructions.
 The clock agrees; the instruction count is what to keep measuring.
+
+## S7: the WAL is syscall-bound, not instruction-bound
+
+Callgrind says every WAL-specific function in the crate together accounts for **0.9 %**
+of a WAL commit's instructions — `VisibleWalState::clone`, the one the audit singles
+out, is 0.12 %. On instruction counts alone the conclusion would be that S7 is not
+worth doing.
+
+That conclusion would be wrong, because a WAL's cost is syscalls, and callgrind counts
+only user-space instructions. `strace -c` over 1 300 single-row commits:
+
+| syscall | per commit, before | what it was |
+|---|---|---|
+| statx | 14.0 | header stats, autocheckpoint's size probe, file length |
+| write | 6.1 | frames written with two `write_all` each |
+| pread64 | 4.8 | |
+| flock | 4.0 | the sidecar locks |
+| openat / close | 4.0 / 4.0 | the WAL reopened by path per access |
+| lseek | 3.0 | |
+| unlink | 1.0 | |
+| read | 2.0 | |
+| **fsync** | **1.0** | the only one actually required |
+| **total** | **44.0** | |
+
+**44 syscalls to commit one row, one of which is the fsync that has to be there.**
+
+| after | syscalls/commit |
+|---|---|
+| before | 44.0 |
+| one-open append (header read once, not twice) | 39.9 |
+| cached WAL frame count | **38.9** |
+
+−11.6 % so far. The remaining large items are the 4 `flock`s and the reader-lock
+directory — deletable outright, since the settled decision is in-process only — and
+the `statx` calls behind `Pager::file_len`.
+
+### A measurement dead end worth recording
+
+`strace -k` attributes syscalls to stack frames, which on this optimized binary is
+unreliable: it put `Catalog::save_schema_to_btree` and `Pager::recover_if_needed` on
+the per-commit path, and `std::io::stdio` in a file-length probe. Both are impossible
+— `recover_if_needed` has exactly one caller, at open. The frames are return addresses
+that `addr2line` maps into unrelated inlined code, and adding `debug = 1` did not fix
+it.
+
+Attribute by **ablation** instead: remove or cache one call site, re-run `strace -c`,
+and check the total moved by the predicted amount. Both changes above were confirmed
+that way — −4.1 and −1.0 per commit, each matching its prediction exactly.
