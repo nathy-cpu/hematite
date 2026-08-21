@@ -96,16 +96,25 @@ impl Pager {
             return;
         }
 
-        let frames = self
-            .wal_path
-            .as_ref()
-            .and_then(|path| std::fs::metadata(path).ok())
-            .map(|metadata| {
-                metadata.len()
-                    / (crate::storage::wal::V3_WAL_FRAME_PREFIX_SIZE + crate::storage::PAGE_SIZE)
-                        as u64
-            })
-            .unwrap_or(0);
+        let frames = match self.wal_frame_count {
+            Some(frames) => frames,
+            None => {
+                // First commit since the WAL's size became unknown: ask the
+                // filesystem once and remember, rather than every commit.
+                let frames = self
+                    .wal_path
+                    .as_ref()
+                    .and_then(|path| std::fs::metadata(path).ok())
+                    .map(|metadata| {
+                        metadata.len()
+                            / (crate::storage::wal::V3_WAL_FRAME_PREFIX_SIZE
+                                + crate::storage::PAGE_SIZE) as u64
+                    })
+                    .unwrap_or(0);
+                self.wal_frame_count = Some(frames);
+                frames
+            }
+        };
         if frames < WAL_AUTOCHECKPOINT_FRAMES {
             return;
         }
@@ -166,6 +175,8 @@ impl Pager {
         self.latest_wal_state = None;
         self.latest_wal_file_stamp = None;
         self.wal_read_snapshot = None;
+        // The WAL file is about to be removed, so it holds no frames.
+        self.wal_frame_count = Some(0);
         self.cache_mut()?.reset();
         self.remove_wal_file()?;
         self.persist_checksums()

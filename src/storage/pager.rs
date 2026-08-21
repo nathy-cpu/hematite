@@ -295,6 +295,16 @@ pub struct Pager {
     wal_read_snapshot: Option<WalReadSnapshot>,
     latest_wal_state: Option<Arc<VisibleWalState>>,
     latest_wal_file_stamp: Option<WalFileStamp>,
+    /// How many frames the WAL file holds, when known.
+    ///
+    /// Autocheckpointing needs this on every commit to decide whether the WAL has
+    /// grown past its threshold, and used to get it by stat'ing the WAL by path --
+    /// one `statx` per commit for a number the pager itself determines, since it is
+    /// the only writer. `None` means "ask the filesystem once, then remember".
+    ///
+    /// A stale value can only make the threshold fire a commit early or late, which
+    /// for a heuristic is not a correctness question.
+    wal_frame_count: Option<u64>,
     transaction: Option<PagerTransaction>,
     /// Pre-allocated rollback transaction state recycled between transactions.
     rollback_scratch: Option<RollbackTransaction>,
@@ -358,6 +368,7 @@ impl Pager {
             wal_read_snapshot: None,
             latest_wal_state: None,
             latest_wal_file_stamp: None,
+            wal_frame_count: None,
             transaction: None,
             rollback_scratch: None,
             wal_scratch: None,
@@ -397,6 +408,7 @@ impl Pager {
             wal_read_snapshot: None,
             latest_wal_state: None,
             latest_wal_file_stamp: None,
+            wal_frame_count: None,
             transaction: None,
             rollback_scratch: None,
             wal_scratch: None,

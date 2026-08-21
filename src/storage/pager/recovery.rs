@@ -678,10 +678,15 @@ impl Pager {
                 &metadata_page.data,
                 &frames,
             )
-            .inspect(|_| {
+            .inspect(|offsets| {
                 // One fsync per WAL commit, plus the frames just appended.
                 crate::storage::stats::PagerStats::bump(&self.stats.fsyncs);
                 crate::storage::stats::PagerStats::add(&self.stats.wal_frames, frames.len() as u64);
+                // `offsets` covers the whole batch, including the synthesized
+                // metadata frame, so it is the count the file actually grew by.
+                if let Some(count) = self.wal_frame_count.as_mut() {
+                    *count += offsets.len() as u64;
+                }
             })?
         } else {
             std::collections::HashMap::new()
