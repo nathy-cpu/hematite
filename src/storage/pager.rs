@@ -175,7 +175,7 @@ mod tests;
 mod wal;
 
 use self::cache::PageCache;
-use self::locking::WalReaderRegistration;
+use self::locking::{DbCoordination, HeldLocks};
 use self::state::PagerLockMode;
 use crate::error::Result;
 use crate::storage::free_list::FreeList;
@@ -188,7 +188,6 @@ use crate::storage::{
 };
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::fs::File;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -289,9 +288,12 @@ pub struct Pager {
     wal_path: Option<PathBuf>,
     database_identity: Option<PathBuf>,
     lock_mode: PagerLockMode,
-    rollback_lock_file: Option<File>,
-    wal_write_lock_file: Option<File>,
-    wal_reader_registration: Option<WalReaderRegistration>,
+    /// Shared coordination with any other handle on this database, resolved lazily
+    /// on first lock and `None` for an in-memory pager, which has nothing to share.
+    coordination: Option<Arc<DbCoordination>>,
+    held_locks: HeldLocks,
+    /// The commit sequence this pager's read transaction registered, if any.
+    wal_reader_sequence: Option<u64>,
     wal_read_snapshot: Option<WalReadSnapshot>,
     latest_wal_state: Option<Arc<VisibleWalState>>,
     latest_wal_file_stamp: Option<WalFileStamp>,
@@ -362,9 +364,9 @@ impl Pager {
             wal_path,
             database_identity,
             lock_mode: PagerLockMode::None,
-            rollback_lock_file: None,
-            wal_write_lock_file: None,
-            wal_reader_registration: None,
+            coordination: None,
+            held_locks: HeldLocks::default(),
+            wal_reader_sequence: None,
             wal_read_snapshot: None,
             latest_wal_state: None,
             latest_wal_file_stamp: None,
@@ -402,9 +404,9 @@ impl Pager {
             wal_path: None,
             database_identity: None,
             lock_mode: PagerLockMode::None,
-            rollback_lock_file: None,
-            wal_write_lock_file: None,
-            wal_reader_registration: None,
+            coordination: None,
+            held_locks: HeldLocks::default(),
+            wal_reader_sequence: None,
             wal_read_snapshot: None,
             latest_wal_state: None,
             latest_wal_file_stamp: None,

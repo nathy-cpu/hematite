@@ -265,14 +265,12 @@ mod pager_tests {
     };
     use crate::test_utils::TestDbFile;
     use std::collections::HashMap;
-    use std::ffi::OsString;
+    
     use std::fs;
-    #[cfg(unix)]
-    use std::fs::OpenOptions;
+    
     use std::io::{Seek, SeekFrom, Write};
-    #[cfg(unix)]
-    use std::os::fd::AsRawFd;
-    use std::path::{Path, PathBuf};
+    
+    
     use std::sync::{Arc, Barrier, RwLock};
     use std::thread;
 
@@ -289,67 +287,6 @@ mod pager_tests {
         hash
     }
 
-    fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
-        let mut file_name = path
-            .file_name()
-            .map(OsString::from)
-            .unwrap_or_else(|| OsString::from("hematite.db"));
-        file_name.push(suffix);
-        match path.parent() {
-            Some(parent) => parent.join(file_name),
-            None => PathBuf::from(file_name),
-        }
-    }
-
-    #[cfg(unix)]
-    fn lock_file_exclusive(path: &Path) -> crate::error::Result<std::fs::File> {
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .open(path)?;
-        let rc = unsafe { test_flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
-        if rc == 0 {
-            Ok(file)
-        } else {
-            Err(std::io::Error::last_os_error().into())
-        }
-    }
-
-    #[cfg(unix)]
-    fn lock_file_shared(path: &Path) -> crate::error::Result<std::fs::File> {
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .open(path)?;
-        let rc = unsafe { test_flock(file.as_raw_fd(), LOCK_SH | LOCK_NB) };
-        if rc == 0 {
-            Ok(file)
-        } else {
-            Err(std::io::Error::last_os_error().into())
-        }
-    }
-
-    #[cfg(unix)]
-    fn unlock_file(file: &std::fs::File) {
-        let _ = unsafe { test_flock(file.as_raw_fd(), LOCK_UN) };
-    }
-
-    #[cfg(unix)]
-    const LOCK_SH: i32 = 1;
-    #[cfg(unix)]
-    const LOCK_EX: i32 = 2;
-    #[cfg(unix)]
-    const LOCK_NB: i32 = 4;
-    #[cfg(unix)]
-    const LOCK_UN: i32 = 8;
-
-    #[cfg(unix)]
-    unsafe extern "C" {
-        #[link_name = "flock"]
-        fn test_flock(fd: i32, operation: i32) -> i32;
-    }
 
     #[test]
     fn test_pager_write_is_buffered_until_flush() -> crate::error::Result<()> {
@@ -1016,25 +953,6 @@ mod pager_tests {
         Ok(())
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn test_pager_respects_external_rollback_lock_file() -> crate::error::Result<()> {
-        let test_db = TestDbFile::new("_test_pager_external_rollback_lock");
-        let rollback_lock_path = sidecar_path(test_db.as_path(), ".rollback.lock");
-        let external_lock = lock_file_shared(&rollback_lock_path)?;
-
-        let mut writer = Pager::new(test_db.path(), 8)?;
-        let err = writer.begin_transaction().unwrap_err();
-        assert!(err.to_string().contains("locked"));
-
-        unlock_file(&external_lock);
-        drop(external_lock);
-
-        writer.begin_transaction()?;
-        writer.rollback_transaction()?;
-        Ok(())
-    }
-
     #[test]
     fn test_pager_blocks_reader_while_writer_is_active() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_pager_reader_blocked_by_writer");
@@ -1048,26 +966,6 @@ mod pager_tests {
 
         reader.begin_read()?;
         reader.end_read()?;
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_pager_respects_external_wal_writer_lock_file() -> crate::error::Result<()> {
-        let test_db = TestDbFile::new("_test_pager_external_wal_writer_lock");
-        let wal_write_lock_path = sidecar_path(test_db.as_path(), ".wal.write.lock");
-        let external_lock = lock_file_exclusive(&wal_write_lock_path)?;
-
-        let mut writer = Pager::new(test_db.path(), 8)?;
-        writer.set_journal_mode(JournalMode::Wal)?;
-        let err = writer.begin_transaction().unwrap_err();
-        assert!(err.to_string().contains("locked"));
-
-        unlock_file(&external_lock);
-        drop(external_lock);
-
-        writer.begin_transaction()?;
-        writer.rollback_transaction()?;
         Ok(())
     }
 
@@ -4445,5 +4343,82 @@ mod savepoint_sharing_tests {
             0x11,
             "rollback did not restore the committed value"
         );
+    }
+}
+
+/// Coordination between handles is in memory, so it leaves nothing on disk.
+///
+/// It used to leave four things: `.rollback.lock`, `.wal.write.lock`, a
+/// `.wal.readers/` directory, and a lock file inside it per live read transaction.
+/// Between them they cost about eight syscalls per commit to support cross-process
+/// access the engine does not offer.
+mod no_lock_sidecar_tests {
+    use crate::storage::{JournalMode, Page, Pager};
+    use crate::test_utils::TestDbFile;
+
+    /// Every path that used to create a lock file: a rollback write, a rollback
+    /// read, a WAL write, and a WAL read.
+    fn exercise_every_lock_path(path: &str) {
+        let mut pager = Pager::new(path, 8).expect("open");
+        let page_id = pager.allocate_page().expect("allocate");
+
+        pager.begin_transaction().expect("begin rollback write");
+        pager.write_page(Page::new(page_id)).expect("write");
+        pager.commit_transaction().expect("commit rollback");
+
+        pager.begin_read().expect("begin rollback read");
+        pager.end_read().expect("end rollback read");
+
+        pager.set_journal_mode(JournalMode::Wal).expect("wal mode");
+        pager.begin_transaction().expect("begin wal write");
+        pager.write_page(Page::new(page_id)).expect("write");
+        pager.commit_transaction().expect("commit wal");
+
+        pager.begin_read().expect("begin wal read");
+        pager.end_read().expect("end wal read");
+    }
+
+    #[test]
+    fn locking_creates_no_sidecar_files() {
+        let db = TestDbFile::new("_test_no_lock_sidecars");
+        let path = db.path().to_string();
+        exercise_every_lock_path(&path);
+
+        for suffix in [".rollback.lock", ".wal.write.lock"] {
+            let sidecar = format!("{path}{suffix}");
+            assert!(
+                !std::path::Path::new(&sidecar).exists(),
+                "{suffix} was created; locking is supposed to be in memory"
+            );
+        }
+        let readers_dir = format!("{path}.wal.readers");
+        assert!(
+            !std::path::Path::new(&readers_dir).exists(),
+            "the reader lock directory was created; locking is supposed to be in memory"
+        );
+    }
+
+    /// Two handles on one database still exclude each other, which is the whole
+    /// point of keeping the state shared rather than per-pager.
+    #[test]
+    fn two_handles_on_one_database_still_exclude_each_other() {
+        let db = TestDbFile::new("_test_two_handles_exclude");
+        let mut first = Pager::new(db.path(), 8).expect("open first");
+        let mut second = Pager::new(db.path(), 8).expect("open second");
+
+        first.begin_transaction().expect("first writer begins");
+        let err = second
+            .begin_transaction()
+            .expect_err("a second writer must not get in");
+        assert!(
+            err.to_string().contains("locked"),
+            "unexpected error for a blocked writer: {err}"
+        );
+
+        first.rollback_transaction().expect("first writer ends");
+        second
+            .begin_transaction()
+            .expect("the lock should be free once the first writer is done");
+        second.rollback_transaction().expect("second writer ends");
     }
 }

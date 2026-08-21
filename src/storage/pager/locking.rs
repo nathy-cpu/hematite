@@ -1,28 +1,213 @@
+//! Coordination between database handles in this process.
+//!
+//! This used to be cross-process coordination built from four `flock` sidecars: a
+//! `.rollback.lock`, a `.wal.write.lock`, a `.wal.readers/` directory and one lock
+//! file per live read transaction. It cost roughly eight syscalls per commit —
+//! four `flock`s, an `unlink`, and the `openat`/`close` pairs to reach them — and
+//! bought a guarantee the engine does not offer: Hematite is single-writer /
+//! multi-reader **within one process**, and two processes opening the same database
+//! was never supported. Paying for cross-process exclusion while not supporting
+//! cross-process use is the worst of both.
+//!
+//! What replaces it is the same state held in memory, shared between handles on the
+//! same database through a process-wide registry keyed by path. Waiting uses a
+//! `Condvar`, so a blocked writer wakes the moment the lock frees rather than
+//! sleeping through a backoff schedule; the five-second ceiling before giving up is
+//! unchanged, and so is the error it produces.
+//!
+//! The locks themselves are unchanged in meaning:
+//!
+//! - **Rollback mode** puts readers and the writer on the same lock, because
+//!   rollback journaling writes pages in place — a reader would see half a
+//!   transaction. Reader acquisition is reentrant, counted by depth.
+//! - **WAL mode** gives the writer its own lock and lets readers past entirely, so
+//!   a reader never waits on a writer. Readers instead register the commit sequence
+//!   they are reading at, so a checkpoint knows which frames are still needed.
+
 use super::{JournalMode, Pager, PagerLockMode, PagerState};
 use crate::error::{HematiteError, Result};
-use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::thread;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
-#[cfg(unix)]
-use std::os::fd::AsRawFd;
+/// How long an acquisition waits before reporting the database as locked.
+///
+/// Unchanged from the `flock` implementation, which polled with an exponential
+/// backoff for the same five seconds.
+const LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[derive(Debug)]
-pub(crate) struct WalReaderRegistration {
-    pub(super) path: PathBuf,
-    pub(super) sequence: u64,
-    pub(super) file: File,
+/// Which in-process locks a pager is currently holding.
+///
+/// Tracked explicitly rather than inferred, because releasing has to undo exactly
+/// what was taken: the journal mode can change between acquire and release, and the
+/// two modes do not use the same lock.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct HeldLocks {
+    rollback_read: bool,
+    rollback_write: bool,
+    wal_write: bool,
 }
 
-fn next_wal_reader_registration_id() -> u64 {
-    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-    NEXT_ID.fetch_add(1, Ordering::Relaxed)
+#[derive(Debug, Default)]
+struct CoordinationState {
+    /// Live rollback readers across all handles on this database.
+    rollback_readers: usize,
+    rollback_writer: bool,
+    wal_writer: bool,
+    /// Commit sequences that live WAL read transactions still depend on, with a
+    /// refcount each. A checkpoint must not discard frames any of these need.
+    wal_readers: BTreeMap<u64, usize>,
+}
+
+/// The shared coordination state for one database file.
+#[derive(Debug, Default)]
+pub(crate) struct DbCoordination {
+    state: Mutex<CoordinationState>,
+    /// Signalled whenever a lock is released, waking anyone waiting to take it.
+    released: Condvar,
+}
+
+impl DbCoordination {
+    fn lock(&self) -> MutexGuard<'_, CoordinationState> {
+        // A panic while holding this mutex leaves the counters describing locks whose
+        // owner is gone. Recovering the inner value keeps the database usable rather
+        // than poisoning every later operation; the alternative is that one panicking
+        // test or caller bricks the handle.
+        self.state.lock().unwrap_or_else(|err| err.into_inner())
+    }
+
+    /// Waits until `ready` holds, then runs `take`.
+    ///
+    /// Returns the "database is locked" error if the condition has not come true
+    /// within [`LOCK_TIMEOUT`].
+    fn acquire(
+        &self,
+        busy_message: &str,
+        ready: impl Fn(&CoordinationState) -> bool,
+        take: impl FnOnce(&mut CoordinationState),
+    ) -> Result<()> {
+        let mut state = self.lock();
+        let deadline = Instant::now() + LOCK_TIMEOUT;
+        while !ready(&state) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(HematiteError::StorageError(busy_message.to_string()));
+            }
+            let (next, timeout) = self
+                .released
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(|err| err.into_inner());
+            state = next;
+            if timeout.timed_out() && !ready(&state) {
+                return Err(HematiteError::StorageError(busy_message.to_string()));
+            }
+        }
+        take(&mut state);
+        Ok(())
+    }
+
+    fn release(&self, give_back: impl FnOnce(&mut CoordinationState)) {
+        give_back(&mut self.lock());
+        self.released.notify_all();
+    }
+
+    fn acquire_rollback_read(&self) -> Result<()> {
+        self.acquire(
+            "database is locked for writing",
+            |state| !state.rollback_writer,
+            |state| state.rollback_readers += 1,
+        )
+    }
+
+    fn release_rollback_read(&self) {
+        self.release(|state| state.rollback_readers = state.rollback_readers.saturating_sub(1));
+    }
+
+    fn acquire_rollback_write(&self) -> Result<()> {
+        self.acquire(
+            "database is locked",
+            |state| !state.rollback_writer && state.rollback_readers == 0,
+            |state| state.rollback_writer = true,
+        )
+    }
+
+    fn release_rollback_write(&self) {
+        self.release(|state| state.rollback_writer = false);
+    }
+
+    fn acquire_wal_write(&self) -> Result<()> {
+        self.acquire(
+            "database is locked",
+            |state| !state.wal_writer,
+            |state| state.wal_writer = true,
+        )
+    }
+
+    fn release_wal_write(&self) {
+        self.release(|state| state.wal_writer = false);
+    }
+
+    fn rollback_writer_active(&self) -> bool {
+        self.lock().rollback_writer
+    }
+
+    fn wal_writer_active(&self) -> bool {
+        self.lock().wal_writer
+    }
+
+    fn register_wal_reader(&self, sequence: u64) {
+        *self.lock().wal_readers.entry(sequence).or_insert(0) += 1;
+    }
+
+    fn unregister_wal_reader(&self, sequence: u64) {
+        let mut state = self.lock();
+        if let Some(count) = state.wal_readers.get_mut(&sequence) {
+            *count -= 1;
+            if *count == 0 {
+                state.wal_readers.remove(&sequence);
+            }
+        }
+    }
+
+    fn active_wal_reader_sequences(&self) -> Vec<u64> {
+        self.lock().wal_readers.keys().copied().collect()
+    }
+}
+
+/// The coordination state for `database_identity`, shared by every handle on it.
+///
+/// Entries are never evicted, so a process that opens many distinct databases keeps
+/// one small struct per path. That is deliberate: a handle can be dropped and
+/// reopened while another still holds a lock, and dropping the entry in between
+/// would lose the lock state that makes the two agree.
+fn coordination_for(database_identity: &Path) -> Arc<DbCoordination> {
+    static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, Arc<DbCoordination>>>> = OnceLock::new();
+    let registry = REGISTRY.get_or_init(Mutex::default);
+    let mut handles = registry.lock().unwrap_or_else(|err| err.into_inner());
+    handles
+        .entry(database_identity.to_path_buf())
+        .or_default()
+        .clone()
 }
 
 impl Pager {
+    /// The coordination state for this pager, if it is backed by a file.
+    ///
+    /// An in-memory pager has no identity to share, and nothing to coordinate with,
+    /// so every lock operation on it succeeds without touching any state — which is
+    /// what the sidecar implementation did too, by returning early whenever the
+    /// database identity was absent.
+    pub(super) fn coordination(&mut self) -> Option<Arc<DbCoordination>> {
+        if let Some(coordination) = &self.coordination {
+            return Some(coordination.clone());
+        }
+        let identity = self.database_identity.as_ref()?;
+        let coordination = coordination_for(identity);
+        self.coordination = Some(coordination.clone());
+        Some(coordination)
+    }
+
     pub(super) fn enter_reader_scope(&mut self) -> Result<PagerLockMode> {
         let previous_lock_mode = self.lock_mode;
         self.acquire_shared_lock()?;
@@ -49,77 +234,41 @@ impl Pager {
         self.transition_state(PagerState::Open)
     }
 
-    pub(super) fn database_identity_path(&self) -> Result<&PathBuf> {
-        self.database_identity.as_ref().ok_or_else(|| {
-            HematiteError::InternalError("Pager database identity is not available".to_string())
-        })
+    /// Like [`coordination`](Self::coordination) but takes `&self`, so it cannot
+    /// cache what it resolves.
+    ///
+    /// The probes below run before this pager has taken any lock — `has_live_writer`
+    /// is consulted during recovery at open — so they cannot rely on the cached
+    /// field being populated. Resolving through the registry each time is a hashmap
+    /// lookup under a mutex, on paths that run once per open or once per checkpoint.
+    fn coordination_ref(&self) -> Option<Arc<DbCoordination>> {
+        if let Some(coordination) = &self.coordination {
+            return Some(coordination.clone());
+        }
+        self.database_identity.as_deref().map(coordination_for)
     }
 
     pub(super) fn has_live_writer(&self) -> Result<bool> {
-        if self.database_identity.is_none() {
-            return Ok(false);
-        }
-
-        match self.try_exclusive_probe(&self.rollback_lock_path()?) {
-            Ok(Some(file)) => {
-                unlock_file(&file)?;
-                Ok(false)
-            }
-            Ok(None) => Ok(true),
-            Err(err) => Err(err),
-        }
+        Ok(self
+            .coordination_ref()
+            .is_some_and(|coordination| coordination.rollback_writer_active()))
     }
 
     pub(super) fn wal_writer_active(&self) -> Result<bool> {
-        if self.database_identity.is_none() {
-            return Ok(false);
-        }
-
-        match self.try_exclusive_probe(&self.wal_write_lock_path()?) {
-            Ok(Some(file)) => {
-                unlock_file(&file)?;
-                Ok(false)
-            }
-            Ok(None) => Ok(true),
-            Err(err) => Err(err),
-        }
+        Ok(self
+            .coordination_ref()
+            .is_some_and(|coordination| coordination.wal_writer_active()))
     }
 
     pub(super) fn active_wal_reader_sequences(&self) -> Result<Vec<u64>> {
-        let Some(dir_path) = self.wal_readers_dir_path()? else {
-            return Ok(Vec::new());
-        };
-        if !dir_path.exists() {
-            return Ok(Vec::new());
-        }
-
-        let mut sequences = Vec::new();
-        for entry in fs::read_dir(&dir_path)? {
-            let entry = entry?;
-            let path = entry.path();
-            if !entry.file_type()?.is_file() {
-                continue;
-            }
-            let Some(sequence) = Self::parse_wal_reader_sequence_path(&path) else {
-                continue;
-            };
-
-            match self.try_exclusive_probe(&path)? {
-                Some(file) => {
-                    unlock_file(&file)?;
-                    let _ = fs::remove_file(&path);
-                }
-                None => sequences.push(sequence),
-            }
-        }
-        sequences.sort_unstable();
-        sequences.dedup();
-        Ok(sequences)
+        Ok(self
+            .coordination_ref()
+            .map(|coordination| coordination.active_wal_reader_sequences())
+            .unwrap_or_default())
     }
 
     pub(super) fn acquire_shared_lock(&mut self) -> Result<()> {
         match self.lock_mode {
-            PagerLockMode::Write if self.journal_mode == JournalMode::Wal => return Ok(()),
             PagerLockMode::Write => return Ok(()),
             PagerLockMode::Shared { depth } => {
                 self.lock_mode = PagerLockMode::Shared { depth: depth + 1 };
@@ -128,36 +277,12 @@ impl Pager {
             PagerLockMode::None => {}
         }
 
-        if self.database_identity.is_none() {
-            self.lock_mode = PagerLockMode::Shared { depth: 1 };
-            return Ok(());
-        }
-
+        // Only rollback mode excludes readers and writers from each other. In WAL
+        // mode a reader reads a snapshot, so it takes nothing and waits for nobody.
         if self.journal_mode == JournalMode::Rollback {
-            let lock_path = self.rollback_lock_path()?;
-            let file = open_lock_file(&lock_path)?;
-
-            let start = Instant::now();
-            let mut backoff = Duration::from_millis(1);
-            let timeout = Duration::from_secs(5);
-
-            loop {
-                match try_lock_shared(&file) {
-                    Ok(()) => {
-                        self.rollback_lock_file = Some(file);
-                        break;
-                    }
-                    Err(err) if is_lock_busy(&err) => {
-                        if start.elapsed() >= timeout {
-                            return Err(HematiteError::StorageError(
-                                "database is locked for writing".to_string(),
-                            ));
-                        }
-                        thread::sleep(backoff);
-                        backoff = (backoff * 2).min(Duration::from_millis(100));
-                    }
-                    Err(err) => return Err(err.into()),
-                }
+            if let Some(coordination) = self.coordination() {
+                coordination.acquire_rollback_read()?;
+                self.held_locks.rollback_read = true;
             }
         }
 
@@ -175,13 +300,18 @@ impl Pager {
             PagerLockMode::Shared { .. } => {}
         }
 
-        if let Some(registration) = self.wal_reader_registration.take() {
-            unlock_file(&registration.file)?;
+        if let Some(sequence) = self.wal_reader_sequence.take() {
+            if let Some(coordination) = &self.coordination {
+                coordination.unregister_wal_reader(sequence);
+            }
             self.wal_read_snapshot = None;
         }
 
-        if let Some(file) = self.rollback_lock_file.take() {
-            unlock_file(&file)?;
+        if self.held_locks.rollback_read {
+            if let Some(coordination) = &self.coordination {
+                coordination.release_rollback_read();
+            }
+            self.held_locks.rollback_read = false;
         }
 
         self.lock_mode = PagerLockMode::None;
@@ -189,54 +319,35 @@ impl Pager {
     }
 
     pub(super) fn register_wal_reader_sequence(&mut self, sequence: u64) -> Result<()> {
-        let Some(dir_path) = self.wal_readers_dir_path()? else {
+        let Some(coordination) = self.coordination() else {
             return Ok(());
         };
-
-        let path = self.wal_reader_sequence_path(sequence, next_wal_reader_registration_id())?;
-        // Open the per-reader lock file directly. The `.wal.readers` directory is created
-        // lazily only when the open fails with NotFound, so the steady-state path costs a
-        // single `openat` instead of a `create_dir_all` (mkdir + stat) on every read
-        // transaction.
-        let file = match open_reader_lock_file(&path) {
-            Ok(file) => file,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                fs::create_dir_all(&dir_path)?;
-                open_reader_lock_file(&path)?
-            }
-            Err(err) => return Err(err.into()),
-        };
-        try_lock_shared(&file)?;
-        self.wal_reader_registration = Some(WalReaderRegistration {
-            path,
-            sequence,
-            file,
-        });
+        // Re-registering replaces whatever this pager held, matching the sidecar
+        // version where a new lock file superseded the old one.
+        if let Some(previous) = self.wal_reader_sequence.replace(sequence) {
+            coordination.unregister_wal_reader(previous);
+        }
+        coordination.register_wal_reader(sequence);
         Ok(())
     }
 
     pub(super) fn unregister_wal_reader_sequence(&mut self, sequence: u64) -> Result<()> {
-        let Some(registration) = self.wal_reader_registration.take() else {
+        let Some(held) = self.wal_reader_sequence else {
             return Ok(());
         };
-
-        if registration.sequence != sequence {
-            self.wal_reader_registration = Some(registration);
+        if held != sequence {
             return Ok(());
         }
 
-        unlock_file(&registration.file)?;
+        if let Some(coordination) = &self.coordination {
+            coordination.unregister_wal_reader(sequence);
+        }
+        self.wal_reader_sequence = None;
         self.wal_read_snapshot = None;
-        let _ = fs::remove_file(&registration.path);
-
         Ok(())
     }
 
     pub(super) fn acquire_write_lock(&mut self) -> Result<()> {
-        if self.database_identity.is_none() {
-            self.lock_mode = PagerLockMode::Write;
-            return Ok(());
-        }
         if self.lock_mode == PagerLockMode::Write {
             return Ok(());
         }
@@ -246,36 +357,19 @@ impl Pager {
             ));
         }
 
-        let (lock_path, lock_slot) = if self.journal_mode == JournalMode::Rollback {
-            (self.rollback_lock_path()?, &mut self.rollback_lock_file)
-        } else {
-            (self.wal_write_lock_path()?, &mut self.wal_write_lock_file)
-        };
-
-        let file = open_lock_file(&lock_path)?;
-        let start = Instant::now();
-        let mut backoff = Duration::from_millis(1);
-        let timeout = Duration::from_secs(5);
-
-        loop {
-            match try_lock_exclusive(&file) {
-                Ok(()) => {
-                    *lock_slot = Some(file);
-                    self.lock_mode = PagerLockMode::Write;
-                    return Ok(());
-                }
-                Err(err) if is_lock_busy(&err) => {
-                    if start.elapsed() >= timeout {
-                        return Err(HematiteError::StorageError(
-                            "database is locked".to_string(),
-                        ));
-                    }
-                    thread::sleep(backoff);
-                    backoff = (backoff * 2).min(Duration::from_millis(100));
-                }
-                Err(err) => return Err(err.into()),
+        let rollback_mode = self.journal_mode == JournalMode::Rollback;
+        if let Some(coordination) = self.coordination() {
+            if rollback_mode {
+                coordination.acquire_rollback_write()?;
+                self.held_locks.rollback_write = true;
+            } else {
+                coordination.acquire_wal_write()?;
+                self.held_locks.wal_write = true;
             }
         }
+
+        self.lock_mode = PagerLockMode::Write;
+        Ok(())
     }
 
     pub(super) fn release_write_lock(&mut self) -> Result<()> {
@@ -283,147 +377,18 @@ impl Pager {
             return Ok(());
         }
 
-        if let Some(file) = self.rollback_lock_file.take() {
-            unlock_file(&file)?;
+        if let Some(coordination) = &self.coordination {
+            if self.held_locks.rollback_write {
+                coordination.release_rollback_write();
+            }
+            if self.held_locks.wal_write {
+                coordination.release_wal_write();
+            }
         }
-        if let Some(file) = self.wal_write_lock_file.take() {
-            unlock_file(&file)?;
-        }
+        self.held_locks.rollback_write = false;
+        self.held_locks.wal_write = false;
 
         self.lock_mode = PagerLockMode::None;
         Ok(())
     }
-
-    fn rollback_lock_path(&self) -> Result<PathBuf> {
-        Self::sidecar_path(self.database_identity_path()?, ".rollback.lock")
-    }
-
-    fn wal_write_lock_path(&self) -> Result<PathBuf> {
-        Self::sidecar_path(self.database_identity_path()?, ".wal.write.lock")
-    }
-
-    fn wal_readers_dir_path(&self) -> Result<Option<PathBuf>> {
-        let Some(path) = self.database_identity.as_ref() else {
-            return Ok(None);
-        };
-        Ok(Some(Self::sidecar_path(path, ".wal.readers")?))
-    }
-
-    fn wal_reader_sequence_path(&self, sequence: u64, registration_id: u64) -> Result<PathBuf> {
-        let dir = self.wal_readers_dir_path()?.ok_or_else(|| {
-            HematiteError::InternalError("Pager database identity is not available".to_string())
-        })?;
-        Ok(dir.join(format!("reader-{}-seq-{}.lock", registration_id, sequence)))
-    }
-
-    fn parse_wal_reader_sequence_path(path: &Path) -> Option<u64> {
-        let file_name = path.file_name()?.to_str()?;
-        let sequence = file_name.rsplit_once("-seq-")?.1.strip_suffix(".lock")?;
-        sequence.parse::<u64>().ok()
-    }
-
-    fn sidecar_path(db_path: &Path, suffix: &str) -> Result<PathBuf> {
-        let mut file_name = db_path
-            .file_name()
-            .map(OsString::from)
-            .unwrap_or_else(|| OsString::from("hematite.db"));
-        file_name.push(suffix);
-        Ok(match db_path.parent() {
-            Some(parent) => parent.join(file_name),
-            None => PathBuf::from(file_name),
-        })
-    }
-
-    fn try_exclusive_probe(&self, path: &Path) -> Result<Option<File>> {
-        let file = open_lock_file(path)?;
-        match try_lock_exclusive(&file) {
-            Ok(()) => Ok(Some(file)),
-            Err(err) if is_lock_busy(&err) => Ok(None),
-            Err(err) => Err(err.into()),
-        }
-    }
-}
-
-fn open_lock_file(path: &Path) -> Result<File> {
-    OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .open(path)
-        .map_err(Into::into)
-}
-
-/// Like [`open_lock_file`] but preserves the raw [`std::io::Error`] so callers can react to
-/// specific kinds (e.g. lazily creating the parent directory on `NotFound`).
-fn open_reader_lock_file(path: &Path) -> std::io::Result<File> {
-    OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .open(path)
-}
-
-#[cfg(unix)]
-fn try_lock_shared(file: &File) -> std::io::Result<()> {
-    flock(file, LOCK_SH | LOCK_NB)
-}
-
-#[cfg(unix)]
-fn try_lock_exclusive(file: &File) -> std::io::Result<()> {
-    flock(file, LOCK_EX | LOCK_NB)
-}
-
-#[cfg(unix)]
-fn unlock_file(file: &File) -> std::io::Result<()> {
-    flock(file, LOCK_UN)
-}
-
-#[cfg(unix)]
-fn flock(file: &File, operation: i32) -> std::io::Result<()> {
-    let rc = unsafe { libc_flock(file.as_raw_fd(), operation) };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-#[cfg(unix)]
-fn is_lock_busy(err: &std::io::Error) -> bool {
-    matches!(err.raw_os_error(), Some(11) | Some(35))
-}
-
-#[cfg(not(unix))]
-fn try_lock_shared(file: &File) -> std::io::Result<()> {
-    Ok(file.try_lock_shared()?)
-}
-
-#[cfg(not(unix))]
-fn try_lock_exclusive(file: &File) -> std::io::Result<()> {
-    Ok(file.try_lock()?)
-}
-
-#[cfg(not(unix))]
-fn unlock_file(file: &File) -> std::io::Result<()> {
-    file.unlock()
-}
-
-#[cfg(not(unix))]
-fn is_lock_busy(err: &std::io::Error) -> bool {
-    err.kind() == std::io::ErrorKind::WouldBlock
-}
-
-#[cfg(unix)]
-const LOCK_SH: i32 = 1;
-#[cfg(unix)]
-const LOCK_EX: i32 = 2;
-#[cfg(unix)]
-const LOCK_NB: i32 = 4;
-#[cfg(unix)]
-const LOCK_UN: i32 = 8;
-
-#[cfg(unix)]
-unsafe extern "C" {
-    #[link_name = "flock"]
-    fn libc_flock(fd: i32, operation: i32) -> i32;
 }
