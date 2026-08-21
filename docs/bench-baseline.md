@@ -785,11 +785,23 @@ only user-space instructions. `strace -c` over 1 300 single-row commits:
 |---|---|
 | before | 44.0 |
 | one-open append (header read once, not twice) | 39.9 |
-| cached WAL frame count | **38.9** |
+| cached WAL frame count | 38.9 |
+| one `writev` per commit instead of two writes per frame | 34.0 |
+| in-process locking, no flock sidecars | **25.9** |
 
-−11.6 % so far. The remaining large items are the 4 `flock`s and the reader-lock
-directory — deletable outright, since the settled decision is in-process only — and
-the `statx` calls behind `Pager::file_len`.
+**−41 %.** `flock`, `unlink` and `close` are gone entirely; `openat` went 4.0 → 1.0,
+`write` 6.1 → one `writev`. What is left per commit:
+
+| syscall | /commit | |
+|---|---|---|
+| statx | 12.0 | mostly `Pager::file_len`, the next target |
+| pread64 | 4.8 | page reads on the commit path |
+| lseek | 3.0 | |
+| writev / read / openat / fsync / futex | 1.0 each | |
+
+Deleting the sidecars also took the test suite from 10.4 s to 6.0 s when the lock
+tests run alone, because contention tests no longer sit through a five-second `flock`
+backoff — they now wake on a `Condvar`.
 
 ### A measurement dead end worth recording
 
