@@ -856,3 +856,31 @@ re-parsing the page header per access, and `get_key_view`/`get_value_view` both 
 on the node (every construction path already parses it) turned +1.5 % into −6.0 %.
 Without the instruction counts this would have shipped as a scan regression hidden
 inside a large write win.
+
+## A null result: the buffer pool
+
+`__memset_avx2_unaligned_erms` is ~8 % of the insert path and `_int_malloc` ~11 %, and
+`PageCache::return_page_buffer` zeroed every recycled 4 KiB buffer. The obvious reading
+— the pool is churning buffers and zeroing them needlessly — is wrong, and two changes
+built on it were reverted after measuring.
+
+**Zeroing on acquire instead of on release: −0.1 %.** Splitting `take_page_buffer` into
+a zeroed variant and an overwrite variant, auditing all ten consumers, and dropping the
+`fill(0)` from the return path bought essentially nothing. Buffers are returned to the
+pool only from `remove` and `reset`, so the zeroing hardly ran.
+
+**Feeding the pool from the replace path: 0 %.** `put_shared_with_view` overwrites
+`entry.page`, dropping the displaced `Arc` and freeing its buffer, so the common write
+path never fed the pool. Reclaiming it there changed nothing measurable, because
+`Arc::try_unwrap` fails: a rollback savepoint is taken per row and holds a shared handle
+to every dirty page, so the displaced `Arc` is never the last reference. **The buffer
+pool cannot work while savepoints pin dirty pages** — an interaction between two
+separately-good changes, and the thing to fix before revisiting this.
+
+And the memset is not where either change assumed. `calloc` accounts for 0.95 % of the
+insert path, so `vec![0u8; PAGE_SIZE]` is not the source, and 99.99 % of the memset has
+no attributed caller in the profile. It remains unexplained; the next attempt here
+should start by finding it rather than by reasoning from which code contains a `fill`.
+
+Recorded because the audit's whole point is that this project's priors about its own hot
+spots are unreliable, and a measured non-result is worth as much as a measured win.
