@@ -84,14 +84,19 @@ impl Pager {
                 )));
             }
 
-            let page = if self.cache_read()?.is_dirty(page_id) {
-                self.cache_read()?.peek(page_id).cloned().ok_or_else(|| {
-                    crate::error::HematiteError::StorageError(format!(
-                        "Dirty page {} missing from page cache",
-                        page_id
-                    ))
-                })?
-            } else if wal_override_page_ids.contains(&page_id) {
+            // A dirty page has not reached storage, so a stored checksum cannot
+            // describe it and there is nothing storage could have corrupted. This
+            // used to compare the cached bytes against the map anyway, which always
+            // matched: `write_page` computed that entry from those same bytes moments
+            // earlier, so the comparison was tautological. Checksums are now computed
+            // at flush, when the contents are final, and this page is simply not yet
+            // verifiable — it is left out of `verified_checksum_pages` rather than
+            // counted as checked. The structural checks below still cover it.
+            if self.cache_read()?.is_dirty(page_id) {
+                continue;
+            }
+
+            let page = if wal_override_page_ids.contains(&page_id) {
                 // Read WAL page data on-demand through the LRU cache
                 if let Some(data) = self.read_wal_page_data(page_id)? {
                     Page::from_bytes(page_id, data)?
@@ -125,5 +130,38 @@ impl Pager {
 
     pub(super) fn calculate_page_checksum(page: &Page) -> u32 {
         checksum::hash32(0, &page.data)
+    }
+
+    /// Recomputes the checksum of every dirty page.
+    ///
+    /// `write_page` used to do this on every call, so a transaction that wrote the
+    /// same leaf once per row hashed 4 KiB once per row where once per commit would
+    /// do — `hash64` was 5.8 % of a batched insert's instructions, most of it
+    /// recomputing checksums that were about to be superseded. What a checksum has
+    /// to describe is a page's *final* contents, and only a flush or a WAL commit
+    /// makes them final.
+    ///
+    /// Deferring is safe because a dirty page is never evicted: `evict_if_needed`
+    /// only takes clean, unpinned pages and would rather exceed its capacity than
+    /// drop one. So between the write and the flush the page is always served from
+    /// cache, and its checksum is never consulted.
+    ///
+    /// Must run before the metadata page is staged, since that page carries the
+    /// serialized checksum map and would otherwise describe the previous contents.
+    pub(super) fn refresh_dirty_page_checksums(&mut self) -> Result<()> {
+        let dirty_ids = self.cache_read()?.dirty_page_ids();
+        for page_id in dirty_ids {
+            // The metadata page deliberately has no entry: it is where the map is
+            // stored, so it cannot describe itself.
+            if page_id == crate::storage::STORAGE_METADATA_PAGE_ID {
+                continue;
+            }
+            let page = self.cache_read()?.peek_shared(page_id);
+            if let Some(page) = page {
+                let checksum = Self::calculate_page_checksum(&page);
+                self.page_checksums.insert(page_id, checksum);
+            }
+        }
+        Ok(())
     }
 }

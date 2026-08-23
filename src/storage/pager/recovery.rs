@@ -650,6 +650,10 @@ impl Pager {
             .map(|state| state.visible_sequence + 1)
             .unwrap_or(1);
 
+        // The frames and the metadata page below both carry checksums, so bring them
+        // up to date first; `write_page` no longer does it per call.
+        self.refresh_dirty_page_checksums()?;
+
         let mut page_ids = self.cache_read()?.dirty_page_ids();
         page_ids.sort_unstable();
 

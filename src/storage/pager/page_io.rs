@@ -144,10 +144,6 @@ impl Pager {
         if let Some(transaction) = self.active_rollback_transaction_mut() {
             transaction.rollback_uninitialized_pages.remove(&page_id);
         }
-        if page_id != STORAGE_METADATA_PAGE_ID {
-            self.page_checksums
-                .insert(page_id, Self::calculate_page_checksum(&page));
-        }
         let rollback_transaction_active = self.active_rollback_transaction().is_some();
         let journal_needs_sync = self.journal_needs_sync;
         {
@@ -246,6 +242,9 @@ impl Pager {
             ));
         }
 
+        // Before staging: the metadata page carries the checksum map, so the map has
+        // to describe what is about to be written rather than what was there before.
+        self.refresh_dirty_page_checksums()?;
         self.stage_persisted_state_page()?;
         if self.active_rollback_transaction().is_some() {
             if declare_commit_intent {
