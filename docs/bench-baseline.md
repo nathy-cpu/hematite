@@ -884,3 +884,26 @@ should start by finding it rather than by reasoning from which code contains a `
 
 Recorded because the audit's whole point is that this project's priors about its own hot
 spots are unreliable, and a measured non-result is worth as much as a measured win.
+
+### Resolved: it was the savepoints
+
+Rebuilding with `debug = true` in the release profile gave callgrind the symbols to
+attribute it: **`calloc`, 167 482 812 Ir over 40 690 calls**, ~4 116 each — exactly
+`vec![0u8; PAGE_SIZE]`. The earlier reading missed it by looking only at the
+allocator-side `calloc` entry (0.95 %) and not the memset-side one. The pool *was* the
+problem; both fixes above were downstream of the actual cause.
+
+The cause: `run_atomically` dropped only a savepoint's *id* on success, leaving the
+savepoint in `transaction.savepoints` until the transaction ended — 401 of them after
+200 rows. Each pins every page dirty at the time, so `Arc::try_unwrap` on a displaced
+page never succeeded and no buffer was ever reclaimed. Releasing on success:
+
+| | before | after |
+|---|---|---|
+| insert phase (Ir) | 2 116 810 044 | **1 690 244 447** (−20.2 %) |
+| heap churn | 1.13 GB | **615 MB** (−45.5 %) |
+| scan (Ir/row) | 2 489 | **2 446** |
+
+Worth keeping as a pattern: two changes aimed at the mechanism measured zero, and the
+cause was one level up. Attributing the cost before changing anything — which needed
+nothing more than a debug-symbol rebuild — would have found it first.
