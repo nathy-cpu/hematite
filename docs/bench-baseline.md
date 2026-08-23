@@ -815,3 +815,44 @@ it.
 Attribute by **ablation** instead: remove or cache one call site, re-run `strace -c`,
 and check the total moved by the predicted amount. Both changes above were confirmed
 that way — −4.1 and −1.0 per commit, each matching its prediction exactly.
+
+## Write path, and the eager cell validation
+
+Profiling the batched-insert phase — 20 000 rows in batches of 500 — found a cost the
+catalogue had recorded as small. `BTreeNode::from_shared_page` ran
+`compute_cell_ranges_exact` on every page it loaded:
+
+| function | share of insert |
+|---|---|
+| `compute_cell_ranges_exact` | 12.2 % |
+| `compute_cell_size` (called from inside it, once per cell) | 7.8 % |
+| `from_shared_page` | 7.6 % |
+| its `sort_unstable_by_key` | 2.9 % |
+| allocator (three `Vec`s per call, among others) | ~14 % |
+
+`docs/rewrite-audit.md` had this filed as **deliberate**, measured at 4–6 % on scans.
+On writes it was the largest single item in the profile. The audit's estimate was not
+wrong, it was taken on the wrong workload.
+
+### Results
+
+| | before session | after checksums | after B3a |
+|---|---|---|---|
+| insert phase (Ir) | 3 855 855 991 | 3 634 192 359 | **2 856 831 752** |
+| scan (Ir/row) | 3 790 | — | **2 510** |
+
+**Insert −25.9 %, scan −33.8 %, both across the session.**
+
+### Two things worth recording
+
+**Removing the eager call alone would have achieved nothing.** The lazy fallback called
+the same whole-page function, so it would only have skipped pages whose cells are never
+accessed. The win needed per-cell access to become O(1) — which it can be, since
+`compute_cell_size` reads two `u16`s at the cell's own offset.
+
+**The first attempt made scans 1.5 % worse.** Computing a range per access meant
+re-parsing the page header per access, and `get_key_view`/`get_value_view` both call it
+— two parses per row against one amortised whole-page pass. Caching the parsed header
+on the node (every construction path already parses it) turned +1.5 % into −6.0 %.
+Without the instruction counts this would have shipped as a scan regression hidden
+inside a large write win.

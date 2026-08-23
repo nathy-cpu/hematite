@@ -44,12 +44,8 @@ worth it), or **deliberate** (present by design, with the reason).
 | Sync ordering was untestable | `f2a53ba`, `3305589` |
 | Projected column names were re-resolved per row — a UTF-8 char search plus a SipHash lookup, per column | `8046860`; 18 % of a scan's instructions |
 | Scans copied every key out of the page and allocated a buffer for every value, spilled or not | `b4b3a85`; 4.07 → 2.07 allocations per row |
-
-## Deliberate — a cost with a reason
-
-| problem | measured | why it stays |
-|---|---|---|
-| `from_shared_page` validates every cell range on every page it loads, including pages a cursor merely navigates past | **4–6 % of a full scan**, measured by deferring it | It is the only thing that surfaces corruption on those cells, because `BTreeCursor::key_view`/`value_view` swallow decode errors with `.ok()` and report them as "no entry". The cost is a workaround for that, not for the validation itself — make the cursor propagate its errors and the eager pass can go. That is the real fix and it is a behaviour change to the public cursor API. |
+| `write_page` hashed a whole 4 KiB page on every call, so a bulk insert rehashed one leaf per row | `d51fa93`; −5.7 % of the insert path |
+| `from_shared_page` validated every cell range on every page it loaded, including pages a cursor merely navigated past | `27a2b21`; −21.4 % insert, −6.0 % scan. Recorded here as *deliberate* until the write path was profiled: it was 4–6 % of a scan but ~28–30 % of a batched insert. Cells are now checked where they are read, and the whole-page structural checks are `BTreeNode::verify`, run by `validate_tree` and `open_tree`. The narrowing: duplicate or overlapping cell pointers in a non-root page are no longer caught on the read path |
 
 ## Declined — present, not worth it
 
