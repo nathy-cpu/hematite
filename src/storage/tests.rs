@@ -4420,3 +4420,62 @@ mod no_lock_sidecar_tests {
         second.rollback_transaction().expect("second writer ends");
     }
 }
+
+/// A rollback savepoint holds a shared handle to every page that was dirty when it was
+/// taken, and `run_atomically` takes one per row. If they are not released on success
+/// they accumulate for the length of the transaction: memory grows linearly in rows,
+/// and — because the handles are shared — the page cache can never reclaim a buffer,
+/// so every page write allocates a fresh zeroed 4 KiB one.
+mod savepoint_release_tests {
+    use crate::catalog::CatalogEngine;
+    use crate::test_utils::TestDbFile;
+    use crate::Value;
+
+    /// Held savepoints after `rows` successful inserts in one transaction.
+    fn savepoints_held_after(rows: i32, name: &str) -> usize {
+        let db = TestDbFile::new(name);
+        let mut engine = CatalogEngine::new(db.path()).expect("open");
+        engine.create_table("t").expect("create");
+
+        engine.begin_transaction().expect("begin");
+        for i in 0..rows {
+            engine
+                .insert_into_table("t", vec![Value::Integer(i)])
+                .expect("insert");
+        }
+        let held = engine
+            .tree_store()
+            .shared_storage()
+            .read()
+            .unwrap()
+            .active_rollback_savepoint_count();
+        engine.commit_transaction().expect("commit");
+        held
+    }
+
+    /// The property is that the count does not grow with rows, not that it is zero:
+    /// one savepoint stays outstanding for the statement in progress, which is
+    /// bounded. Before releasing on success it was two per row — 401 held after 200
+    /// rows, which is what this fails with if the release in `CatalogEngine::
+    /// run_atomically` is removed.
+    ///
+    /// It does *not* cover the matching release in `ByteTreeStore::run_atomically`:
+    /// removing that one alone leaves this passing, because inserts reach the tree
+    /// through the catalog. That release is kept for the same correctness reason and
+    /// for direct `ByteTreeStore` users, but it is unexercised here.
+    #[test]
+    fn savepoints_do_not_accumulate_across_rows_in_one_transaction() {
+        let few = savepoints_held_after(10, "_test_savepoint_release_few");
+        let many = savepoints_held_after(200, "_test_savepoint_release_many");
+
+        assert_eq!(
+            few, many,
+            "savepoints held grew from {few} at 10 rows to {many} at 200 -- they are \
+             accumulating again, and each pins every dirty page"
+        );
+        assert!(
+            many <= 1,
+            "expected at most one outstanding savepoint, found {many}"
+        );
+    }
+}

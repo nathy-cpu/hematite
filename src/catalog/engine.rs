@@ -368,6 +368,11 @@ not available yet.",
         self.tree_store.restore_snapshot(snapshot.tree_store)
     }
 
+    /// Discards a snapshot, keeping the work done since it was taken.
+    pub(crate) fn release_snapshot(&mut self, snapshot: CatalogEngineSnapshot) -> Result<()> {
+        self.tree_store.release_snapshot(snapshot.tree_store)
+    }
+
     fn restore_runtime_metadata(&mut self, table_metadata: HashMap<String, TableRuntimeMetadata>) {
         self.table_metadata = table_metadata;
     }
@@ -387,7 +392,11 @@ not available yet.",
         if transaction_active {
             let snapshot = self.snapshot()?;
             match operation(self) {
-                Ok(result) => Ok(result),
+                // Released, not dropped — see `Pager::release_rollback_savepoint`.
+                Ok(result) => {
+                    self.release_snapshot(snapshot)?;
+                    Ok(result)
+                }
                 Err(err) => {
                     self.restore_snapshot(snapshot)?;
                     Err(err)

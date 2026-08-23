@@ -189,6 +189,56 @@ impl Pager {
         })))
     }
 
+    /// How many rollback savepoints are currently held.
+    ///
+    /// Exposed so a test can assert they do not accumulate: `run_atomically` takes one
+    /// per row, and each pins every page dirty at the time.
+    #[cfg(test)]
+    pub(crate) fn active_rollback_savepoint_count(&self) -> usize {
+        self.active_rollback_transaction()
+            .map(|transaction| transaction.savepoints.len())
+            .unwrap_or(0)
+    }
+
+    /// Discards a savepoint, keeping the work done since it was taken.
+    ///
+    /// This is `RELEASE SAVEPOINT`. Without it `run_atomically` dropped only the
+    /// savepoint's *id* on success and left the savepoint itself in
+    /// `transaction.savepoints` until the transaction ended, so a 500-row batch
+    /// accumulated 500 of them. Each holds an `Arc` to every page that was dirty when
+    /// it was taken, which grows memory linearly in rows and — because those handles
+    /// are shared — stops the page cache from ever reclaiming a buffer:
+    /// `Arc::try_unwrap` on a displaced page always failed, so every page write
+    /// allocated a fresh zeroed 4 KiB buffer. That was 40 690 `calloc`s and 7.9 % of a
+    /// batched insert.
+    ///
+    /// Releasing truncates from this savepoint upward, matching SQL semantics: a
+    /// release invalidates the savepoints taken after it too. `run_atomically` nests
+    /// strictly, so in practice this pops exactly one.
+    pub(crate) fn release_rollback_savepoint(&mut self, id: u64) -> Result<()> {
+        let Some(transaction) = self.active_rollback_transaction_mut() else {
+            return Ok(());
+        };
+        if let Some(position) = transaction
+            .savepoints
+            .iter()
+            .position(|savepoint| savepoint.id == id)
+        {
+            transaction.savepoints.truncate(position);
+        }
+        Ok(())
+    }
+
+    /// Discards a snapshot without rolling back to it.
+    pub(crate) fn release_snapshot(&mut self, snapshot: PagerSnapshot) -> Result<()> {
+        match snapshot {
+            // A full snapshot owns its page handles outright, so dropping it releases
+            // them; there is no registry entry to remove.
+            PagerSnapshot::Full(_) => Ok(()),
+            PagerSnapshot::RollbackSavepoint { id } => self.release_rollback_savepoint(id),
+        }
+    }
+
     pub(crate) fn restore_snapshot(&mut self, snapshot: PagerSnapshot) -> Result<()> {
         match snapshot {
             PagerSnapshot::Full(full) => {

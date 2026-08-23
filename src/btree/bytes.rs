@@ -185,10 +185,20 @@ impl ByteTreeStore {
         self.lock_storage()?.restore_snapshot(snapshot.pager)
     }
 
+    /// Discards a snapshot, keeping the work done since it was taken.
+    pub(crate) fn release_snapshot(&self, snapshot: ByteTreeStoreSnapshot) -> Result<()> {
+        self.lock_storage()?.release_snapshot(snapshot.pager)
+    }
+
     fn run_atomically<T>(&self, operation: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
         let snapshot = self.snapshot()?;
         match operation(self) {
-            Ok(result) => Ok(result),
+            // Released rather than dropped: dropping leaves the savepoint in the
+            // transaction, pinning every page that was dirty when it was taken.
+            Ok(result) => {
+                self.release_snapshot(snapshot)?;
+                Ok(result)
+            }
             Err(err) => {
                 self.restore_snapshot(snapshot)?;
                 Err(err)
