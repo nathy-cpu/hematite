@@ -1955,9 +1955,12 @@ mod tree_tests {
 
         let mut lazy = BTreeNode::from_page(page)?;
         lazy.cell_offsets[1] = lazy.cell_offsets[0];
-        *lazy.cell_ranges_cache.borrow_mut() = None;
 
-        let err = lazy.search(&BTreeKey::new(vec![2])).unwrap_err();
+        // Two cell pointers claiming the same bytes is a whole-page property: no
+        // single cell looks wrong on its own, so only a pass that compares cells
+        // against each other can see it. That pass used to run on every page load;
+        // it is `verify` now, called by integrity checks and by `open_tree`.
+        let err = lazy.verify().unwrap_err();
         assert!(matches!(err, crate::error::HematiteError::CorruptedData(_)));
         assert!(!lazy.is_decoded);
 
@@ -1988,9 +1991,11 @@ mod tree_tests {
         };
         lazy.cell_offsets[lower_index] += 2;
         assert!(lazy.cell_offsets[lower_index] != lazy.cell_offsets[higher_index]);
-        *lazy.cell_ranges_cache.borrow_mut() = None;
 
-        let err = lazy.search(&BTreeKey::new(vec![0])).unwrap_err();
+        // As with duplicate pointers, an overlap is only visible when cells are
+        // compared against one another, so it lives in `verify` rather than on the
+        // access path. Each of these cells parses fine in isolation.
+        let err = lazy.verify().unwrap_err();
         assert!(matches!(
             err,
             crate::error::HematiteError::CorruptedData(ref message)
@@ -2050,15 +2055,26 @@ mod tree_tests {
         Ok(())
     }
 
+    /// Duplicate cell pointers on a root page are caught when the tree is opened.
+    ///
+    /// This used to assert that `get`/`seek`/`first` each returned `CorruptedData`,
+    /// because `from_shared_page` structurally validated every page it loaded. That
+    /// pass cost ~28-30 % of a batched insert and is now `verify`, run by
+    /// `validate_integrity` and by `open_tree` — so a fresh open of a corrupt root
+    /// still errors, which is how a reader reaches it in practice.
+    ///
+    /// The narrowing is real and worth stating: a handle obtained *before* the
+    /// corruption keeps reading through it, and duplicate pointers make a key look
+    /// absent rather than raise. Detection on the access path now covers cells that
+    /// fail to parse, not cells that parse but disagree with their neighbours.
     #[test]
-    fn test_byte_tree_corrupted_root_returns_errors_for_lookup_seek_and_scan() -> Result<()> {
+    fn test_byte_tree_corrupted_root_is_rejected_on_open() -> Result<()> {
         let trees = ByteTreeStore::new(Pager::new_in_memory(100)?);
         let root_page_id = trees.create_tree()?;
         let mut tree = trees.open_tree(root_page_id)?;
         tree.insert(b"alpha", b"one")?;
         tree.insert(b"beta", b"two")?;
 
-        let mut cursor = tree.cursor()?;
         let shared = trees.shared_storage();
         let mut pager = shared.write().unwrap();
         let mut page = pager.read_page(root_page_id)?;
@@ -2067,23 +2083,14 @@ mod tree_tests {
         pager.write_page(page)?;
         drop(pager);
 
-        let lookup_err = tree.get(b"beta").unwrap_err();
-        assert!(matches!(
-            lookup_err,
-            crate::error::HematiteError::CorruptedData(_)
-        ));
+        match trees.open_tree(root_page_id) {
+            Err(crate::error::HematiteError::CorruptedData(_)) => {}
+            Err(other) => panic!("expected CorruptedData, got {other:?}"),
+            Ok(_) => panic!("opening a tree with duplicate cell pointers should fail"),
+        }
 
-        let seek_err = cursor.seek(b"beta").unwrap_err();
-        assert!(matches!(
-            seek_err,
-            crate::error::HematiteError::CorruptedData(_)
-        ));
-
-        let scan_err = cursor.first().unwrap_err();
-        assert!(matches!(
-            scan_err,
-            crate::error::HematiteError::CorruptedData(_)
-        ));
+        // And the integrity check, which walks every page rather than just roots.
+        assert!(!trees.clone().validate_tree(root_page_id).unwrap_or(false));
 
         Ok(())
     }
@@ -2428,5 +2435,58 @@ mod merge_fit_tests {
         assert!(!leaf.can_merge_with(&interior));
         assert!(!interior.can_merge_with(&leaf));
         assert_eq!(interior.node_type, NodeType::Internal);
+    }
+}
+
+/// Guards the exchange B3a made: whole-page structural validation stopped running on
+/// every page load, and in return the read accessors stopped swallowing decode
+/// errors. If `key_view`/`value_view` ever go back to `.ok()`, corruption becomes
+/// silent absence again and nothing else is watching for it.
+mod cell_access_error_tests {
+    use crate::btree::bytes::ByteTreeStore;
+    use crate::error::{HematiteError, Result};
+    use crate::storage::Pager;
+
+    /// A cell whose declared length runs off the end of the page must raise when a
+    /// cursor reads it — not read as "no entry", which is what `.ok()` turned it into
+    /// and what the eager whole-page pass existed to compensate for.
+    ///
+    /// Checked against a deliberate revert: restoring `.ok()` on `value_view` alone
+    /// still fails this test, but restoring it on `key_view` alone does not, because
+    /// an oversized key length puts the *value* out of bounds too and `value_view`
+    /// reaches it first. So this guards the pair, not each accessor independently.
+    #[test]
+    fn corrupt_cell_surfaces_through_the_cursor_rather_than_reading_as_absent() -> Result<()> {
+        let trees = ByteTreeStore::new(Pager::new_in_memory(100)?);
+        let root_page_id = trees.create_tree()?;
+        let mut tree = trees.open_tree(root_page_id)?;
+        tree.insert(b"alpha", b"one")?;
+        tree.insert(b"beta", b"two")?;
+
+        // Find the first cell and blow up its declared key length. The cell pointers
+        // stay consistent, so this is per-cell corruption, not the whole-page kind
+        // `verify` covers.
+        // Corrupt after opening, so the read path is what is under test rather than
+        // `open_tree`'s root `verify`.
+        let shared = trees.shared_storage();
+        let mut pager = shared.write().unwrap();
+        let mut page = pager.read_page(root_page_id)?;
+        let first_offset = u16::from_be_bytes([page.data[8], page.data[9]]) as usize;
+        page.data[first_offset..first_offset + 2].copy_from_slice(&u16::MAX.to_be_bytes());
+        pager.write_page(page)?;
+        drop(pager);
+
+        let mut cursor = tree.cursor()?;
+        let result = (|| {
+            cursor.first()?;
+            cursor.with_current(|_key, _value| Ok(()))
+        })();
+
+        match result {
+            Err(HematiteError::CorruptedData(_)) => Ok(()),
+            Err(other) => panic!("expected CorruptedData, got {other:?}"),
+            Ok(Some(())) => panic!("a cell with an impossible key length was read as valid"),
+            Ok(None) => panic!("corruption reported as 'no entry' — the `.ok()` bug is back"),
+        }
     }
 }

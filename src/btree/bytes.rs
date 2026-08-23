@@ -586,16 +586,16 @@ impl ByteTreeCursor {
         self.inner.seek(&crate::btree::BTreeKey::new(key.to_vec()))
     }
 
-    pub fn key(&self) -> Option<&[u8]> {
+    pub fn key(&self) -> Result<Option<&[u8]>> {
         self.inner.key_view()
     }
 
-    pub fn value(&self) -> Option<&[u8]> {
+    pub fn value(&self) -> Result<Option<&[u8]>> {
         self.inner.value_view()
     }
 
     pub fn current(&self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-        match (self.inner.key_view(), self.inner.value_view()) {
+        match (self.inner.key_view()?, self.inner.value_view()?) {
             (Some(key), Some(value)) => {
                 let storage = self.lock_storage()?;
                 Ok(Some((key.to_vec(), hydrate_stored_value(&storage, value)?)))
@@ -618,7 +618,7 @@ impl ByteTreeCursor {
         &self,
         visit: impl FnOnce(&[u8], &[u8]) -> Result<R>,
     ) -> Result<Option<R>> {
-        let (Some(key), Some(value)) = (self.inner.key_view(), self.inner.value_view()) else {
+        let (Some(key), Some(value)) = (self.inner.key_view()?, self.inner.value_view()?) else {
             return Ok(None);
         };
 

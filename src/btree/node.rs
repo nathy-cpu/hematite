@@ -100,7 +100,6 @@ use crate::storage::format::{PageKind, DATABASE_HEADER_SIZE};
 #[cfg(test)]
 use crate::storage::INVALID_PAGE_ID;
 use crate::storage::{Page, PageId, Pager, PAGE_SIZE};
-use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -127,7 +126,14 @@ pub struct BTreeNode {
     pub raw_page: Option<Arc<Page>>,
     pub is_decoded: bool,
     pub cell_offsets: Vec<u16>,
-    pub cell_ranges_cache: RefCell<Option<Vec<(usize, usize)>>>,
+    /// The parsed header of `raw_page`, kept so per-cell access does not re-parse it.
+    ///
+    /// `cell_range_for_index` needs the header, and both `get_key_view` and
+    /// `get_value_view` call it, so parsing on demand cost two header parses per row
+    /// on a scan — enough to cancel out what removing the eager whole-page pass
+    /// saved. Every construction path already parses the header, so holding on to it
+    /// is free.
+    pub(crate) header: Option<BTreePageHeaderV3>,
 }
 
 impl BTreeNode {
@@ -143,7 +149,7 @@ impl BTreeNode {
             raw_page: None,
             is_decoded: true,
             cell_offsets: Vec::new(),
-            cell_ranges_cache: RefCell::new(None),
+            header: None,
         }
     }
 
@@ -159,7 +165,7 @@ impl BTreeNode {
             raw_page: None,
             is_decoded: true,
             cell_offsets: Vec::new(),
-            cell_ranges_cache: RefCell::new(None),
+            header: None,
         }
     }
 
@@ -296,23 +302,13 @@ impl BTreeNode {
             offsets.push(cell_pointer_from_header(&page, &header, index)?);
         }
         node.cell_offsets = offsets;
-        // BUG-02 fix: validate exact per-cell sizing (reads key_len/value_len
-        // from page bytes) up front, for every page constructed here, not
-        // just cells a caller happens to query. This is a deliberate
-        // defense-in-depth choice: `BTreeCursor::key_view`/`value_view` (used
-        // by the public cursor API) swallow per-cell decode errors via `.ok()`
-        // and report them as "no entry" rather than propagating
-        // `CorruptedData` — so eager, whole-page validation here is the only
-        // thing that reliably surfaces corruption on cells a cursor merely
-        // navigates past without directly reading. Deferring this to
-        // first-access (as the mutation-invalidation paths below do) would
-        // silently mask corruption instead of erroring.
-        *node.cell_ranges_cache.borrow_mut() = Some(compute_cell_ranges_exact(
-            &page,
-            &header,
-            &node.cell_offsets,
-        )?);
-
+        node.header = Some(header);
+        // Whole-page structural validation used to run here, on every page loaded,
+        // including pages a cursor merely navigates past — ~28-30 % of a batched
+        // insert. It stood in for `key_view`/`value_view`, which swallowed per-cell
+        // decode errors with `.ok()`; those propagate now, so a cell that is read is
+        // checked at the read. The whole-page form is [`BTreeNode::verify`], for
+        // callers that want the page examined rather than used.
         Ok(node)
     }
 
@@ -701,9 +697,8 @@ impl BTreeNode {
             offsets.push(cell_pointer_from_header(page, &header, i)?);
         }
         self.cell_offsets = offsets;
-        // Invalidate cached cell ranges because offsets changed.
-        *self.cell_ranges_cache.borrow_mut() = None;
         self.payload_len = PAGE_SIZE.saturating_sub(header.cell_content_start as usize);
+        self.header = Some(header);
         self.keys.clear();
         self.values.clear();
         self.children.clear();
@@ -732,10 +727,8 @@ impl BTreeNode {
             offsets.push(cell_pointer_from_header(page, &header, i)?);
         }
         self.cell_offsets = offsets;
-        // Invalidate the cell-range cache; it's rebuilt lazily (with exact
-        // per-cell sizing, BUG-02 fix) on next access via `cell_range_for_index`.
-        *self.cell_ranges_cache.borrow_mut() = None;
         self.payload_len = PAGE_SIZE.saturating_sub(header.cell_content_start as usize);
+        self.header = Some(header);
         self.keys.clear();
         self.values.clear();
         self.children.clear();
@@ -888,8 +881,8 @@ impl BTreeNode {
             offsets.push(cell_pointer_from_header(page, &new_header, i)?);
         }
         self.cell_offsets = offsets;
-        *self.cell_ranges_cache.borrow_mut() = None;
         self.payload_len = PAGE_SIZE.saturating_sub(new_header.cell_content_start as usize);
+        self.header = Some(new_header);
         self.keys.clear();
         self.values.clear();
         self.children.clear();
@@ -1281,42 +1274,62 @@ impl BTreeNode {
         used * 4 < capacity
     }
 
+    /// The byte range of one cell.
+    ///
+    /// O(1): `compute_cell_size` reads the cell's own `key_len`/`value_len` at its
+    /// offset, so a single range needs neither the other cells nor an allocation.
+    ///
+    /// This used to build — and cache — the exact ranges of *every* cell on the page,
+    /// which meant three `Vec` allocations, a sort and an overlap sweep to answer a
+    /// question about one cell. `from_shared_page` ran the same pass eagerly on every
+    /// page it loaded, and together they were ~28-30 % of a batched insert. The
+    /// whole-page pass was doing two jobs; only the structural half of it needed the
+    /// whole page, and that half now lives in [`verify`](Self::verify).
     fn cell_range_for_index(&self, index: usize) -> Result<(usize, usize)> {
         // BUG-01 fix: the parameter is always a cell *index*, never a byte
         // offset.  The previous dual-interpretation (index if < len, else
         // treated as offset) would silently return the wrong cell when the
         // cell count exceeded a cell's byte offset value.
-        if index >= self.cell_offsets.len() {
+        let Some(&offset) = self.cell_offsets.get(index) else {
             return Err(HematiteError::StorageError(format!(
                 "Cell index {} out of bounds (len={})",
                 index,
                 self.cell_offsets.len()
             )));
-        }
+        };
 
-        // Populate the cache lazily on first access, using the exact-sizing
-        // algorithm (reads key_len/value_len from the page bytes) so a node
-        // that's never had its ranges queried before pays this cost at most
-        // once, and so that validation is always the corrected exact form
-        // rather than the offset-neighbour approximation.
-        if self.cell_ranges_cache.borrow().is_none() {
-            let page = self.raw_page.as_ref().ok_or_else(|| {
-                HematiteError::CorruptedData("Missing raw page for lazy node".to_string())
-            })?;
-            let header = BTreePageHeaderV3::parse(page, is_page_one(self.page_id))?;
-            *self.cell_ranges_cache.borrow_mut() = Some(compute_cell_ranges_exact(
-                page,
-                &header,
-                &self.cell_offsets,
-            )?);
-        }
-        self.cell_ranges_cache
-            .borrow()
-            .as_ref()
-            .and_then(|ranges| ranges.get(index).copied())
-            .ok_or_else(|| {
-                HematiteError::StorageError(format!("Cell index {} out of bounds in cache", index))
-            })
+        let (page, header) = self.raw_page_and_header()?;
+        let start = offset as usize;
+        let size = compute_cell_size(page, header, start)?;
+        Ok((start, start + size))
+    }
+
+    /// The raw page and its already-parsed header.
+    fn raw_page_and_header(&self) -> Result<(&Page, &BTreePageHeaderV3)> {
+        let page = self.raw_page.as_ref().ok_or_else(|| {
+            HematiteError::CorruptedData("Missing raw page for lazy node".to_string())
+        })?;
+        let header = self.header.as_ref().ok_or_else(|| {
+            HematiteError::CorruptedData("Missing parsed header for lazy node".to_string())
+        })?;
+        Ok((page, header))
+    }
+
+    /// Checks the structural properties of the whole page: that no two cell pointers
+    /// coincide, that every cell's declared size is readable, and that no two cells
+    /// overlap.
+    ///
+    /// This ran on every page load, including pages a cursor merely navigated past.
+    /// It was defence-in-depth for `BTreeCursor::key_view`/`value_view`, which used to
+    /// swallow per-cell decode errors with `.ok()` and report corruption as "no
+    /// entry" — so the eager pass was the only thing that surfaced it. Those
+    /// accessors now propagate, which means a cell that is actually read is checked
+    /// where it is read, and this is left for callers that want the whole page
+    /// examined: `validate_integrity` and debug assertions.
+    pub fn verify(&self) -> Result<()> {
+        let (page, header) = self.raw_page_and_header()?;
+        compute_cell_ranges_exact(page, header, &self.cell_offsets)?;
+        Ok(())
     }
 }
 

@@ -54,8 +54,13 @@ impl BTreeManager {
     }
 
     pub fn open_tree(&mut self, root_page_id: PageId) -> Result<BTreeIndex> {
+        // Confirms the id really names a B-tree page before handing out a handle to
+        // it. The `verify` used to be implicit: `from_shared_page` structurally
+        // validated every page it loaded, so this line read as a bare discard. It is
+        // explicit now, and costs one page per tree open rather than one per page
+        // touched.
         let page = self.lock_storage_read()?.read_page_shared(root_page_id)?;
-        let _node = BTreeNode::from_shared_page(page)?;
+        BTreeNode::from_shared_page(page)?.verify()?;
         Ok(BTreeIndex::from_shared_storage(
             self.storage.clone(),
             root_page_id,
@@ -122,6 +127,12 @@ impl BTreeManager {
 
         let page = self.lock_storage_read()?.read_page_shared(page_id)?;
         let node = BTreeNode::from_shared_page(page)?;
+        // `verify` covers the whole-page structure — duplicate cell pointers and
+        // overlapping cells — which `validate_cell_layouts` does not: it parses each
+        // cell in isolation and so cannot see two of them claiming the same bytes.
+        // `from_shared_page` used to run this implicitly on every page in the
+        // database; here it runs on the pages an integrity check actually walks.
+        node.verify()?;
         node.validate_cell_layouts()?;
 
         for i in 1..node.key_count {

@@ -100,26 +100,38 @@ impl BTreeCursor {
         let _ = self.cached_value.take();
     }
 
-    pub(crate) fn key_view(&self) -> Option<&[u8]> {
+    /// The current entry's key bytes, or `None` if the cursor is not on an entry.
+    ///
+    /// `Err` means the cell itself is corrupt. This used to be `.ok()`, which turned a
+    /// `CorruptedData` decode failure into `None` — indistinguishable from "the cursor
+    /// is past the end", so corruption read as absence. Whole-page validation on every
+    /// page load existed to compensate, at ~28-30 % of a batched insert; propagating
+    /// here is what let that go.
+    pub(crate) fn key_view(&self) -> Result<Option<&[u8]>> {
         if !self.is_valid() {
-            return None;
+            return Ok(None);
         }
-        let frame = self.stack.last()?;
+        let Some(frame) = self.stack.last() else {
+            return Ok(None);
+        };
         if frame.index >= frame.node.key_count {
-            return None;
+            return Ok(None);
         }
-        frame.node.get_key_view(frame.index).ok()
+        frame.node.get_key_view(frame.index).map(Some)
     }
 
-    pub(crate) fn value_view(&self) -> Option<&[u8]> {
+    /// The current entry's value bytes. See [`key_view`](Self::key_view) on `Err`.
+    pub(crate) fn value_view(&self) -> Result<Option<&[u8]>> {
         if !self.is_valid() {
-            return None;
+            return Ok(None);
         }
-        let frame = self.stack.last()?;
+        let Some(frame) = self.stack.last() else {
+            return Ok(None);
+        };
         if frame.node.node_type != NodeType::Leaf || frame.index >= frame.node.key_count {
-            return None;
+            return Ok(None);
         }
-        frame.node.get_value_view(frame.index).ok()
+        frame.node.get_value_view(frame.index).map(Some)
     }
 
     pub fn is_valid(&self) -> bool {
@@ -128,13 +140,13 @@ impl BTreeCursor {
 
     #[cfg(test)]
     pub fn key(&self) -> Option<&BTreeKey> {
-        let key = self.key_view()?;
+        let key = self.key_view().expect("corrupt cell under test cursor")?;
         Some(self.cached_key.get_or_init(|| BTreeKey::new(key.to_vec())))
     }
 
     #[cfg(test)]
     pub fn value(&self) -> Option<&BTreeValue> {
-        let value = self.value_view()?;
+        let value = self.value_view().expect("corrupt cell under test cursor")?;
         Some(
             self.cached_value
                 .get_or_init(|| BTreeValue::new(value.to_vec())),
@@ -152,8 +164,14 @@ impl BTreeCursor {
     ///
     /// After this call the cursor is in `RequireSeek` state and must have
     /// `restore_position()` called before any further navigation.
+    ///
+    /// A corrupt current cell is treated the same as no current cell: the position is
+    /// simply not saved and the cursor invalidates, so the caller re-seeks. Unlike the
+    /// read accessors, this cannot hide corruption from anyone — a bookmark is never
+    /// returned as data, and the bad cell still errors when something actually reads
+    /// it.
     pub fn save_position(&mut self) {
-        if let Some(key_bytes) = self.key_view() {
+        if let Ok(Some(key_bytes)) = self.key_view() {
             self.saved_key = Some(key_bytes.to_vec());
             self.state = CursorState::RequireSeek;
         } else {
@@ -203,7 +221,7 @@ impl BTreeCursor {
         // is >= current key, check the current leaf page first. This avoids
         // a full root-to-leaf descent for append-pattern workloads.
         if self.at_last && self.state == CursorState::Valid {
-            if let Some(current_key) = self.key_view() {
+            if let Some(current_key) = self.key_view()? {
                 if key.as_bytes() >= current_key {
                     let frame = self.stack.last().unwrap();
                     let idx = frame.node.lower_bound_index(key)?;
