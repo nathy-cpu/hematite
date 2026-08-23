@@ -73,11 +73,6 @@ impl Pager {
     pub(crate) fn create_rollback_savepoint(&mut self) -> Result<u64> {
         let file_manager = self.file_manager.snapshot()?;
         let page_checksums = self.page_checksums.clone();
-        let dirty_pages = self.share_dirty_pages()?;
-        let dirty_page_ids = dirty_pages
-            .iter()
-            .map(|page| page.id)
-            .collect::<crate::storage::page_hash::PageSet>();
 
         let savepoint = {
             let transaction = self.active_rollback_transaction().ok_or_else(|| {
@@ -99,9 +94,9 @@ impl Pager {
                     .collect(),
                 rollback_uninitialized_pages: transaction.rollback_uninitialized_pages.clone(),
                 page_checksums,
-                dirty_pages,
                 page_records: Vec::new(),
-                captured_page_ids: dirty_page_ids,
+                captured_page_ids: crate::storage::page_hash::PageSet::default(),
+                created_page_ids: crate::storage::page_hash::PageSet::default(),
             }
         };
         let transaction = self.active_rollback_transaction_mut().ok_or_else(|| {
@@ -136,13 +131,15 @@ impl Pager {
 
         self.file_manager
             .restore_snapshot(savepoint.file_manager.clone())?;
-        self.cache_mut()?.reset();
         self.page_checksums = savepoint.page_checksums.clone();
-        for page in savepoint.dirty_pages.iter().cloned() {
-            let page_id = page.id;
-            let cache = self.cache_mut()?;
-            cache.put_shared_with_view(page, 0);
-            cache.mark_dirty(page_id);
+
+        // Undo exactly what changed, rather than resetting the cache and rebuilding
+        // it. The reset was why the savepoint had to hold an image of every dirty
+        // page: it threw away pages that were dirty at the mark and never written
+        // again, and those exist nowhere on disk. Leaving them alone is both correct
+        // and free -- they still hold the contents the savepoint recorded.
+        for page_id in savepoint.created_page_ids.iter().copied() {
+            self.cache_mut()?.remove(page_id);
         }
         for record in &savepoint.page_records {
             let page = Page::from_bytes(record.page_id, record.data.clone())?;

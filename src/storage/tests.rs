@@ -4300,6 +4300,89 @@ mod savepoint_sharing_tests {
     use crate::storage::{Page, Pager};
     use crate::test_utils::TestDbFile;
 
+    /// A page the transaction created after the savepoint has no pre-image, so
+    /// rolling back has to drop it rather than restore anything. Rollback used to
+    /// reset the whole cache, which handled this bluntly; it now undoes only what
+    /// changed, so created pages are tracked explicitly.
+    #[test]
+    fn rolling_back_drops_pages_created_after_the_savepoint() {
+        let db = TestDbFile::new("_test_savepoint_created_pages");
+        let mut pager = Pager::new(db.path(), 64).expect("open");
+
+        let existing = pager.allocate_page().expect("allocate");
+        pager.begin_transaction().expect("begin");
+        let mut page = Page::new(existing);
+        page.data.fill(0x11);
+        pager.write_page(page).expect("write");
+        pager.commit_transaction().expect("commit");
+
+        pager.begin_transaction().expect("begin");
+        let snapshot = pager.snapshot().expect("snapshot");
+
+        let created = pager.allocate_page().expect("allocate");
+        let mut page = Page::new(created);
+        page.data.fill(0x99);
+        pager.write_page(page).expect("write");
+
+        pager.restore_snapshot(snapshot).expect("restore");
+
+        // The page allocated after the mark must not survive as a dirty cache entry
+        // holding 0x99.
+        assert!(
+            pager
+                .read_page(created)
+                .map(|page| page.data[0] != 0x99)
+                .unwrap_or(true),
+            "a page created after the savepoint survived the rollback"
+        );
+        // And the page that predates the transaction is untouched.
+        assert_eq!(pager.read_page(existing).expect("read").data[0], 0x11);
+
+        pager.rollback_transaction().expect("rollback");
+    }
+
+    /// The case removing the eager dirty-page copy could have broken: a page dirtied
+    /// *before* the savepoint and never written again. Its contents live only in the
+    /// cache, so an undo that resets the cache would lose them.
+    #[test]
+    fn a_page_dirtied_before_the_savepoint_and_untouched_after_survives() {
+        let db = TestDbFile::new("_test_savepoint_untouched_dirty");
+        let mut pager = Pager::new(db.path(), 64).expect("open");
+
+        let quiet = pager.allocate_page().expect("allocate");
+        let noisy = pager.allocate_page().expect("allocate");
+        pager.begin_transaction().expect("begin");
+        for (id, fill) in [(quiet, 0x11u8), (noisy, 0x22)] {
+            let mut page = Page::new(id);
+            page.data.fill(fill);
+            pager.write_page(page).expect("write");
+        }
+        pager.commit_transaction().expect("commit");
+
+        pager.begin_transaction().expect("begin");
+        // Dirty both, then mark. `quiet` is never written again.
+        for (id, fill) in [(quiet, 0xAAu8), (noisy, 0xBB)] {
+            let mut page = Page::new(id);
+            page.data.fill(fill);
+            pager.write_page(page).expect("write");
+        }
+        let snapshot = pager.snapshot().expect("snapshot");
+
+        let mut page = Page::new(noisy);
+        page.data.fill(0xCC);
+        pager.write_page(page).expect("write");
+
+        pager.restore_snapshot(snapshot).expect("restore");
+        assert_eq!(
+            pager.read_page(quiet).expect("read").data[0],
+            0xAA,
+            "a page dirtied before the savepoint and untouched after was lost"
+        );
+        assert_eq!(pager.read_page(noisy).expect("read").data[0], 0xBB);
+
+        pager.rollback_transaction().expect("rollback");
+    }
+
     #[test]
     fn a_savepoint_image_survives_later_writes_to_the_same_page() {
         let db = TestDbFile::new("_test_savepoint_shared_image");

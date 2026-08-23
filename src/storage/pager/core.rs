@@ -101,7 +101,7 @@ impl Pager {
                         .collect(),
                     rollback_uninitialized_pages: rollback.rollback_uninitialized_pages.clone(),
                     page_checksums: self.page_checksums.clone(),
-                    dirty_pages: Vec::new(),
+                    created_page_ids: PageSet::default(),
                     page_records: Vec::new(),
                     captured_page_ids: PageSet::default(),
                 };

@@ -220,17 +220,19 @@ struct RollbackSavepoint {
     rollback_free_page_set: PageSet,
     rollback_uninitialized_pages: PageSet,
     page_checksums: HashMap<PageId, u32>,
-    /// Images of the pages that were dirty when the savepoint was taken.
+    /// Pre-images of the pages modified since the savepoint was taken — the undo log.
     ///
-    /// Shared, not copied. `run_atomically` takes a savepoint per row, so deep-copying
-    /// every dirty page here cost one 4 KiB memcpy per already-dirty page per row —
-    /// quadratic across a transaction, since dirty pages accumulate as it runs.
-    ///
-    /// Holding the `Arc` also pins the page, which is what keeps the image stable: a
-    /// later write copies the page into a fresh buffer rather than mutating this one.
-    dirty_pages: Vec<Arc<Page>>,
+    /// Captured lazily, one copy per page per savepoint, by `snapshot_original_page`.
+    /// The savepoint used to *also* hold shared images of every page already dirty
+    /// when it was taken, because the capture below was skipped for any page the
+    /// transaction had already journalled, leaving a hole. Separating the journal's
+    /// per-transaction dedup from this per-savepoint one closed the hole and made
+    /// taking a savepoint O(1) rather than O(dirty pages) — it ran per row.
     page_records: Vec<JournalRecord>,
     captured_page_ids: PageSet,
+    /// Pages the transaction created after this savepoint, which therefore have no
+    /// pre-image. Rolling back drops them instead of restoring them.
+    created_page_ids: PageSet,
 }
 
 #[derive(Debug, Clone)]

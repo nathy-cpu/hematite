@@ -306,13 +306,35 @@ impl Pager {
             return Ok(());
         };
 
-        if transaction.journaled_pages.contains(&page_id) {
+        // Two independent questions, and they used to be conflated. The journal needs
+        // one pre-image per page per *transaction*; a savepoint needs one per page per
+        // *savepoint*. The `journaled_pages` check answered only the first and
+        // returned early, so a page written before a savepoint and again after it
+        // never reached the capture loop below — which is why savepoints also had to
+        // eagerly copy every dirty page when they were created.
+        let needs_journal_record = !transaction.journaled_pages.contains(&page_id);
+        let needs_savepoint_capture = transaction.savepoints.iter().any(|savepoint| {
+            page_is_live_at_savepoint(page_id, savepoint)
+                && !savepoint.captured_page_ids.contains(&page_id)
+        });
+
+        if !needs_journal_record && !needs_savepoint_capture {
             return Ok(());
         }
 
         let page_start = page_id as u64 * PAGE_SIZE as u64;
         let page_end = page_start.saturating_add(PAGE_SIZE as u64);
         if page_end > transaction.original_file_len {
+            // The page did not exist when the transaction began, so there is no
+            // pre-image to keep. A savepoint records it as created instead, and
+            // rolling back to that savepoint drops it from the cache.
+            if let Some(transaction) = self.active_rollback_transaction_mut() {
+                for savepoint in &mut transaction.savepoints {
+                    if !page_is_live_at_savepoint(page_id, savepoint) {
+                        savepoint.created_page_ids.insert(page_id);
+                    }
+                }
+            }
             return Ok(());
         }
 
@@ -324,15 +346,21 @@ impl Pager {
 
         if let Some(transaction) = self.active_rollback_transaction_mut() {
             for savepoint in &mut transaction.savepoints {
-                let live_at_savepoint = page_id < savepoint.rollback_next_page_id
-                    && !savepoint.rollback_free_page_set.contains(&page_id);
-                if live_at_savepoint && savepoint.captured_page_ids.insert(page_id) {
+                if !page_is_live_at_savepoint(page_id, savepoint) {
+                    savepoint.created_page_ids.insert(page_id);
+                    continue;
+                }
+                if savepoint.captured_page_ids.insert(page_id) {
                     savepoint.page_records.push(JournalRecord {
                         page_id,
                         data: page.data.to_vec(),
                     });
                 }
             }
+        }
+
+        if !needs_journal_record {
+            return Ok(());
         }
 
         let record = {
@@ -725,4 +753,14 @@ impl Pager {
         }
         Ok(())
     }
+}
+
+/// Whether `page_id` existed and was allocated when `savepoint` was taken.
+///
+/// A page that did not is one the transaction created afterwards: it has no
+/// pre-image, and rolling back to the savepoint should drop it rather than restore
+/// anything.
+fn page_is_live_at_savepoint(page_id: PageId, savepoint: &super::RollbackSavepoint) -> bool {
+    page_id < savepoint.rollback_next_page_id
+        && !savepoint.rollback_free_page_set.contains(&page_id)
 }
