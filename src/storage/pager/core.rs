@@ -1,5 +1,5 @@
 use super::{
-    JournalMode, Pager, PagerState, PagerTransaction, RollbackSavepoint, RollbackTransaction,
+    JournalMode, Pager, PagerSavepoint, PagerState, PagerTransaction, RollbackTransaction,
     WalTransaction,
 };
 use crate::error::Result;
@@ -88,18 +88,18 @@ impl Pager {
                 rollback.page_records.clear();
                 rollback.savepoints.clear();
                 rollback.next_savepoint_id = 1;
-                let baseline = RollbackSavepoint {
+                let baseline = PagerSavepoint {
                     id: 0,
                     file_manager: self.file_manager.snapshot()?,
-                    rollback_next_page_id: rollback.rollback_next_page_id,
-                    rollback_free_pages: rollback.rollback_free_list.as_slice().to_vec(),
-                    rollback_free_page_set: rollback
+                    next_page_id: rollback.rollback_next_page_id,
+                    free_pages: rollback.rollback_free_list.as_slice().to_vec(),
+                    free_page_set: rollback
                         .rollback_free_list
                         .as_slice()
                         .iter()
                         .copied()
                         .collect(),
-                    rollback_uninitialized_pages: rollback.rollback_uninitialized_pages.clone(),
+                    uninitialized_pages: rollback.rollback_uninitialized_pages.clone(),
                     page_checksums: self.page_checksums.clone(),
                     created_page_ids: PageSet::default(),
                     page_records: Vec::new(),
@@ -117,7 +117,11 @@ impl Pager {
                     wal_free_pages: Vec::new(),
                     wal_free_page_set: PageSet::default(),
                     original_checksums: HashMap::new(),
+                    savepoints: Vec::new(),
+                    next_savepoint_id: 1,
                 });
+                wal.savepoints.clear();
+                wal.next_savepoint_id = 1;
                 wal.wal_next_page_id = visible_state.visible_next_page_id();
                 wal.wal_free_pages.clone_from(&visible_state.free_pages);
                 wal.wal_free_page_set

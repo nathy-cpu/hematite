@@ -207,18 +207,22 @@ pub(crate) struct RollbackTransaction {
     rollback_uninitialized_pages: PageSet,
     journaled_pages: PageSet,
     page_records: Vec<JournalRecord>,
-    savepoints: Vec<RollbackSavepoint>,
+    savepoints: Vec<PagerSavepoint>,
     next_savepoint_id: u64,
 }
 
+/// A savepoint's undo state. Shared by both journal modes: what it takes to return to
+/// a mark is the same question either way, and only how a *commit* becomes durable
+/// differs between them.
 #[derive(Debug, Clone)]
-struct RollbackSavepoint {
+struct PagerSavepoint {
     id: u64,
     file_manager: FileManagerSnapshot,
-    rollback_next_page_id: PageId,
-    rollback_free_pages: Vec<PageId>,
-    rollback_free_page_set: PageSet,
-    rollback_uninitialized_pages: PageSet,
+    next_page_id: PageId,
+    free_pages: Vec<PageId>,
+    free_page_set: PageSet,
+    /// Rollback mode only; empty for WAL, which has no uninitialised-page concept.
+    uninitialized_pages: PageSet,
     page_checksums: HashMap<PageId, u32>,
     /// Pre-images of the pages modified since the savepoint was taken — the undo log.
     ///
@@ -241,6 +245,8 @@ pub(crate) struct WalTransaction {
     wal_free_pages: Vec<PageId>,
     wal_free_page_set: PageSet,
     original_checksums: HashMap<PageId, u32>,
+    savepoints: Vec<PagerSavepoint>,
+    next_savepoint_id: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -486,6 +492,27 @@ impl Pager {
         match &mut self.transaction {
             Some(PagerTransaction::Wal(transaction)) => Some(transaction),
             _ => None,
+        }
+    }
+
+    /// The active transaction's savepoints, whichever journal mode it is in.
+    ///
+    /// Returning to a mark is the same problem in both modes — undo the pages changed
+    /// since it — so the savepoint machinery is shared. Only how a *commit* becomes
+    /// durable differs.
+    fn active_savepoints_mut(&mut self) -> Option<&mut Vec<PagerSavepoint>> {
+        match &mut self.transaction {
+            Some(PagerTransaction::Rollback(transaction)) => Some(&mut transaction.savepoints),
+            Some(PagerTransaction::Wal(transaction)) => Some(&mut transaction.savepoints),
+            None => None,
+        }
+    }
+
+    fn active_savepoints(&self) -> Option<&Vec<PagerSavepoint>> {
+        match &self.transaction {
+            Some(PagerTransaction::Rollback(transaction)) => Some(&transaction.savepoints),
+            Some(PagerTransaction::Wal(transaction)) => Some(&transaction.savepoints),
+            None => None,
         }
     }
 

@@ -392,7 +392,7 @@ not available yet.",
         if transaction_active {
             let snapshot = self.snapshot()?;
             match operation(self) {
-                // Released, not dropped — see `Pager::release_rollback_savepoint`.
+                // Released, not dropped — see `Pager::release_savepoint`.
                 Ok(result) => {
                     self.release_snapshot(snapshot)?;
                     Ok(result)

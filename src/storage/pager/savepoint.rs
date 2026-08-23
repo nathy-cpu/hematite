@@ -1,4 +1,4 @@
-use super::{Pager, PagerState, PagerTransaction, RollbackSavepoint};
+use super::{Pager, PagerSavepoint, PagerState, PagerTransaction};
 use crate::error::Result;
 use crate::storage::{file_manager::FileManagerSnapshot, Page, PageId};
 use std::collections::HashMap;
@@ -8,7 +8,7 @@ use std::sync::Arc;
 ///
 /// Split out and boxed because the enum is only ever as small as its largest
 /// variant: inline, every snapshot cost a 424-byte move, including the
-/// `RollbackSavepoint` case that carries nothing but an id — and one snapshot is
+/// `PagerSavepoint` case that carries nothing but an id — and one snapshot is
 /// taken per row by `run_atomically`. Boxed, the enum is two words.
 #[derive(Debug, Clone)]
 pub(crate) struct FullSnapshot {
@@ -38,7 +38,7 @@ pub(crate) struct FullSnapshot {
 #[derive(Debug, Clone)]
 pub(crate) enum PagerSnapshot {
     Full(Box<FullSnapshot>),
-    RollbackSavepoint { id: u64 },
+    PagerSavepoint { id: u64 },
 }
 
 impl PagerSnapshot {
@@ -70,64 +70,86 @@ impl Pager {
         Ok(dirty_pages)
     }
 
-    pub(crate) fn create_rollback_savepoint(&mut self) -> Result<u64> {
+    /// Takes a savepoint in whichever journal mode is active.
+    ///
+    /// O(1) in the number of dirty pages: nothing is copied here, and the undo log is
+    /// filled lazily by `snapshot_original_page` as pages are modified.
+    pub(crate) fn create_savepoint(&mut self) -> Result<u64> {
         let file_manager = self.file_manager.snapshot()?;
         let page_checksums = self.page_checksums.clone();
 
-        let savepoint = {
-            let transaction = self.active_rollback_transaction().ok_or_else(|| {
-                crate::error::HematiteError::StorageError(
-                    "Rollback savepoints require an active rollback transaction".to_string(),
-                )
-            })?;
-
-            RollbackSavepoint {
+        let savepoint = match &self.transaction {
+            Some(super::PagerTransaction::Rollback(transaction)) => PagerSavepoint {
                 id: transaction.next_savepoint_id,
                 file_manager,
-                rollback_next_page_id: transaction.rollback_next_page_id,
-                rollback_free_pages: transaction.rollback_free_list.as_slice().to_vec(),
-                rollback_free_page_set: transaction
+                next_page_id: transaction.rollback_next_page_id,
+                free_pages: transaction.rollback_free_list.as_slice().to_vec(),
+                free_page_set: transaction
                     .rollback_free_list
                     .as_slice()
                     .iter()
                     .copied()
                     .collect(),
-                rollback_uninitialized_pages: transaction.rollback_uninitialized_pages.clone(),
+                uninitialized_pages: transaction.rollback_uninitialized_pages.clone(),
                 page_checksums,
                 page_records: Vec::new(),
                 captured_page_ids: crate::storage::page_hash::PageSet::default(),
                 created_page_ids: crate::storage::page_hash::PageSet::default(),
+            },
+            Some(super::PagerTransaction::Wal(transaction)) => PagerSavepoint {
+                id: transaction.next_savepoint_id,
+                file_manager,
+                next_page_id: transaction.wal_next_page_id,
+                free_pages: transaction.wal_free_pages.clone(),
+                free_page_set: transaction.wal_free_page_set.clone(),
+                uninitialized_pages: crate::storage::page_hash::PageSet::default(),
+                page_checksums,
+                page_records: Vec::new(),
+                captured_page_ids: crate::storage::page_hash::PageSet::default(),
+                created_page_ids: crate::storage::page_hash::PageSet::default(),
+            },
+            None => {
+                return Err(crate::error::HematiteError::StorageError(
+                    "Savepoints require an active transaction".to_string(),
+                ))
             }
         };
-        let transaction = self.active_rollback_transaction_mut().ok_or_else(|| {
-            crate::error::HematiteError::StorageError(
-                "Rollback savepoint state disappeared during snapshot creation".to_string(),
-            )
-        })?;
+
         let id = savepoint.id.max(1);
-        transaction.next_savepoint_id = id.saturating_add(1);
-        transaction
-            .savepoints
-            .push(RollbackSavepoint { id, ..savepoint });
+        match &mut self.transaction {
+            Some(super::PagerTransaction::Rollback(transaction)) => {
+                transaction.next_savepoint_id = id.saturating_add(1);
+                transaction
+                    .savepoints
+                    .push(PagerSavepoint { id, ..savepoint });
+            }
+            Some(super::PagerTransaction::Wal(transaction)) => {
+                transaction.next_savepoint_id = id.saturating_add(1);
+                transaction
+                    .savepoints
+                    .push(PagerSavepoint { id, ..savepoint });
+            }
+            None => {
+                return Err(crate::error::HematiteError::StorageError(
+                    "Transaction disappeared during savepoint creation".to_string(),
+                ))
+            }
+        }
         Ok(id)
     }
 
-    pub(crate) fn restore_rollback_savepoint(&mut self, id: u64) -> Result<()> {
-        let Some(transaction) = self.active_rollback_transaction() else {
+    pub(crate) fn restore_savepoint(&mut self, id: u64) -> Result<()> {
+        let Some(savepoints) = self.active_savepoints() else {
             return Ok(());
         };
 
-        let position = transaction
-            .savepoints
+        let position = savepoints
             .iter()
             .position(|savepoint| savepoint.id == id)
             .ok_or_else(|| {
-                crate::error::HematiteError::StorageError(format!(
-                    "Rollback savepoint {} is not active",
-                    id
-                ))
+                crate::error::HematiteError::StorageError(format!("Savepoint {} is not active", id))
             })?;
-        let savepoint = transaction.savepoints[position].clone();
+        let savepoint = savepoints[position].clone();
 
         self.file_manager
             .restore_snapshot(savepoint.file_manager.clone())?;
@@ -148,17 +170,31 @@ impl Pager {
             cache.mark_dirty(record.page_id);
         }
 
-        let transaction = self.active_rollback_transaction_mut().ok_or_else(|| {
-            crate::error::HematiteError::StorageError(
-                "Rollback transaction disappeared during savepoint restore".to_string(),
-            )
-        })?;
-        transaction.rollback_next_page_id = savepoint.rollback_next_page_id;
-        transaction
-            .rollback_free_list
-            .replace(savepoint.rollback_free_pages.clone());
-        transaction.rollback_uninitialized_pages = savepoint.rollback_uninitialized_pages.clone();
-        transaction.savepoints.truncate(position + 1);
+        // Restore the allocation state each mode tracks separately, then drop the
+        // savepoints taken after this one.
+        match &mut self.transaction {
+            Some(super::PagerTransaction::Rollback(transaction)) => {
+                transaction.rollback_next_page_id = savepoint.next_page_id;
+                transaction
+                    .rollback_free_list
+                    .replace(savepoint.free_pages.clone());
+                transaction.rollback_uninitialized_pages = savepoint.uninitialized_pages.clone();
+                transaction.savepoints.truncate(position + 1);
+            }
+            Some(super::PagerTransaction::Wal(transaction)) => {
+                transaction.wal_next_page_id = savepoint.next_page_id;
+                transaction.wal_free_pages.clone_from(&savepoint.free_pages);
+                transaction
+                    .wal_free_page_set
+                    .clone_from(&savepoint.free_page_set);
+                transaction.savepoints.truncate(position + 1);
+            }
+            None => {
+                return Err(crate::error::HematiteError::StorageError(
+                    "Transaction disappeared during savepoint restore".to_string(),
+                ))
+            }
+        }
         self.sync_rollback_journal_from_transaction()?;
         self.state = if self.cache_mut()?.dirty_page_ids().is_empty() {
             PagerState::WriterLocked
@@ -169,11 +205,13 @@ impl Pager {
     }
 
     pub(crate) fn snapshot(&mut self) -> Result<PagerSnapshot> {
-        if self.journal_mode == super::JournalMode::Rollback
-            && self.active_rollback_transaction().is_some()
-        {
-            return Ok(PagerSnapshot::RollbackSavepoint {
-                id: self.create_rollback_savepoint()?,
+        // Both modes take the cheap path now. WAL used to fall through to `Full`,
+        // which copies a handle to every dirty page — per row, since `run_atomically`
+        // snapshots per row. That made WAL inserts 21 % more expensive than rollback
+        // for no reason other than the undo log being rollback-only.
+        if self.transaction.is_some() {
+            return Ok(PagerSnapshot::PagerSavepoint {
+                id: self.create_savepoint()?,
             });
         }
 
@@ -212,16 +250,12 @@ impl Pager {
     /// Releasing truncates from this savepoint upward, matching SQL semantics: a
     /// release invalidates the savepoints taken after it too. `run_atomically` nests
     /// strictly, so in practice this pops exactly one.
-    pub(crate) fn release_rollback_savepoint(&mut self, id: u64) -> Result<()> {
-        let Some(transaction) = self.active_rollback_transaction_mut() else {
+    pub(crate) fn release_savepoint(&mut self, id: u64) -> Result<()> {
+        let Some(savepoints) = self.active_savepoints_mut() else {
             return Ok(());
         };
-        if let Some(position) = transaction
-            .savepoints
-            .iter()
-            .position(|savepoint| savepoint.id == id)
-        {
-            transaction.savepoints.truncate(position);
+        if let Some(position) = savepoints.iter().position(|savepoint| savepoint.id == id) {
+            savepoints.truncate(position);
         }
         Ok(())
     }
@@ -232,7 +266,7 @@ impl Pager {
             // A full snapshot owns its page handles outright, so dropping it releases
             // them; there is no registry entry to remove.
             PagerSnapshot::Full(_) => Ok(()),
-            PagerSnapshot::RollbackSavepoint { id } => self.release_rollback_savepoint(id),
+            PagerSnapshot::PagerSavepoint { id } => self.release_savepoint(id),
         }
     }
 
@@ -271,7 +305,7 @@ impl Pager {
                 self.state = state;
                 Ok(())
             }
-            PagerSnapshot::RollbackSavepoint { id } => self.restore_rollback_savepoint(id),
+            PagerSnapshot::PagerSavepoint { id } => self.restore_savepoint(id),
         }
     }
 }

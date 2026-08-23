@@ -1,4 +1,4 @@
-use super::{JournalMode, Pager, WalFileStamp};
+use super::{JournalMode, Pager, PagerTransaction, WalFileStamp};
 use crate::error::Result;
 use crate::storage::journal::{
     append_journal_record, initialize_journal_file, write_commit_intents,
@@ -298,22 +298,25 @@ impl Pager {
     }
 
     pub(super) fn snapshot_original_page(&mut self, page_id: PageId) -> Result<()> {
-        if self.journal_mode == JournalMode::Wal {
-            return Ok(());
-        }
+        // Two independent questions, and they used to be conflated. The rollback
+        // journal needs one pre-image per page per *transaction*; a savepoint needs
+        // one per page per *savepoint*. The `journaled_pages` check answered only the
+        // first and returned early, so a page written before a savepoint and again
+        // after it never reached the capture loop below — which is why savepoints
+        // also had to eagerly copy every dirty page when they were created.
+        //
+        // Only the journal half is rollback-specific. This used to return immediately
+        // in WAL mode, which left WAL with no undo log and forced its snapshots to
+        // copy every dirty page per row instead.
+        let needs_journal_record = self.journal_mode != JournalMode::Wal
+            && self
+                .active_rollback_transaction()
+                .is_some_and(|transaction| !transaction.journaled_pages.contains(&page_id));
 
-        let Some(transaction) = self.active_rollback_transaction() else {
+        let Some(savepoints) = self.active_savepoints() else {
             return Ok(());
         };
-
-        // Two independent questions, and they used to be conflated. The journal needs
-        // one pre-image per page per *transaction*; a savepoint needs one per page per
-        // *savepoint*. The `journaled_pages` check answered only the first and
-        // returned early, so a page written before a savepoint and again after it
-        // never reached the capture loop below — which is why savepoints also had to
-        // eagerly copy every dirty page when they were created.
-        let needs_journal_record = !transaction.journaled_pages.contains(&page_id);
-        let needs_savepoint_capture = transaction.savepoints.iter().any(|savepoint| {
+        let needs_savepoint_capture = savepoints.iter().any(|savepoint| {
             page_is_live_at_savepoint(page_id, savepoint)
                 && !savepoint.captured_page_ids.contains(&page_id)
         });
@@ -322,14 +325,29 @@ impl Pager {
             return Ok(());
         }
 
-        let page_start = page_id as u64 * PAGE_SIZE as u64;
-        let page_end = page_start.saturating_add(PAGE_SIZE as u64);
-        if page_end > transaction.original_file_len {
-            // The page did not exist when the transaction began, so there is no
-            // pre-image to keep. A savepoint records it as created instead, and
-            // rolling back to that savepoint drops it from the cache.
-            if let Some(transaction) = self.active_rollback_transaction_mut() {
-                for savepoint in &mut transaction.savepoints {
+        // A page past the length the file had when the transaction began has no
+        // pre-image on disk. That bound is rollback's; in WAL mode a page's previous
+        // version may live in the WAL rather than the file, so the equivalent question
+        // is answered per savepoint by `page_is_live_at_savepoint` instead.
+        let page_end = (page_id as u64 * PAGE_SIZE as u64).saturating_add(PAGE_SIZE as u64);
+        let beyond_original_file = match &self.transaction {
+            Some(PagerTransaction::Rollback(transaction)) => {
+                page_end > transaction.original_file_len
+            }
+            Some(PagerTransaction::Wal(_)) => false,
+            None => return Ok(()),
+        };
+
+        let is_live_somewhere = self.active_savepoints().is_some_and(|savepoints| {
+            savepoints
+                .iter()
+                .any(|savepoint| page_is_live_at_savepoint(page_id, savepoint))
+        });
+
+        if beyond_original_file || !(is_live_somewhere || needs_journal_record) {
+            // Nothing to preserve. Record it as created so a rollback drops it.
+            if let Some(savepoints) = self.active_savepoints_mut() {
+                for savepoint in savepoints.iter_mut() {
                     if !page_is_live_at_savepoint(page_id, savepoint) {
                         savepoint.created_page_ids.insert(page_id);
                     }
@@ -338,14 +356,22 @@ impl Pager {
             return Ok(());
         }
 
+        // The pre-image: the page as it stands *before* this write, which is why this
+        // runs ahead of `cache.put`. In WAL mode the newest version may be a WAL frame
+        // rather than the file, so go through the WAL-aware path when the cache misses.
         let mut page = if let Some(page) = self.cache_mut()?.peek(page_id) {
             page.clone()
+        } else if self.journal_mode == JournalMode::Wal {
+            match self.read_wal_page_data(page_id)? {
+                Some(data) => Page::from_bytes(page_id, data)?,
+                None => self.file_manager.read_page(page_id)?,
+            }
         } else {
             self.file_manager.read_page(page_id)?
         };
 
-        if let Some(transaction) = self.active_rollback_transaction_mut() {
-            for savepoint in &mut transaction.savepoints {
+        if let Some(savepoints) = self.active_savepoints_mut() {
+            for savepoint in savepoints.iter_mut() {
                 if !page_is_live_at_savepoint(page_id, savepoint) {
                     savepoint.created_page_ids.insert(page_id);
                     continue;
@@ -760,7 +786,6 @@ impl Pager {
 /// A page that did not is one the transaction created afterwards: it has no
 /// pre-image, and rolling back to the savepoint should drop it rather than restore
 /// anything.
-fn page_is_live_at_savepoint(page_id: PageId, savepoint: &super::RollbackSavepoint) -> bool {
-    page_id < savepoint.rollback_next_page_id
-        && !savepoint.rollback_free_page_set.contains(&page_id)
+fn page_is_live_at_savepoint(page_id: PageId, savepoint: &super::PagerSavepoint) -> bool {
+    page_id < savepoint.next_page_id && !savepoint.free_page_set.contains(&page_id)
 }

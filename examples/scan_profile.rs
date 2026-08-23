@@ -19,14 +19,19 @@
 //!
 //! Allocations per row: the same two runs under `--tool=dhat`, diffing "blocks".
 
+use hematite::query::JournalMode;
 use hematite::Hematite;
 
 const ROWS: usize = 20_000;
 
 fn main() {
     let path = ".scratch/scan_profile.db";
+    let _ = std::fs::remove_file(".scratch/scan_profile.db.wal");
     let _ = std::fs::remove_file(path);
     let mut h = Hematite::new(path).expect("open");
+    if std::env::var("MODE").as_deref() == Ok("wal") {
+        h.set_journal_mode(JournalMode::Wal).expect("wal");
+    }
     h.execute("CREATE TABLE t (id INT PRIMARY KEY, a INT, b INT, c INT, d INT);")
         .expect("create");
 

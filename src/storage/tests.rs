@@ -4297,8 +4297,51 @@ mod wal_salt_tests {
 /// instead of mutating the one the savepoint holds — the outstanding `Arc` is what
 /// forces that. This checks the property that argument rests on.
 mod savepoint_sharing_tests {
-    use crate::storage::{Page, Pager};
+    use crate::storage::{JournalMode, Page, Pager};
     use crate::test_utils::TestDbFile;
+
+    /// WAL mode has to roll back to a savepoint too.
+    ///
+    /// It could not until the undo log stopped being rollback-specific: WAL
+    /// transactions had no savepoints, so `snapshot` fell back to copying every dirty
+    /// page. Nothing in the suite covered this — when WAL restore was briefly a silent
+    /// no-op, every existing test still passed.
+    #[test]
+    fn wal_mode_rolls_back_to_a_savepoint() {
+        let db = TestDbFile::new("_test_savepoint_wal_restore");
+        let mut pager = Pager::new(db.path(), 64).expect("open");
+        pager
+            .set_journal_mode(JournalMode::Wal)
+            .expect("journal mode");
+
+        let page_id = pager.allocate_page().expect("allocate");
+        pager.begin_transaction().expect("begin");
+        let mut page = Page::new(page_id);
+        page.data.fill(0x11);
+        pager.write_page(page).expect("write");
+        pager.commit_transaction().expect("commit");
+
+        pager.begin_transaction().expect("begin");
+        let mut page = Page::new(page_id);
+        page.data.fill(0x22);
+        pager.write_page(page).expect("write");
+
+        let snapshot = pager.snapshot().expect("snapshot");
+
+        let mut page = Page::new(page_id);
+        page.data.fill(0x33);
+        pager.write_page(page).expect("write");
+
+        pager.restore_snapshot(snapshot).expect("restore");
+        assert_eq!(
+            pager.read_page(page_id).expect("read").data[0],
+            0x22,
+            "restoring a WAL savepoint did not undo the write after it"
+        );
+
+        pager.commit_transaction().expect("commit");
+        assert_eq!(pager.read_page(page_id).expect("read").data[0], 0x22);
+    }
 
     /// A page the transaction created after the savepoint has no pre-image, so
     /// rolling back has to drop it rather than restore anything. Rollback used to
