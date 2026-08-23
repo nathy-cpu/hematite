@@ -885,25 +885,41 @@ should start by finding it rather than by reasoning from which code contains a `
 Recorded because the audit's whole point is that this project's priors about its own hot
 spots are unreliable, and a measured non-result is worth as much as a measured win.
 
-### Resolved: it was the savepoints
+### Attributed: `calloc`, and it is still there
 
-Rebuilding with `debug = true` in the release profile gave callgrind the symbols to
-attribute it: **`calloc`, 167 482 812 Ir over 40 690 calls**, ~4 116 each — exactly
-`vec![0u8; PAGE_SIZE]`. The earlier reading missed it by looking only at the
-allocator-side `calloc` entry (0.95 %) and not the memset-side one. The pool *was* the
-problem; both fixes above were downstream of the actual cause.
+Rebuilding with `debug = true` in the release profile gave callgrind the symbols:
+**`calloc`, 167 482 812 Ir over 40 690 calls**, ~4 116 each — exactly
+`vec![0u8; PAGE_SIZE]`, about two per row. The earlier reading missed it by looking
+only at the allocator-side `calloc` entry (0.95 %) and not the memset-side one.
 
-The cause: `run_atomically` dropped only a savepoint's *id* on success, leaving the
-savepoint in `transaction.savepoints` until the transaction ended — 401 of them after
-200 rows. Each pins every page dirty at the time, so `Arc::try_unwrap` on a displaced
-page never succeeded and no buffer was ever reclaimed. Releasing on success:
+### The savepoint fix was real, but not this
 
-| | before | after |
-|---|---|---|
-| insert phase (Ir) | 2 116 810 044 | **1 690 244 447** (−20.2 %) |
-| heap churn | 1.13 GB | **615 MB** (−45.5 %) |
-| scan (Ir/row) | 2 489 | **2 446** |
+Releasing savepoints on success (see below) took the insert path down 20.2 %. **It did
+not touch the memset**: `calloc` measured 40 690 calls before and 40 691 after, and
+`__memset` went 171.5 M → 173.6 M. An earlier version of this section claimed the
+savepoint release resolved the memset. It did not, and the commit message for
+`4fa4a5b` makes the same wrong claim. The 20.2 % came from deleting savepoint
+bookkeeping — a `Vec` of `Arc`s per row, `share_dirty_pages`, the per-row set builds —
+not from unblocking the buffer pool.
 
-Worth keeping as a pattern: two changes aimed at the mechanism measured zero, and the
-cause was one level up. Attributing the cost before changing anything — which needed
-nothing more than a debug-symbol rebuild — would have found it first.
+### Why the pool still cannot be fed
+
+Three attempts, all measuring zero:
+
+1. Zero on acquire rather than on release. Buffers barely return, so the `fill` barely ran.
+2. Reclaim the buffer displaced by `put_shared_with_view`. `Arc::try_unwrap` failed every time.
+3. The same again after savepoints stopped pinning dirty pages. Still zero.
+
+The remaining holder is `BTreeNode::raw_page: Option<Arc<Page>>`
+([node.rs:126](src/btree/node.rs#L126)). A node holds a handle to the page it is
+reading or mutating, so when the mutated page is written back the displaced `Arc` is
+never the last reference. The pool can only be fed on eviction, and in a write-heavy
+workload pages are replaced far more often than evicted.
+
+So this is not reachable by patching the pool. It is the **frame arena** (plan phase
+S3.2): pages live in one contiguous allocation and are addressed by frame index rather
+than owned by `Arc<Page>`, which removes both the per-write `calloc` and the question
+of who holds the last reference. S3 was deferred on the grounds that the pool *hit*
+path measured 106 ns and was not a bottleneck. That reasoning still holds for hits —
+but the pool *miss* path is now ~10 % of the insert profile, which is a different and
+better argument for the same work.
