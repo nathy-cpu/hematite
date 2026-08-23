@@ -3,7 +3,8 @@ use super::{
     WalTransaction,
 };
 use crate::error::Result;
-use std::collections::{HashMap, HashSet};
+use crate::storage::page_hash::PageSet;
+use std::collections::HashMap;
 
 /// Recycle a finished transaction into the scratch slots, freeing any data that is
 /// only needed for rollback (dirty-page images, page-record copies, savepoint
@@ -68,8 +69,8 @@ impl Pager {
                             original_checksums: HashMap::new(),
                             rollback_next_page_id: 0,
                             rollback_free_list: crate::storage::free_list::FreeList::new(),
-                            rollback_uninitialized_pages: HashSet::new(),
-                            journaled_pages: HashSet::new(),
+                            rollback_uninitialized_pages: PageSet::default(),
+                            journaled_pages: PageSet::default(),
                             page_records: Vec::new(),
                             savepoints: Vec::new(),
                             next_savepoint_id: 1,
@@ -102,7 +103,7 @@ impl Pager {
                     page_checksums: self.page_checksums.clone(),
                     dirty_pages: Vec::new(),
                     page_records: Vec::new(),
-                    captured_page_ids: HashSet::new(),
+                    captured_page_ids: PageSet::default(),
                 };
                 rollback.savepoints.push(baseline);
                 PagerTransaction::Rollback(rollback)
@@ -114,7 +115,7 @@ impl Pager {
                 let mut wal = self.wal_scratch.take().unwrap_or_else(|| WalTransaction {
                     wal_next_page_id: 0,
                     wal_free_pages: Vec::new(),
-                    wal_free_page_set: HashSet::new(),
+                    wal_free_page_set: PageSet::default(),
                     original_checksums: HashMap::new(),
                 });
                 wal.wal_next_page_id = visible_state.visible_next_page_id();

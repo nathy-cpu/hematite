@@ -180,13 +180,14 @@ use self::state::PagerLockMode;
 use crate::error::Result;
 use crate::storage::free_list::FreeList;
 use crate::storage::journal::JournalRecord;
+use crate::storage::page_hash::PageSet;
 use crate::storage::stats::{PagerStats, StatsSnapshot};
 use crate::storage::wal::VisibleWalState;
 use crate::storage::{
     file_len_for_next_page_id, file_manager::FileManager, file_manager::FileManagerSnapshot, Page,
     PageId, DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
@@ -203,8 +204,8 @@ pub(crate) struct RollbackTransaction {
     original_checksums: HashMap<PageId, u32>,
     rollback_next_page_id: PageId,
     rollback_free_list: FreeList,
-    rollback_uninitialized_pages: HashSet<PageId>,
-    journaled_pages: HashSet<PageId>,
+    rollback_uninitialized_pages: PageSet,
+    journaled_pages: PageSet,
     page_records: Vec<JournalRecord>,
     savepoints: Vec<RollbackSavepoint>,
     next_savepoint_id: u64,
@@ -216,8 +217,8 @@ struct RollbackSavepoint {
     file_manager: FileManagerSnapshot,
     rollback_next_page_id: PageId,
     rollback_free_pages: Vec<PageId>,
-    rollback_free_page_set: HashSet<PageId>,
-    rollback_uninitialized_pages: HashSet<PageId>,
+    rollback_free_page_set: PageSet,
+    rollback_uninitialized_pages: PageSet,
     page_checksums: HashMap<PageId, u32>,
     /// Images of the pages that were dirty when the savepoint was taken.
     ///
@@ -229,14 +230,14 @@ struct RollbackSavepoint {
     /// later write copies the page into a fresh buffer rather than mutating this one.
     dirty_pages: Vec<Arc<Page>>,
     page_records: Vec<JournalRecord>,
-    captured_page_ids: HashSet<PageId>,
+    captured_page_ids: PageSet,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct WalTransaction {
     wal_next_page_id: PageId,
     wal_free_pages: Vec<PageId>,
-    wal_free_page_set: HashSet<PageId>,
+    wal_free_page_set: PageSet,
     original_checksums: HashMap<PageId, u32>,
 }
 

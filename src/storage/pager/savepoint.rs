@@ -77,7 +77,7 @@ impl Pager {
         let dirty_page_ids = dirty_pages
             .iter()
             .map(|page| page.id)
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<crate::storage::page_hash::PageSet>();
 
         let savepoint = {
             let transaction = self.active_rollback_transaction().ok_or_else(|| {

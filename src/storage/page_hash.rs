@@ -17,7 +17,7 @@
 //! panics rather than silently hashing badly, so a map keyed by something other than
 //! a page id cannot pick this up by accident.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
 
 /// 2^64 divided by the golden ratio, rounded to an odd number.
@@ -56,6 +56,14 @@ impl Hasher for PageIdHasher {
 
 /// A `HashMap` keyed by page id.
 pub(crate) type PageMap<V> = HashMap<u32, V, BuildHasherDefault<PageIdHasher>>;
+
+/// A `HashSet` of page ids.
+///
+/// The pager keeps seven of these — journaled pages, captured pages, free-page
+/// sets — and several are rebuilt per row, because a rollback savepoint is taken per
+/// row. Under `RandomState` that made `HashMap<u32, ()>::insert` 2.9 % of a batched
+/// insert, all of it SipHash over four bytes.
+pub(crate) type PageSet = HashSet<u32, BuildHasherDefault<PageIdHasher>>;
 
 #[cfg(test)]
 mod tests {

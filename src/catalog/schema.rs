@@ -1,7 +1,7 @@
 //! Schema management for database metadata
 
 use super::column::Column;
-use super::ids::TableId;
+use super::ids::{IdMap, TableId};
 use super::object::NamedConstraintKind;
 use super::table::{CheckConstraint, ForeignKeyConstraint, SecondaryIndex, Table};
 use crate::error::HematiteError;
@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct Schema {
-    tables: HashMap<TableId, Table>,
+    tables: IdMap<TableId, Table>,
     table_names: HashMap<String, TableId>,
     next_table_id: u32,
     next_column_id: u32,
@@ -19,7 +19,7 @@ pub struct Schema {
 impl Schema {
     pub fn new() -> Self {
         Self {
-            tables: HashMap::new(),
+            tables: IdMap::default(),
             table_names: HashMap::new(),
             next_table_id: 1,
             next_column_id: 1,
@@ -107,11 +107,11 @@ impl Schema {
             .and_then(|&id| self.tables.get(&id))
     }
 
-    pub(crate) fn tables(&self) -> &HashMap<TableId, Table> {
+    pub(crate) fn tables(&self) -> &IdMap<TableId, Table> {
         &self.tables
     }
 
-    pub(crate) fn tables_mut(&mut self) -> &mut HashMap<TableId, Table> {
+    pub(crate) fn tables_mut(&mut self) -> &mut IdMap<TableId, Table> {
         &mut self.tables
     }
 
@@ -420,7 +420,7 @@ impl Schema {
         offset += 4;
 
         let mut schema = Self {
-            tables: HashMap::new(),
+            tables: IdMap::default(),
             table_names: HashMap::new(),
             next_table_id,
             next_column_id,

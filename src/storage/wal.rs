@@ -103,6 +103,7 @@
 use crate::error::{HematiteError, Result};
 use crate::storage::checksum;
 use crate::storage::metadata_page;
+use crate::storage::page_hash::PageSet;
 use crate::storage::pager::JournalMode;
 use crate::storage::pager_metadata::PersistedPagerState;
 use crate::storage::{
@@ -111,7 +112,7 @@ use crate::storage::{
 };
 #[cfg(test)]
 use std::collections::BTreeMap;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{IoSlice, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -324,7 +325,7 @@ pub struct VisibleWalState {
     pub visible_sequence: u64,
     pub file_len: u64,
     pub free_pages: Vec<PageId>,
-    pub free_page_set: HashSet<PageId>,
+    pub free_page_set: PageSet,
     pub page_checksums: HashMap<PageId, u32>,
     /// Byte offset into the WAL file for each overridden page.
     /// Used to read page data on-demand instead of storing full images.
@@ -341,7 +342,7 @@ impl VisibleWalState {
         free_pages: Vec<PageId>,
         page_checksums: HashMap<PageId, u32>,
     ) -> Self {
-        let free_page_set = free_pages.iter().copied().collect();
+        let free_page_set: PageSet = free_pages.iter().copied().collect();
         Self {
             visible_sequence: 0,
             file_len,
@@ -380,7 +381,7 @@ impl VisibleWalState {
         }
 
         let visible_next_page_id = visible_next_page_id(file_len);
-        let free_page_set = free_pages.iter().copied().collect::<HashSet<_>>();
+        let free_page_set = free_pages.iter().copied().collect::<PageSet>();
         self.page_override_offsets.retain(|page_id, _| {
             *page_id < visible_next_page_id && !free_page_set.contains(page_id)
         });
@@ -598,7 +599,7 @@ pub(crate) fn load_visible_state_from_path_with_base<P: AsRef<Path>>(
     };
 
     let visible_next_page_id = next_page_id_for_file_len(file_len);
-    let free_page_set = free_pages.iter().copied().collect::<HashSet<_>>();
+    let free_page_set = free_pages.iter().copied().collect::<PageSet>();
 
     // Compute checksums from the in-memory data (still needed for correctness)
     // but only store page IDs as override markers.
