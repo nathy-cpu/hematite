@@ -54,13 +54,12 @@ impl BTreeManager {
     }
 
     pub fn open_tree(&mut self, root_page_id: PageId) -> Result<BTreeIndex> {
-        // Confirms the id really names a B-tree page before handing out a handle to
-        // it. The `verify` used to be implicit: `from_shared_page` structurally
-        // validated every page it loaded, so this line read as a bare discard. It is
-        // explicit now, and costs one page per tree open rather than one per page
-        // touched.
+        // Confirms the id really names a parseable B-tree page before handing out a
+        // handle to it. Deliberately *not* a `verify`: `open_tree` is called once per
+        // inserted row, so a whole-page structural pass here is paid per row and
+        // grows with the root's cell count. Those checks belong to `validate_tree`.
         let page = self.lock_storage_read()?.read_page_shared(root_page_id)?;
-        BTreeNode::from_shared_page(page)?.verify()?;
+        let _node = BTreeNode::from_shared_page(page)?;
         Ok(BTreeIndex::from_shared_storage(
             self.storage.clone(),
             root_page_id,

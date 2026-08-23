@@ -2055,20 +2055,23 @@ mod tree_tests {
         Ok(())
     }
 
-    /// Duplicate cell pointers on a root page are caught when the tree is opened.
+    /// Duplicate cell pointers are caught by the integrity check.
     ///
     /// This used to assert that `get`/`seek`/`first` each returned `CorruptedData`,
-    /// because `from_shared_page` structurally validated every page it loaded. That
-    /// pass cost ~28-30 % of a batched insert and is now `verify`, run by
-    /// `validate_integrity` and by `open_tree` — so a fresh open of a corrupt root
-    /// still errors, which is how a reader reaches it in practice.
+    /// because `from_shared_page` structurally validated every page it loaded — a
+    /// pass worth ~28-30 % of a batched insert. It is `verify` now, called from
+    /// `validate_tree`.
     ///
-    /// The narrowing is real and worth stating: a handle obtained *before* the
-    /// corruption keeps reading through it, and duplicate pointers make a key look
-    /// absent rather than raise. Detection on the access path now covers cells that
+    /// It is deliberately *not* called from `open_tree`: that runs once per inserted
+    /// row, and putting a whole-page pass there measured 5.7 % of the insert path,
+    /// growing with the root's cell count. Cheap-looking checks on per-row paths are
+    /// not cheap.
+    ///
+    /// The narrowing is real and worth stating: duplicate pointers now make a key
+    /// look absent rather than raise. Detection on the access path covers cells that
     /// fail to parse, not cells that parse but disagree with their neighbours.
     #[test]
-    fn test_byte_tree_corrupted_root_is_rejected_on_open() -> Result<()> {
+    fn test_byte_tree_duplicate_cell_pointers_are_caught_by_integrity_check() -> Result<()> {
         let trees = ByteTreeStore::new(Pager::new_in_memory(100)?);
         let root_page_id = trees.create_tree()?;
         let mut tree = trees.open_tree(root_page_id)?;
@@ -2083,14 +2086,13 @@ mod tree_tests {
         pager.write_page(page)?;
         drop(pager);
 
-        match trees.open_tree(root_page_id) {
+        // `validate_tree` returns Err on a structural fault and Ok(false) on a
+        // semantic one; duplicate pointers are the former.
+        match trees.clone().validate_tree(root_page_id) {
             Err(crate::error::HematiteError::CorruptedData(_)) => {}
             Err(other) => panic!("expected CorruptedData, got {other:?}"),
-            Ok(_) => panic!("opening a tree with duplicate cell pointers should fail"),
+            Ok(valid) => assert!(!valid, "duplicate cell pointers should not validate"),
         }
-
-        // And the integrity check, which walks every page rather than just roots.
-        assert!(!trees.clone().validate_tree(root_page_id).unwrap_or(false));
 
         Ok(())
     }
