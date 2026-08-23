@@ -265,12 +265,11 @@ mod pager_tests {
     };
     use crate::test_utils::TestDbFile;
     use std::collections::HashMap;
-    
+
     use std::fs;
-    
+
     use std::io::{Seek, SeekFrom, Write};
-    
-    
+
     use std::sync::{Arc, Barrier, RwLock};
     use std::thread;
 
@@ -286,7 +285,6 @@ mod pager_tests {
         }
         hash
     }
-
 
     #[test]
     fn test_pager_write_is_buffered_until_flush() -> crate::error::Result<()> {

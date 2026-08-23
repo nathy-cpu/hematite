@@ -923,10 +923,7 @@ impl SelectExecutor {
     /// this when they have at least one row to project: raising it eagerly would
     /// make `SELECT ambiguous FROM empty` start erroring where it used to return
     /// nothing.
-    fn resolve_projection_columns(
-        &self,
-        sources: &[ResolvedSource],
-    ) -> Result<Vec<Option<usize>>> {
+    fn resolve_projection_columns(&self, sources: &[ResolvedSource]) -> Result<Vec<Option<usize>>> {
         self.statement
             .columns
             .iter()

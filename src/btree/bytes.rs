@@ -45,7 +45,8 @@ use crate::btree::tree::{
     collect_tree_page_ids, collect_tree_space_stats, reset_tree_pages, BTreeManager, TreeSpaceStats,
 };
 use crate::btree::value_store::{
-    free_stored_value_overflow, hydrate_stored_value, inline_payload, materialize_stored_value, StoredValueLayout,
+    free_stored_value_overflow, hydrate_stored_value, inline_payload, materialize_stored_value,
+    StoredValueLayout,
 };
 use crate::btree::NodeType;
 use crate::btree::{BTreeKey, BTreeValue};

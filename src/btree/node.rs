@@ -125,7 +125,6 @@ pub struct BTreeNode {
     pub payload_len: usize,
     pub raw_page: Option<Arc<Page>>,
     pub is_decoded: bool,
-    pub cell_offsets: Vec<u16>,
     /// The parsed header of `raw_page`, kept so per-cell access does not re-parse it.
     ///
     /// `cell_range_for_index` needs the header, and both `get_key_view` and
@@ -148,7 +147,6 @@ impl BTreeNode {
             payload_len: 0,
             raw_page: None,
             is_decoded: true,
-            cell_offsets: Vec::new(),
             header: None,
         }
     }
@@ -164,7 +162,6 @@ impl BTreeNode {
             payload_len: 0,
             raw_page: None,
             is_decoded: true,
-            cell_offsets: Vec::new(),
             header: None,
         }
     }
@@ -296,12 +293,6 @@ impl BTreeNode {
         node.payload_len = PAGE_SIZE.saturating_sub(header.cell_content_start as usize);
         node.raw_page = Some(page.clone());
         node.is_decoded = false;
-        // Build cell_offsets without intermediate iterator allocation.
-        let mut offsets = Vec::with_capacity(header.cell_count as usize);
-        for index in 0..header.cell_count as usize {
-            offsets.push(cell_pointer_from_header(&page, &header, index)?);
-        }
-        node.cell_offsets = offsets;
         node.header = Some(header);
         // Whole-page structural validation used to run here, on every page loaded,
         // including pages a cursor merely navigates past — ~28-30 % of a batched
@@ -337,7 +328,7 @@ impl BTreeNode {
 
         match self.node_type {
             NodeType::Leaf => {
-                for (i, &_offset) in self.cell_offsets.iter().enumerate() {
+                for i in 0..self.key_count {
                     let (start, end) = self.cell_range_for_index(i)?;
                     let (key, value) = parse_leaf_cell(&page.data[start..end])?;
                     self.keys.push_back(key);
@@ -345,7 +336,7 @@ impl BTreeNode {
                 }
             }
             NodeType::Internal => {
-                for (i, &_offset) in self.cell_offsets.iter().enumerate() {
+                for i in 0..self.key_count {
                     let (start, end) = self.cell_range_for_index(i)?;
                     let (left_child, key) = parse_internal_cell(&page.data[start..end])?;
                     self.children.push_back(left_child);
@@ -691,12 +682,6 @@ impl BTreeNode {
         self.is_decoded = false;
         let header = BTreePageHeaderV3::parse(page, is_p1)?;
         self.key_count = header.cell_count as usize;
-        // Rebuild cell_offsets without intermediate iterator/collect allocation.
-        let mut offsets = Vec::with_capacity(header.cell_count as usize);
-        for i in 0..header.cell_count as usize {
-            offsets.push(cell_pointer_from_header(page, &header, i)?);
-        }
-        self.cell_offsets = offsets;
         self.payload_len = PAGE_SIZE.saturating_sub(header.cell_content_start as usize);
         self.header = Some(header);
         self.keys.clear();
@@ -721,12 +706,6 @@ impl BTreeNode {
         self.is_decoded = false;
         let header = BTreePageHeaderV3::parse(page, is_p1)?;
         self.key_count = header.cell_count as usize;
-        // Refresh cell_offsets from page header without intermediate iterator allocation.
-        let mut offsets = Vec::with_capacity(header.cell_count as usize);
-        for i in 0..header.cell_count as usize {
-            offsets.push(cell_pointer_from_header(page, &header, i)?);
-        }
-        self.cell_offsets = offsets;
         self.payload_len = PAGE_SIZE.saturating_sub(header.cell_content_start as usize);
         self.header = Some(header);
         self.keys.clear();
@@ -828,7 +807,12 @@ impl BTreeNode {
         // the logical children array.
         let left_child: PageId = if pos < old_key_count {
             // Read from the cell currently at `pos` — first 4 bytes are child ptr.
-            let cell_offset = self.cell_offsets[pos] as usize;
+            // Parsed from the `page` argument rather than `self.header`: this reads
+            // into that buffer, and nothing here guarantees it is the same one
+            // `raw_page` holds. One parse per internal in-place insert, which only
+            // happens when a split propagates.
+            let page_header = BTreePageHeaderV3::parse(page, is_p1)?;
+            let cell_offset = cell_pointer_from_header(page, &page_header, pos)? as usize;
             u32::from_be_bytes([
                 page.data[cell_offset],
                 page.data[cell_offset + 1],
@@ -876,11 +860,6 @@ impl BTreeNode {
         self.raw_page = None;
         self.is_decoded = false;
         self.key_count = new_header.cell_count as usize;
-        let mut offsets = Vec::with_capacity(new_header.cell_count as usize);
-        for i in 0..new_header.cell_count as usize {
-            offsets.push(cell_pointer_from_header(page, &new_header, i)?);
-        }
-        self.cell_offsets = offsets;
         self.payload_len = PAGE_SIZE.saturating_sub(new_header.cell_content_start as usize);
         self.header = Some(new_header);
         self.keys.clear();
@@ -1290,16 +1269,8 @@ impl BTreeNode {
         // offset.  The previous dual-interpretation (index if < len, else
         // treated as offset) would silently return the wrong cell when the
         // cell count exceeded a cell's byte offset value.
-        let Some(&offset) = self.cell_offsets.get(index) else {
-            return Err(HematiteError::StorageError(format!(
-                "Cell index {} out of bounds (len={})",
-                index,
-                self.cell_offsets.len()
-            )));
-        };
-
         let (page, header) = self.raw_page_and_header()?;
-        let start = offset as usize;
+        let start = cell_pointer_from_header(page, header, index)? as usize;
         let size = compute_cell_size(page, header, start)?;
         Ok((start, start + size))
     }
@@ -1328,7 +1299,11 @@ impl BTreeNode {
     /// examined: `validate_integrity` and debug assertions.
     pub fn verify(&self) -> Result<()> {
         let (page, header) = self.raw_page_and_header()?;
-        compute_cell_ranges_exact(page, header, &self.cell_offsets)?;
+        let mut offsets = Vec::with_capacity(self.key_count);
+        for index in 0..self.key_count {
+            offsets.push(cell_pointer_from_header(page, header, index)?);
+        }
+        compute_cell_ranges_exact(page, header, &offsets)?;
         Ok(())
     }
 }

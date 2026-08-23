@@ -1953,13 +1953,19 @@ mod tree_tests {
         let mut page = Page::new(page_id);
         BTreeNode::to_page(&node, &mut page)?;
 
-        let mut lazy = BTreeNode::from_page(page)?;
-        lazy.cell_offsets[1] = lazy.cell_offsets[0];
+        // Point the second cell at the first. The corruption goes into the page's
+        // pointer array rather than a cached copy of it: `BTreeNode` no longer keeps
+        // one, and writing the bytes is what real corruption looks like anyway.
+        // A leaf header is 8 bytes, so pointer `i` lives at `8 + i * 2`.
+        let first_pointer = [page.data[8], page.data[9]];
+        page.data[10..12].copy_from_slice(&first_pointer);
+
+        let lazy = BTreeNode::from_page(page)?;
 
         // Two cell pointers claiming the same bytes is a whole-page property: no
         // single cell looks wrong on its own, so only a pass that compares cells
         // against each other can see it. That pass used to run on every page load;
-        // it is `verify` now, called by integrity checks and by `open_tree`.
+        // it is `verify` now, called by `validate_tree`.
         let err = lazy.verify().unwrap_err();
         assert!(matches!(err, crate::error::HematiteError::CorruptedData(_)));
         assert!(!lazy.is_decoded);
@@ -1979,18 +1985,24 @@ mod tree_tests {
         let mut page = Page::new(page_id);
         BTreeNode::to_page(&node, &mut page)?;
 
-        let mut lazy = BTreeNode::from_page(page)?;
-        // Shift the earlier cell's declared offset forward by 2 bytes so it
-        // reads into its own header/payload bytes as a *different*, smaller
-        // cell -- overlapping the later cell's byte range without being an
-        // exact duplicate pointer (distinct from the case covered above).
-        let (lower_index, higher_index) = if lazy.cell_offsets[0] < lazy.cell_offsets[1] {
+        // Shift the earlier cell's declared offset forward by 2 bytes so it reads
+        // into its own header/payload bytes as a *different*, smaller cell --
+        // overlapping the later cell's byte range without being an exact duplicate
+        // pointer (distinct from the case covered above). A leaf header is 8 bytes,
+        // so pointer `i` lives at `8 + i * 2`.
+        let pointer_at =
+            |data: &[u8], i: usize| u16::from_be_bytes([data[8 + i * 2], data[9 + i * 2]]);
+        let (lower_index, higher_index) = if pointer_at(&page.data, 0) < pointer_at(&page.data, 1) {
             (0, 1)
         } else {
             (1, 0)
         };
-        lazy.cell_offsets[lower_index] += 2;
-        assert!(lazy.cell_offsets[lower_index] != lazy.cell_offsets[higher_index]);
+        let shifted = pointer_at(&page.data, lower_index) + 2;
+        page.data[8 + lower_index * 2..10 + lower_index * 2]
+            .copy_from_slice(&shifted.to_be_bytes());
+        assert!(shifted != pointer_at(&page.data, higher_index));
+
+        let lazy = BTreeNode::from_page(page)?;
 
         // As with duplicate pointers, an overlap is only visible when cells are
         // compared against one another, so it lives in `verify` rather than on the
@@ -2042,8 +2054,9 @@ mod tree_tests {
         let mut page = Page::new(page_id);
         BTreeNode::to_page(&node, &mut page)?;
 
-        let probe = BTreeNode::from_page(page.clone())?;
-        let second_offset = probe.cell_offsets[1] as usize;
+        // An interior header is 12 bytes, so cell pointer `i` lives at `12 + i * 2`.
+        // Read straight from the page: `BTreeNode` no longer caches the pointer array.
+        let second_offset = u16::from_be_bytes([page.data[14], page.data[15]]) as usize;
         page.data[second_offset..second_offset + 4].copy_from_slice(&1u32.to_be_bytes());
 
         let lazy = BTreeNode::from_page(page)?;

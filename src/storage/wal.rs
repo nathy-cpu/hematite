@@ -1198,7 +1198,6 @@ impl WalFile {
         file.sync_all()?;
         Ok((start_offset, header))
     }
-
 }
 
 /// Writes every slice, looping over partial writes.
