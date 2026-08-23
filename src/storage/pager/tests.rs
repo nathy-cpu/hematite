@@ -1,21 +1,50 @@
 mod cache_tests {
     use super::super::cache::PageCache;
+    use crate::storage::types::{clear_page_pool, pooled_page_buffers};
     use crate::storage::Page;
 
     #[test]
     fn new_does_not_eagerly_allocate_the_full_buffer_pool() {
-        // Regression guard: `capacity` is an upper bound on cache occupancy,
-        // not the actual working set (defaults to thousands of pages), so
-        // pre-filling `free_buffers` to `capacity` at construction would
-        // fault in `capacity * PAGE_SIZE` bytes of resident memory upfront
-        // regardless of how many pages a workload ever touches -- exactly
-        // the kind of peak-RSS regression this test catches.
-        let cache = PageCache::new(50_000);
+        // Regression guard: `capacity` is an upper bound on cache occupancy, not the
+        // actual working set (defaults to thousands of pages), so pre-filling the
+        // buffer pool to `capacity` at construction would fault in
+        // `capacity * PAGE_SIZE` bytes of resident memory upfront regardless of how
+        // many pages a workload ever touches.
+        //
+        // The pool used to live on `PageCache`; it is now the thread-local one behind
+        // `Page`, which recycles on drop. The property is unchanged: constructing a
+        // cache must not populate it.
+        clear_page_pool();
+        let _cache = PageCache::new(50_000);
         assert_eq!(
-            cache.free_buffer_pool_len(),
+            pooled_page_buffers(),
             0,
-            "the buffer pool must start empty and grow lazily with actual eviction"
+            "the buffer pool must start empty and grow lazily as pages are dropped"
         );
+    }
+
+    /// The pool is what makes a page write cheap: without it every write allocates a
+    /// fresh 4 KiB buffer and zeroes it, which is ~4 100 instructions of `rep stosb`.
+    #[test]
+    fn dropping_a_page_returns_its_buffer_to_the_pool() {
+        clear_page_pool();
+        assert_eq!(pooled_page_buffers(), 0);
+
+        drop(Page::new(1));
+        assert_eq!(
+            pooled_page_buffers(),
+            1,
+            "a dropped page must hand its buffer back for reuse"
+        );
+
+        // And the next page takes it rather than allocating.
+        let reused = Page::new(2);
+        assert_eq!(pooled_page_buffers(), 0);
+        assert!(
+            reused.data.iter().all(|&byte| byte == 0),
+            "`Page::new` must hand back a zeroed page even from a recycled buffer"
+        );
+        clear_page_pool();
     }
 
     #[test]

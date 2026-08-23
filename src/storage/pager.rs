@@ -652,8 +652,9 @@ impl Pager {
     /// b-tree split's new sibling) and will write it back via `write_page`,
     /// which performs its own snapshot/checksum bookkeeping.
     pub(crate) fn new_page_buffer(&mut self, page_id: PageId) -> Result<Page> {
-        let data = self.cache_mut()?.take_page_buffer();
-        Ok(Page { id: page_id, data })
+        // Callers fill part of the page and rely on the rest reading as zeros --
+        // `write_reserved_blob` copies `bytes.len()` and leaves the remainder.
+        Ok(Page::new(page_id))
     }
 }
 

@@ -7,12 +7,9 @@ use std::sync::Arc;
 impl Pager {
     pub fn read_page(&self, page_id: PageId) -> Result<Page> {
         let shared = self.read_page_shared(page_id)?;
-        let mut data = self.cache_write()?.take_page_buffer();
-        data.copy_from_slice(&shared.data);
-        Ok(Page {
-            id: shared.id,
-            data,
-        })
+        let mut page = Page::new_for_overwrite(shared.id);
+        page.data.copy_from_slice(&shared.data);
+        Ok(page)
     }
 
     pub(crate) fn read_page_shared(&self, page_id: PageId) -> Result<Arc<Page>> {
@@ -34,8 +31,8 @@ impl Pager {
                 )));
             }
             if self.rollback_page_is_uninitialized(page_id) {
-                let data = self.cache_write()?.take_page_buffer();
-                let page = Arc::new(Page { id: page_id, data });
+                // A page beyond the end of the file reads as zeros.
+                let page = Arc::new(Page::new(page_id));
                 self.cache_write()?
                     .put_shared_with_view(page.clone(), view_token);
                 return Ok(page);
@@ -64,8 +61,8 @@ impl Pager {
                 if (page_id >= base_visible_next_page_id || base_page_is_free)
                     && page_id < transaction.wal_next_page_id
                 {
-                    let data = self.cache_write()?.take_page_buffer();
-                    let page = Arc::new(Page { id: page_id, data });
+                    // A page beyond the end of the file reads as zeros.
+                    let page = Arc::new(Page::new(page_id));
                     self.cache_write()?
                         .put_shared_with_view(page.clone(), view_token);
                     return Ok(page);
@@ -109,15 +106,17 @@ impl Pager {
                 }
             }
             if page_id >= self.file_manager.next_page_id() && page_id < visible_next_page_id {
-                let data = self.cache_write()?.take_page_buffer();
-                let page = Arc::new(Page { id: page_id, data });
+                // A page beyond the end of the file reads as zeros.
+                let page = Arc::new(Page::new(page_id));
                 self.cache_write()?
                     .put_shared_with_view(page.clone(), view_token);
                 return Ok(page);
             }
         }
 
-        let buf = { self.cache_write()?.take_page_buffer() };
+        // `read_page_with_buf` goes through `read_exact_at`, which fills all 4096
+        // bytes or fails, so this does not need zeroing first.
+        let buf = crate::storage::types::take_page_buffer_for_overwrite();
         let page = Arc::new(self.file_manager.read_page_with_buf(page_id, buf)?);
         let expected_checksum = self
             .current_wal_visible_state()

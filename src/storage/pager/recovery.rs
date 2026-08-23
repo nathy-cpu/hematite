@@ -316,7 +316,7 @@ impl Pager {
             return Ok(());
         }
 
-        let page = if let Some(page) = self.cache_mut()?.peek(page_id) {
+        let mut page = if let Some(page) = self.cache_mut()?.peek(page_id) {
             page.clone()
         } else {
             self.file_manager.read_page(page_id)?
@@ -341,7 +341,7 @@ impl Pager {
             };
             let record = JournalRecord {
                 page_id,
-                data: page.data,
+                data: page.take_data(),
             };
             transaction.page_records.push(record.clone());
             transaction.journaled_pages.insert(page_id);
@@ -659,13 +659,13 @@ impl Pager {
 
         let mut frames = Vec::with_capacity(page_ids.len());
         for page_id in page_ids {
-            let page = self.cache_read()?.peek(page_id).cloned().ok_or_else(|| {
+            let mut page = self.cache_read()?.peek(page_id).cloned().ok_or_else(|| {
                 crate::error::HematiteError::StorageError(format!(
                     "Dirty page {} missing from page cache",
                     page_id
                 ))
             })?;
-            frames.push(WalFrame::new(page_id, page.data));
+            frames.push(WalFrame::new(page_id, page.take_data()));
         }
         let metadata_page = self
             .cache_read()?

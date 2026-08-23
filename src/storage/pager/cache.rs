@@ -1,5 +1,5 @@
 use crate::storage::page_hash::PageMap;
-use crate::storage::{Page, PageId, PAGE_SIZE};
+use crate::storage::{Page, PageId};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Default)]
@@ -35,7 +35,6 @@ pub(crate) struct PageCache {
     /// on cache occupancy, not the real working set, so pre-filling this to
     /// `capacity` at construction would allocate `capacity * PAGE_SIZE`
     /// bytes upfront regardless of how many pages a workload ever touches.
-    free_buffers: Vec<Vec<u8>>,
     entries: PageMap<CachedPageEntry>,
     lru_head: Option<PageId>,
     lru_tail: Option<PageId>,
@@ -54,7 +53,6 @@ impl PageCache {
     pub(crate) fn new(capacity: usize) -> Self {
         Self {
             capacity,
-            free_buffers: Vec::new(),
             entries: PageMap::default(),
             lru_head: None,
             lru_tail: None,
@@ -66,23 +64,6 @@ impl PageCache {
         }
     }
 
-    /// Take a zeroed 4KB buffer from the pool, allocating only if the pool is empty.
-    pub(crate) fn take_page_buffer(&mut self) -> Vec<u8> {
-        self.free_buffers
-            .pop()
-            .unwrap_or_else(|| vec![0u8; PAGE_SIZE])
-    }
-
-    #[cfg(test)]
-    pub(crate) fn free_buffer_pool_len(&self) -> usize {
-        self.free_buffers.len()
-    }
-
-    /// Return a page data buffer to the pool after zeroing it.
-    fn return_page_buffer(&mut self, mut data: Vec<u8>) {
-        data.fill(0);
-        self.free_buffers.push(data);
-    }
     #[cfg(test)]
     pub(crate) fn get(&mut self, page_id: PageId) -> Option<Arc<Page>> {
         self.get_for_view(page_id, 0)
@@ -176,7 +157,8 @@ impl PageCache {
         self.detach_dirty(page_id);
         if let Some(entry) = self.entries.remove(&page_id) {
             if let Ok(page) = Arc::try_unwrap(entry.page) {
-                self.return_page_buffer(page.data);
+                // Dropping the page returns its buffer to the pool.
+                drop(page);
             }
         }
     }
@@ -186,7 +168,8 @@ impl PageCache {
         let arcs: Vec<Arc<Page>> = self.entries.drain().map(|(_, e)| e.page).collect();
         for arc in arcs {
             if let Ok(page) = Arc::try_unwrap(arc) {
-                self.return_page_buffer(page.data);
+                // Dropping the page returns its buffer to the pool.
+                drop(page);
             }
         }
         self.lru_head = None;
@@ -411,11 +394,11 @@ impl PageCache {
             return;
         }
         self.evict_if_needed(Some(page_id));
-        let data = self.take_page_buffer();
         self.entries.insert(
             page_id,
             CachedPageEntry {
-                page: Arc::new(Page { id: page_id, data }),
+                // A brand-new entry's content is the zeros.
+                page: Arc::new(Page::new(page_id)),
                 meta: CachedPageMeta::default(),
                 lru_prev: None,
                 lru_next: None,
@@ -438,11 +421,11 @@ impl PageCache {
     /// `entry.page.as_ref().clone()` at call sites and centralize the copy behavior.
     pub(crate) fn take_page_for_write(&mut self, page_id: PageId) -> Page {
         self.ensure_entry(page_id);
-        let mut data = self.take_page_buffer();
+        let mut page = Page::new_for_overwrite(page_id);
         let entry = self.entries.get_mut(&page_id).expect("entry should exist");
         entry.meta.writeable = true;
-        data.copy_from_slice(&entry.page.data);
-        Page { id: page_id, data }
+        page.data.copy_from_slice(&entry.page.data);
+        page
     }
 
     /// Zero-copy fast path for `take_page_for_write`: if the cached `Arc<Page>`
@@ -457,23 +440,21 @@ impl PageCache {
     /// call sites that unconditionally commit their mutation.
     pub(crate) fn take_page_for_write_owned(&mut self, page_id: PageId) -> Page {
         self.ensure_entry(page_id);
-        let placeholder = Arc::new(Page {
-            id: page_id,
-            data: self.take_page_buffer(),
-        });
+        // Stands in as the entry's page, so its content is the zeros.
+        let placeholder = Arc::new(Page::new(page_id));
         let entry = self.entries.get_mut(&page_id).expect("entry should exist");
         entry.meta.writeable = true;
         let arc = std::mem::replace(&mut entry.page, placeholder);
         match Arc::try_unwrap(arc) {
             Ok(page) => page,
             Err(shared_arc) => {
-                let mut data = self.take_page_buffer();
-                data.copy_from_slice(&shared_arc.data);
+                let mut page = Page::new_for_overwrite(page_id);
+                page.data.copy_from_slice(&shared_arc.data);
                 self.entries
                     .get_mut(&page_id)
                     .expect("entry should exist")
                     .page = shared_arc;
-                Page { id: page_id, data }
+                page
             }
         }
     }
