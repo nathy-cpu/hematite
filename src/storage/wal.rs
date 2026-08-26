@@ -841,8 +841,12 @@ fn visible_next_page_id(file_len: u64) -> PageId {
 /// Must stay identical to `Pager::calculate_page_checksum`: the values computed
 /// here are stored in the same per-page checksum map the main file uses, and a
 /// checkpoint moves pages between the two without recomputing them.
+/// Covers a page's contents, not its trailer, matching
+/// `Pager::calculate_page_checksum`. The trailer holds the page's own checksum and is
+/// written by the file layer, so it is zero in a WAL frame and non-zero in the main
+/// file; hashing it would make the two disagree for the same page image.
 fn page_checksum(bytes: &[u8]) -> u32 {
-    checksum::hash32(0, bytes)
+    checksum::hash32(0, &bytes[..crate::storage::USABLE_PAGE_SIZE])
 }
 
 /// Groups `frames` by contiguous commit-sequence runs that include a

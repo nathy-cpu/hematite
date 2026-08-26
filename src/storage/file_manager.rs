@@ -29,7 +29,8 @@ use crate::storage::free_list::FreeList;
 use crate::storage::stats::PagerStats;
 use crate::storage::{
     file_len_for_next_page_id, next_page_id_for_file_len, Page, PageId, DB_HEADER_PAGE_ID,
-    FIRST_ALLOCATABLE_PAGE_ID, PAGE_SIZE, STORAGE_METADATA_PAGE_ID,
+    FIRST_ALLOCATABLE_PAGE_ID, PAGE_SIZE, PAGE_TRAILER_SIZE, STORAGE_METADATA_PAGE_ID,
+    USABLE_PAGE_SIZE,
 };
 use std::fs::{File, OpenOptions};
 #[cfg(any(test, not(any(unix, windows))))]
@@ -159,6 +160,23 @@ impl FileManager {
 
     /// Read a page from disk into a caller-supplied buffer, reusing its allocation.
     /// The buffer must have a capacity of at least `PAGE_SIZE`; it will be resized.
+    /// Whether a page read back matches the checksum in its trailer.
+    ///
+    /// A page that has never been written carries a zero trailer, which is what a
+    /// freshly extended file gives. Those are reported as unverifiable rather than
+    /// corrupt: there is nothing to check them against yet.
+    pub(crate) fn page_trailer_state(page: &Page) -> PageTrailerState {
+        let stored = &page.data[USABLE_PAGE_SIZE..];
+        if stored.iter().all(|&byte| byte == 0) {
+            return PageTrailerState::Unstamped;
+        }
+        if stored == page_trailer(page.id, &page.data[..USABLE_PAGE_SIZE]) {
+            PageTrailerState::Valid
+        } else {
+            PageTrailerState::Mismatch
+        }
+    }
+
     pub(crate) fn read_page_with_buf(&self, page_id: PageId, mut data: Vec<u8>) -> Result<Page> {
         let offset = Self::page_offset(page_id)?;
         PagerStats::bump(&self.stats.page_reads);
@@ -169,13 +187,34 @@ impl FileManager {
                 page_id, offset, err
             ))
         })?;
-        Page::from_bytes(page_id, data)
+        let page = Page::from_bytes(page_id, data)?;
+        // Unstamped pages are pages this pager has never written -- a freshly extended
+        // file reads as zeros -- so there is nothing to check them against.
+        if Self::page_trailer_state(&page) == PageTrailerState::Mismatch {
+            return Err(crate::error::HematiteError::CorruptedData(format!(
+                "Page {page_id} does not match the checksum in its trailer"
+            )));
+        }
+        Ok(page)
     }
 
+    /// Writes a page and stamps its trailer with a checksum of its own contents.
+    ///
+    /// The checksum covers `..USABLE_PAGE_SIZE` and is seeded with the page id, so a
+    /// page written to the wrong offset fails verification rather than reading as
+    /// valid. The trailer bytes in `page.data` are ignored: the checksum lives on disk
+    /// only, and nothing above the pager may write there.
+    ///
+    /// Two positional writes rather than one. `pwritev` would make it one syscall but
+    /// is not in `std`, and seeking to use the vectored path would cost the syscall it
+    /// saved.
     pub fn write_page(&mut self, page: &Page) -> Result<()> {
         let offset = Self::page_offset(page.id)?;
         PagerStats::bump(&self.stats.page_writes);
-        self.write_all_at(offset, &page.data)
+        let content = &page.data[..USABLE_PAGE_SIZE];
+        let trailer = page_trailer(page.id, content);
+        self.write_all_at(offset, content)?;
+        self.write_all_at(offset + USABLE_PAGE_SIZE as u64, &trailer)
     }
 
     pub fn allocate_page(&mut self) -> Result<PageId> {
@@ -511,4 +550,20 @@ impl FileManager {
     pub fn inject_write_failure_after(&mut self, writes_before_failure: usize) {
         self.fail_on_write_countdown = Some(writes_before_failure);
     }
+}
+
+/// A page's trailer bytes: a checksum of its contents, seeded with its id.
+fn page_trailer(page_id: PageId, content: &[u8]) -> [u8; PAGE_TRAILER_SIZE] {
+    crate::storage::checksum::hash32(page_id as u64, content).to_le_bytes()
+}
+
+/// What a page's trailer says about the page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PageTrailerState {
+    /// Contents match the stored checksum.
+    Valid,
+    /// Never written by this pager — a freshly extended file reads as zeros.
+    Unstamped,
+    /// Contents do not match the stored checksum.
+    Mismatch,
 }

@@ -129,8 +129,13 @@ impl Pager {
         })
     }
 
+    /// Covers a page's contents, not its trailer.
+    ///
+    /// The trailer holds the page's own checksum, written by the file layer, so it is
+    /// zero in memory and non-zero on disk. Hashing it would make every page fail
+    /// verification the moment it was read back.
     pub(super) fn calculate_page_checksum(page: &Page) -> u32 {
-        checksum::hash32(0, &page.data)
+        checksum::hash32(0, &page.data[..crate::storage::USABLE_PAGE_SIZE])
     }
 
     /// Recomputes the checksum of every dirty page.

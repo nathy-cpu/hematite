@@ -2397,8 +2397,16 @@ mod mod_tests {
         }
 
         let reopened = crate::catalog::CatalogEngine::new(test_db.path())?;
+        // Caught by the page's own trailer now, at read time, before the checksum map
+        // is consulted at all. The map could only cover a database small enough for it
+        // to fit one metadata page; the trailer has no such ceiling.
         let err = reopened.read_page(corrupted_page_id).unwrap_err();
-        assert!(err.to_string().contains("Page checksum mismatch"));
+        let message = err.to_string();
+        assert!(
+            message.contains("checksum in its trailer")
+                || message.contains("Page checksum mismatch"),
+            "corruption went undetected: {message}"
+        );
 
         Ok(())
     }
@@ -2429,8 +2437,15 @@ mod mod_tests {
         }
 
         let mut reopened = crate::catalog::CatalogEngine::new(test_db.path())?;
+        // As above: the trailer catches this while `validate_integrity` is reading the
+        // page, so the error names the trailer rather than the map.
         let err = reopened.validate_integrity().unwrap_err();
-        assert!(err.to_string().contains("Page checksum mismatch"));
+        let message = err.to_string();
+        assert!(
+            message.contains("checksum in its trailer")
+                || message.contains("Page checksum mismatch"),
+            "corruption went undetected: {message}"
+        );
 
         Ok(())
     }
@@ -4639,5 +4654,125 @@ mod checksum_cliff_probe {
             last_reported = report.checksummed_page_count;
         }
         println!("\nno cliff within 4000 pages (peak {last_reported} checksummed)\n");
+    }
+}
+
+/// The trailer exists so a page carries its own checksum, with no central map to
+/// outgrow a metadata page. These check it is written, that it detects a page
+/// corrupted on disk, and that it is seeded per page so a page written to the wrong
+/// offset does not read as valid.
+mod page_trailer_tests {
+    use crate::storage::file_manager::{FileManager, PageTrailerState};
+    use crate::storage::{Page, Pager, PAGE_TRAILER_SIZE, USABLE_PAGE_SIZE};
+    use crate::test_utils::TestDbFile;
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    fn commit_page(pager: &mut Pager, fill: u8) -> u32 {
+        let id = pager.allocate_page().expect("allocate");
+        pager.begin_transaction().expect("begin");
+        let mut page = Page::new(id);
+        page.data[..USABLE_PAGE_SIZE].fill(fill);
+        pager.write_page(page).expect("write");
+        pager.commit_transaction().expect("commit");
+        id
+    }
+
+    #[test]
+    fn a_written_page_carries_a_valid_trailer() {
+        let db = TestDbFile::new("_test_trailer_written");
+        let mut pager = Pager::new(db.path(), 32).expect("open");
+        let id = commit_page(&mut pager, 0x5A);
+        drop(pager);
+
+        let mut file = std::fs::File::open(db.path()).expect("open file");
+        let mut bytes = vec![0u8; crate::storage::PAGE_SIZE];
+        file.seek(SeekFrom::Start(
+            id as u64 * crate::storage::PAGE_SIZE as u64,
+        ))
+        .expect("seek");
+        file.read_exact(&mut bytes).expect("read");
+
+        let page = Page::from_bytes(id, bytes).expect("page");
+        assert!(
+            page.data[USABLE_PAGE_SIZE..].iter().any(|&b| b != 0),
+            "the trailer was never stamped"
+        );
+        assert_eq!(
+            FileManager::page_trailer_state(&page),
+            PageTrailerState::Valid
+        );
+    }
+
+    /// The case the central map could not cover past 685 pages: a byte flipped on
+    /// disk, in a page nothing has cached.
+    #[test]
+    fn a_flipped_byte_on_disk_fails_its_trailer() {
+        let db = TestDbFile::new("_test_trailer_detects_flip");
+        let mut pager = Pager::new(db.path(), 32).expect("open");
+        let id = commit_page(&mut pager, 0x5A);
+        drop(pager);
+
+        let offset = id as u64 * crate::storage::PAGE_SIZE as u64;
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(db.path())
+            .expect("open file");
+        file.seek(SeekFrom::Start(offset + 100)).expect("seek");
+        file.write_all(&[0x5B]).expect("flip");
+        file.seek(SeekFrom::Start(offset)).expect("seek");
+        let mut bytes = vec![0u8; crate::storage::PAGE_SIZE];
+        file.read_exact(&mut bytes).expect("read");
+
+        let page = Page::from_bytes(id, bytes).expect("page");
+        assert_eq!(
+            FileManager::page_trailer_state(&page),
+            PageTrailerState::Mismatch,
+            "a flipped content byte was not caught by the trailer"
+        );
+    }
+
+    /// Seeded with the page id, so the same bytes at the wrong offset are not valid.
+    /// Without the seed a page relocated by compaction would verify against its old
+    /// contents.
+    #[test]
+    fn the_trailer_is_bound_to_its_page_id() {
+        let db = TestDbFile::new("_test_trailer_seeded");
+        let mut pager = Pager::new(db.path(), 32).expect("open");
+        let id = commit_page(&mut pager, 0x77);
+        drop(pager);
+
+        let mut file = std::fs::File::open(db.path()).expect("open file");
+        let mut bytes = vec![0u8; crate::storage::PAGE_SIZE];
+        file.seek(SeekFrom::Start(
+            id as u64 * crate::storage::PAGE_SIZE as u64,
+        ))
+        .expect("seek");
+        file.read_exact(&mut bytes).expect("read");
+
+        let as_written = Page::from_bytes(id, bytes.clone()).expect("page");
+        assert_eq!(
+            FileManager::page_trailer_state(&as_written),
+            PageTrailerState::Valid
+        );
+
+        let relocated = Page::from_bytes(id + 1, bytes).expect("page");
+        assert_eq!(
+            FileManager::page_trailer_state(&relocated),
+            PageTrailerState::Mismatch,
+            "the same bytes verified under a different page id"
+        );
+    }
+
+    /// A page in a freshly extended file has never been written and has nothing to
+    /// verify against; that is reported as unstamped rather than as corruption.
+    #[test]
+    fn an_unwritten_page_is_unstamped_not_corrupt() {
+        let page = Page::new(9);
+        assert_eq!(page.data[USABLE_PAGE_SIZE..].len(), PAGE_TRAILER_SIZE);
+        assert_eq!(
+            FileManager::page_trailer_state(&page),
+            PageTrailerState::Unstamped
+        );
     }
 }

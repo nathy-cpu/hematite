@@ -1,5 +1,5 @@
 use crate::error::{HematiteError, Result};
-use crate::storage::PAGE_SIZE;
+use crate::storage::{PAGE_SIZE, USABLE_PAGE_SIZE};
 
 const METADATA_PAGE_MAGIC: &[u8; 4] = b"HMD1";
 const METADATA_PAGE_VERSION: u32 = 1;
@@ -39,7 +39,9 @@ fn parse_sections(page: &[u8]) -> Result<MetadataSections<'_>> {
         )));
     }
 
-    if page.iter().all(|&byte| byte == 0) {
+    // Content only: the pager stamps a checksum into the trailer of every page it
+    // writes, so a metadata page that holds nothing yet is no longer all zeros.
+    if page[..USABLE_PAGE_SIZE].iter().all(|&byte| byte == 0) {
         return Ok(MetadataSections {
             pager: None,
             catalog: None,
@@ -70,7 +72,7 @@ fn parse_container_sections(page: &[u8]) -> Result<MetadataSections<'_>> {
         HematiteError::StorageError("Reserved metadata page lengths overflow".to_string())
     })?;
 
-    if HEADER_LEN + payload_len > PAGE_SIZE {
+    if HEADER_LEN + payload_len > USABLE_PAGE_SIZE {
         return Err(HematiteError::StorageError(
             "Reserved metadata page payload exceeds page size".to_string(),
         ));
@@ -90,7 +92,7 @@ fn encode_sections(pager: Option<&[u8]>, catalog: Option<&[u8]>) -> Result<Vec<u
         HematiteError::StorageError("Reserved metadata page lengths overflow".to_string())
     })?;
 
-    if HEADER_LEN + payload_len > PAGE_SIZE {
+    if HEADER_LEN + payload_len > USABLE_PAGE_SIZE {
         return Err(HematiteError::StorageError(
             "Reserved metadata page payload exceeds page size".to_string(),
         ));
