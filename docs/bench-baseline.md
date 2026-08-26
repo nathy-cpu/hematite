@@ -991,3 +991,49 @@ and re-parsing the page header on every access — is the largest remaining CPU 
 *both* paths, and it is removed structurally by the same page-format work that closes
 the disk-space gap. And disk space, at −11.5 % against a ~3.5× target, is the one goal
 that has barely moved.
+
+## B3: the page-format phase
+
+Four changes, measured one at a time. Disk space, 5 000 rows of five small ints:
+
+| | bytes/row | |
+|---|---|---|
+| start of phase | 87.7 | |
+| bytes decide a full page, not a cell count | **59.8** | −31.8 % |
+| one-byte header on inline stored values | **39.3** | −34.3 % |
+| length-delimited row id in secondary keys | 39.3 | −7.5 % *on a table that has one* |
+| varint cell lengths | **35.2** | −10.4 % |
+
+**87.7 → 35.2, −59.9 %.** Against pre-rewrite `main`'s 99.1, **−64.5 %**. The table's own
+tree is at 25.9 used bytes per row, which was the plan's target for a whole row.
+
+### What the probe found that reading the code did not
+
+Two assumptions were wrong, and an ignored `space_budget` probe settled both in minutes:
+
+- **Half the file is the primary-key index.** A row through `CatalogEngine` cost 44.2
+  bytes; the same row through SQL cost 87.7. The difference is the mandatory PK index.
+  The plan's ~25 bytes/row target was computed for the row alone and never accounted
+  for it.
+- **Density was capped by a cell count, not by bytes.** `BTREE_ORDER = 100` meant a
+  leaf split at 98 cells and 86 % full when the bytes allowed ~113. The append-split
+  optimisation was working; it had nothing to do. Raising the bound clear of what a
+  page can physically hold took leaves to 156 rows at 99 % fill.
+
+### The one change that cost CPU
+
+Varint cell lengths are the only part of this phase that is not free:
+
+| | before | after |
+|---|---|---|
+| insert | 1 126 950 943 Ir | 1 186 477 449 (+5.3 %) |
+| scan | 2 425 Ir/row | 2 491 (+2.7 %) |
+
+Two `u16` loads were cheaper than two branchy decodes. Inlining the one-byte fast path
+recovered about a fifth. The prediction that varints would be CPU-neutral here was
+wrong, and the entry is kept as a deliberate 10 % space for 5 % write CPU trade.
+
+Worth recording separately: the cell framing arithmetic was duplicated in **five**
+places, and three still wrote or reserved the old widths after the others moved. The
+mismatch surfaced as a node that passed its fit check and then failed to serialise —
+not as a wrong answer, which is luck rather than design. They share the helpers now.
