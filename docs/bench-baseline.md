@@ -955,3 +955,39 @@ So the arena's stated justification is gone. The remaining `Arc<Page>` costs mea
 arena may still be worth doing for the reasons the plan gives — a truthful cache
 capacity, CLOCK eviction, in-place mutation — but **not on a memcpy argument**, and
 nothing currently measured justifies a 72-site rewrite across three layers.
+
+## Headline: the whole rewrite against pre-rewrite `main`
+
+Alternating in one session, 4 000-row fixture, `main` built with the benchmark suite
+copied across (it predates P0):
+
+| workload | before | after | |
+|---|---|---|---|
+| `delete_heavy/rollback` | 54.942 ms | **11.160 ms** | −79.7 % (4.9×) |
+| `append_heavy/rollback` | 46.270 ms | **25.237 ms** | −45.5 % |
+| `point_lookup/rollback` | 26.480 µs | **16.716 µs** | −36.9 % |
+| `full_scan/rollback` | 1.1398 ms | **792.09 µs** | −30.5 % |
+| bytes/row, 5 small ints | 99.1 | **87.7** | −11.5 % |
+| bytes/row, int+2 text+bool | 123.7 | **105.7** | −14.6 % |
+
+Instruction counts: insert 3 855 855 991 → **1 119 173 076** (−71.0 %), scan 3 790 →
+**2 452** Ir/row (−35.3 %), WAL insert **1 204 430 039** — 7.6 % behind rollback, having
+been 21 % behind.
+
+### Where the remaining cost sits
+
+| | insert (1.119 G) | scan (638 M) |
+|---|---|---|
+| B-tree cell access | **17.3 %** | **12.0 %** |
+| allocator | 14.8 % | **30.5 %** |
+| record decode/encode | 1.9 % | **27.8 %** |
+| `execute_body` | — | 11.1 % |
+| memcpy/memset/memcmp | 7.4 % | 4.6 % |
+| SQL lex + parse | 6.4 % | — |
+| savepoint/journal | 1.5 % | — |
+
+Two things this settles. The B-tree cell-access cluster — re-deriving a cell's position
+and re-parsing the page header on every access — is the largest remaining CPU cost on
+*both* paths, and it is removed structurally by the same page-format work that closes
+the disk-space gap. And disk space, at −11.5 % against a ~3.5× target, is the one goal
+that has barely moved.
