@@ -2536,6 +2536,38 @@ mod space_budget_probe {
     use crate::test_utils::TestDbFile;
     use crate::Value;
 
+    /// Same fixture but with a secondary index, which is the only thing that uses
+    /// the row-id key suffix. `cargo test --release secondary_index_space -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn report_secondary_index_space() {
+        let db = TestDbFile::new("_test_secondary_index_space");
+        let mut h = crate::Hematite::new(db.path()).expect("open");
+        h.execute("CREATE TABLE t (id INT PRIMARY KEY, a INT);")
+            .expect("create");
+        h.execute("CREATE INDEX ix_a ON t (a);").expect("index");
+        let mut i = 0;
+        while i < 5000 {
+            let end = (i + 500).min(5000);
+            let mut sql = String::from("INSERT INTO t (id, a) VALUES ");
+            for id in i..end {
+                if id > i {
+                    sql.push(',');
+                }
+                sql.push_str(&format!("({},{})", id, id));
+            }
+            sql.push(';');
+            h.execute(&sql).expect("insert");
+            i = end;
+        }
+        drop(h);
+        let bytes = std::fs::metadata(db.path()).expect("stat").len();
+        println!(
+            "\nsecondary-index fixture: {bytes} bytes ({:.1}/row)\n",
+            bytes as f64 / 5000.0
+        );
+    }
+
     #[test]
     #[ignore]
     fn report_space_budget() -> crate::error::Result<()> {

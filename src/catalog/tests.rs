@@ -1602,11 +1602,37 @@ mod catalog_new_tests {
             "unexpected error: {err}"
         );
 
-        // A secondary key always ends with the eight-byte row id.
-        let err = IndexKeyCodec::split_secondary_key(&[1, 2, 3, 4, 5, 6, 7]).unwrap_err();
+        // A secondary key ends with `[len][big-endian row id][len]`, so there are
+        // three ways for the suffix to be wrong and each has to be rejected rather
+        // than silently decoding to some other row id.
+        let err = IndexKeyCodec::split_secondary_key(&[]).unwrap_err();
         assert!(err
             .to_string()
             .contains("Index entry is missing rowid bytes"));
+
+        // Declares seven bytes of row id but is not long enough to hold them.
+        let err = IndexKeyCodec::split_secondary_key(&[1, 2, 3, 4, 5, 6, 7]).unwrap_err();
+        assert!(
+            err.to_string().contains("malformed rowid suffix"),
+            "unexpected error: {err}"
+        );
+
+        // A length outside 1..=8 is not a length this encoder ever writes.
+        for bad_len in [0u8, 9, 255] {
+            let err = IndexKeyCodec::split_secondary_key(&[7, 7, bad_len]).unwrap_err();
+            assert!(
+                err.to_string().contains("malformed rowid suffix"),
+                "unexpected error for length {bad_len}: {err}"
+            );
+        }
+
+        // The two length markers must agree; if they do not, the suffix does not
+        // start where the trailing byte claims.
+        let err = IndexKeyCodec::split_secondary_key(&[9, 2, 0, 0, 1]).unwrap_err();
+        assert!(
+            err.to_string().contains("length markers disagree"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

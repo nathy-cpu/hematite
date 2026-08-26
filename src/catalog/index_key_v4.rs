@@ -285,9 +285,29 @@ pub(crate) fn encode_key_into(out: &mut Vec<u8>, values: &[Value]) {
 /// The row id makes otherwise-equal keys unique, and it is recoverable from the key
 /// itself — so unlike the old format, the entry's *value* stays empty rather than
 /// storing a second copy of the same eight bytes.
+/// Appends the row id that makes an index entry unique and orders duplicates.
+///
+/// Encoded as `[len][big-endian magnitude][len]`, not a fixed eight bytes. Both the
+/// ordering and the parsing constrain the shape:
+///
+/// * The tree compares whole keys as bytes. Two entries only reach their row ids when
+///   their value prefixes are equal, so both suffixes start at the same offset, and
+///   the **leading** length is what makes the comparison correct: a smaller row id has
+///   no more significant bytes than a larger one, so comparing lengths first and
+///   magnitudes second reproduces integer order. A trailing length alone would sort
+///   row id 5 after row id 256.
+/// * `split_secondary_key` is handed a whole key and no column count, so it has to
+///   find the suffix from the end — hence the **trailing** copy. It only affects
+///   comparisons where the leading lengths were already equal, so it cannot change
+///   the order.
+///
+/// Costs `2 + len` bytes against a flat 8: four bytes for row ids up to 65 535.
 pub(crate) fn encode_secondary_key(values: &[Value], row_id: u64) -> Vec<u8> {
     let mut key = encode_key(values);
-    key.extend_from_slice(&row_id.to_be_bytes());
+    let len = significant_bytes(row_id).max(1);
+    key.push(len as u8);
+    key.extend_from_slice(&row_id.to_be_bytes()[8 - len..]);
+    key.push(len as u8);
     key
 }
 
@@ -296,12 +316,20 @@ pub(crate) fn encode_secondary_key(values: &[Value], row_id: u64) -> Vec<u8> {
 /// Borrows rather than copying; the old signature returned an owned `Vec` for the
 /// prefix, which every caller then dropped.
 pub(crate) fn split_secondary_key(key: &[u8]) -> Result<(&[u8], u64)> {
-    if key.len() < 8 {
+    let Some(&len) = key.last() else {
         return Err(corrupt("Index entry is missing rowid bytes"));
+    };
+    let len = len as usize;
+    if len == 0 || len > 8 || key.len() < len + 2 {
+        return Err(corrupt("Index entry has a malformed rowid suffix"));
     }
-    let split = key.len() - 8;
-    let row_id = u64::from_be_bytes(key[split..].try_into().expect("checked length"));
-    Ok((&key[..split], row_id))
+    let split = key.len() - len - 2;
+    if key[split] as usize != len {
+        return Err(corrupt("Index entry rowid length markers disagree"));
+    }
+    let mut bytes = [0u8; 8];
+    bytes[8 - len..].copy_from_slice(&key[split + 1..key.len() - 1]);
+    Ok((&key[..split], u64::from_be_bytes(bytes)))
 }
 
 /// A primary-key index entry's payload: the row id as a varint.
@@ -595,6 +623,33 @@ mod tests {
             let left = key(Value::BigInt(a));
             let right = key(Value::BigInt(b));
             prop_assert_eq!(left.cmp(&right), a.cmp(&b));
+        }
+
+        /// A secondary-index key is a value prefix plus the row id, and the tree
+        /// compares the whole thing as bytes. So byte order has to match
+        /// `(values, row_id)` order — including when the two entries share a value
+        /// prefix, which is the only time the row id decides anything.
+        #[test]
+        fn secondary_key_order_matches_value_then_row_id(
+            a in any::<i64>(),
+            ra in any::<u64>(),
+            b in any::<i64>(),
+            rb in any::<u64>(),
+        ) {
+            let left = encode_secondary_key(&[Value::BigInt(a)], ra);
+            let right = encode_secondary_key(&[Value::BigInt(b)], rb);
+            prop_assert_eq!(left.cmp(&right), (a, ra).cmp(&(b, rb)));
+        }
+
+        /// And the row id has to survive the round trip, since callers read it back
+        /// off the end of the key.
+        #[test]
+        fn secondary_key_row_id_round_trips(a in any::<i64>(), row_id in any::<u64>()) {
+            let key = encode_secondary_key(&[Value::BigInt(a)], row_id);
+            let (prefix, decoded) = split_secondary_key(&key).expect("split");
+            let expected_prefix = encode_key(&[Value::BigInt(a)]);
+            prop_assert_eq!(decoded, row_id);
+            prop_assert_eq!(prefix, expected_prefix.as_slice());
         }
 
         #[test]
