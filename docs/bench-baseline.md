@@ -994,7 +994,7 @@ that has barely moved.
 
 ## B3: the page-format phase
 
-Four changes, measured one at a time. Disk space, 5 000 rows of five small ints:
+Three changes kept, one reverted. Disk space, 5 000 rows of five small ints:
 
 | | bytes/row | |
 |---|---|---|
@@ -1002,10 +1002,10 @@ Four changes, measured one at a time. Disk space, 5 000 rows of five small ints:
 | bytes decide a full page, not a cell count | **59.8** | −31.8 % |
 | one-byte header on inline stored values | **39.3** | −34.3 % |
 | length-delimited row id in secondary keys | 39.3 | −7.5 % *on a table that has one* |
-| varint cell lengths | **35.2** | −10.4 % |
 
-**87.7 → 35.2, −59.9 %.** Against pre-rewrite `main`'s 99.1, **−64.5 %**. The table's own
-tree is at 25.9 used bytes per row, which was the plan's target for a whole row.
+**87.7 → 39.3, −55.2 %.** Against pre-rewrite `main`'s 99.1, **−60.3 %**. The table's
+own tree is at 25.9 used bytes per row, which was the plan's target for a whole row.
+CPU is unchanged: insert 1 126 578 313 Ir, scan 2 423 Ir/row.
 
 ### What the probe found that reading the code did not
 
@@ -1020,20 +1020,28 @@ Two assumptions were wrong, and an ignored `space_budget` probe settled both in 
   optimisation was working; it had nothing to do. Raising the bound clear of what a
   page can physically hold took leaves to 156 rows at 99 % fill.
 
-### The one change that cost CPU
+### Varint cell lengths: built, measured, reverted
 
-Varint cell lengths are the only part of this phase that is not free:
+Framing key and value lengths as varints rather than two `u16` bought 39.3 → 35.2
+bytes/row, −10.4 %. It cost more than it was worth:
 
-| | before | after |
+| | u16 | varint |
 |---|---|---|
-| insert | 1 126 950 943 Ir | 1 186 477 449 (+5.3 %) |
-| scan | 2 425 Ir/row | 2 491 (+2.7 %) |
+| insert (Ir) | 1 126 950 943 | 1 186 477 449 (+5.3 %) |
+| scan (Ir/row) | 2 425 | 2 491 (+2.7 %) |
+| `append_heavy` wall clock | 26.972 / 26.627 ms | 27.232 / 26.894 ms |
+| `full_scan` wall clock | 919.84 / 866.98 µs | 1.0079 ms / 943.82 µs (**~+9 %**) |
 
-Two `u16` loads were cheaper than two branchy decodes. Inlining the one-byte fast path
-recovered about a fifth. The prediction that varints would be CPU-neutral here was
-wrong, and the entry is kept as a deliberate 10 % space for 5 % write CPU trade.
+Two `u16` loads beat two branchy decodes; inlining the one-byte fast path recovered
+about a fifth. **The instruction count understated it** — +2.7 % on scans against ~9 %
+on the clock — which is the first time in this project the two have disagreed in that
+direction, and a reason to check wall clock on branch-heavy changes specifically.
+Reverted: 10 % of the space was not worth 9 % of the scan, and scans are the workload
+that has moved least.
 
-Worth recording separately: the cell framing arithmetic was duplicated in **five**
-places, and three still wrote or reserved the old widths after the others moved. The
-mismatch surfaced as a node that passed its fit check and then failed to serialise —
-not as a wrong answer, which is luck rather than design. They share the helpers now.
+What is kept from it is the reason it broke. The leaf framing was spelled out
+independently in **five** places, and changing it updated three. The mismatch surfaced
+as a node that passed its fit check and then failed to serialise — loud, but by luck
+rather than design. There is now one definition, and two tests pin the agreement
+between what a cell is declared to cost, what encoding writes, and what reading
+reports.
