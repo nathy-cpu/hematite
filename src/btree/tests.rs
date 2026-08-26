@@ -26,8 +26,13 @@ mod mod_tests {
         let trees = ByteTreeStore::new(Pager::new_in_memory(100)?);
         let root_page_id = trees.create_tree()?;
         let mut tree = trees.open_tree(root_page_id)?;
-        for i in 0..100u32 {
-            tree.insert(&i.to_be_bytes(), &[i as u8])?;
+        // Large enough values that a handful of rows overflow a page. Inserting a
+        // fixed count of tiny rows used to work only because `MAX_KEYS` forced a split
+        // at 99 cells; splits are driven by bytes now, so the fixture has to supply
+        // the bytes rather than rely on the cell cap.
+        let filler = vec![0xAB; 900];
+        for i in 0..20u32 {
+            tree.insert(&i.to_be_bytes(), &filler)?;
         }
         Ok((trees, root_page_id))
     }
@@ -2503,5 +2508,57 @@ mod cell_access_error_tests {
             Ok(Some(())) => panic!("a cell with an impossible key length was read as valid"),
             Ok(None) => panic!("corruption reported as 'no entry' — the `.ok()` bug is back"),
         }
+    }
+}
+
+/// Diagnostic, not an assertion: prints where a row's bytes on disk go.
+/// `cargo test --release space_budget -- --ignored --nocapture`
+mod space_budget_probe {
+    use crate::catalog::CatalogEngine;
+    use crate::test_utils::TestDbFile;
+    use crate::Value;
+
+    #[test]
+    #[ignore]
+    fn report_space_budget() -> crate::error::Result<()> {
+        let db = TestDbFile::new("_test_space_budget_probe");
+        let mut engine = CatalogEngine::new(db.path())?;
+        let root = engine.create_table("t")?;
+
+        let rows = 5000i64;
+        engine.begin_transaction()?;
+        for i in 0..rows {
+            engine.insert_into_table(
+                "t",
+                (0..5).map(|c| Value::Integer((i + c) as i32)).collect(),
+            )?;
+        }
+        engine.commit_transaction()?;
+
+        let stats = engine.collect_tree_space_stats(root)?;
+        let file = std::fs::metadata(db.path())?.len();
+        let leaf_capacity = (stats.leaf_pages * 4096).max(1);
+        println!("\n--- space budget, {rows} rows of 5 small ints ---");
+        println!(
+            "file bytes         {file}  ({:.1}/row)",
+            file as f64 / rows as f64
+        );
+        println!("leaf pages         {}", stats.leaf_pages);
+        println!("internal pages     {}", stats.internal_pages);
+        println!("overflow pages     {}", stats.overflow_page_ids.len());
+        println!(
+            "rows per leaf      {:.1}",
+            rows as f64 / stats.leaf_pages.max(1) as f64
+        );
+        println!(
+            "tree used bytes    {}  ({:.1}/row)",
+            stats.used_bytes,
+            stats.used_bytes as f64 / rows as f64
+        );
+        println!(
+            "leaf fill factor   {:.0}%\n",
+            100.0 * stats.used_bytes as f64 / leaf_capacity as f64
+        );
+        Ok(())
     }
 }

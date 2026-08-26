@@ -40,7 +40,21 @@ pub use codec::{KeyValueCodec, RawBytesCodec};
 pub use tree::TreeSpaceStats;
 pub use typed::{TypedTree, TypedTreeCursor, TypedTreeStore};
 
-pub const BTREE_ORDER: usize = 100;
+/// Upper bound on cells per page — deliberately above what a page can physically
+/// hold, so that **bytes are what actually limit a page**, not this number.
+///
+/// It was 100, and that was the binding constraint rather than page space: a leaf of
+/// five-small-int rows filled to 98 cells and split at 86 % full, when the bytes would
+/// have allowed ~113. Raising it took a table from 44.2 to 39.3 bytes per row, and the
+/// same fixture through SQL — where the primary-key index roughly doubles the file, and
+/// index cells are smaller so the cap bit harder — from 87.7 to 59.8.
+///
+/// The floor for a leaf cell is 2 bytes of pointer plus 4 of length prefix plus at
+/// least one key byte and an 11-byte stored-value header, so a 4088-byte page cannot
+/// hold more than ~227 cells. 400 is clear of that, which is the point: splitting is
+/// decided by `total_free_space`, and this only exists to bound the in-memory decoded
+/// vectors.
+pub const BTREE_ORDER: usize = 400;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeType {
