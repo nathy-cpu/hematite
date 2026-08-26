@@ -113,6 +113,11 @@ pub const BTREE_PAGE_HEADER_SIZE: usize = LEAF_HEADER_SIZE;
 const LEAF_HEADER_SIZE: usize = 8;
 const INTERIOR_HEADER_SIZE: usize = 12;
 
+/// `[u16 key_len][u16 value_len]` ahead of a leaf cell's payload.
+pub(crate) const LEAF_CELL_HEADER_SIZE: usize = 4;
+/// `[u32 left_child][u16 key_len]` ahead of an interior cell's key.
+pub(crate) const INTERNAL_CELL_HEADER_SIZE: usize = CHILD_ID_SIZE + 2;
+
 #[derive(Debug, Clone)]
 pub struct BTreeNode {
     pub page_id: PageId,
@@ -499,11 +504,11 @@ impl BTreeNode {
                 NodeType::Leaf => {
                     Self::validate_key_size(&self.keys[index])?;
                     Self::validate_value_size(&self.values[index])?;
-                    4 + self.keys[index].data.len() + self.values[index].data.len()
+                    leaf_cell_size(&self.keys[index], &self.values[index])
                 }
                 NodeType::Internal => {
                     Self::validate_key_size(&self.keys[index])?;
-                    6 + self.keys[index].data.len()
+                    internal_cell_size(&self.keys[index])
                 }
             };
             total_cell_bytes += cell_len;
@@ -524,8 +529,8 @@ impl BTreeNode {
         let mut content_start = PAGE_SIZE;
         for index in (0..self.keys.len()).rev() {
             let cell_len = match self.node_type {
-                NodeType::Leaf => 4 + self.keys[index].data.len() + self.values[index].data.len(),
-                NodeType::Internal => 6 + self.keys[index].data.len(),
+                NodeType::Leaf => leaf_cell_size(&self.keys[index], &self.values[index]),
+                NodeType::Internal => internal_cell_size(&self.keys[index]),
             };
 
             content_start -= cell_len;
@@ -1404,7 +1409,7 @@ fn initialize_page_bytes(page: &mut Page, kind: PageKind) -> Result<()> {
 }
 
 fn encode_leaf_cell(key: &BTreeKey, value: &BTreeValue) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(4 + key.data.len() + value.data.len());
+    let mut bytes = Vec::with_capacity(leaf_cell_size(key, value));
     bytes.extend_from_slice(&(key.data.len() as u16).to_be_bytes());
     bytes.extend_from_slice(&(value.data.len() as u16).to_be_bytes());
     bytes.extend_from_slice(&key.data);
@@ -1412,19 +1417,28 @@ fn encode_leaf_cell(key: &BTreeKey, value: &BTreeValue) -> Vec<u8> {
     bytes
 }
 
+/// Bytes a leaf cell occupies: `[u16 key_len][u16 value_len][key][value]`.
+///
+/// The one definition of the leaf framing. It was spelled out independently in five
+/// places — here, `encode_leaf_cell`, `to_page`'s reservation loop, `to_page`'s size
+/// check and `compute_cell_size` — and when the framing was briefly changed to
+/// varints, three of them kept writing the old widths. The mismatch surfaced as a node
+/// that passed its fit check and then failed to serialise; nothing structurally
+/// prevents the next such change from surfacing as a wrong answer instead.
 fn leaf_cell_size(key: &BTreeKey, value: &BTreeValue) -> usize {
-    4 + key.data.len() + value.data.len()
+    LEAF_CELL_HEADER_SIZE + key.data.len() + value.data.len()
 }
 
+/// Bytes an interior cell occupies: `[u32 left_child][u16 key_len][key]`.
 fn internal_cell_size(key: &BTreeKey) -> usize {
-    6 + key.data.len()
+    INTERNAL_CELL_HEADER_SIZE + key.data.len()
 }
 
 /// Encode a raw internal cell: `[4-byte child_page_id][2-byte key_len][key_bytes]`.
 /// Used by `try_insert_internal_in_place` to build a cell directly from raw
 /// components without going through the VecDeque-based decode path.
 fn encode_internal_cell_raw(child: PageId, key: &BTreeKey) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(6 + key.data.len());
+    let mut bytes = Vec::with_capacity(internal_cell_size(key));
     bytes.extend_from_slice(&child.to_be_bytes());
     bytes.extend_from_slice(&(key.data.len() as u16).to_be_bytes());
     bytes.extend_from_slice(&key.data);
@@ -1432,14 +1446,14 @@ fn encode_internal_cell_raw(child: PageId, key: &BTreeKey) -> Vec<u8> {
 }
 
 fn leaf_cell_ranges(cell: &[u8]) -> Result<((usize, usize), (usize, usize))> {
-    if cell.len() < 4 {
+    if cell.len() < LEAF_CELL_HEADER_SIZE {
         return Err(HematiteError::CorruptedData(
             "Leaf cell header is truncated".to_string(),
         ));
     }
     let key_len = u16::from_be_bytes([cell[0], cell[1]]) as usize;
     let value_len = u16::from_be_bytes([cell[2], cell[3]]) as usize;
-    let key_start = 4;
+    let key_start = LEAF_CELL_HEADER_SIZE;
     let key_end = key_start + key_len;
     let value_end = key_end + value_len;
     if key_len > MAX_KEY_SIZE || value_len > MAX_VALUE_SIZE || value_end > cell.len() {
@@ -1459,13 +1473,13 @@ fn leaf_cell_value_range(cell: &[u8]) -> Result<(usize, usize)> {
 }
 
 fn internal_cell_key_range(cell: &[u8]) -> Result<(usize, usize)> {
-    if cell.len() < 6 {
+    if cell.len() < INTERNAL_CELL_HEADER_SIZE {
         return Err(HematiteError::CorruptedData(
             "Internal cell header is truncated".to_string(),
         ));
     }
-    let key_len = u16::from_be_bytes([cell[4], cell[5]]) as usize;
-    let key_start = 6;
+    let key_len = u16::from_be_bytes([cell[CHILD_ID_SIZE], cell[CHILD_ID_SIZE + 1]]) as usize;
+    let key_start = INTERNAL_CELL_HEADER_SIZE;
     let key_end = key_start + key_len;
     if key_len > MAX_KEY_SIZE || key_end > cell.len() {
         return Err(HematiteError::CorruptedData(

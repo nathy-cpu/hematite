@@ -2612,3 +2612,83 @@ mod space_budget_probe {
         Ok(())
     }
 }
+
+/// The cell framing is stated by `leaf_cell_size`/`internal_cell_size`, written by the
+/// encoders, reserved by `to_page` and read back by `compute_cell_size`. Those were
+/// five independent copies of the same arithmetic; a change to the framing updated
+/// some and not others, and the mismatch surfaced only as a node that passed its fit
+/// check and then failed to serialise. These pin the agreement directly.
+mod cell_framing_agreement_tests {
+    use crate::btree::node::BTreeNode;
+    use crate::btree::page_format::{compute_cell_size, BTreePageHeaderV3};
+    use crate::btree::{BTreeKey, BTreeValue, NodeType};
+    use crate::storage::format::PageKind;
+    use crate::storage::Page;
+
+    /// What a leaf cell is declared to cost, what encoding one actually costs, and
+    /// what reading it back reports, must be the same number.
+    #[test]
+    fn leaf_cell_size_matches_what_is_written_and_read_back() -> crate::error::Result<()> {
+        // Lengths that a varint would frame differently from a fixed u16, so a
+        // half-applied change to the framing shows up here.
+        for (key_len, value_len) in [(1usize, 1usize), (3, 17), (127, 5), (128, 200), (250, 900)] {
+            let key = BTreeKey::new(vec![0xAA; key_len]);
+            let value = BTreeValue::new(vec![0xBB; value_len]);
+
+            let mut node = BTreeNode::new_leaf(2);
+            node.keys.push_back(key.clone());
+            node.values.push_back(value.clone());
+            node.key_count = 1;
+
+            let mut page = Page::new(2);
+            node.to_page(&mut page)?;
+
+            let header = BTreePageHeaderV3::parse(&page, false)?;
+            let offset = header.cell_content_start as usize;
+            let read_back = compute_cell_size(&page, &header, offset)?;
+
+            // Round-tripping the node must recover the same key and value, which is
+            // what fails first if the reserved width and the written width disagree.
+            let decoded = BTreeNode::from_page_decoded(page)?;
+            assert_eq!(decoded.keys[0], key, "key {key_len}/{value_len}");
+            assert_eq!(decoded.values[0], value, "value {key_len}/{value_len}");
+            assert_eq!(
+                read_back,
+                crate::storage::PAGE_SIZE - offset,
+                "compute_cell_size disagrees with the bytes written for {key_len}/{value_len}"
+            );
+        }
+        Ok(())
+    }
+
+    /// The same for interior cells, whose framing carries a child pointer too.
+    #[test]
+    fn internal_cell_size_matches_what_is_written_and_read_back() -> crate::error::Result<()> {
+        for key_len in [1usize, 3, 127, 128, 250] {
+            let key = BTreeKey::new(vec![0xCC; key_len]);
+            let mut node = BTreeNode::new_internal(2);
+            node.keys.push_back(key.clone());
+            node.children.push_back(7);
+            node.children.push_back(9);
+            node.key_count = 1;
+
+            let mut page = Page::new(2);
+            node.to_page(&mut page)?;
+
+            let header = BTreePageHeaderV3::parse(&page, false)?;
+            assert_eq!(header.kind, PageKind::InteriorTable);
+            let offset = header.cell_content_start as usize;
+            let read_back = compute_cell_size(&page, &header, offset)?;
+            assert_eq!(
+                read_back,
+                crate::storage::PAGE_SIZE - offset,
+                "compute_cell_size disagrees with the bytes written for key length {key_len}"
+            );
+
+            let decoded = BTreeNode::from_page_decoded(page)?;
+            assert_eq!(decoded.node_type, NodeType::Internal);
+            assert_eq!(decoded.keys[0], key, "key length {key_len}");
+        }
+        Ok(())
+    }
+}
