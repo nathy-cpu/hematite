@@ -500,27 +500,17 @@ pub(crate) fn compute_cell_size(
 
     match header.kind {
         PageKind::LeafTable => {
-            let truncated =
-                || HematiteError::CorruptedData("Leaf cell header truncated".to_string());
-            // Both lengths in their one-byte form is the overwhelmingly common case --
-            // any key under 128 bytes and any value under 128 -- so it is worth one
-            // bounds check and two shifts rather than two `varint::read` calls, each
-            // with its own bounds check and `Option`. Going through `read` twice cost
-            // ~6 % of the insert path.
-            let total = match page.data.get(cell_offset..cell_offset + 2) {
-                Some(&[a, b]) if a & 1 == 1 && b & 1 == 1 => {
-                    2 + (a >> 1) as usize + (b >> 1) as usize
-                }
-                _ => {
-                    let (key_len, key_len_bytes) =
-                        crate::btree::varint::read(&page.data, cell_offset)
-                            .ok_or_else(truncated)?;
-                    let (value_len, value_len_bytes) =
-                        crate::btree::varint::read(&page.data, cell_offset + key_len_bytes)
-                            .ok_or_else(truncated)?;
-                    key_len_bytes + value_len_bytes + key_len as usize + value_len as usize
-                }
-            };
+            if cell_offset + 4 > PAGE_SIZE {
+                return Err(HematiteError::CorruptedData(
+                    "Leaf cell header truncated".to_string(),
+                ));
+            }
+            let key_len =
+                u16::from_be_bytes([page.data[cell_offset], page.data[cell_offset + 1]]) as usize;
+            let value_len =
+                u16::from_be_bytes([page.data[cell_offset + 2], page.data[cell_offset + 3]])
+                    as usize;
+            let total = 4 + key_len + value_len;
             if cell_offset + total > PAGE_SIZE {
                 return Err(HematiteError::CorruptedData(
                     "Leaf cell content exceeds page bounds".to_string(),
@@ -529,13 +519,15 @@ pub(crate) fn compute_cell_size(
             Ok(total)
         }
         PageKind::InteriorTable => {
-            const CHILD_ID_SIZE: usize = 4;
-            let truncated =
-                || HematiteError::CorruptedData("Internal cell header truncated".to_string());
-            let (key_len, key_len_bytes) =
-                crate::btree::varint::read(&page.data, cell_offset + CHILD_ID_SIZE)
-                    .ok_or_else(truncated)?;
-            let total = CHILD_ID_SIZE + key_len_bytes + key_len as usize;
+            if cell_offset + 6 > PAGE_SIZE {
+                return Err(HematiteError::CorruptedData(
+                    "Internal cell header truncated".to_string(),
+                ));
+            }
+            let key_len =
+                u16::from_be_bytes([page.data[cell_offset + 4], page.data[cell_offset + 5]])
+                    as usize;
+            let total = 6 + key_len;
             if cell_offset + total > PAGE_SIZE {
                 return Err(HematiteError::CorruptedData(
                     "Internal cell key exceeds page bounds".to_string(),
