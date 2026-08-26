@@ -557,6 +557,18 @@ fn page_trailer(page_id: PageId, content: &[u8]) -> [u8; PAGE_TRAILER_SIZE] {
     crate::storage::checksum::hash32(page_id as u64, content).to_le_bytes()
 }
 
+/// Writes a page's trailer into its own buffer.
+///
+/// `write_page` stamps as it writes and leaves the in-memory buffer alone, because
+/// stamping there would mean mutating a cached page. A WAL frame is different: the
+/// frame *is* the page image that a reader will later verify, so the trailer has to be
+/// in the bytes the frame carries. Without it, WAL-resident pages would be
+/// unverifiable until a checkpoint wrote them to the file.
+pub(crate) fn stamp_page_trailer(page: &mut Page) {
+    let trailer = page_trailer(page.id, &page.data[..USABLE_PAGE_SIZE]);
+    page.data[USABLE_PAGE_SIZE..].copy_from_slice(&trailer);
+}
+
 /// What a page's trailer says about the page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PageTrailerState {

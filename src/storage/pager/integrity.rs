@@ -1,35 +1,33 @@
 use super::Pager;
 use crate::error::Result;
 use crate::storage::checksum;
+use crate::storage::file_manager::{FileManager, PageTrailerState};
 use crate::storage::{
     next_page_id_for_file_len, Page, PageId, PagerIntegrityReport, DB_HEADER_PAGE_ID,
-    STORAGE_METADATA_PAGE_ID,
+    FIRST_ALLOCATABLE_PAGE_ID, STORAGE_METADATA_PAGE_ID,
 };
 use std::collections::HashSet;
 use std::sync::Arc;
 
 impl Pager {
     pub fn validate_integrity(&mut self) -> Result<PagerIntegrityReport> {
-        let (max_page_id_exclusive, logical_free_pages, logical_checksums, wal_override_page_ids) =
+        let (max_page_id_exclusive, logical_free_pages, wal_override_page_ids) =
             if let Some(state) = &self.latest_wal_state {
                 (
                     next_page_id_for_file_len(state.file_len),
                     state.free_pages.clone(),
-                    state.page_checksums.clone(),
                     state.overridden_page_ids().collect::<HashSet<PageId>>(),
                 )
             } else if let Some(transaction) = self.active_rollback_transaction() {
                 (
                     transaction.rollback_next_page_id,
                     transaction.rollback_free_list.as_slice().to_vec(),
-                    self.page_checksums.as_ref().clone(),
                     HashSet::new(),
                 )
             } else {
                 (
                     self.file_manager.next_page_id(),
                     self.file_manager.free_pages().to_vec(),
-                    self.page_checksums.as_ref().clone(),
                     HashSet::new(),
                 )
             };
@@ -59,64 +57,56 @@ impl Pager {
             }
         }
 
-        if logical_checksums.contains_key(&STORAGE_METADATA_PAGE_ID) {
-            return Err(crate::error::HematiteError::CorruptedData(format!(
-                "Storage metadata page {} must not have pager checksum metadata",
-                STORAGE_METADATA_PAGE_ID
-            )));
-        }
-
-        let checksummed_pages = logical_checksums.into_iter().collect::<Vec<_>>();
-        let checksummed_page_count = checksummed_pages.len();
-
+        // Walks every allocated page rather than the entries of a checksum map.
+        //
+        // The map was the coverage limit, not a helper: it is serialised into a single
+        // metadata page, and when it stopped fitting the encoder silently wrote no
+        // checksums at all — measured at 685 pages, so integrity checking was off in
+        // any database past about 2.8 MB. A page's checksum lives in its own trailer
+        // now, so coverage does not depend on a map fitting anywhere.
+        let mut checksummed_page_count = 0usize;
         let mut verified_checksum_pages = 0usize;
-        for (page_id, expected_checksum) in checksummed_pages {
-            if page_id >= max_page_id_exclusive {
-                return Err(crate::error::HematiteError::CorruptedData(format!(
-                    "Checksum entry for page {} exceeds allocated page range (next_page_id={})",
-                    page_id, max_page_id_exclusive
-                )));
-            }
-
+        for page_id in FIRST_ALLOCATABLE_PAGE_ID..max_page_id_exclusive {
             if free_pages.contains(&page_id) {
-                return Err(crate::error::HematiteError::CorruptedData(format!(
-                    "Page {} has checksum metadata but is marked free",
-                    page_id
-                )));
+                continue;
             }
-
-            // A dirty page has not reached storage, so a stored checksum cannot
-            // describe it and there is nothing storage could have corrupted. This
-            // used to compare the cached bytes against the map anyway, which always
-            // matched: `write_page` computed that entry from those same bytes moments
-            // earlier, so the comparison was tautological. Checksums are now computed
-            // at flush, when the contents are final, and this page is simply not yet
-            // verifiable — it is left out of `verified_checksum_pages` rather than
-            // counted as checked. The structural checks below still cover it.
+            // A dirty page has not reached storage, so nothing storage could have
+            // corrupted has happened to it yet.
             if self.cache_read()?.is_dirty(page_id) {
                 continue;
             }
 
             let page = if wal_override_page_ids.contains(&page_id) {
-                // Read WAL page data on-demand through the LRU cache
                 if let Some(data) = self.read_wal_page_data(page_id)? {
                     Page::from_bytes(page_id, data)?
                 } else {
                     self.file_manager.read_page(page_id)?
                 }
             } else {
+                // In WAL mode the logical page range runs ahead of the physical file:
+                // a page allocated in the WAL has no image on disk until a checkpoint
+                // writes one. There is nothing to verify yet.
+                if page_id >= self.file_manager.next_page_id() {
+                    continue;
+                }
                 self.file_manager.read_page(page_id)?
             };
 
-            let actual_checksum = Self::calculate_page_checksum(&page);
-            if actual_checksum != expected_checksum {
-                return Err(crate::error::HematiteError::CorruptedData(format!(
-                    "Page checksum mismatch for page {}: expected {}, got {}",
-                    page_id, expected_checksum, actual_checksum
-                )));
+            match FileManager::page_trailer_state(&page) {
+                PageTrailerState::Valid => {
+                    checksummed_page_count += 1;
+                    verified_checksum_pages += 1;
+                }
+                // Either never written, or resident in the WAL: a frame carries the
+                // page image as it was in memory, where the trailer is still zero.
+                // Those are covered by the WAL's own per-frame checksums instead.
+                PageTrailerState::Unstamped => {}
+                PageTrailerState::Mismatch => {
+                    return Err(crate::error::HematiteError::CorruptedData(format!(
+                        "Page {page_id} does not match the checksum in its trailer"
+                    )));
+                }
             }
-
-            verified_checksum_pages += 1;
         }
 
         Ok(PagerIntegrityReport {

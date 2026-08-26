@@ -1809,9 +1809,12 @@ mod pager_tests {
                 .data
                 .to_vec()
         };
-        let mut wal_page = vec![0u8; crate::storage::PAGE_SIZE];
-        wal_page[0] = 99;
-        let frame = WalFrame::committed(page_id, 4, 1, wal_page);
+        // Hand-built frames have to stamp the trailer the pager would have written,
+        // or the page reads back as never-written and nothing verifies it.
+        let mut wal_page = Page::new(page_id);
+        wal_page.data[0] = 99;
+        crate::storage::file_manager::stamp_page_trailer(&mut wal_page);
+        let frame = WalFrame::committed(page_id, 4, 1, wal_page.take_data());
         let metadata_frame = WalFrame::committed(
             crate::storage::STORAGE_METADATA_PAGE_ID,
             4,

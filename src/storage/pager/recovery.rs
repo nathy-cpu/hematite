@@ -719,6 +719,10 @@ impl Pager {
                     page_id
                 ))
             })?;
+            // The frame carries the image a reader will verify, so the trailer has to
+            // be in it. `write_page` stamps as it writes and leaves memory alone; here
+            // there is no later write to stamp at until a checkpoint.
+            crate::storage::file_manager::stamp_page_trailer(&mut page);
             frames.push(WalFrame::new(page_id, page.take_data()));
         }
         let metadata_page = self
