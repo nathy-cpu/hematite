@@ -923,3 +923,35 @@ of who holds the last reference. S3 was deferred on the grounds that the pool *h
 path measured 106 ns and was not a bottleneck. That reasoning still holds for hits —
 but the pool *miss* path is now ~10 % of the insert profile, which is a different and
 better argument for the same work.
+
+## The arena's target did not exist
+
+The addressing half of the frame arena — frames by index, `PageRef`/`PageMut`, no
+`Arc<Page>` — was scoped on the grounds that `__memcpy` was 7–10 % of the insert path
+and came from `take_page_for_write` copying 4 KiB so a caller could mutate an owned
+page. Measuring before building, which is the rule this project keeps re-learning:
+
+- **`take_page_for_write` is called 201 times in the entire insert phase**, costing
+  767 427 Ir — **0.06 %**. It is not the memcpy and never was.
+- The undo log's pre-image copy is not it either: stubbing that copy out moved memcpy
+  85.8 M → 83.9 M.
+- Stubbing the savepoint's *other* eager state — `page_checksums`, the free list, the
+  free-page set, `uninitialized_pages`, all cloned per savepoint and so per row — moved
+  memcpy 85.8 M → 51.8 M and the total −10.2 %.
+
+`page_checksums` was almost all of it: a map sized by the whole database, deep-copied
+per row, that only changes at flush and on deallocation. Behind an `Arc` with
+`Arc::make_mut`, taking a savepoint is a refcount bump:
+
+| | before | after |
+|---|---|---|
+| insert (Ir) | 1 218 822 012 | **1 119 815 263** (−8.1 %) |
+| `__memcpy` | 85.8 M | **51.2 M** (−40 %) |
+| `_int_malloc` | 44 M | **18.5 M** (−58 %) |
+
+So the arena's stated justification is gone. The remaining `Arc<Page>` costs measure
+`read_page_shared` 1.37 % and drop glue 0.67 %, `RwLock` does not appear in the top
+90 %, and the memcpy it was meant to remove belonged to savepoint bookkeeping. The
+arena may still be worth doing for the reasons the plan gives — a truthful cache
+capacity, CLOCK eviction, in-place mutation — but **not on a memcpy argument**, and
+nothing currently measured justifies a 72-site rewrite across three layers.
