@@ -1399,12 +1399,23 @@ mod page_format_tests {
     use crate::storage::format::PageKind;
     use crate::storage::Page;
 
+    /// A leaf cell of exactly `len` bytes: an empty key and a value filling the rest.
+    ///
+    /// Cell lengths are varints now, so the framing width depends on the value length
+    /// rather than being a flat four bytes. Built through the same `varint` the page
+    /// format uses so this cannot drift from it again.
     fn dummy_cell(len: usize) -> Vec<u8> {
-        assert!(len >= 4);
-        let mut buf = vec![1; len];
-        let val_len = (len - 4) as u16;
-        buf[0..2].copy_from_slice(&0u16.to_be_bytes());
-        buf[2..4].copy_from_slice(&val_len.to_be_bytes());
+        use crate::btree::varint;
+        assert!(len >= 2, "a cell needs at least two length varints");
+        // Find the value length whose framing plus itself totals `len`.
+        let val_len = (0..len)
+            .rev()
+            .find(|&v| varint::len_of(0) + varint::len_of(v as u64) + v == len)
+            .expect("no value length produces the requested cell size");
+        let mut buf = Vec::with_capacity(len);
+        varint::write_to_vec(&mut buf, 0);
+        varint::write_to_vec(&mut buf, val_len as u64);
+        buf.resize(len, 1);
         buf
     }
 
@@ -1496,9 +1507,10 @@ mod index_extra_tests {
         initialize_btree_page(&mut page, PageKind::LeafTable, false).unwrap();
 
         let make_cell = |klen: usize, vlen: usize, key_byte: u8, val_byte: u8| -> Vec<u8> {
-            let mut cell = Vec::with_capacity(4 + klen + vlen);
-            cell.extend_from_slice(&(klen as u16).to_be_bytes());
-            cell.extend_from_slice(&(vlen as u16).to_be_bytes());
+            use crate::btree::varint;
+            let mut cell = Vec::new();
+            varint::write_to_vec(&mut cell, klen as u64);
+            varint::write_to_vec(&mut cell, vlen as u64);
             cell.extend(std::iter::repeat_n(key_byte, klen));
             cell.extend(std::iter::repeat_n(val_byte, vlen));
             cell
@@ -2000,19 +2012,28 @@ mod tree_tests {
     fn test_btree_lazy_search_reports_overlapping_cells_as_corruption() -> Result<()> {
         let page_id = 2;
         let mut node = BTreeNode::new_leaf(page_id);
-        node.keys.push_back(BTreeKey::new(vec![0]));
-        node.values.push_back(BTreeValue::new(vec![5]));
-        node.keys.push_back(BTreeKey::new(vec![0]));
-        node.values.push_back(BTreeValue::new(vec![5]));
+        for _ in 0..2 {
+            node.keys.push_back(BTreeKey::new(vec![0x0B; 4]));
+            node.values.push_back(BTreeValue::new(vec![0x0B; 4]));
+        }
 
         let mut page = Page::new(page_id);
         BTreeNode::to_page(&node, &mut page)?;
 
         // Shift the earlier cell's declared offset forward by 2 bytes so it reads
-        // into its own header/payload bytes as a *different*, smaller cell --
-        // overlapping the later cell's byte range without being an exact duplicate
-        // pointer (distinct from the case covered above). A leaf header is 8 bytes,
-        // so pointer `i` lives at `8 + i * 2`.
+        // into its own payload bytes as a *different*, smaller cell -- overlapping the
+        // later cell's byte range without being an exact duplicate pointer (distinct
+        // from the case covered above). A leaf header is 8 bytes, so pointer `i` lives
+        // at `8 + i * 2`.
+        //
+        // The payload bytes are `0x0B` on purpose. Cell lengths are varints, and
+        // `0x0B` is the one-byte encoding of 5, so the shifted pointer parses as a
+        // well-formed cell of `1 + 1 + 5 + 5 = 12` bytes. Each real cell here is 10
+        // bytes, so a cell starting two bytes in and running twelve reaches past its
+        // neighbour's start while still ending inside the page: an overlap, rather
+        // than the out-of-bounds length that a smaller or larger byte would produce.
+        // That is what makes this exercise the overlap sweep instead of the per-cell
+        // size validation, which would reject it first.
         let pointer_at =
             |data: &[u8], i: usize| u16::from_be_bytes([data[8 + i * 2], data[9 + i * 2]]);
         let (lower_index, higher_index) = if pointer_at(&page.data, 0) < pointer_at(&page.data, 1) {
