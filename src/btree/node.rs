@@ -99,7 +99,7 @@ use crate::error::{HematiteError, Result};
 use crate::storage::format::{PageKind, DATABASE_HEADER_SIZE};
 #[cfg(test)]
 use crate::storage::INVALID_PAGE_ID;
-use crate::storage::{Page, PageId, Pager, PAGE_SIZE};
+use crate::storage::{Page, PageId, Pager, PAGE_SIZE, USABLE_PAGE_SIZE};
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -237,7 +237,7 @@ impl BTreeNode {
     /// reference implementation that the differential merge test checks against.
     #[cfg(test)]
     pub fn will_fit_in_page(&self) -> bool {
-        self.estimate_serialized_size() + page_header_offset(self.page_id) <= PAGE_SIZE
+        self.estimate_serialized_size() + page_header_offset(self.page_id) <= USABLE_PAGE_SIZE
     }
 
     pub fn can_insert_key_value(&self, key: &BTreeKey, value: &BTreeValue) -> bool {
@@ -248,7 +248,7 @@ impl BTreeNode {
             + leaf_cell_size(key, value)
             + 2
             + page_header_offset(self.page_id)
-            <= PAGE_SIZE
+            <= USABLE_PAGE_SIZE
     }
 
     pub fn can_insert_key_child(&self, key: &BTreeKey) -> bool {
@@ -259,7 +259,7 @@ impl BTreeNode {
             + internal_cell_size(key)
             + 2
             + page_header_offset(self.page_id)
-            <= PAGE_SIZE
+            <= USABLE_PAGE_SIZE
     }
 
     pub fn from_page(page: Page) -> Result<Self> {
@@ -295,7 +295,7 @@ impl BTreeNode {
             NodeType::Internal => Self::new_internal(page.id),
         };
         node.key_count = header.cell_count as usize;
-        node.payload_len = PAGE_SIZE.saturating_sub(header.cell_content_start as usize);
+        node.payload_len = USABLE_PAGE_SIZE.saturating_sub(header.cell_content_start as usize);
         node.raw_page = Some(page.clone());
         node.is_decoded = false;
         node.header = Some(header);
@@ -516,7 +516,7 @@ impl BTreeNode {
 
         let total_size =
             page_header_offset(page.id) + header_size + self.keys.len() * 2 + total_cell_bytes;
-        if total_size > PAGE_SIZE {
+        if total_size > USABLE_PAGE_SIZE {
             return Err(HematiteError::StorageError(format!(
                 "Serialized B-tree node exceeds page size: {} bytes",
                 total_size
@@ -526,7 +526,7 @@ impl BTreeNode {
         // Fill cells directly into the page buffer from the end backwards to avoid
         // allocating per-cell Vec<u8>. For each cell, compute its length and write
         // header + key (+ value) bytes straight into the page.data slice.
-        let mut content_start = PAGE_SIZE;
+        let mut content_start = USABLE_PAGE_SIZE;
         for index in (0..self.keys.len()).rev() {
             let cell_len = match self.node_type {
                 NodeType::Leaf => leaf_cell_size(&self.keys[index], &self.values[index]),
@@ -687,7 +687,7 @@ impl BTreeNode {
         self.is_decoded = false;
         let header = BTreePageHeaderV3::parse(page, is_p1)?;
         self.key_count = header.cell_count as usize;
-        self.payload_len = PAGE_SIZE.saturating_sub(header.cell_content_start as usize);
+        self.payload_len = USABLE_PAGE_SIZE.saturating_sub(header.cell_content_start as usize);
         self.header = Some(header);
         self.keys.clear();
         self.values.clear();
@@ -711,7 +711,7 @@ impl BTreeNode {
         self.is_decoded = false;
         let header = BTreePageHeaderV3::parse(page, is_p1)?;
         self.key_count = header.cell_count as usize;
-        self.payload_len = PAGE_SIZE.saturating_sub(header.cell_content_start as usize);
+        self.payload_len = USABLE_PAGE_SIZE.saturating_sub(header.cell_content_start as usize);
         self.header = Some(header);
         self.keys.clear();
         self.values.clear();
@@ -865,7 +865,7 @@ impl BTreeNode {
         self.raw_page = None;
         self.is_decoded = false;
         self.key_count = new_header.cell_count as usize;
-        self.payload_len = PAGE_SIZE.saturating_sub(new_header.cell_content_start as usize);
+        self.payload_len = USABLE_PAGE_SIZE.saturating_sub(new_header.cell_content_start as usize);
         self.header = Some(new_header);
         self.keys.clear();
         self.values.clear();
@@ -1179,7 +1179,7 @@ impl BTreeNode {
         let Some(merged) = self.merged_size_with(other, LEAF_HEADER_SIZE) else {
             return false;
         };
-        merged + page_header_offset(self.page_id) <= PAGE_SIZE
+        merged + page_header_offset(self.page_id) <= USABLE_PAGE_SIZE
     }
 
     /// Whether two interior nodes plus the separator between them fit in one page.
@@ -1201,7 +1201,7 @@ impl BTreeNode {
             return false;
         };
         merged + internal_cell_size(separator_key) + 2 + page_header_offset(self.page_id)
-            <= PAGE_SIZE
+            <= USABLE_PAGE_SIZE
     }
 
     pub fn merge_leaf(&mut self, other: &mut BTreeNode, storage: &mut Pager) -> Result<()> {
@@ -1252,8 +1252,8 @@ impl BTreeNode {
         // BUG-07 fix: base underflow on page-space utilisation instead of the
         // MAX_KEYS constant, which is higher than the realistic per-page key
         // capacity and would trigger rebalancing on almost every delete.
-        let used = self.serialized_size_on_page().unwrap_or(PAGE_SIZE);
-        let capacity = PAGE_SIZE - page_header_offset(self.page_id);
+        let used = self.serialized_size_on_page().unwrap_or(USABLE_PAGE_SIZE);
+        let capacity = USABLE_PAGE_SIZE - page_header_offset(self.page_id);
         // Underflow when the node occupies less than 25 % of its available space.
         used * 4 < capacity
     }
@@ -1400,7 +1400,7 @@ fn initialize_page_bytes(page: &mut Page, kind: PageKind) -> Result<()> {
     page.data[header_offset] = kind as u8;
     write_u16_be(&mut page.data, header_offset + 1, 0);
     write_u16_be(&mut page.data, header_offset + 3, 0);
-    write_u16_be(&mut page.data, header_offset + 5, PAGE_SIZE as u16);
+    write_u16_be(&mut page.data, header_offset + 5, USABLE_PAGE_SIZE as u16);
     page.data[header_offset + 7] = 0;
     if header_size == INTERIOR_HEADER_SIZE {
         write_u32_be(&mut page.data, header_offset + 8, 0);

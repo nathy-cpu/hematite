@@ -50,8 +50,8 @@ pub use pager::{JournalMode, Pager};
 pub use stats::{PagerStats, StatsSnapshot};
 pub use types::{
     file_len_for_next_page_id, next_page_id_for_file_len, Page, PageId, PagerIntegrityReport,
-    DB_HEADER_PAGE_ID, FIRST_ALLOCATABLE_PAGE_ID, INVALID_PAGE_ID, PAGE_SIZE,
-    STORAGE_METADATA_PAGE_ID,
+    DB_HEADER_PAGE_ID, FIRST_ALLOCATABLE_PAGE_ID, INVALID_PAGE_ID, PAGE_SIZE, PAGE_TRAILER_SIZE,
+    STORAGE_METADATA_PAGE_ID, USABLE_PAGE_SIZE,
 };
 
 #[cfg(test)]

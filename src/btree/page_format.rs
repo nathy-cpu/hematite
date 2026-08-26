@@ -86,7 +86,7 @@
 
 use crate::error::{HematiteError, Result};
 use crate::storage::format::{PageKind, DATABASE_HEADER_SIZE};
-use crate::storage::{Page, PAGE_SIZE};
+use crate::storage::{Page, USABLE_PAGE_SIZE};
 
 const LEAF_HEADER_SIZE: usize = 8;
 const INTERIOR_HEADER_SIZE: usize = 12;
@@ -139,7 +139,7 @@ impl BTreePageHeaderV3 {
                 .then(|| read_u32_be(&page.data, header_offset + OFFSET_RIGHTMOST_CHILD)),
         };
 
-        if header.cell_content_start as usize > PAGE_SIZE {
+        if header.cell_content_start as usize > USABLE_PAGE_SIZE {
             return Err(HematiteError::CorruptedData(
                 "v3 b-tree cell content start exceeds page bounds".to_string(),
             ));
@@ -176,7 +176,7 @@ pub(crate) fn initialize_btree_page(
 ) -> Result<()> {
     let header_offset = header_offset(is_page_one);
     let header_size = page_header_size(kind)?;
-    if header_offset + header_size > PAGE_SIZE {
+    if header_offset + header_size > USABLE_PAGE_SIZE {
         return Err(HematiteError::StorageError(
             "v3 b-tree header does not fit on page".to_string(),
         ));
@@ -209,7 +209,7 @@ pub(crate) fn initialize_btree_page(
     write_u16_be(
         &mut page.data,
         header_offset + OFFSET_CELL_CONTENT_START,
-        PAGE_SIZE as u16,
+        USABLE_PAGE_SIZE as u16,
     );
     page.data[header_offset + OFFSET_FRAGMENTED_FREE_BYTES] = 0;
     if kind.is_interior() {
@@ -262,7 +262,7 @@ pub(crate) fn total_free_space(page: &Page, is_page_one: bool) -> Result<usize> 
     let mut fb_offset = header.first_freeblock as usize;
     let mut visited = 0u16;
     while fb_offset != 0 {
-        if fb_offset + MIN_FREEBLOCK_SIZE > PAGE_SIZE {
+        if fb_offset + MIN_FREEBLOCK_SIZE > USABLE_PAGE_SIZE {
             return Err(HematiteError::CorruptedData(
                 "Freeblock pointer exceeds page bounds".to_string(),
             ));
@@ -271,7 +271,7 @@ pub(crate) fn total_free_space(page: &Page, is_page_one: bool) -> Result<usize> 
         freeblock_space += fb_size;
         fb_offset = read_u16_be(&page.data, fb_offset) as usize;
         visited += 1;
-        if visited > PAGE_SIZE as u16 / MIN_FREEBLOCK_SIZE as u16 {
+        if visited > USABLE_PAGE_SIZE as u16 / MIN_FREEBLOCK_SIZE as u16 {
             return Err(HematiteError::CorruptedData(
                 "Freeblock chain cycle detected".to_string(),
             ));
@@ -492,7 +492,7 @@ pub(crate) fn compute_cell_size(
     header: &BTreePageHeaderV3,
     cell_offset: usize,
 ) -> Result<usize> {
-    if cell_offset >= PAGE_SIZE {
+    if cell_offset >= USABLE_PAGE_SIZE {
         return Err(HematiteError::CorruptedData(
             "Cell offset out of bounds".to_string(),
         ));
@@ -500,7 +500,7 @@ pub(crate) fn compute_cell_size(
 
     match header.kind {
         PageKind::LeafTable => {
-            if cell_offset + crate::btree::node::LEAF_CELL_HEADER_SIZE > PAGE_SIZE {
+            if cell_offset + crate::btree::node::LEAF_CELL_HEADER_SIZE > USABLE_PAGE_SIZE {
                 return Err(HematiteError::CorruptedData(
                     "Leaf cell header truncated".to_string(),
                 ));
@@ -511,7 +511,7 @@ pub(crate) fn compute_cell_size(
                 u16::from_be_bytes([page.data[cell_offset + 2], page.data[cell_offset + 3]])
                     as usize;
             let total = crate::btree::node::LEAF_CELL_HEADER_SIZE + key_len + value_len;
-            if cell_offset + total > PAGE_SIZE {
+            if cell_offset + total > USABLE_PAGE_SIZE {
                 return Err(HematiteError::CorruptedData(
                     "Leaf cell content exceeds page bounds".to_string(),
                 ));
@@ -519,7 +519,7 @@ pub(crate) fn compute_cell_size(
             Ok(total)
         }
         PageKind::InteriorTable => {
-            if cell_offset + crate::btree::node::INTERNAL_CELL_HEADER_SIZE > PAGE_SIZE {
+            if cell_offset + crate::btree::node::INTERNAL_CELL_HEADER_SIZE > USABLE_PAGE_SIZE {
                 return Err(HematiteError::CorruptedData(
                     "Internal cell header truncated".to_string(),
                 ));
@@ -528,7 +528,7 @@ pub(crate) fn compute_cell_size(
                 u16::from_be_bytes([page.data[cell_offset + 4], page.data[cell_offset + 5]])
                     as usize;
             let total = crate::btree::node::INTERNAL_CELL_HEADER_SIZE + key_len;
-            if cell_offset + total > PAGE_SIZE {
+            if cell_offset + total > USABLE_PAGE_SIZE {
                 return Err(HematiteError::CorruptedData(
                     "Internal cell key exceeds page bounds".to_string(),
                 ));
@@ -557,10 +557,10 @@ pub(crate) fn defragment_page(page: &mut Page, is_page_one: bool) -> Result<()> 
     }
 
     let pointer_area_end = pointer_start + cell_count * 2;
-    page.data[pointer_area_end..PAGE_SIZE].fill(0);
+    page.data[pointer_area_end..USABLE_PAGE_SIZE].fill(0);
 
     // Repack cells from the end.
-    let mut content_start = PAGE_SIZE;
+    let mut content_start = USABLE_PAGE_SIZE;
     // Process in reverse offset order so the largest offset is written first.
     for (ptr_index, cell_data) in cells.iter().rev() {
         content_start -= cell_data.len();

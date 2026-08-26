@@ -10,7 +10,10 @@ use crate::storage::{PageId, Pager};
 use std::collections::HashSet;
 
 const OVERFLOW_HEADER_SIZE: usize = 8;
-pub const OVERFLOW_PAYLOAD_CAPACITY: usize = crate::storage::PAGE_SIZE - OVERFLOW_HEADER_SIZE;
+/// An overflow page is a database page like any other, so its payload stops short of
+/// the pager's trailer.
+pub const OVERFLOW_PAYLOAD_CAPACITY: usize =
+    crate::storage::USABLE_PAGE_SIZE - OVERFLOW_HEADER_SIZE;
 pub const OVERFLOW_CHUNK_CAPACITY: usize = OVERFLOW_PAYLOAD_CAPACITY;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

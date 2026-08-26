@@ -1416,7 +1416,11 @@ mod page_format_tests {
         let header = BTreePageHeaderV3::parse(&page, true).unwrap();
         assert_eq!(header.header_offset, 100);
         assert_eq!(header.cell_count, 0);
-        assert_eq!(header.cell_content_start, crate::storage::PAGE_SIZE as u16);
+        // Content stops short of the pager's trailer, not at the end of the page.
+        assert_eq!(
+            header.cell_content_start,
+            crate::storage::USABLE_PAGE_SIZE as u16
+        );
     }
 
     #[test]
@@ -2654,7 +2658,7 @@ mod cell_framing_agreement_tests {
             assert_eq!(decoded.values[0], value, "value {key_len}/{value_len}");
             assert_eq!(
                 read_back,
-                crate::storage::PAGE_SIZE - offset,
+                crate::storage::USABLE_PAGE_SIZE - offset,
                 "compute_cell_size disagrees with the bytes written for {key_len}/{value_len}"
             );
         }
@@ -2681,13 +2685,66 @@ mod cell_framing_agreement_tests {
             let read_back = compute_cell_size(&page, &header, offset)?;
             assert_eq!(
                 read_back,
-                crate::storage::PAGE_SIZE - offset,
+                crate::storage::USABLE_PAGE_SIZE - offset,
                 "compute_cell_size disagrees with the bytes written for key length {key_len}"
             );
 
             let decoded = BTreeNode::from_page_decoded(page)?;
             assert_eq!(decoded.node_type, NodeType::Internal);
             assert_eq!(decoded.keys[0], key, "key length {key_len}");
+        }
+        Ok(())
+    }
+}
+
+/// The pager owns the last `PAGE_TRAILER_SIZE` bytes of every page. Nothing above it
+/// may write there, and the only way to be sure is to fill pages and look.
+mod page_trailer_reservation_tests {
+    use crate::btree::bytes::ByteTreeStore;
+    use crate::storage::{Pager, PAGE_SIZE, PAGE_TRAILER_SIZE, USABLE_PAGE_SIZE};
+
+    /// Pack a tree until pages split repeatedly, then check every page it owns has an
+    /// untouched trailer. The trailer is zero here because nothing writes it yet;
+    /// what matters is that B-tree content stopped short of it.
+    #[test]
+    fn btree_content_never_reaches_the_trailer() -> crate::error::Result<()> {
+        let trees = ByteTreeStore::new(Pager::new_in_memory(200)?);
+        let root = trees.create_tree()?;
+        let mut tree = trees.open_tree(root)?;
+
+        // A mix of sizes so pages fill by different routes: dense small cells, and
+        // large ones that spill to overflow pages.
+        for i in 0..400u32 {
+            tree.insert(&i.to_be_bytes(), &vec![0xAB; 40])?;
+        }
+        for i in 400..430u32 {
+            tree.insert(&i.to_be_bytes(), &vec![0xCD; PAGE_SIZE * 2])?;
+        }
+
+        // Delete scattered entries and refill, so pages accumulate freeblocks and have
+        // to compact. `defragment_page` rebuilds a page's content from the top down and
+        // is a separate writer from `to_page`; without this the fixture never reaches
+        // it, and a trailer violation there would go unnoticed.
+        for i in (0..400u32).step_by(3) {
+            tree.delete(&i.to_be_bytes())?;
+        }
+        for i in (0..400u32).step_by(3) {
+            tree.insert(&i.to_be_bytes(), &vec![0xEF; 70])?;
+        }
+
+        let page_ids = trees.collect_page_ids(root)?;
+        assert!(page_ids.len() > 5, "expected a multi-page tree");
+
+        let shared = trees.shared_storage();
+        let pager = shared.read().unwrap();
+        for page_id in page_ids {
+            let page = pager.read_page_shared(page_id)?;
+            let trailer = &page.data[USABLE_PAGE_SIZE..];
+            assert_eq!(trailer.len(), PAGE_TRAILER_SIZE);
+            assert!(
+                trailer.iter().all(|&byte| byte == 0),
+                "page {page_id} has content in the pager's trailer: {trailer:?}"
+            );
         }
         Ok(())
     }

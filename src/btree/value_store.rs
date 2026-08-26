@@ -19,7 +19,7 @@
 
 use crate::error::{HematiteError, Result};
 use crate::storage::overflow::{free_overflow_chain, read_overflow_chain, write_overflow_chain};
-use crate::storage::{Pager, INVALID_PAGE_ID, PAGE_SIZE};
+use crate::storage::{Pager, INVALID_PAGE_ID, USABLE_PAGE_SIZE};
 
 pub const STORED_VALUE_INLINE_TAG: u8 = 0;
 pub const STORED_VALUE_OVERFLOW_TAG: u8 = 1;
@@ -39,7 +39,7 @@ pub const STORED_VALUE_OVERFLOW_HEADER_SIZE: usize = 9;
 
 /// Maximum bytes of payload stored locally in a leaf cell (SQLite-style formula).
 /// For 4096-byte pages: (4096 - 12) * 64 / 255 - 23 = 1001.
-pub const MAX_LOCAL_PAYLOAD: usize = (PAGE_SIZE - 12) * 64 / 255 - 23;
+pub const MAX_LOCAL_PAYLOAD: usize = (USABLE_PAGE_SIZE - 12) * 64 / 255 - 23;
 
 /// Bytes of a spilled payload kept in the leaf cell.
 ///
