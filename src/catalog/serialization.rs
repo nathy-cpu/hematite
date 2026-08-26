@@ -68,6 +68,12 @@ impl RowCodec {
         Ok(u64::from_be_bytes(be_bytes))
     }
 
+    /// Decodes only the fields at `indices`, in that order. See
+    /// [`record_v4::decode_fields`].
+    pub fn decode_row_fields(data: &[u8], indices: &[usize]) -> Result<Vec<Value>> {
+        record_v4::decode_fields(data, indices)
+    }
+
     pub fn decode_stored_row(row_id: u64, data: &[u8]) -> Result<StoredRow> {
         Ok(StoredRow {
             row_id,

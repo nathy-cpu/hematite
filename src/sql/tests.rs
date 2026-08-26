@@ -5462,3 +5462,130 @@ mod limit_pushdown_tests {
         Ok(())
     }
 }
+
+/// The direct-projection path answers a plain `SELECT a, b FROM t` by decoding only
+/// the projected columns, skipping the general filter-and-project machinery. It is a
+/// wrong-answer risk rather than a slow-answer one, so these check the results it
+/// produces and, more importantly, that it stays off for every query shape that can
+/// read a column the projection does not name.
+mod direct_projection_tests {
+    use crate::catalog::Value;
+    use crate::sql::Connection;
+    use crate::test_utils::TestDbFile;
+    use crate::Result;
+
+    /// Returns the temp file alongside the connection so it is cleaned up on drop.
+    fn seeded(name: &str) -> Result<(Connection, TestDbFile)> {
+        let db = TestDbFile::new(name);
+        let mut conn = Connection::new(db.path())?;
+        conn.execute("CREATE TABLE t (id INT PRIMARY KEY, a INT, b INT, c TEXT);")?;
+        conn.execute(
+            "INSERT INTO t (id, a, b, c) VALUES (1,10,100,'x'),(2,20,200,'y'),(3,30,300,'z');",
+        )?;
+        Ok((conn, db))
+    }
+
+    #[test]
+    fn projects_in_statement_order_not_table_order() -> Result<()> {
+        let (mut conn, _db) = seeded("_test_direct_projection_order")?;
+        let result = conn.execute("SELECT b, id FROM t;")?;
+        assert_eq!(result.columns, vec!["b", "id"]);
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![Value::Integer(100), Value::Integer(1)],
+                vec![Value::Integer(200), Value::Integer(2)],
+                vec![Value::Integer(300), Value::Integer(3)],
+            ]
+        );
+        Ok(())
+    }
+
+    /// The same column twice must produce it twice, not once.
+    #[test]
+    fn repeats_a_column_named_twice() -> Result<()> {
+        let (mut conn, _db) = seeded("_test_direct_projection_repeat")?;
+        let result = conn.execute("SELECT a, a FROM t;")?;
+        assert_eq!(result.rows.len(), 3);
+        assert_eq!(result.rows[0], vec![Value::Integer(10), Value::Integer(10)]);
+        Ok(())
+    }
+
+    /// A text column decodes the same on this path as on the general one.
+    #[test]
+    fn decodes_text_columns() -> Result<()> {
+        let (mut conn, _db) = seeded("_test_direct_projection_text")?;
+        let result = conn.execute("SELECT c FROM t;")?;
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![Value::Text("x".to_string())],
+                vec![Value::Text("y".to_string())],
+                vec![Value::Text("z".to_string())],
+            ]
+        );
+        Ok(())
+    }
+
+    /// The load-bearing cases: each of these reads or depends on a column the
+    /// projection does not name, so the fast path must decline and the general path
+    /// must answer. If the guard ever lets one through, the unnamed column would be
+    /// read as whatever the fast path left in its place.
+    #[test]
+    fn declines_when_another_clause_can_read_an_unprojected_column() -> Result<()> {
+        let (mut conn, _db) = seeded("_test_direct_projection_declines")?;
+
+        // WHERE on a column that is not projected.
+        let result = conn.execute("SELECT a FROM t WHERE b = 200;")?;
+        assert_eq!(result.rows, vec![vec![Value::Integer(20)]]);
+
+        // ORDER BY on a column that is not projected.
+        let result = conn.execute("SELECT a FROM t ORDER BY b DESC;")?;
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![Value::Integer(30)],
+                vec![Value::Integer(20)],
+                vec![Value::Integer(10)],
+            ]
+        );
+
+        // An aggregate over a column that is not projected.
+        let result = conn.execute("SELECT COUNT(*) FROM t;")?;
+        assert_eq!(result.rows, vec![vec![Value::Integer(3)]]);
+
+        // GROUP BY.
+        let result = conn.execute("SELECT a FROM t GROUP BY a ORDER BY a;")?;
+        assert_eq!(result.rows.len(), 3);
+
+        // An expression, rather than a bare column reference.
+        let result = conn.execute("SELECT a + b FROM t ORDER BY a;")?;
+        assert_eq!(result.rows[0], vec![Value::Integer(110)]);
+
+        // A wildcard needs every column.
+        let result = conn.execute("SELECT * FROM t;")?;
+        assert_eq!(result.rows[0].len(), 4);
+
+        // DISTINCT.
+        let result = conn.execute("SELECT DISTINCT a FROM t;")?;
+        assert_eq!(result.rows.len(), 3);
+
+        Ok(())
+    }
+
+    /// LIMIT and OFFSET are applied on this path too, and `scan_row_cap` stops the
+    /// scan early only when it is safe to.
+    #[test]
+    fn applies_limit_and_offset() -> Result<()> {
+        let (mut conn, _db) = seeded("_test_direct_projection_window")?;
+        let result = conn.execute("SELECT id FROM t LIMIT 2;")?;
+        assert_eq!(
+            result.rows,
+            vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]
+        );
+
+        let result = conn.execute("SELECT id FROM t LIMIT 1 OFFSET 1;")?;
+        assert_eq!(result.rows, vec![vec![Value::Integer(2)]]);
+        Ok(())
+    }
+}

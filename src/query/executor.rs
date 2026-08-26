@@ -1420,6 +1420,10 @@ impl SelectExecutor {
             return Ok(left_result);
         }
 
+        if let Some(result) = self.try_direct_projection(ctx)? {
+            return Ok(result);
+        }
+
         let (sources, mut filtered_rows) = self.materialize_filtered_rows(ctx)?;
         let mut subquery_cache = SubqueryCache::new();
 
@@ -1490,6 +1494,89 @@ impl SelectExecutor {
         apply_distinct_if_needed(self.statement.distinct, &mut projected_rows);
         self.apply_select_window(&mut projected_rows);
         Ok(self.build_query_result(self.get_column_names(&sources), projected_rows))
+    }
+
+    /// The table column indices to decode, in projection order, when a query wants
+    /// nothing but a few of one table's own columns.
+    ///
+    /// Listed as things that must be *absent* rather than things that must be present:
+    /// every clause below can read a column the projection does not mention, and
+    /// decoding only the projected ones would then hand it a value that was never
+    /// read off the page. Adding a clause to `SelectStatement` therefore cannot
+    /// silently widen this path — it stays off until someone adds it here.
+    fn direct_projection_columns(&self, sources: &[ResolvedSource]) -> Option<Vec<usize>> {
+        if !matches!(self.access_path, SelectAccessPath::FullTableScan) {
+            return None;
+        }
+        // One source, so a resolved index is a table column index.
+        if sources.len() != 1 || sources[0].offset != 0 {
+            return None;
+        }
+
+        let statement = &self.statement;
+        if statement.where_clause.is_some()
+            || !statement.order_by.is_empty()
+            || !statement.group_by.is_empty()
+            || statement.having_clause.is_some()
+            || statement.distinct
+            || statement.set_operation.is_some()
+            || self.has_aggregate_projection()
+            || self.uses_materialized_reference()
+            || !self.outer_scopes.is_empty()
+        {
+            return None;
+        }
+
+        let mut indices = Vec::with_capacity(statement.columns.len());
+        for item in &statement.columns {
+            // Wildcards, expressions and aggregates all need more than a column read.
+            let SelectItem::Column(name) = item else {
+                return None;
+            };
+            indices.push(self.resolve_column_index(sources, name).ok()??);
+        }
+        if indices.is_empty() {
+            return None;
+        }
+        Some(indices)
+    }
+
+    /// Answers a plain `SELECT a, b FROM t` by decoding only `a` and `b`.
+    ///
+    /// The general path decodes every column of every row into a `Vec<Value>` and then
+    /// builds a second `Vec<Value>` per row holding the projected subset. Record decode
+    /// is about a quarter of a scan's instructions and those two rows are both of its
+    /// per-row allocations, so for a query that needs neither filtering nor ordering
+    /// both are avoidable: decode the wanted fields straight into projection order.
+    fn try_direct_projection(
+        &mut self,
+        ctx: &mut ExecutionContext<'_>,
+    ) -> Result<Option<QueryResult>> {
+        let TableReference::Table(table_name, _) = &self.statement.from else {
+            return Ok(None);
+        };
+        if self.statement.lookup_cte(table_name).is_some() {
+            return Ok(None);
+        }
+        let table_name = table_name.clone();
+        if ctx.catalog.get_table_by_name(&table_name).is_none() {
+            return Ok(None);
+        }
+
+        let sources = self.resolve_sources(ctx)?;
+        let Some(indices) = self.direct_projection_columns(&sources) else {
+            return Ok(None);
+        };
+
+        // `scan_row_cap` already refuses everything this path refuses, so when it
+        // answers it is safe to stop the scan there.
+        let mut rows = ctx
+            .engine
+            .read_table_columns(&table_name, &indices, self.scan_row_cap())?;
+        self.apply_select_window(&mut rows);
+        Ok(Some(
+            self.build_query_result(self.get_column_names(&sources), rows),
+        ))
     }
 
     fn materialize_filtered_rows(

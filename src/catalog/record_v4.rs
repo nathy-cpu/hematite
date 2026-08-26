@@ -634,6 +634,52 @@ impl<'a> Iterator for RecordIter<'a> {
 /// say it does. A caller decoding a whole record hands over exactly one record's
 /// bytes, so anything left over is corruption — most likely a cell whose length
 /// disagrees with its contents.
+/// Decodes only `indices`, in the order given.
+///
+/// A scan that selects two of five columns still decoded all five and then threw
+/// three away — decode is a quarter of a scan's instructions. Field bodies are only
+/// reachable by walking the serial-type header, but that walk is cheap (one byte per
+/// small field) and it is the *bodies* that cost: allocating a `String`, copying a
+/// blob. This walks the header once, records where each wanted field lives, and
+/// touches nothing else.
+///
+/// Emitting in projection order rather than table order lets the caller skip building
+/// a second row to reorder into.
+pub(crate) fn decode_fields(bytes: &[u8], indices: &[usize]) -> Result<Vec<Value>> {
+    let record = RecordRef::new(bytes)?;
+
+    // The output vector is the only allocation: fields are written into their slots as
+    // the single header walk reaches them, rather than collected somewhere first.
+    let mut values = vec![Value::Null; indices.len()];
+    let mut filled = 0usize;
+    let mut body_end = 0usize;
+
+    for (position, entry) in record.types().enumerate() {
+        let (code, range) = entry?;
+        body_end = range.end;
+        for (slot, wanted) in indices.iter().enumerate() {
+            if *wanted == position {
+                values[slot] = record.value_at(code, range.clone())?.to_value()?;
+                filled += 1;
+            }
+        }
+    }
+
+    if body_end != record.body.len() {
+        return Err(corrupt(format!(
+            "Record body is {} bytes but its serial types account for {body_end}",
+            record.body.len()
+        )));
+    }
+    if filled != indices.len() {
+        return Err(corrupt(format!(
+            "Record has {} fields, too few for the requested projection",
+            record.types().count()
+        )));
+    }
+    Ok(values)
+}
+
 pub(crate) fn decode(bytes: &[u8]) -> Result<Vec<Value>> {
     let record = RecordRef::new(bytes)?;
     let (values, body_end) = record.to_values_and_body_end()?;

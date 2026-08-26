@@ -656,6 +656,16 @@ not available yet.",
     ///
     /// The caller is responsible for establishing that a prefix of the table is a
     /// correct answer; see `SelectExecutor::scan_row_cap`.
+    /// Reads a table decoding only the given column indices, in that order.
+    pub fn read_table_columns(
+        &mut self,
+        table_name: &str,
+        indices: &[usize],
+        max_rows: Option<usize>,
+    ) -> Result<Vec<Vec<Value>>> {
+        table_store::read_table_columns(self, table_name, indices, max_rows)
+    }
+
     pub fn read_from_table_capped(
         &mut self,
         table_name: &str,

@@ -215,6 +215,29 @@ pub(crate) fn read_from_table_capped(
     Ok(rows)
 }
 
+/// Reads a table decoding only `indices`, in that order.
+///
+/// The narrow path behind a `SELECT a, b FROM t` with nothing else in it: no
+/// predicate, no ordering, no grouping. Rows come back already in projection order,
+/// so the executor does not build a second row per result to reorder into.
+pub(crate) fn read_table_columns(
+    engine: &mut CatalogEngine,
+    table_name: &str,
+    indices: &[usize],
+    max_rows: Option<usize>,
+) -> Result<Vec<Vec<Value>>> {
+    let root_page_id = engine.table_runtime_metadata(table_name)?.root_page_id;
+    let mut rows = Vec::new();
+    if max_rows == Some(0) {
+        return Ok(rows);
+    }
+    engine.visit_tree_entries_while(root_page_id, |_key, value| {
+        rows.push(RowCodec::decode_row_fields(value, indices)?);
+        Ok(max_rows.is_none_or(|cap| rows.len() < cap))
+    })?;
+    Ok(rows)
+}
+
 pub(crate) fn lookup_row_by_rowid(
     engine: &mut CatalogEngine,
     table_name: &str,
