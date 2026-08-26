@@ -85,7 +85,7 @@ impl Pager {
 
         self.journal_mode = JournalMode::Rollback;
         self.file_manager.set_free_pages(Vec::new());
-        self.page_checksums.clear();
+        Arc::make_mut(&mut self.page_checksums).clear();
         Ok(())
     }
 
@@ -99,7 +99,7 @@ impl Pager {
             PersistedPagerState::decode_bytes(contents, Self::CHECKSUM_METADATA_VERSION)?;
         self.journal_mode = persisted.journal_mode;
         self.file_manager.set_free_pages(persisted.free_pages);
-        self.page_checksums = persisted.checksums;
+        self.page_checksums = Arc::new(persisted.checksums);
         Ok(())
     }
 
@@ -144,7 +144,7 @@ impl Pager {
         Ok(Arc::new(VisibleWalState::from_database_state(
             self.logical_file_len()?,
             self.logical_free_pages().to_vec(),
-            self.page_checksums.clone(),
+            self.page_checksums.as_ref().clone(),
         )))
     }
 
@@ -203,7 +203,7 @@ impl Pager {
             path,
             self.file_manager.file_len()?,
             self.file_manager.free_pages().to_vec(),
-            self.page_checksums.clone(),
+            self.page_checksums.as_ref().clone(),
             metadata_page,
         )?
         .map(Arc::new);
@@ -246,7 +246,7 @@ impl Pager {
         let full_state = PersistedPagerState {
             journal_mode: self.journal_mode,
             free_pages: free_pages.clone(),
-            checksums: self.page_checksums.clone(),
+            checksums: self.page_checksums.as_ref().clone(),
         };
 
         let encoded = full_state.encode(Self::CHECKSUM_METADATA_VERSION);
@@ -673,7 +673,7 @@ impl Pager {
         }
         self.file_manager.flush()?;
 
-        self.page_checksums = journal.original_checksums.iter().copied().collect();
+        self.page_checksums = Arc::new(journal.original_checksums.iter().copied().collect());
         self.persist_checksums()
     }
 
@@ -682,7 +682,7 @@ impl Pager {
             crate::error::HematiteError::StorageError("Pager transaction is not active".to_string())
         })?;
         self.cache_mut()?.reset();
-        self.page_checksums = transaction.original_checksums;
+        self.page_checksums = Arc::new(transaction.original_checksums);
         Ok(())
     }
 
@@ -755,14 +755,14 @@ impl Pager {
             VisibleWalState::from_database_state(
                 self.file_manager.file_len()?,
                 self.file_manager.free_pages().to_vec(),
-                self.page_checksums.clone(),
+                self.page_checksums.as_ref().clone(),
             )
         };
         updated_visible_state.apply_committed_delta(
             next_sequence,
             file_len_for_next_page_id(wal_next_page_id),
             wal_free_pages.clone(),
-            self.page_checksums.clone(),
+            self.page_checksums.as_ref().clone(),
             frames,
             &frame_offsets,
         )?;

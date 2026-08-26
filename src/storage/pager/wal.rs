@@ -171,7 +171,7 @@ impl Pager {
         }
 
         self.file_manager.flush()?;
-        self.page_checksums = state.page_checksums.clone();
+        self.page_checksums = Arc::new(state.page_checksums.clone());
         self.latest_wal_state = None;
         self.latest_wal_file_stamp = None;
         self.wal_read_snapshot = None;

@@ -218,7 +218,7 @@ impl Pager {
         Ok(PagerSnapshot::Full(Box::new(FullSnapshot {
             file_manager: self.file_manager.snapshot()?,
             dirty_pages: self.share_dirty_pages()?,
-            page_checksums: self.page_checksums.clone(),
+            page_checksums: self.page_checksums.as_ref().clone(),
             transaction: self.transaction.clone(),
             state: self.state,
         })))
@@ -299,7 +299,7 @@ impl Pager {
                     cache.mark_dirty(page_id);
                 }
 
-                self.page_checksums = page_checksums;
+                self.page_checksums = Arc::new(page_checksums);
                 self.transaction = transaction;
                 self.sync_rollback_journal_from_transaction()?;
                 self.state = state;

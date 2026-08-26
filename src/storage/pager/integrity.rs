@@ -6,6 +6,7 @@ use crate::storage::{
     STORAGE_METADATA_PAGE_ID,
 };
 use std::collections::HashSet;
+use std::sync::Arc;
 
 impl Pager {
     pub fn validate_integrity(&mut self) -> Result<PagerIntegrityReport> {
@@ -21,14 +22,14 @@ impl Pager {
                 (
                     transaction.rollback_next_page_id,
                     transaction.rollback_free_list.as_slice().to_vec(),
-                    self.page_checksums.clone(),
+                    self.page_checksums.as_ref().clone(),
                     HashSet::new(),
                 )
             } else {
                 (
                     self.file_manager.next_page_id(),
                     self.file_manager.free_pages().to_vec(),
-                    self.page_checksums.clone(),
+                    self.page_checksums.as_ref().clone(),
                     HashSet::new(),
                 )
             };
@@ -159,7 +160,7 @@ impl Pager {
             let page = self.cache_read()?.peek_shared(page_id);
             if let Some(page) = page {
                 let checksum = Self::calculate_page_checksum(&page);
-                self.page_checksums.insert(page_id, checksum);
+                Arc::make_mut(&mut self.page_checksums).insert(page_id, checksum);
             }
         }
         Ok(())

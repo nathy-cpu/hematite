@@ -5,6 +5,7 @@ use super::{
 use crate::error::Result;
 use crate::storage::page_hash::PageSet;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Recycle a finished transaction into the scratch slots, freeing any data that is
 /// only needed for rollback (dirty-page images, page-record copies, savepoint
@@ -110,7 +111,7 @@ impl Pager {
             }
             JournalMode::Wal => {
                 let visible_state = self.snapshot_wal_visible_state()?;
-                self.page_checksums = visible_state.page_checksums.clone();
+                self.page_checksums = Arc::new(visible_state.page_checksums.clone());
                 // Reuse a pre-allocated WalTransaction when available.
                 let mut wal = self.wal_scratch.take().unwrap_or_else(|| WalTransaction {
                     wal_next_page_id: 0,

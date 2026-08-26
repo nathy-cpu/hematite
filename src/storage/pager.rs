@@ -223,7 +223,14 @@ struct PagerSavepoint {
     free_page_set: PageSet,
     /// Rollback mode only; empty for WAL, which has no uninitialised-page concept.
     uninitialized_pages: PageSet,
-    page_checksums: HashMap<PageId, u32>,
+    /// Shared, not copied.
+    ///
+    /// A savepoint is taken per row and used to deep-clone this map, which is O(all
+    /// checksummed pages) each time. The map only changes at flush and on page
+    /// deallocation, never per row, so almost every one of those copies reproduced an
+    /// identical map. `Arc` makes taking a savepoint a refcount bump and defers the
+    /// copy to `Arc::make_mut` at the rare point something actually writes to it.
+    page_checksums: Arc<HashMap<PageId, u32>>,
     /// Pre-images of the pages modified since the savepoint was taken — the undo log.
     ///
     /// Captured lazily, one copy per page per savepoint, by `snapshot_original_page`.
@@ -291,7 +298,14 @@ pub struct Pager {
     /// and the journal/WAL land in one place.
     stats: Arc<PagerStats>,
     cache: RwLock<PageCache>,
-    page_checksums: HashMap<PageId, u32>,
+    /// Shared, not copied.
+    ///
+    /// A savepoint is taken per row and used to deep-clone this map, which is O(all
+    /// checksummed pages) each time. The map only changes at flush and on page
+    /// deallocation, never per row, so almost every one of those copies reproduced an
+    /// identical map. `Arc` makes taking a savepoint a refcount bump and defers the
+    /// copy to `Arc::make_mut` at the rare point something actually writes to it.
+    page_checksums: Arc<HashMap<PageId, u32>>,
     journal_mode: JournalMode,
     journal_path: Option<PathBuf>,
     wal_path: Option<PathBuf>,
@@ -367,7 +381,7 @@ impl Pager {
             file_manager,
             stats,
             cache: RwLock::new(PageCache::new(cache_capacity)),
-            page_checksums: HashMap::new(),
+            page_checksums: Arc::new(HashMap::new()),
             journal_mode: JournalMode::Rollback,
             journal_path,
             wal_path,
@@ -407,7 +421,7 @@ impl Pager {
             file_manager,
             stats,
             cache: RwLock::new(PageCache::new(cache_capacity)),
-            page_checksums: HashMap::new(),
+            page_checksums: Arc::new(HashMap::new()),
             journal_mode: JournalMode::Rollback,
             journal_path: None,
             wal_path: None,
