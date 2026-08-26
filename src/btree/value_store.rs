@@ -23,7 +23,19 @@ use crate::storage::{Pager, INVALID_PAGE_ID, PAGE_SIZE};
 
 pub const STORED_VALUE_INLINE_TAG: u8 = 0;
 pub const STORED_VALUE_OVERFLOW_TAG: u8 = 1;
-pub const STORED_VALUE_HEADER_SIZE: usize = 11;
+/// Header bytes on an inline stored value: just the tag.
+///
+/// It was 11 — tag, `total_len` u32, `local_len` u16, `overflow_first_page` u32 — on
+/// every value, including the empty ones that secondary-index entries store. For an
+/// inline value all four of those beyond the tag are recoverable: the payload length
+/// is the cell's own length prefix minus this header, `total_len` equals it, and
+/// there is no overflow page. Ten bytes per row and per index entry, for nothing.
+pub const STORED_VALUE_INLINE_HEADER_SIZE: usize = 1;
+
+/// Header bytes on a spilled stored value: tag, total length, first overflow page.
+///
+/// `local_len` is still recoverable from the cell length, so it is not stored.
+pub const STORED_VALUE_OVERFLOW_HEADER_SIZE: usize = 9;
 
 /// Maximum bytes of payload stored locally in a leaf cell (SQLite-style formula).
 /// For 4096-byte pages: (4096 - 12) * 64 / 255 - 23 = 1001.
@@ -132,11 +144,17 @@ impl StoredValueLayout {
             ));
         }
 
-        let mut out = Vec::with_capacity(STORED_VALUE_HEADER_SIZE + self.local_payload.len());
+        let header = if self.overflow_first_page == INVALID_PAGE_ID {
+            STORED_VALUE_INLINE_HEADER_SIZE
+        } else {
+            STORED_VALUE_OVERFLOW_HEADER_SIZE
+        };
+        let mut out = Vec::with_capacity(header + self.local_payload.len());
         out.push(self.tag());
-        out.extend_from_slice(&self.total_len.to_le_bytes());
-        out.extend_from_slice(&(self.local_payload.len() as u16).to_le_bytes());
-        out.extend_from_slice(&self.overflow_first_page.to_le_bytes());
+        if self.overflow_first_page != INVALID_PAGE_ID {
+            out.extend_from_slice(&self.total_len.to_le_bytes());
+            out.extend_from_slice(&self.overflow_first_page.to_le_bytes());
+        }
         out.extend_from_slice(&self.local_payload);
         Ok(out)
     }
@@ -148,52 +166,53 @@ impl StoredValueLayout {
     /// inline value — the common case, since a row only spills past
     /// [`MIN_LOCAL_PAYLOAD`] — the borrowed slice is the whole value.
     pub fn decode_borrowed(bytes: &[u8]) -> Result<(Self, &[u8])> {
-        if bytes.len() < STORED_VALUE_HEADER_SIZE {
+        let Some(&tag) = bytes.first() else {
             return Err(HematiteError::CorruptedData(
                 "Stored value header is truncated".to_string(),
             ));
-        }
+        };
 
-        let tag = bytes[0];
-        if tag != STORED_VALUE_INLINE_TAG && tag != STORED_VALUE_OVERFLOW_TAG {
-            return Err(HematiteError::CorruptedData(format!(
-                "Unsupported stored value tag {}",
-                tag
-            )));
-        }
+        let (total_len, overflow_first_page, local_payload) = match tag {
+            STORED_VALUE_INLINE_TAG => {
+                // Everything the old header spelled out is implied: the payload is the
+                // rest of the cell, and that is the whole value.
+                let local_payload = &bytes[STORED_VALUE_INLINE_HEADER_SIZE..];
+                (local_payload.len() as u32, INVALID_PAGE_ID, local_payload)
+            }
+            STORED_VALUE_OVERFLOW_TAG => {
+                if bytes.len() < STORED_VALUE_OVERFLOW_HEADER_SIZE {
+                    return Err(HematiteError::CorruptedData(
+                        "Stored value header is truncated".to_string(),
+                    ));
+                }
+                let total_len = u32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
+                let overflow_first_page =
+                    u32::from_le_bytes([bytes[5], bytes[6], bytes[7], bytes[8]]);
+                if overflow_first_page == INVALID_PAGE_ID {
+                    return Err(HematiteError::CorruptedData(
+                        "Overflow stored value is missing an overflow head page".to_string(),
+                    ));
+                }
+                let local_payload = &bytes[STORED_VALUE_OVERFLOW_HEADER_SIZE..];
+                if local_payload.len() > total_len as usize {
+                    return Err(HematiteError::CorruptedData(
+                        "Stored value local payload exceeds total payload length".to_string(),
+                    ));
+                }
+                (total_len, overflow_first_page, local_payload)
+            }
+            other => {
+                return Err(HematiteError::CorruptedData(format!(
+                    "Unsupported stored value tag {}",
+                    other
+                )));
+            }
+        };
 
-        let total_len = u32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
-        let local_len = u16::from_le_bytes([bytes[5], bytes[6]]) as usize;
-        let overflow_first_page = u32::from_le_bytes([bytes[7], bytes[8], bytes[9], bytes[10]]);
-
-        if local_len > MAX_LOCAL_PAYLOAD {
+        if local_payload.len() > MAX_LOCAL_PAYLOAD {
             return Err(HematiteError::CorruptedData(
                 "Stored value local payload exceeds local capacity".to_string(),
             ));
-        }
-        if STORED_VALUE_HEADER_SIZE + local_len != bytes.len() {
-            return Err(HematiteError::CorruptedData(
-                "Stored value local payload length mismatch".to_string(),
-            ));
-        }
-        if local_len > total_len as usize {
-            return Err(HematiteError::CorruptedData(
-                "Stored value local payload exceeds total payload length".to_string(),
-            ));
-        }
-
-        match tag {
-            STORED_VALUE_INLINE_TAG if overflow_first_page != INVALID_PAGE_ID => {
-                return Err(HematiteError::CorruptedData(
-                    "Inline stored value cannot reference overflow pages".to_string(),
-                ));
-            }
-            STORED_VALUE_OVERFLOW_TAG if overflow_first_page == INVALID_PAGE_ID => {
-                return Err(HematiteError::CorruptedData(
-                    "Overflow stored value is missing an overflow head page".to_string(),
-                ));
-            }
-            _ => {}
         }
 
         Ok((
@@ -202,7 +221,7 @@ impl StoredValueLayout {
                 local_payload: Vec::new(),
                 overflow_first_page,
             },
-            &bytes[STORED_VALUE_HEADER_SIZE..],
+            local_payload,
         ))
     }
 

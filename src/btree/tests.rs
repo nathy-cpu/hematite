@@ -1640,7 +1640,8 @@ mod index_extra_tests {
 
 mod value_store_tests {
     use crate::btree::value_store::{
-        inline_payload, StoredValueLayout, MAX_LOCAL_PAYLOAD, STORED_VALUE_HEADER_SIZE,
+        inline_payload, StoredValueLayout, MAX_LOCAL_PAYLOAD, STORED_VALUE_INLINE_HEADER_SIZE,
+        STORED_VALUE_OVERFLOW_HEADER_SIZE,
     };
     use crate::storage::INVALID_PAGE_ID;
 
@@ -1663,7 +1664,7 @@ mod value_store_tests {
         let encoded = layout.encode()?;
         assert_eq!(
             encoded.len(),
-            STORED_VALUE_HEADER_SIZE + local_payload.len()
+            STORED_VALUE_OVERFLOW_HEADER_SIZE + local_payload.len()
         );
 
         let decoded = StoredValueLayout::decode(&encoded)?;
@@ -1674,14 +1675,23 @@ mod value_store_tests {
 
     #[test]
     fn test_stored_value_layout_rejects_invalid_headers() {
-        assert!(StoredValueLayout::decode(&[0u8; STORED_VALUE_HEADER_SIZE - 1]).is_err());
-
-        let mut bad_inline = vec![0u8; STORED_VALUE_HEADER_SIZE];
-        bad_inline[0] = 0;
-        bad_inline[1..5].copy_from_slice(&1u32.to_le_bytes());
-        bad_inline[5..7].copy_from_slice(&0u16.to_le_bytes());
-        bad_inline[7..11].copy_from_slice(&7u32.to_le_bytes());
-        assert!(StoredValueLayout::decode(&bad_inline).is_err());
+        // Empty input has not even a tag byte.
+        assert!(StoredValueLayout::decode(&[]).is_err());
+        // An unknown tag.
+        assert!(StoredValueLayout::decode(&[9u8; 4]).is_err());
+        // An overflow value whose header is cut short.
+        assert!(StoredValueLayout::decode(&[
+            super::super::value_store::STORED_VALUE_OVERFLOW_TAG,
+            0,
+            0
+        ])
+        .is_err());
+        // An overflow value naming no head page.
+        let mut headless = vec![0u8; STORED_VALUE_OVERFLOW_HEADER_SIZE];
+        headless[0] = super::super::value_store::STORED_VALUE_OVERFLOW_TAG;
+        headless[1..5].copy_from_slice(&8u32.to_le_bytes());
+        headless[5..9].copy_from_slice(&crate::storage::INVALID_PAGE_ID.to_le_bytes());
+        assert!(StoredValueLayout::decode(&headless).is_err());
     }
 
     /// The borrowed decode has to agree with the owning one, since scans now take
@@ -1726,7 +1736,15 @@ mod value_store_tests {
             "a spilled value's bytes are not all in the page, so they cannot be borrowed"
         );
 
-        assert!(inline_payload(&[0u8; STORED_VALUE_HEADER_SIZE - 1]).is_err());
+        assert!(inline_payload(&[]).is_err());
+        // An inline value is now just a tag plus its bytes, so the smallest valid one
+        // is a single tag byte carrying an empty payload -- which is exactly what a
+        // secondary-index entry stores.
+        assert_eq!(inline_payload(&[0u8])?, Some(b"".as_slice()));
+        assert_eq!(
+            STORED_VALUE_INLINE_HEADER_SIZE, 1,
+            "an inline value must cost one byte of header"
+        );
         Ok(())
     }
 }
