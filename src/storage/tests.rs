@@ -4605,3 +4605,39 @@ mod savepoint_release_tests {
         );
     }
 }
+
+/// Diagnostic: at what size does per-page integrity checking silently switch off?
+/// `cargo test --release checksum_cliff -- --ignored --nocapture`
+mod checksum_cliff_probe {
+    use crate::storage::{JournalMode, Page, Pager};
+    use crate::test_utils::TestDbFile;
+
+    #[test]
+    #[ignore]
+    fn report_checksum_cliff() {
+        let db = TestDbFile::new("_test_checksum_cliff");
+        let mut pager = Pager::new(db.path(), 64).expect("open");
+        pager.set_journal_mode(JournalMode::Rollback).expect("mode");
+
+        let mut last_reported = 0usize;
+        for round in 1..=4000u32 {
+            let id = pager.allocate_page().expect("allocate");
+            pager.begin_transaction().expect("begin");
+            let mut page = Page::new(id);
+            page.data[0] = (round % 251) as u8;
+            pager.write_page(page).expect("write");
+            pager.commit_transaction().expect("commit");
+
+            let report = pager.validate_integrity().expect("validate");
+            if report.checksummed_page_count < last_reported {
+                println!(
+                    "\nchecksums dropped after {round} pages: {} -> {}\n",
+                    last_reported, report.checksummed_page_count
+                );
+                return;
+            }
+            last_reported = report.checksummed_page_count;
+        }
+        println!("\nno cliff within 4000 pages (peak {last_reported} checksummed)\n");
+    }
+}
