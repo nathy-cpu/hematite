@@ -386,10 +386,13 @@ not available yet.",
     }
 
     fn run_atomically<T>(&mut self, operation: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
-        let table_metadata = self.table_metadata.clone();
         let transaction_active = self.transaction_active()?;
 
         if transaction_active {
+            // The metadata pre-image lives in the snapshot on this path. It used to be
+            // cloned a second time above, unconditionally, and then dropped unread —
+            // a whole `HashMap<String, TableRuntimeMetadata>` per row, since
+            // `run_atomically` wraps every single-row insert and delete.
             let snapshot = self.snapshot()?;
             match operation(self) {
                 // Released, not dropped — see `Pager::release_savepoint`.
@@ -403,6 +406,9 @@ not available yet.",
                 }
             }
         } else {
+            // No snapshot on this path: the transaction is ours, so rolling it back
+            // undoes the storage side. Only the in-memory metadata needs a pre-image.
+            let table_metadata = self.table_metadata.clone();
             self.begin_transaction()?;
             match operation(self) {
                 Ok(result) => match self.commit_transaction() {
