@@ -17,6 +17,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::storage::USABLE_PAGE_SIZE;
+
 impl Pager {
     fn legacy_checksum_store_path(db_path: &Path) -> PathBuf {
         let mut file_name = db_path
@@ -109,21 +111,34 @@ impl Pager {
         let metadata_page = self.read_persisted_state_page()?;
         self.apply_persisted_state_page(metadata_page.as_ref())?;
         if self.journal_mode != JournalMode::Wal {
-            // In rollback mode there is no WAL to version reads, so a fresh read must observe
-            // any state another writer committed. Previously the entire page cache was thrown
-            // away on every `begin_read`, which defeated caching (re-reading every page from
-            // the OS) and churned the allocator. Instead, fingerprint the persisted metadata
-            // page (which encodes per-page checksums and therefore changes on any commit) and
-            // only reset the cache when that on-disk state has actually changed.
-            let current_fingerprint = metadata_page.as_ref().map(|page| page.data.as_slice());
-            let unchanged = matches!(
-                (self.rollback_persisted_fingerprint.as_deref(), current_fingerprint),
-                (Some(prev), Some(cur)) if prev == cur
-            );
+            // In rollback mode there is no WAL to version reads, so a fresh read must
+            // observe anything another writer committed, and the only safe answer to
+            // "did someone else change the file" is to drop every cached page.
+            //
+            // The question is how to tell someone else's commit from our own. This
+            // used to keep a separate fingerprint of the metadata page as last read
+            // from disk — but that page is shared with the catalog, whose section
+            // carries row counts, so *our* commits changed it too. The fingerprint
+            // never matched and the cache was reset at the start of every single
+            // transaction: 205 resets over 205 one-row transactions, and 7 of the 9
+            // page reads each of those cost.
+            //
+            // The cached copy of the page is the better witness, and it needs no
+            // separate bookkeeping: a commit writes it through the cache, so it is
+            // exactly what we last put on disk. Bytes still on disk that differ from
+            // it are bytes we did not write. Content only -- the trailer holds a
+            // checksum the pager stamps on the way out and never mirrors in memory.
+            let unchanged = {
+                let cache = self.cache_read()?;
+                match (metadata_page.as_ref(), cache.peek(STORAGE_METADATA_PAGE_ID)) {
+                    (Some(on_disk), Some(cached)) => {
+                        on_disk.data[..USABLE_PAGE_SIZE] == cached.data[..USABLE_PAGE_SIZE]
+                    }
+                    _ => false,
+                }
+            };
             if !unchanged {
                 self.cache_mut()?.reset();
-                self.rollback_persisted_fingerprint =
-                    current_fingerprint.map(|bytes| bytes.to_vec().into_boxed_slice());
             }
             self.latest_wal_state = None;
             self.latest_wal_file_stamp = None;

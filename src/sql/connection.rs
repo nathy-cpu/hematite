@@ -1157,6 +1157,11 @@ impl Connection {
         catalog_guard.journal_mode()
     }
 
+    pub fn storage_counters(&self) -> Result<crate::storage::StatsSnapshot> {
+        let catalog_guard = self.lock_catalog()?;
+        catalog_guard.storage_counters()
+    }
+
     pub fn set_journal_mode(&mut self, journal_mode: JournalMode) -> Result<()> {
         let mut catalog_guard = self.lock_catalog()?;
         catalog_guard.set_journal_mode(journal_mode)

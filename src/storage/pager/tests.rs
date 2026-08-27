@@ -271,6 +271,10 @@ mod fault_tests {
         let mut updated = pager.read_page(page_id)?;
         updated.data[0] = 2;
 
+        // Cold, so the write below has to spill to reach the injected failure. It
+        // used to be cold by accident: rollback mode reset the cache at the start of
+        // every transaction.
+        pager.evict_all_cached_pages()?;
         pager.inject_io_failure_after(0);
         let err = pager.write_page(updated).unwrap_err();
         assert!(err.to_string().contains("Injected IO error"));

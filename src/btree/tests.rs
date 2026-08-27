@@ -495,6 +495,14 @@ mod mod_tests {
         let baseline_free_pages = trees.free_page_ids()?;
 
         trees.begin_transaction()?;
+        // Cold, so the operation below has to reach the disk and meet the injected
+        // failure. It used to be cold by accident: rollback mode reset the page
+        // cache at the start of every transaction.
+        trees
+            .shared_storage()
+            .write()
+            .unwrap()
+            .evict_all_cached_pages()?;
         trees
             .shared_storage()
             .write()
@@ -588,6 +596,14 @@ mod mod_tests {
 
         trees.begin_transaction()?;
 
+        // Cold, so the operation below has to reach the disk and meet the injected
+        // failure. It used to be cold by accident: rollback mode reset the page
+        // cache at the start of every transaction.
+        trees
+            .shared_storage()
+            .write()
+            .unwrap()
+            .evict_all_cached_pages()?;
         trees
             .shared_storage()
             .write()

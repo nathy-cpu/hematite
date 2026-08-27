@@ -20,6 +20,12 @@
 //!         ./target/release/examples/storage_profile 2>&1 | sort | uniq -c | sort -rn
 //!
 //! Allocations: the same pair of runs under `--tool=dhat`, diffing "blocks".
+//!
+//! Every run also prints the storage counters for the measured phase alone —
+//! fsyncs, page reads and writes, pool hits and misses, journal bytes, page-image
+//! copies. Those need no tooling at all, and they catch the two things the other
+//! two instruments are blind to: a syscall, which callgrind does not see, and a
+//! copy into a recycled buffer, which dhat does not see.
 
 use hematite::query::JournalMode;
 use hematite::Hematite;
@@ -63,6 +69,7 @@ fn main() {
         i = end;
     }
 
+    let baseline = h.storage_counters().expect("counters");
     let mut sink = 0usize;
     match phase.as_str() {
         // The subtraction baseline: build the fixture and stop.
@@ -108,5 +115,13 @@ fn main() {
         }
         other => panic!("unknown PHASE {other}"),
     }
+    // The counters are the point of this harness as much as the workload is:
+    // callgrind cannot see a syscall and dhat cannot see a memcpy into a recycled
+    // buffer, and these see both.
+    let work = h
+        .storage_counters()
+        .expect("counters")
+        .since(&baseline);
     println!("phase={phase} rows={rows} reps={reps} sink={sink}");
+    println!("{work:#?}");
 }

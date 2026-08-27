@@ -575,6 +575,10 @@ impl Catalog {
         self.engine.journal_mode()
     }
 
+    pub fn storage_counters(&self) -> Result<crate::storage::StatsSnapshot> {
+        self.engine.storage_counters()
+    }
+
     pub fn set_journal_mode(&mut self, journal_mode: JournalMode) -> Result<()> {
         self.save_schema_to_btree()?;
         self.engine.set_journal_mode(journal_mode)

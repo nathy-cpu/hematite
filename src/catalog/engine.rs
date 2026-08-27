@@ -560,6 +560,16 @@ not available yet.",
             || page_id == ByteTreeStore::RESERVED_METADATA_PAGE_ID
     }
 
+    /// Live counters for the storage work this engine has caused.
+    ///
+    /// Distinct from [`Self::get_storage_stats`], which describes the file's shape.
+    /// These are cumulative counts of syscalls and copies — what a benchmark or a
+    /// profiling run wants to attribute, and what the storage layer's own tests
+    /// assert on. Exposed so a workload outside the crate can do the same.
+    pub fn storage_counters(&self) -> Result<crate::storage::StatsSnapshot> {
+        self.tree_store().storage_stats()
+    }
+
     pub fn get_storage_stats(&self) -> Result<CatalogStorageStats> {
         table_store::get_storage_stats(self)
     }

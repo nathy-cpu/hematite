@@ -3828,6 +3828,55 @@ mod work_performed_tests {
         );
     }
 
+    /// A rollback commit leaves the page cache alone.
+    ///
+    /// Rollback mode has no WAL to version reads, so a transaction that starts
+    /// after someone else committed has to drop every cached page. Telling their
+    /// commit from ours is the whole problem, and the answer used to be a
+    /// fingerprint of the persisted metadata page as last read from disk. But that
+    /// page is shared with the catalog, whose section carries row counts, so our own
+    /// commits changed it too: the fingerprint never matched and the cache was
+    /// emptied at the start of every single transaction — 205 resets over 205
+    /// one-row transactions, and seven of the nine page reads each of those cost.
+    ///
+    /// The cached copy of that page is the better witness. A commit writes it
+    /// through the cache, so bytes on disk that differ from it are bytes we did not
+    /// write.
+    #[test]
+    fn a_rollback_commit_does_not_empty_the_page_cache() {
+        let db = TestDbFile::new("_test_work_cache_survives_commit");
+        let mut pager = Pager::new(db.path(), 64).expect("open");
+        let page_ids: Vec<u32> = (0..4)
+            .map(|_| pager.allocate_page().expect("allocate"))
+            .collect();
+
+        pager.begin_transaction().expect("begin");
+        for &page_id in &page_ids {
+            let mut page = Page::new(page_id);
+            page.data[0] = 1;
+            pager.write_page(page).expect("write");
+        }
+        pager.commit_transaction().expect("commit");
+
+        // Every page is resident and clean. Reading them back in a fresh
+        // transaction must not touch the file.
+        let before = pager.stats();
+        pager.begin_transaction().expect("begin");
+        for &page_id in &page_ids {
+            pager.read_page(page_id).expect("read");
+        }
+        let mut page = Page::new(page_ids[0]);
+        page.data[0] = 2;
+        pager.write_page(page).expect("write");
+        pager.commit_transaction().expect("commit");
+        let work = pager.stats().since(&before);
+
+        assert_eq!(
+            work.pool_misses, 0,
+            "the commit before this one emptied the page cache: {work:?}"
+        );
+    }
+
     #[test]
     fn wal_commit_issues_exactly_one_fsync() {
         let db = TestDbFile::new("_test_work_wal_fsyncs");

@@ -127,6 +127,17 @@ impl Hematite {
         self.connection.journal_mode()
     }
 
+    /// Cumulative counts of the storage work this database has done: fsyncs, page
+    /// reads and writes, buffer-pool hits and misses, journal bytes, page-image
+    /// copies.
+    ///
+    /// Two readings subtracted with [`StatsSnapshot::since`] give the work a
+    /// stretch of queries cost. Unlike wall time these do not drift, which is why
+    /// the storage layer's own regression tests are written against them.
+    pub fn storage_counters(&self) -> Result<crate::storage::StatsSnapshot> {
+        self.connection.storage_counters()
+    }
+
     pub fn set_journal_mode(&mut self, journal_mode: JournalMode) -> Result<()> {
         self.connection.set_journal_mode(journal_mode)
     }
