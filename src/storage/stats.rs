@@ -54,6 +54,13 @@ pub struct PagerStats {
     pub wal_frames: AtomicU64,
     /// Completed WAL checkpoints.
     pub checkpoints: AtomicU64,
+    /// Page trailers verified on read, each an xxHash64 over 4 KiB.
+    ///
+    /// Every page read used to pay one. The read at the start of a read scope --
+    /// twice per statement, on a page that has almost always not changed -- made
+    /// that 11 % of a point-lookup workload. It compares the bytes against the
+    /// cached copy first now, and only a page that differs is verified.
+    pub trailer_verifications: AtomicU64,
     /// Cells moved between two leaf pages to rebalance after a delete.
     ///
     /// A B-tree counter rather than a pager one, kept here because this is the set
@@ -109,6 +116,7 @@ impl PagerStats {
             journal_bytes: self.journal_bytes.load(Ordering::Relaxed),
             wal_frames: self.wal_frames.load(Ordering::Relaxed),
             checkpoints: self.checkpoints.load(Ordering::Relaxed),
+            trailer_verifications: self.trailer_verifications.load(Ordering::Relaxed),
             leaf_rotations: self.leaf_rotations.load(Ordering::Relaxed),
             undo_page_copies: self.undo_page_copies.load(Ordering::Relaxed),
             file_stats: self.file_stats.load(Ordering::Relaxed),
@@ -129,6 +137,7 @@ pub struct StatsSnapshot {
     pub journal_bytes: u64,
     pub wal_frames: u64,
     pub checkpoints: u64,
+    pub trailer_verifications: u64,
     pub leaf_rotations: u64,
     pub undo_page_copies: u64,
     pub file_stats: u64,
@@ -151,6 +160,9 @@ impl StatsSnapshot {
             journal_bytes: self.journal_bytes.saturating_sub(earlier.journal_bytes),
             wal_frames: self.wal_frames.saturating_sub(earlier.wal_frames),
             checkpoints: self.checkpoints.saturating_sub(earlier.checkpoints),
+            trailer_verifications: self
+                .trailer_verifications
+                .saturating_sub(earlier.trailer_verifications),
             leaf_rotations: self.leaf_rotations.saturating_sub(earlier.leaf_rotations),
             undo_page_copies: self
                 .undo_page_copies

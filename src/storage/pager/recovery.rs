@@ -64,6 +64,41 @@ impl Pager {
         Ok(Some(self.file_manager.read_page(STORAGE_METADATA_PAGE_ID)?))
     }
 
+    /// Whether the persisted state page on disk still matches the copy in the cache.
+    ///
+    /// Answering this is the entire job of the read at the start of a read scope,
+    /// and the answer is almost always yes: a commit writes that page through the
+    /// cache, so bytes on disk that differ from the cached copy are bytes this
+    /// process did not write.
+    ///
+    /// Reading it without verifying or parsing it first is what makes that cheap.
+    /// A page that compares equal to one this pager itself wrote needs neither: it
+    /// is not being trusted, it is being recognised. Only a page that differs goes
+    /// on to be checked and applied, and that is the path where another writer's
+    /// commit has to be handled anyway.
+    ///
+    /// Verifying every one of these reads cost an xxHash64 over 4 KiB — 11 % of a
+    /// point-lookup workload, on a page that had not changed.
+    fn persisted_state_page_matches_cache(&mut self) -> Result<bool> {
+        self.file_manager.sync_with_disk()?;
+        if STORAGE_METADATA_PAGE_ID >= self.file_manager.next_page_id() {
+            return Ok(false);
+        }
+        let Some(cached) = self.cache_read()?.peek_shared(STORAGE_METADATA_PAGE_ID) else {
+            return Ok(false);
+        };
+        let mut scratch = self.metadata_scratch.take().unwrap_or_else(|| {
+            crate::storage::types::page_pool::take_for_overwrite().into_boxed_slice()
+        });
+        let matches = self
+            .file_manager
+            .read_page_content_into(STORAGE_METADATA_PAGE_ID, &mut scratch)
+            .map(|()| scratch[..USABLE_PAGE_SIZE] == cached.data[..USABLE_PAGE_SIZE])
+            .unwrap_or(false);
+        self.metadata_scratch = Some(scratch);
+        Ok(matches)
+    }
+
     fn apply_persisted_state_page(&mut self, page: Option<&Page>) -> Result<()> {
         if let Some(page) = page {
             if let Some(bytes) = metadata_page::read_pager_metadata(&page.data)? {
@@ -105,6 +140,15 @@ impl Pager {
 
     pub(super) fn refresh_persisted_view(&mut self) -> Result<()> {
         if self.transaction.is_some() || self.cache_mut()?.dirty_count() != 0 {
+            return Ok(());
+        }
+
+        if self.journal_mode != JournalMode::Wal && self.persisted_state_page_matches_cache()? {
+            // Recognised: this is the page we last wrote, so nothing has been
+            // committed by anyone since, and there is nothing to verify, parse or
+            // apply. The cache stays, and so does everything derived from it.
+            self.latest_wal_state = None;
+            self.latest_wal_file_stamp = None;
             return Ok(());
         }
 

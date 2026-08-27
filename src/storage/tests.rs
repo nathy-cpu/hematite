@@ -3948,6 +3948,45 @@ mod work_performed_tests {
         );
     }
 
+    /// Opening a read scope does not hash a page it already has.
+    ///
+    /// Every read scope re-reads the persisted state page to find out whether
+    /// another process has committed, and every page read verified its trailer:
+    /// an xxHash64 over 4 KiB, twice per statement, on a page that had not
+    /// changed. It was 11 % of a point-lookup workload.
+    ///
+    /// The bytes are compared against the cached copy first now. A page that
+    /// matches one this pager itself wrote is not being trusted, it is being
+    /// recognised, so there is nothing to verify — or to parse, or to apply.
+    #[test]
+    fn opening_a_read_scope_verifies_no_trailers() {
+        let db = TestDbFile::new("_test_read_scope_no_verify");
+        let mut pager = Pager::new(db.path(), 64).expect("open");
+        let page_id = pager.allocate_page().expect("allocate");
+        pager.begin_transaction().expect("begin");
+        let mut page = Page::new(page_id);
+        page.data[0] = 1;
+        pager.write_page(page).expect("write");
+        pager.commit_transaction().expect("commit");
+
+        // Warm: the first scope after a commit has a cached copy to compare to.
+        pager.begin_read().expect("begin read");
+        pager.end_read().expect("end read");
+
+        let before = pager.stats();
+        for _ in 0..8 {
+            pager.begin_read().expect("begin read");
+            let _ = pager.read_page(page_id).expect("read");
+            pager.end_read().expect("end read");
+        }
+        let work = pager.stats().since(&before);
+
+        assert_eq!(
+            work.trailer_verifications, 0,
+            "a read scope hashed a page it already had: {work:?}"
+        );
+    }
+
     #[test]
     fn wal_commit_issues_exactly_one_fsync() {
         let db = TestDbFile::new("_test_work_wal_fsyncs");

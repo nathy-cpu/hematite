@@ -167,7 +167,10 @@ impl FileManager {
     }
 
     pub fn read_page(&self, page_id: PageId) -> Result<Page> {
-        self.read_page_with_buf(page_id, vec![0u8; PAGE_SIZE])
+        // Unzeroed: `read_exact_at` fills the whole buffer or returns an error, so
+        // the zeros were overwritten without ever being read. Zeroing a 4 KiB page
+        // is about 4 100 instructions, and it happened on every page read.
+        self.read_page_with_buf(page_id, crate::storage::types::page_pool::take_for_overwrite())
     }
 
     /// Read a page from disk into a caller-supplied buffer, reusing its allocation.
@@ -189,6 +192,26 @@ impl FileManager {
         }
     }
 
+    /// Reads a page's bytes into a caller-owned buffer, without building a `Page`
+    /// or checking its trailer.
+    ///
+    /// For a read whose only purpose is to compare the bytes against something the
+    /// caller already has. Nothing is trusted on the strength of this read, so
+    /// nothing is verified; a caller that goes on to *use* the contents reads it
+    /// again through [`Self::read_page`], which does.
+    pub(crate) fn read_page_content_into(&self, page_id: PageId, data: &mut [u8]) -> Result<()> {
+        if data.len() != PAGE_SIZE {
+            return Err(crate::error::HematiteError::InvalidPage(page_id));
+        }
+        let offset = Self::page_offset(page_id)?;
+        PagerStats::bump(&self.stats.page_reads);
+        self.read_exact_at(offset, data).map_err(|err| {
+            crate::error::HematiteError::StorageError(format!(
+                "Failed to read page {page_id} at offset {offset}: {err}"
+            ))
+        })
+    }
+
     pub(crate) fn read_page_with_buf(&self, page_id: PageId, mut data: Vec<u8>) -> Result<Page> {
         let offset = Self::page_offset(page_id)?;
         PagerStats::bump(&self.stats.page_reads);
@@ -202,6 +225,7 @@ impl FileManager {
         let page = Page::from_bytes(page_id, data)?;
         // Unstamped pages are pages this pager has never written -- a freshly extended
         // file reads as zeros -- so there is nothing to check them against.
+        PagerStats::bump(&self.stats.trailer_verifications);
         if Self::page_trailer_state(&page) == PageTrailerState::Mismatch {
             return Err(crate::error::HematiteError::CorruptedData(format!(
                 "Page {page_id} does not match the checksum in its trailer"

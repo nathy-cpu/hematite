@@ -66,7 +66,7 @@ pub const fn file_len_for_next_page_id(next_page_id: PageId) -> u64 {
 ///
 /// Thread-local so the hot path takes no lock. Buffers do not migrate between
 /// threads: one thread's pool simply stays empty until it frees its own pages.
-mod page_pool {
+pub(crate) mod page_pool {
     use super::PAGE_SIZE;
     use std::cell::RefCell;
 
@@ -80,7 +80,7 @@ mod page_pool {
 
     /// A page-sized buffer whose contents are **undefined**; the caller must write
     /// every byte before the buffer is read.
-    pub(super) fn take_for_overwrite() -> Vec<u8> {
+    pub(crate) fn take_for_overwrite() -> Vec<u8> {
         POOL.with(|pool| pool.borrow_mut().pop())
             .unwrap_or_else(|| vec![0u8; PAGE_SIZE])
     }

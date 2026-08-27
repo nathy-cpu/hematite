@@ -345,6 +345,12 @@ pub struct Pager {
     journal_needs_sync: bool,
     /// See [`Pager::durable_state_token`].
     durable_state_token: u64,
+    /// Reused buffer for reading the persisted state page back to compare it.
+    ///
+    /// That read happens at the start of every read scope, twice per statement, and
+    /// allocating a fresh page-sized buffer for it made a 4 KiB `malloc` and a
+    /// 4 KiB zeroing part of the cost of every query.
+    metadata_scratch: Option<Box<[u8]>>,
     #[cfg(test)]
     wal_visible_state_reload_count: usize,
     /// Leaves the journal on disk after a commit, standing in for a crash in the
@@ -395,6 +401,7 @@ impl Pager {
             state: PagerState::Open,
             journal_file: None,
             durable_state_token: 0,
+            metadata_scratch: None,
             journal_record_count: 0,
             journal_header_len: 0,
             journal_needs_sync: false,
@@ -434,6 +441,7 @@ impl Pager {
             state: PagerState::Open,
             journal_file: None,
             durable_state_token: 0,
+            metadata_scratch: None,
             journal_record_count: 0,
             journal_header_len: 0,
             journal_needs_sync: false,
