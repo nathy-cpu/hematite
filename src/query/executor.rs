@@ -155,7 +155,7 @@ pub struct SelectExecutor {
     pub access_path: SelectAccessPath,
     outer_scopes: Arc<Vec<CorrelatedScope>>,
     materialized_ctes: Arc<HashMap<String, Arc<QueryResult>>>,
-    table_row_counts: Arc<HashMap<String, usize>>,
+    table_row_counts: Option<Arc<crate::catalog::TableMetadataMap>>,
 }
 
 #[derive(Debug, Clone)]
@@ -336,7 +336,7 @@ impl SelectExecutor {
             access_path,
             outer_scopes: Arc::new(Vec::new()),
             materialized_ctes: Arc::new(HashMap::new()),
-            table_row_counts: Arc::new(HashMap::new()),
+            table_row_counts: None,
         }
     }
 
@@ -593,7 +593,11 @@ impl SelectExecutor {
             subquery.clone()
         };
         let planner = QueryPlanner::with_shared_schema(Arc::clone(&ctx.catalog))
-            .with_table_row_counts(self.table_row_counts.as_ref().clone());
+            .with_table_row_counts(
+                self.table_row_counts
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(crate::catalog::TableMetadataMap::default())),
+            );
         let plan = planner.plan(Statement::Select(effective_subquery))?;
         match plan.program {
             ExecutionProgram::Select {
@@ -2267,8 +2271,8 @@ impl SelectExecutor {
 impl QueryExecutor for SelectExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext) -> Result<QueryResult> {
         validate_statement(&Statement::Select(self.statement.clone()), &ctx.catalog)?;
-        if self.table_row_counts.is_empty() {
-            self.table_row_counts = Arc::new(current_table_row_counts(ctx.engine));
+        if self.table_row_counts.is_none() {
+            self.table_row_counts = Some(current_table_row_counts(ctx.engine));
         }
         self.execute_body(ctx)
     }
@@ -3653,12 +3657,15 @@ fn catalog_table(ctx: &ExecutionContext<'_>, table_name: &str) -> Result<Table> 
         .ok_or_else(|| table_not_found_parse_error(table_name))
 }
 
-fn current_table_row_counts(engine: &crate::catalog::CatalogEngine) -> HashMap<String, usize> {
-    engine
-        .get_table_metadata()
-        .iter()
-        .map(|(name, metadata)| (name.to_string(), metadata.row_count as usize))
-        .collect()
+/// The engine's own table metadata, shared rather than transcribed.
+///
+/// This used to build a `HashMap<String, usize>` per statement, cloning a key per
+/// table to record a row count the engine already had. The planner reads the
+/// counts straight out of the map now.
+fn current_table_row_counts(
+    engine: &crate::catalog::CatalogEngine,
+) -> Arc<crate::catalog::TableMetadataMap> {
+    engine.shared_table_metadata()
 }
 
 fn build_insert_column_positions(

@@ -1003,7 +1003,6 @@ mod planner_tests {
     use crate::parser::ast::*;
     use crate::parser::{LiteralValue, SqlTypeName};
     use crate::query::planner::*;
-    use std::collections::HashMap;
 
     fn expect_select_node(plan: &QueryPlan) -> &SelectPlanNode {
         match &plan.node {
@@ -1632,6 +1631,32 @@ mod planner_tests {
         Ok(())
     }
 
+
+    /// Builds the runtime-metadata map a planner reads row counts from.
+    ///
+    /// The planner takes the engine's own map now rather than a transcribed
+    /// `HashMap<String, usize>`, so a test that wants to pose "this table has N
+    /// rows" has to say it in those terms.
+    fn row_counts(entries: &[(&str, u64)]) -> std::sync::Arc<crate::catalog::TableMetadataMap> {
+        std::sync::Arc::new(
+            entries
+                .iter()
+                .map(|(name, rows)| {
+                    let name: std::sync::Arc<str> = std::sync::Arc::from(*name);
+                    (
+                        std::sync::Arc::clone(&name),
+                        crate::catalog::TableRuntimeMetadata {
+                            name,
+                            root_page_id: 2,
+                            row_count: *rows,
+                            next_row_id: *rows + 1,
+                        },
+                    )
+                })
+                .collect(),
+        )
+    }
+
     #[test]
     fn test_query_planner_estimates_equality_join_below_cross_product() -> Result<()> {
         let mut catalog = Schema::new();
@@ -1661,10 +1686,7 @@ mod planner_tests {
             ],
         )?;
 
-        let row_counts = std::collections::HashMap::from([
-            ("users".to_string(), 10usize),
-            ("posts".to_string(), 100usize),
-        ]);
+        let row_counts = row_counts(&[("users", 10), ("posts", 100)]);
         let planner = QueryPlanner::new(catalog).with_table_row_counts(row_counts);
 
         let cross_plan = planner.plan(Statement::Select(SelectStatement {
@@ -1732,9 +1754,7 @@ mod planner_tests {
         ];
         catalog.create_table("users".to_string(), columns)?;
 
-        let mut row_counts = HashMap::new();
-        row_counts.insert("users".to_string(), 10_000usize);
-        let planner = QueryPlanner::new(catalog).with_table_row_counts(row_counts);
+        let planner = QueryPlanner::new(catalog).with_table_row_counts(row_counts(&[("users", 10_000)]));
 
         let full_scan = planner.plan(Statement::Select(SelectStatement {
             with_clause: Vec::new(),
@@ -1982,7 +2002,7 @@ mod planner_tests {
         catalog.create_table("users".to_string(), columns)?;
 
         let planner = QueryPlanner::new(catalog)
-            .with_table_row_counts(std::collections::HashMap::from([("users".to_string(), 12)]));
+            .with_table_row_counts(row_counts(&[("users", 12)]));
 
         let statement = SelectStatement {
             with_clause: Vec::new(),

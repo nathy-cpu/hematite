@@ -468,6 +468,11 @@ not available yet.",
         self.tree_store().create_tree()
     }
 
+    /// A shared handle to the runtime metadata, for callers that only read it.
+    pub fn shared_table_metadata(&self) -> Arc<TableMetadataMap> {
+        Arc::clone(&self.table_metadata)
+    }
+
     pub(crate) fn get_table_metadata(&self) -> &TableMetadataMap {
         &self.table_metadata
     }

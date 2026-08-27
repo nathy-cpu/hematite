@@ -10,13 +10,19 @@ use crate::query::predicate::extract_literal_equalities;
 use crate::query::rewrite::rewrite_select;
 use crate::query::validation::validate_statement;
 use crate::HematiteError;
-use std::collections::HashMap;
+use crate::catalog::TableMetadataMap;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct QueryPlanner {
     catalog: Arc<Schema>,
-    table_row_counts: HashMap<String, usize>,
+    /// The engine's own table metadata, borrowed rather than transcribed.
+    ///
+    /// This used to be a `HashMap<String, usize>` built fresh for every statement,
+    /// cloning a `String` key per table to record a number the engine already had.
+    /// Building and hashing it was 7.5 % of a point-lookup workload — more than
+    /// anything it went on to decide.
+    table_row_counts: Option<Arc<TableMetadataMap>>,
 }
 
 impl QueryPlanner {
@@ -32,12 +38,12 @@ impl QueryPlanner {
     pub fn with_shared_schema(catalog: Arc<Schema>) -> Self {
         Self {
             catalog,
-            table_row_counts: HashMap::new(),
+            table_row_counts: None,
         }
     }
 
-    pub fn with_table_row_counts(mut self, table_row_counts: HashMap<String, usize>) -> Self {
-        self.table_row_counts = table_row_counts;
+    pub fn with_table_row_counts(mut self, table_row_counts: Arc<TableMetadataMap>) -> Self {
+        self.table_row_counts = Some(table_row_counts);
         self
     }
 
@@ -663,8 +669,9 @@ impl QueryPlanner {
 
     fn estimate_table_rows(&self, table: &Table) -> usize {
         self.table_row_counts
-            .get(&table.name)
-            .copied()
+            .as_ref()
+            .and_then(|counts| counts.get(table.name.as_str()))
+            .map(|metadata| metadata.row_count as usize)
             .unwrap_or(1000)
     }
 

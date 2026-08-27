@@ -39,7 +39,8 @@ pub use catalog::Catalog;
 pub use column::Column;
 pub use cursor::{IndexCursor, TableCursor};
 pub use engine::{
-    CatalogEngine, CatalogIntegrityReport, CatalogStorageStats, TableRuntimeMetadata,
+    CatalogEngine, CatalogIntegrityReport, CatalogStorageStats, TableMetadataMap,
+    TableRuntimeMetadata,
 };
 pub use header::DatabaseHeader;
 pub use ids::{ColumnId, TableId};

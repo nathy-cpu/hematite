@@ -115,7 +115,7 @@ use crate::query::lowering::raise_literal_value;
 use crate::query::metadata as query_metadata;
 use crate::query::validation::{source_column_names, validate_statement};
 use crate::query::{
-    Catalog, CatalogEngine, ExecutionContext, JournalMode, QueryCatalogSnapshot, QueryExecutor,
+    Catalog, ExecutionContext, JournalMode, QueryCatalogSnapshot, QueryExecutor,
     QueryPlanner, QueryResult, Schema, Value,
 };
 use crate::sql::result::ExecutedStatement;
@@ -1124,21 +1124,14 @@ impl Connection {
         Ok((schema, plan.into_executor()))
     }
 
-    fn read_planning_state(&self) -> Result<(Arc<Schema>, HashMap<String, usize>)> {
+    fn read_planning_state(&self) -> Result<(Arc<Schema>, Arc<crate::catalog::TableMetadataMap>)> {
         let mut catalog_guard = self.lock_catalog()?;
         let schema = catalog_guard.clone_schema();
         let table_row_counts =
-            catalog_guard.with_engine(|engine| Ok(Self::collect_table_row_counts(engine)))?;
+            catalog_guard.with_engine(|engine| Ok(engine.shared_table_metadata()))?;
         Ok((schema, table_row_counts))
     }
 
-    fn collect_table_row_counts(engine: &CatalogEngine) -> HashMap<String, usize> {
-        engine
-            .get_table_metadata()
-            .iter()
-            .map(|(name, metadata)| (name.to_string(), metadata.row_count as usize))
-            .collect()
-    }
 
     pub fn close(&mut self) -> Result<()> {
         if self.transaction.is_some() {
