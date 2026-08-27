@@ -143,6 +143,18 @@ impl Pager {
             return Ok(());
         }
 
+        if self.journal_mode == JournalMode::Wal
+            && self.latest_wal_state.is_some()
+            && self.latest_wal_file_stamp == self.current_wal_file_stamp()?
+        {
+            // The WAL has not moved, so nothing has been committed and the state
+            // page cannot have changed either. Asked first because it is the
+            // cheaper question: this used to read and verify that 4 KiB page and
+            // *then* check the stamp, which is the same page-per-read-scope cost
+            // rollback mode was paying.
+            return Ok(());
+        }
+
         if self.journal_mode != JournalMode::Wal && self.persisted_state_page_matches_cache()? {
             // Recognised: this is the page we last wrote, so nothing has been
             // committed by anyone since, and there is nothing to verify, parse or

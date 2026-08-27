@@ -3987,6 +3987,49 @@ mod work_performed_tests {
         );
     }
 
+    /// The same in WAL mode, which answers the question a different way.
+    ///
+    /// Rollback mode compares the persisted state page against its cached copy.
+    /// WAL mode has a cheaper witness — the WAL file's own stamp — and used to
+    /// read, verify, parse and apply that 4 KiB page *before* consulting it. The
+    /// stamp is asked first now, so a read scope that finds the WAL unmoved
+    /// touches the file for nothing at all.
+    #[test]
+    fn opening_a_wal_read_scope_reads_no_pages() {
+        let db = TestDbFile::new("_test_wal_read_scope_no_reads");
+        let mut pager = Pager::new(db.path(), 64).expect("open");
+        pager
+            .set_journal_mode(JournalMode::Wal)
+            .expect("switch to wal");
+        let page_id = pager.allocate_page().expect("allocate");
+        pager.begin_transaction().expect("begin");
+        let mut page = Page::new(page_id);
+        page.data[0] = 1;
+        pager.write_page(page).expect("write");
+        pager.commit_transaction().expect("commit");
+
+        // Warm: the first scope after a commit establishes the stamp.
+        pager.begin_read().expect("begin read");
+        pager.end_read().expect("end read");
+
+        let before = pager.stats();
+        for _ in 0..8 {
+            pager.begin_read().expect("begin read");
+            let _ = pager.read_page(page_id).expect("read");
+            pager.end_read().expect("end read");
+        }
+        let work = pager.stats().since(&before);
+
+        assert_eq!(
+            work.page_reads, 0,
+            "a WAL read scope read from the file: {work:?}"
+        );
+        assert_eq!(
+            work.trailer_verifications, 0,
+            "a WAL read scope hashed a page: {work:?}"
+        );
+    }
+
     #[test]
     fn wal_commit_issues_exactly_one_fsync() {
         let db = TestDbFile::new("_test_work_wal_fsyncs");
