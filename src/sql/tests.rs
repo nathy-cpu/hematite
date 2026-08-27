@@ -2624,6 +2624,83 @@ mod connection_tests {
         Ok(())
     }
 
+    /// A connection opened before another one changed the schema still sees the
+    /// change.
+    ///
+    /// `refresh_from_storage` runs before every statement and exists for exactly
+    /// this. It rebuilds the schema by re-reading the header page, re-reading the
+    /// runtime metadata and deserialising every `Table` and `Column` out of the
+    /// stored blob, and it now skips all of that when the storage layer's
+    /// durable-state token says nothing has been committed since. The token has to
+    /// move for another process's commit too, and it is the read scope opened just
+    /// above the check that notices one — this test is what holds that ordering in
+    /// place. Nothing else in the suite reads a second connection's DDL.
+    #[test]
+    fn a_connection_sees_a_table_another_one_created() -> Result<()> {
+        let db = TestDbFile::new("_test_connection_sees_foreign_ddl");
+        let mut setup = Connection::new(db.path())?;
+        setup.execute("CREATE TABLE first (id INT PRIMARY KEY, note TEXT NOT NULL);")?;
+        setup.execute("INSERT INTO first (id, note) VALUES (1, 'a');")?;
+        setup.close()?;
+
+        // Opened, and made to read, before the other connection exists — so it has
+        // a schema in hand and a token recorded against it.
+        let mut observer = Connection::new(db.path())?;
+        assert_eq!(count_rows(&mut observer, "first")?, 1);
+
+        let mut writer = Connection::new(db.path())?;
+        writer.execute("CREATE TABLE second (id INT PRIMARY KEY, label TEXT NOT NULL);")?;
+        writer.execute("INSERT INTO second (id, label) VALUES (7, 'seven');")?;
+        writer.close()?;
+
+        // A table the observer has never heard of, created after its last refresh.
+        assert_eq!(
+            count_rows(&mut observer, "second")?,
+            1,
+            "observer did not pick up a table created by another connection"
+        );
+
+        // And a row added to a table it had already loaded.
+        let mut writer = Connection::new(db.path())?;
+        writer.execute("INSERT INTO first (id, note) VALUES (2, 'b');")?;
+        writer.close()?;
+        assert_eq!(count_rows(&mut observer, "first")?, 2);
+
+        observer.close()?;
+        Ok(())
+    }
+
+    /// The same, in WAL mode, which notices a foreign commit by a different route.
+    ///
+    /// Rollback mode compares the metadata page against the copy in its cache; WAL
+    /// mode compares a file stamp and reloads its visible state. Both have to move
+    /// the durable-state token, and only one of them would be covered otherwise.
+    #[test]
+    fn a_wal_connection_sees_a_table_another_one_created() -> Result<()> {
+        let db = TestDbFile::new("_test_wal_connection_sees_foreign_ddl");
+        let mut setup = Connection::new(db.path())?;
+        setup.set_journal_mode(JournalMode::Wal)?;
+        setup.execute("CREATE TABLE first (id INT PRIMARY KEY, note TEXT NOT NULL);")?;
+        setup.execute("INSERT INTO first (id, note) VALUES (1, 'a');")?;
+        setup.close()?;
+
+        let mut observer = Connection::new(db.path())?;
+        assert_eq!(count_rows(&mut observer, "first")?, 1);
+
+        let mut writer = Connection::new(db.path())?;
+        writer.execute("CREATE TABLE second (id INT PRIMARY KEY, label TEXT NOT NULL);")?;
+        writer.execute("INSERT INTO second (id, label) VALUES (7, 'seven');")?;
+        writer.close()?;
+
+        assert_eq!(
+            count_rows(&mut observer, "second")?,
+            1,
+            "observer did not pick up a table created by another WAL connection"
+        );
+        observer.close()?;
+        Ok(())
+    }
+
     #[test]
     fn test_close_of_stale_rollback_connection_does_not_rewrite_checksums() -> Result<()> {
         let db =

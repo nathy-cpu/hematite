@@ -109,6 +109,8 @@ impl CatalogEngineSnapshot {
 pub struct CatalogEngine {
     pub(crate) tree_store: ByteTreeStore,
     pub(crate) table_metadata: Arc<TableMetadataMap>,
+    /// The durable-state token as of the last [`Self::refresh_runtime_metadata`].
+    metadata_state_token: Option<u64>,
 }
 
 impl CatalogEngine {
@@ -153,6 +155,7 @@ not available yet.",
         let mut engine = Self {
             tree_store,
             table_metadata: Arc::default(),
+            metadata_state_token: None,
         };
         engine_metadata::load_table_metadata(&mut engine)?;
         Ok(engine)
@@ -360,12 +363,31 @@ not available yet.",
 
     pub(crate) fn refresh_runtime_metadata(&mut self) -> Result<()> {
         Arc::make_mut(&mut self.table_metadata).clear();
-        engine_metadata::load_table_metadata(self)
+        let loaded = engine_metadata::load_table_metadata(self);
+        self.metadata_state_token = self.durable_state_token().ok();
+        loaded
+    }
+
+    /// Re-reads the runtime metadata only if durable state has moved since the last
+    /// time it was read.
+    ///
+    /// This runs at the start of every read scope, which is once per statement, and
+    /// re-read and re-parsed the whole table-metadata section each time. Between two
+    /// statements with no commit in between there is nothing new to read.
+    fn refresh_runtime_metadata_if_stale(&mut self) -> Result<()> {
+        if let Ok(token) = self.durable_state_token() {
+            if self.metadata_state_token == Some(token) {
+                return Ok(());
+            }
+        }
+        self.refresh_runtime_metadata()
     }
 
     pub(crate) fn begin_read(&mut self) -> Result<()> {
+        // Opening the read scope first: that is what notices another process's
+        // commit, and it is what moves the token the check below reads.
         self.tree_store().begin_read()?;
-        self.refresh_runtime_metadata()
+        self.refresh_runtime_metadata_if_stale()
     }
 
     pub(crate) fn end_read(&mut self) -> Result<()> {
@@ -574,6 +596,12 @@ not available yet.",
     pub(crate) fn is_reserved_page(page_id: PageId) -> bool {
         page_id == ByteTreeStore::DB_HEADER_PAGE_ID
             || page_id == ByteTreeStore::RESERVED_METADATA_PAGE_ID
+    }
+
+    /// A token that changes whenever durable state does, so a caller can tell
+    /// whether anything it derived from the file needs rebuilding.
+    pub(crate) fn durable_state_token(&self) -> Result<u64> {
+        self.tree_store().durable_state_token()
     }
 
     /// Live counters for the storage work this engine has caused.

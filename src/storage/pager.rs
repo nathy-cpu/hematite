@@ -343,6 +343,8 @@ pub struct Pager {
     /// Whether the current rollback journal contents must be synced before dirty pages can spill
     /// or flush to the main database file.
     journal_needs_sync: bool,
+    /// See [`Pager::durable_state_token`].
+    durable_state_token: u64,
     #[cfg(test)]
     wal_visible_state_reload_count: usize,
     /// Leaves the journal on disk after a commit, standing in for a crash in the
@@ -392,6 +394,7 @@ impl Pager {
             wal_scratch: None,
             state: PagerState::Open,
             journal_file: None,
+            durable_state_token: 0,
             journal_record_count: 0,
             journal_header_len: 0,
             journal_needs_sync: false,
@@ -430,6 +433,7 @@ impl Pager {
             wal_scratch: None,
             state: PagerState::Open,
             journal_file: None,
+            durable_state_token: 0,
             journal_record_count: 0,
             journal_header_len: 0,
             journal_needs_sync: false,
@@ -672,6 +676,25 @@ impl Pager {
     /// this page will be committed via exactly one `write_page` call with no
     /// other pager access to the same `page_id` in between. See
     /// `PageCache::take_page_for_write_owned` for the exact contract.
+    /// A token that changes whenever this pager's view of durable state does.
+    ///
+    /// Layers above cache things derived from the file — the catalog's schema and
+    /// its per-table row counts, both of which it otherwise re-reads and re-parses
+    /// from stored bytes on every statement. Two readings of this that agree mean
+    /// nothing has been committed, by this process or another, in between; the
+    /// derived state is still current and does not need rebuilding.
+    ///
+    /// Deliberately coarse. It moves on any commit, not only on ones that changed
+    /// the thing a caller cares about, so a stale token is impossible and the worst
+    /// outcome is a rebuild that was not strictly required.
+    pub fn durable_state_token(&self) -> u64 {
+        self.durable_state_token
+    }
+
+    pub(crate) fn bump_durable_state_token(&mut self) {
+        self.durable_state_token = self.durable_state_token.wrapping_add(1);
+    }
+
     /// Records that the B-tree moved one cell between two leaf pages.
     ///
     /// The rotation itself is above the pager, but this is the counter set the

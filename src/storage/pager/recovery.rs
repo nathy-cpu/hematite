@@ -138,7 +138,10 @@ impl Pager {
                 }
             };
             if !unchanged {
+                // Someone else committed. Drop the cached pages, and tell the
+                // layers above that what they derived from this file is stale.
                 self.cache_mut()?.reset();
+                self.bump_durable_state_token();
             }
             self.latest_wal_state = None;
             self.latest_wal_file_stamp = None;
@@ -197,10 +200,17 @@ impl Pager {
             return Ok(());
         }
 
-        let Some(path) = &self.wal_path else {
+        if self.wal_path.is_none() {
             self.latest_wal_state = None;
             self.latest_wal_file_stamp = None;
             return Ok(());
+        }
+        // Reloading means the WAL is not what we last saw, so anything derived from
+        // the database's contents may be stale. Over-reporting is safe here;
+        // under-reporting would hand a caller a stale schema.
+        self.bump_durable_state_token();
+        let Some(path) = &self.wal_path else {
+            unreachable!("checked just above");
         };
 
         let wal_file_stamp = self.current_wal_file_stamp()?;

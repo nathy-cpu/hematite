@@ -226,6 +226,12 @@ impl ByteTreeStore {
         self.lock_storage()?.checkpoint_wal()
     }
 
+    /// A token that changes whenever the storage layer's view of durable state
+    /// does. See [`crate::storage::Pager::durable_state_token`].
+    pub fn durable_state_token(&self) -> Result<u64> {
+        Ok(self.lock_storage_read()?.durable_state_token())
+    }
+
     /// Storage counters, so a test can assert on pages read rather than on wall time.
     pub fn storage_stats(&self) -> Result<crate::storage::StatsSnapshot> {
         Ok(self.lock_storage_read()?.stats())

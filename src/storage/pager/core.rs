@@ -159,6 +159,8 @@ impl Pager {
         let old_txn = self.transaction.take();
         self.exit_writer_scope_to_open()?;
         stash_transaction(&mut self.rollback_scratch, &mut self.wal_scratch, old_txn);
+        // Anything derived from the file is now potentially out of date.
+        self.bump_durable_state_token();
         // After the transaction is closed out, so the checkpoint sees no active
         // writer and the commit is already durable whatever happens next.
         self.autocheckpoint_wal_if_needed();
@@ -180,6 +182,9 @@ impl Pager {
         let old_txn = self.transaction.take();
         self.exit_writer_scope_to_open()?;
         stash_transaction(&mut self.rollback_scratch, &mut self.wal_scratch, old_txn);
+        // A rollback moves the file back to where it was, which is just as much a
+        // change to anything derived from it as a commit is.
+        self.bump_durable_state_token();
         Ok(())
     }
 }

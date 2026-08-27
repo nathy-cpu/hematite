@@ -116,6 +116,17 @@ pub struct Catalog {
     pub(crate) schema: Schema,
     pub(crate) schema_root: u32,
     pub(crate) schema_dirty: bool,
+    /// The storage layer's durable-state token as of the last successful
+    /// [`Catalog::refresh_from_storage`].
+    ///
+    /// `refresh_from_storage` runs on every statement, and rebuilt the schema by
+    /// reading the header page, re-reading the runtime metadata, and deserialising
+    /// every `Table` and `Column` out of the stored schema blob — on a point-lookup
+    /// workload that was 19 of the 261 allocations each query cost, all of it
+    /// re-deriving something that had not changed. If the token still matches, no
+    /// commit has landed since, from this process or another, and the schema in
+    /// hand is current.
+    loaded_state_token: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -159,11 +170,13 @@ impl Catalog {
         // Load schema from B-tree
         let schema = engine.load_schema(header.schema_root_page)?;
 
+        let loaded_state_token = engine.durable_state_token().ok();
         Ok(Self {
             engine,
             schema,
             schema_root: header.schema_root_page,
             schema_dirty: false,
+            loaded_state_token,
         })
     }
 
@@ -467,10 +480,23 @@ impl Catalog {
 
         let transaction_active = self.engine.transaction_active()?;
         if !transaction_active {
+            // Always taken, never skipped on the token: opening the read scope is
+            // what *detects* another process's commit, and the token cannot have
+            // moved for a foreign change before this runs. Skipping it would let
+            // this statement plan against a schema someone else had already
+            // replaced.
             self.engine.begin_read()?;
         }
 
         let refresh = (|| -> Result<()> {
+            // Now that any foreign change has been noticed, the token is a sound
+            // answer to "is what we derived last time still current".
+            if let Ok(token) = self.engine.durable_state_token() {
+                if self.loaded_state_token == Some(token) {
+                    return Ok(());
+                }
+            }
+
             let Some(header) = self.engine.read_database_header()? else {
                 return Ok(());
             };
@@ -479,6 +505,7 @@ impl Catalog {
             self.schema = self.engine.load_schema(header.schema_root_page)?;
             self.schema_root = header.schema_root_page;
             self.schema_dirty = false;
+            self.loaded_state_token = self.engine.durable_state_token().ok();
             Ok(())
         })();
 
