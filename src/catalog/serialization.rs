@@ -11,6 +11,20 @@ use super::record::StoredRow;
 
 pub struct RowCodec;
 
+/// Bytes needed to hold `value`, at least one.
+fn significant_byte_width(value: u64) -> usize {
+    match value {
+        0..=0xFF => 1,
+        0x100..=0xFFFF => 2,
+        0x10000..=0xFFFFFF => 3,
+        0x1000000..=0xFFFF_FFFF => 4,
+        0x1_0000_0000..=0xFF_FFFF_FFFF => 5,
+        0x100_0000_0000..=0xFFFF_FFFF_FFFF => 6,
+        0x1_0000_0000_0000..=0xFF_FFFF_FFFF_FFFF => 7,
+        _ => 8,
+    }
+}
+
 impl RowCodec {
     pub fn encode_values(values: &[Value]) -> Result<Vec<u8>> {
         Ok(record_v4::encode(values))
@@ -31,10 +45,9 @@ impl RowCodec {
     /// the same number for the commonest case, and keeping them the same is what
     /// lets `RowIdLookup` and `PrimaryKeyLookup` reach the same row.
     ///
-    /// Row ids compare unsigned, so a negative key lands above every positive one
-    /// and a full scan returns it last. That costs nothing here: the planner's only
-    /// key-driven access paths are point lookups, and row-id order was never
-    /// primary-key order anyway — under the counter it was insertion order.
+    /// A negative key is stored where its value belongs: [`Self::encode_row_id_key`]
+    /// sorts row ids by their signed value, so a table keyed this way is physically
+    /// ordered by its primary key across the whole range.
     ///
     /// `None` for anything that is not an integer, or a `u64` past what `i64`
     /// holds — [`Table::rowid_alias_column`] refuses those tables, and this is the
@@ -57,47 +70,70 @@ impl RowCodec {
         row_id as i64
     }
 
-    /// Encodes a `u64` row ID into a lexicographically sortable variable-length byte array.
+    /// Encodes a row id into bytes that sort in row-id order.
+    ///
+    /// Row ids are held as `u64` but their domain is `i64`: a table whose primary
+    /// key is a single integer column stores each row under that key, and SQL
+    /// integers are signed. So the ordering this has to preserve is signed, while
+    /// byte-string comparison is not.
+    ///
+    /// A leading tag carries both the sign and the width, which is what lets the
+    /// two coexist. Tags `0x81..=0x88` mark a non-negative id of 1..8 bytes and
+    /// `0x78..=0x7F` a negative one of 8..1 bytes, so every negative tag sorts
+    /// below every non-negative one, a wider magnitude sorts below a narrower one
+    /// among negatives, and the body settles ties within a width in both cases.
+    ///
+    /// Compactness survives it: a small id is still two bytes, and a small
+    /// negative id is now two bytes as well, where reinterpreting it as a large
+    /// `u64` made it nine.
+    ///
+    /// The tag range does not overlap the 1..=8 length prefix this format used
+    /// before, so a file written by an older build is rejected on the first key
+    /// rather than silently misread.
     pub fn encode_row_id_key(row_id: u64) -> Vec<u8> {
-        let bytes_needed = match row_id {
-            0..=0xFF => 1,
-            0x100..=0xFFFF => 2,
-            0x10000..=0xFFFFFF => 3,
-            0x1000000..=0xFFFFFFFF => 4,
-            0x100000000..=0xFFFFFFFFFF => 5,
-            0x10000000000..=0xFFFFFFFFFFFF => 6,
-            0x1000000000000..=0xFFFFFFFFFFFFFF => 7,
-            _ => 8,
+        let signed = row_id as i64;
+        // The magnitude that has to fit: the id itself when non-negative, and its
+        // complement when not -- `!v` is `-v - 1`, which is what makes -1 the
+        // narrowest negative rather than the widest.
+        let magnitude = if signed < 0 { !signed as u64 } else { row_id };
+        let width = significant_byte_width(magnitude);
+        let tag = if signed < 0 {
+            0x80 - width as u8
+        } else {
+            0x80 + width as u8
         };
 
-        let mut key = Vec::with_capacity(1 + bytes_needed);
-        key.push(bytes_needed as u8);
-        let be_bytes = row_id.to_be_bytes();
-        key.extend_from_slice(&be_bytes[8 - bytes_needed..]);
+        let mut key = Vec::with_capacity(1 + width);
+        key.push(tag);
+        key.extend_from_slice(&row_id.to_be_bytes()[8 - width..]);
         key
     }
 
-    /// Decodes a `u64` row ID from the prefix-length variable-length byte array.
+    /// Decodes a row id written by [`Self::encode_row_id_key`].
     pub fn decode_row_id_key(key: &[u8]) -> Result<u64> {
-        if key.is_empty() {
+        let Some(&tag) = key.first() else {
             return Err(HematiteError::CorruptedData("Empty rowid key".to_string()));
-        }
-        let bytes_needed = key[0] as usize;
-        if !(1..=8).contains(&bytes_needed) {
+        };
+        let (width, negative) = match tag {
+            0x81..=0x88 => ((tag - 0x80) as usize, false),
+            0x78..=0x7F => ((0x80 - tag) as usize, true),
+            other => {
+                return Err(HematiteError::CorruptedData(format!(
+                    "Invalid rowid key tag: {other:#04x}"
+                )))
+            }
+        };
+        if key.len() != 1 + width {
             return Err(HematiteError::CorruptedData(format!(
-                "Invalid rowid key prefix length: {}",
-                bytes_needed
-            )));
-        }
-        if key.len() != 1 + bytes_needed {
-            return Err(HematiteError::CorruptedData(format!(
-                "Rowid key length mismatch: prefix specifies {} bytes but key length is {}",
-                bytes_needed,
+                "Rowid key length mismatch: tag specifies {} bytes but key length is {}",
+                width,
                 key.len()
             )));
         }
-        let mut be_bytes = [0u8; 8];
-        be_bytes[8 - bytes_needed..].copy_from_slice(&key[1..]);
+        // Sign extension: a negative id was written as the low bytes of its
+        // two's-complement form, so the bytes above it are all ones.
+        let mut be_bytes = if negative { [0xFFu8; 8] } else { [0u8; 8] };
+        be_bytes[8 - width..].copy_from_slice(&key[1..]);
         Ok(u64::from_be_bytes(be_bytes))
     }
 
@@ -190,16 +226,36 @@ mod tests {
 
         for row_id in test_cases {
             let encoded = RowCodec::encode_row_id_key(row_id);
-            assert_eq!(encoded[0] as usize + 1, encoded.len());
+            // The leading byte is a tag now, not a plain length: it carries the
+            // width in its distance from 0x80 and the sign in its direction.
+            let width = encoded.len() - 1;
+            let expected_tag = if (row_id as i64) < 0 {
+                0x80 - width as u8
+            } else {
+                0x80 + width as u8
+            };
+            assert_eq!(encoded[0], expected_tag, "tag for {row_id}");
             let decoded = RowCodec::decode_row_id_key(&encoded)?;
             assert_eq!(row_id, decoded);
         }
         Ok(())
     }
 
+    /// Row-id keys sort by their *signed* value, which is a deliberate change.
+    ///
+    /// They used to sort unsigned, and for ids handed out by a counter the two
+    /// agree — a counter never reaches the top half of the range. They stopped
+    /// agreeing when a table's primary key became its row id, because a SQL
+    /// integer key can be negative. Under the old encoding those keys landed
+    /// above every positive one; `u64::MAX` read as a row id is `-1`, and it now
+    /// sorts where `-1` belongs.
     #[test]
-    fn test_row_id_key_codec_sorting() {
-        let test_cases = vec![
+    fn row_id_keys_sort_by_signed_value() {
+        let ascending: Vec<u64> = vec![
+            i64::MIN as u64,
+            (-4_294_967_296i64) as u64,
+            (-2i64) as u64,
+            u64::MAX, // -1
             0,
             1,
             50,
@@ -210,22 +266,25 @@ mod tests {
             500,
             65535,
             65536,
-            16777215,
             16777216,
-            4294967295,
             4294967296,
-            u64::MAX - 1,
-            u64::MAX,
+            i64::MAX as u64,
         ];
 
-        for i in 0..test_cases.len() - 1 {
-            let a = test_cases[i];
-            let b = test_cases[i + 1];
-            assert!(a < b);
-
+        for pair in ascending.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            assert!(
+                (a as i64) < (b as i64),
+                "fixture is not in ascending signed order"
+            );
             let encoded_a = RowCodec::encode_row_id_key(a);
             let encoded_b = RowCodec::encode_row_id_key(b);
-            assert!(encoded_a < encoded_b, "lexicographical sort order violation: key({a}) >= key({b})\n  key({a}) = {:?}\n  key({b}) = {:?}", encoded_a, encoded_b);
+            assert!(
+                encoded_a < encoded_b,
+                "sort order violation: key({}) >= key({})",
+                a as i64,
+                b as i64
+            );
         }
     }
 
@@ -276,20 +335,30 @@ mod tests {
         );
     }
 
-    /// Non-negative keys sort in key order once encoded, which is what makes a
-    /// table keyed by its primary key scan in that order. Row ids compare
-    /// unsigned, so a negative key sorts last — documented, and harmless while
-    /// every key-driven access path is a point lookup.
+    /// Encoded keys sort in key order across the whole `i64` range, negatives
+    /// included. This is what lets a table keyed by its primary key be physically
+    /// sorted by that key — and what a range scan or a "MIN is the first leaf"
+    /// optimisation would rely on if either ever lands.
     #[test]
-    fn encoded_rowid_keys_sort_in_key_order_above_zero() {
-        let mut keys: Vec<i64> = vec![0, 1, 255, 256, 70_000, i64::MAX];
+    fn encoded_rowid_keys_sort_in_key_order() {
+        let mut keys: Vec<i64> = vec![
+            i64::MIN,
+            -1_000_000_000_000,
+            -65_536,
+            -257,
+            -256,
+            -2,
+            -1,
+            0,
+            1,
+            255,
+            256,
+            70_000,
+            i64::MAX,
+        ];
         let mut encoded: Vec<(i64, Vec<u8>)> = keys
             .iter()
-            .map(|&key| {
-                let row_id =
-                    RowCodec::rowid_for_primary_key(&Value::BigInt(key)).expect("integer key");
-                (key, RowCodec::encode_row_id_key(row_id))
-            })
+            .map(|&key| (key, RowCodec::encode_row_id_key(key as u64)))
             .collect();
         encoded.sort_by(|left, right| left.1.cmp(&right.1));
         keys.sort_unstable();
@@ -298,13 +367,47 @@ mod tests {
             keys,
             "encoded row-id keys did not sort in key order"
         );
+    }
 
-        let negative =
-            RowCodec::encode_row_id_key(RowCodec::rowid_for_primary_key(&Value::BigInt(-1)).unwrap());
-        assert!(
-            negative > encoded.last().expect("keys").1,
-            "a negative key is expected to sort last, and did not"
-        );
+    /// Every `i64` round-trips, and small ids stay two bytes in both directions —
+    /// which is the point of the tag rather than a plain sign flip, since flipping
+    /// would make every small key eight bytes of body.
+    #[test]
+    fn rowid_keys_round_trip_and_stay_compact() {
+        for key in [
+            i64::MIN,
+            -70_000,
+            -256,
+            -1,
+            0,
+            1,
+            255,
+            70_000,
+            i64::MAX,
+        ] {
+            let encoded = RowCodec::encode_row_id_key(key as u64);
+            assert_eq!(
+                RowCodec::decode_row_id_key(&encoded).expect("decode") as i64,
+                key,
+                "{key} did not round-trip"
+            );
+        }
+        assert_eq!(RowCodec::encode_row_id_key(1).len(), 2);
+        assert_eq!(RowCodec::encode_row_id_key(-3i64 as u64).len(), 2);
+    }
+
+    /// The tag range does not overlap the plain 1..=8 length prefix this format
+    /// used before, so an older file is rejected rather than misread.
+    #[test]
+    fn a_pre_tag_rowid_key_is_rejected() {
+        for width in 1u8..=8 {
+            let mut old_key = vec![width];
+            old_key.extend(std::iter::repeat_n(0u8, width as usize));
+            assert!(
+                RowCodec::decode_row_id_key(&old_key).is_err(),
+                "a {width}-byte pre-tag key was accepted"
+            );
+        }
     }
 
     #[test]

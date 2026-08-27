@@ -2721,22 +2721,38 @@ mod connection_tests {
         Ok(())
     }
 
-    /// A negative key is stored where an unsigned row id puts it, which is after
-    /// every non-negative one. Looking it up still works; only the order a bare
-    /// scan returns rows in is affected, and that was never primary-key order.
+    /// A negative key is found, and a table keyed by its primary key is physically
+    /// ordered by that key — negatives included.
+    ///
+    /// Row ids compare unsigned, so this only holds because the row-id key
+    /// encoding is sign-aware. Without that a negative key sorts above every
+    /// non-negative one, which is not a wrong answer to any query the planner can
+    /// ask today but would be one the moment a range scan or a
+    /// "MIN is the first leaf" optimisation existed.
     #[test]
-    fn a_negative_primary_key_is_stored_and_found() -> Result<()> {
+    fn a_negative_primary_key_is_stored_in_key_order() -> Result<()> {
         let db = TestDbFile::new("_test_negative_pk");
         let mut conn = Connection::new(db.path())?;
         conn.execute("CREATE TABLE t (id INT PRIMARY KEY, a INT);")?;
-        conn.execute("INSERT INTO t (id, a) VALUES (5, 50), (-3, 30), (1, 10);")?;
+        conn.execute("INSERT INTO t (id, a) VALUES (5, 50), (-3, 30), (1, 10), (-100, 99), (0, 0);")?;
 
         assert_eq!(conn.execute("SELECT a FROM t WHERE id = -3;")?.rows.len(), 1);
-        assert_eq!(conn.execute("SELECT id FROM t;")?.rows.len(), 3);
+        assert_eq!(conn.execute("SELECT a FROM t WHERE id = -100;")?.rows.len(), 1);
+
+        // No ORDER BY: this is the order the table itself is in.
+        let scanned: Vec<i32> = conn
+            .execute("SELECT id FROM t;")?
+            .rows
+            .iter()
+            .map(|row| match row.first() {
+                Some(crate::catalog::Value::Integer(value)) => *value,
+                other => panic!("unexpected id value: {other:?}"),
+            })
+            .collect();
         assert_eq!(
-            conn.execute("SELECT id FROM t ORDER BY id;")?.rows.len(),
-            3,
-            "ORDER BY still sorts them"
+            scanned,
+            vec![-100, -3, 0, 1, 5],
+            "a bare scan should return rows in primary-key order"
         );
         conn.close()?;
         Ok(())
