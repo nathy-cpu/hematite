@@ -648,33 +648,40 @@ impl<'a> Iterator for RecordIter<'a> {
 pub(crate) fn decode_fields(bytes: &[u8], indices: &[usize]) -> Result<Vec<Value>> {
     let record = RecordRef::new(bytes)?;
 
+    // Stop at the last field anyone asked for. A `SELECT id, a` over five columns has
+    // no reason to walk the last three serial types; only the fields that are read
+    // need locating, and `value_at` bounds-checks each against the body, so a field
+    // that is read is still checked.
+    //
+    // The cost of stopping is the whole-record check that the serial types account for
+    // exactly the body length. That check covers fields nobody reads, which is the same
+    // trade the B-tree makes for cell ranges: verify what is used, and leave
+    // whole-object structure to the integrity check.
+    let Some(&last_wanted) = indices.iter().max() else {
+        return Ok(Vec::new());
+    };
+
     // The output vector is the only allocation: fields are written into their slots as
-    // the single header walk reaches them, rather than collected somewhere first.
+    // the single header walk reaches them.
     let mut values = vec![Value::Null; indices.len()];
     let mut filled = 0usize;
-    let mut body_end = 0usize;
 
     for (position, entry) in record.types().enumerate() {
         let (code, range) = entry?;
-        body_end = range.end;
         for (slot, wanted) in indices.iter().enumerate() {
             if *wanted == position {
                 values[slot] = record.value_at(code, range.clone())?.to_value()?;
                 filled += 1;
             }
         }
+        if position == last_wanted {
+            break;
+        }
     }
 
-    if body_end != record.body.len() {
-        return Err(corrupt(format!(
-            "Record body is {} bytes but its serial types account for {body_end}",
-            record.body.len()
-        )));
-    }
     if filled != indices.len() {
         return Err(corrupt(format!(
-            "Record has {} fields, too few for the requested projection",
-            record.types().count()
+            "Record has no field at index {last_wanted}"
         )));
     }
     Ok(values)
@@ -695,6 +702,77 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Vec<Value>> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// `decode_fields` answers projections, so it has to agree with `decode` on the
+    /// fields it returns and honour the order it was asked for.
+    #[test]
+    fn decode_fields_matches_a_full_decode() {
+        let values = vec![
+            Value::Integer(7),
+            Value::Text("hello".to_string()),
+            Value::BigInt(-9_000_000_000),
+            Value::Null,
+            Value::Boolean(true),
+        ];
+        let bytes = encode(&values);
+        let all = decode(&bytes).expect("decode");
+
+        for indices in [
+            vec![0usize],
+            vec![4],
+            vec![1, 3],
+            vec![3, 1],
+            vec![2, 2],
+            vec![0, 1, 2, 3, 4],
+        ] {
+            let got = decode_fields(&bytes, &indices).expect("decode_fields");
+            let want: Vec<Value> = indices.iter().map(|i| all[*i].clone()).collect();
+            assert_eq!(got, want, "indices {indices:?}");
+        }
+    }
+
+    #[test]
+    fn decode_fields_rejects_an_index_past_the_end() {
+        let bytes = encode(&[Value::Integer(1), Value::Integer(2)]);
+        assert!(decode_fields(&bytes, &[2]).is_err());
+        assert!(decode_fields(&bytes, &[0, 5]).is_err());
+    }
+
+    /// A field that is read is still bounds-checked against the body.
+    #[test]
+    fn decode_fields_rejects_a_truncated_body_it_reads() {
+        let bytes = encode(&[Value::BigInt(i64::MAX), Value::Integer(3)]);
+        let truncated = &bytes[..bytes.len() - 1];
+        assert!(
+            decode_fields(truncated, &[1]).is_err(),
+            "reading a field off the end of a truncated body must fail"
+        );
+    }
+
+    /// The narrowing the early stop buys, stated so it is a decision rather than a
+    /// surprise: the walk stops at the last field asked for, so damage confined to
+    /// fields beyond it is not noticed here. `decode` still checks the whole record,
+    /// and the integrity check still walks every page.
+    #[test]
+    fn decode_fields_does_not_inspect_fields_after_the_last_one_wanted() {
+        let bytes = encode(&[Value::Integer(1), Value::Integer(2), Value::Integer(3)]);
+        let mut damaged = bytes.clone();
+        let last = damaged.len() - 1;
+        damaged[last] ^= 0xFF;
+
+        // Reading only the first field succeeds despite the damaged tail...
+        assert_eq!(
+            decode_fields(&damaged, &[0]).expect("first field"),
+            vec![Value::Integer(1)]
+        );
+        // ...and the damage is visible to anything that reads that far.
+        assert_ne!(
+            decode_fields(&damaged, &[2]).expect("third field"),
+            vec![Value::Integer(3)]
+        );
+    }
+
     use super::*;
     use proptest::prelude::*;
 
