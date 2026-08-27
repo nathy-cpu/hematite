@@ -76,12 +76,11 @@ impl Pager {
             (
                 state.contains_page(page_id),
                 state.has_page_override(page_id),
-                state.checksum_for_page(page_id),
                 state.visible_next_page_id(),
             )
         });
 
-        if let Some((contains, has_override, expected_checksum, visible_next_page_id)) = wal_info {
+        if let Some((contains, has_override, visible_next_page_id)) = wal_info {
             if !contains {
                 return Err(crate::error::HematiteError::StorageError(format!(
                     "Page {} is not allocated in the current WAL-visible state",
@@ -91,12 +90,13 @@ impl Pager {
             if has_override {
                 if let Some(data) = self.read_wal_page_data_readonly(page_id)? {
                     let page = Arc::new(Page::from_bytes(page_id, data)?);
-                    if let Some(expected_checksum) = expected_checksum {
-                        let actual_checksum = Self::calculate_page_checksum(&page);
-                        if actual_checksum != expected_checksum {
+                    {
+                        // A WAL frame carries the page image complete with its
+                        // trailer, so the page checks itself.
+                        use crate::storage::file_manager::{FileManager, PageTrailerState};
+                        if FileManager::page_trailer_state(&page) == PageTrailerState::Mismatch {
                             return Err(crate::error::HematiteError::CorruptedData(format!(
-                                "WAL page checksum mismatch for page {}: expected {}, got {}",
-                                page_id, expected_checksum, actual_checksum
+                                "WAL page {page_id} does not match the checksum in its trailer"
                             )));
                         }
                     }
@@ -117,20 +117,9 @@ impl Pager {
         // `read_page_with_buf` goes through `read_exact_at`, which fills all 4096
         // bytes or fails, so this does not need zeroing first.
         let buf = crate::storage::types::take_page_buffer_for_overwrite();
+        // `read_page_with_buf` verifies the page against the checksum in its own
+        // trailer, so there is no map to consult here.
         let page = Arc::new(self.file_manager.read_page_with_buf(page_id, buf)?);
-        let expected_checksum = self
-            .current_wal_visible_state()
-            .and_then(|state| state.checksum_for_page(page_id))
-            .or_else(|| self.page_checksums.get(&page_id).copied());
-        if let Some(expected_checksum) = expected_checksum {
-            let actual_checksum = Self::calculate_page_checksum(&page);
-            if actual_checksum != expected_checksum {
-                return Err(crate::error::HematiteError::CorruptedData(format!(
-                    "Page checksum mismatch for page {}: expected {}, got {}",
-                    page_id, expected_checksum, actual_checksum
-                )));
-            }
-        }
         self.cache_write()?
             .put_shared_with_view(page.clone(), view_token);
         Ok(page)
@@ -243,7 +232,6 @@ impl Pager {
 
         // Before staging: the metadata page carries the checksum map, so the map has
         // to describe what is about to be written rather than what was there before.
-        self.refresh_dirty_page_checksums()?;
         self.stage_persisted_state_page()?;
         if self.active_rollback_transaction().is_some() {
             if declare_commit_intent {

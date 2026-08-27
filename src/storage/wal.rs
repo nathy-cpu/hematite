@@ -326,7 +326,6 @@ pub struct VisibleWalState {
     pub file_len: u64,
     pub free_pages: Vec<PageId>,
     pub free_page_set: PageSet,
-    pub page_checksums: HashMap<PageId, u32>,
     /// Byte offset into the WAL file for each overridden page.
     /// Used to read page data on-demand instead of storing full images.
     pub(crate) page_override_offsets: HashMap<PageId, u64>,
@@ -337,18 +336,13 @@ pub struct VisibleWalState {
 }
 
 impl VisibleWalState {
-    pub fn from_database_state(
-        file_len: u64,
-        free_pages: Vec<PageId>,
-        page_checksums: HashMap<PageId, u32>,
-    ) -> Self {
+    pub fn from_database_state(file_len: u64, free_pages: Vec<PageId>) -> Self {
         let free_page_set: PageSet = free_pages.iter().copied().collect();
         Self {
             visible_sequence: 0,
             file_len,
             free_pages,
             free_page_set,
-            page_checksums,
             page_override_offsets: HashMap::new(),
             page_cache: WalPageCache::new(WAL_PAGE_CACHE_CAPACITY),
             wal_path: None,
@@ -370,7 +364,6 @@ impl VisibleWalState {
         sequence: u64,
         file_len: u64,
         free_pages: Vec<PageId>,
-        page_checksums: HashMap<PageId, u32>,
         frames: Vec<WalFrame>,
         frame_offsets: &HashMap<PageId, u64>,
     ) -> Result<()> {
@@ -421,7 +414,6 @@ impl VisibleWalState {
         self.file_len = file_len;
         self.free_pages = free_pages;
         self.free_page_set = free_page_set;
-        self.page_checksums = page_checksums;
         Ok(())
     }
 
@@ -506,10 +498,6 @@ impl VisibleWalState {
     pub fn overridden_page_ids(&self) -> impl Iterator<Item = PageId> + '_ {
         self.page_override_offsets.keys().copied()
     }
-
-    pub fn checksum_for_page(&self, page_id: PageId) -> Option<u32> {
-        self.page_checksums.get(&page_id).copied()
-    }
 }
 
 /// Appends a committed transaction's frames to the WAL file, returning the
@@ -520,7 +508,6 @@ pub(crate) fn append_committed_frames_to_path<P: AsRef<Path>>(
     commit_sequence: u64,
     database_page_count: PageId,
     free_pages: &[PageId],
-    checksums: &HashMap<PageId, u32>,
     base_metadata_page: &[u8],
     frames: &[WalFrame],
 ) -> Result<HashMap<PageId, u64>> {
@@ -528,7 +515,6 @@ pub(crate) fn append_committed_frames_to_path<P: AsRef<Path>>(
         commit_sequence,
         database_page_count,
         free_pages,
-        checksums,
         base_metadata_page,
         frames,
     )?;
@@ -546,7 +532,6 @@ pub(crate) fn load_visible_state_from_path_with_base<P: AsRef<Path>>(
     path: P,
     baseline_file_len: u64,
     baseline_free_pages: Vec<PageId>,
-    baseline_checksums: HashMap<PageId, u32>,
     baseline_metadata_page: &[u8],
 ) -> Result<Option<VisibleWalState>> {
     let wal_path = path.as_ref().to_path_buf();
@@ -571,7 +556,7 @@ pub(crate) fn load_visible_state_from_path_with_base<P: AsRef<Path>>(
     };
 
     let metadata_frame_present = page_overrides_btree.contains_key(&STORAGE_METADATA_PAGE_ID);
-    let (free_pages, mut checksums) = if metadata_frame_present {
+    let free_pages = if metadata_frame_present {
         let metadata_page_bytes = page_overrides_btree
             .get(&STORAGE_METADATA_PAGE_ID)
             .map(Vec::as_slice)
@@ -591,11 +576,9 @@ pub(crate) fn load_visible_state_from_path_with_base<P: AsRef<Path>>(
             }
         };
 
-        let mut checksums = baseline_checksums;
-        checksums.extend(persisted.checksums);
-        (persisted.free_pages, checksums)
+        persisted.free_pages
     } else {
-        (baseline_free_pages, baseline_checksums)
+        baseline_free_pages
     };
 
     let visible_next_page_id = next_page_id_for_file_len(file_len);
@@ -610,9 +593,6 @@ pub(crate) fn load_visible_state_from_path_with_base<P: AsRef<Path>>(
         if *page_id >= visible_next_page_id || free_page_set.contains(page_id) {
             continue;
         }
-        if *page_id != STORAGE_METADATA_PAGE_ID {
-            checksums.insert(*page_id, page_checksum(bytes));
-        }
         // Mark this page as having a WAL override, recording the real byte
         // offset of its frame so a cache miss can seek straight to it.
         let offset = frame_offsets.get(page_id).copied().unwrap_or(0);
@@ -621,15 +601,11 @@ pub(crate) fn load_visible_state_from_path_with_base<P: AsRef<Path>>(
         page_cache.put(*page_id, Arc::new(bytes.clone()));
     }
 
-    checksums
-        .retain(|page_id, _| *page_id < visible_next_page_id && !free_page_set.contains(page_id));
-
     Ok(Some(VisibleWalState {
         visible_sequence: latest_sequence,
         file_len,
         free_pages,
         free_page_set,
-        page_checksums: checksums,
         page_override_offsets,
         page_cache,
         wal_path: Some(wal_path),
@@ -759,14 +735,12 @@ fn synthesize_committed_frames(
     commit_sequence: u64,
     database_page_count: PageId,
     free_pages: &[PageId],
-    checksums: &HashMap<PageId, u32>,
     base_metadata_page: &[u8],
     frames: &[WalFrame],
 ) -> Result<Vec<WalFrame>> {
     let persisted = PersistedPagerState {
         journal_mode: JournalMode::Wal,
         free_pages: free_pages.to_vec(),
-        checksums: checksums.clone(),
     };
     let metadata_payload = persisted.encode(1);
 
@@ -781,22 +755,11 @@ fn synthesize_committed_frames(
     if base_page.len() != PAGE_SIZE {
         base_page = vec![0; PAGE_SIZE];
     }
-    let metadata_page_bytes =
-        match metadata_page::write_pager_metadata(&base_page, &metadata_payload) {
-            Ok(bytes) => bytes,
-            Err(HematiteError::StorageError(ref msg)) if msg.contains("exceeds page size") => {
-                // Full checksum map can outgrow one reserved metadata page in WAL mode.
-                // Keep free-page state, drop persisted checksum payload, reconstruct visible-page
-                // checksums from WAL frames when reloading state.
-                let fallback = PersistedPagerState {
-                    journal_mode: JournalMode::Wal,
-                    free_pages: free_pages.to_vec(),
-                    checksums: HashMap::new(),
-                };
-                metadata_page::write_pager_metadata(&base_page, &fallback.encode(1))?
-            }
-            Err(err) => return Err(err),
-        };
+    // No fallback for an oversized payload any more. It existed because the checksum
+    // map could outgrow the metadata page, and it silently dropped every checksum when
+    // it did. The payload is now free-page state only, which is bounded by the free
+    // list, so an overflow here is a real error rather than something to paper over.
+    let metadata_page_bytes = metadata_page::write_pager_metadata(&base_page, &metadata_payload)?;
 
     let mut v3_frames = Vec::with_capacity(frames.len() + 1);
     for frame in frames {
@@ -836,17 +799,6 @@ fn parse_metadata_page(bytes: &[u8]) -> Result<Option<PersistedPagerState>> {
 
 fn visible_next_page_id(file_len: u64) -> PageId {
     next_page_id_for_file_len(file_len)
-}
-
-/// Must stay identical to `Pager::calculate_page_checksum`: the values computed
-/// here are stored in the same per-page checksum map the main file uses, and a
-/// checkpoint moves pages between the two without recomputing them.
-/// Covers a page's contents, not its trailer, matching
-/// `Pager::calculate_page_checksum`. The trailer holds the page's own checksum and is
-/// written by the file layer, so it is zero in a WAL frame and non-zero in the main
-/// file; hashing it would make the two disagree for the same page image.
-fn page_checksum(bytes: &[u8]) -> u32 {
-    checksum::hash32(0, &bytes[..crate::storage::USABLE_PAGE_SIZE])
 }
 
 /// Groups `frames` by contiguous commit-sequence runs that include a

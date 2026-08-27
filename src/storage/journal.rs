@@ -124,7 +124,6 @@ pub struct RollbackJournal {
     pub state: JournalState,
     pub original_file_len: u64,
     pub original_free_pages: Vec<PageId>,
-    pub original_checksums: Vec<(PageId, u32)>,
     pub page_records: Vec<JournalRecord>,
     /// What every page the commit touched must contain if the commit landed.
     ///
@@ -151,7 +150,9 @@ impl RollbackJournal {
                 ..JournalHeader::default()
             },
             original_free_pages: self.original_free_pages.clone(),
-            original_checksums: self.original_checksums.clone(),
+            // Always empty: each page carries its own checksum in its trailer now.
+            // The wire field stays so the header layout is unchanged.
+            original_checksums: Vec::new(),
             records: self
                 .page_records
                 .iter()
@@ -171,7 +172,6 @@ impl RollbackJournal {
                 journal.header.original_database_page_count,
             ),
             original_free_pages: journal.original_free_pages,
-            original_checksums: journal.original_checksums,
             page_records: journal
                 .records
                 .into_iter()

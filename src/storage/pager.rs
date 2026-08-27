@@ -187,7 +187,6 @@ use crate::storage::{
     file_len_for_next_page_id, file_manager::FileManager, file_manager::FileManagerSnapshot, Page,
     PageId, DB_HEADER_PAGE_ID, STORAGE_METADATA_PAGE_ID,
 };
-use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
@@ -201,7 +200,6 @@ pub use self::state::{JournalMode, PagerState};
 pub(crate) struct RollbackTransaction {
     original_file_len: u64,
     original_free_pages: Vec<PageId>,
-    original_checksums: HashMap<PageId, u32>,
     rollback_next_page_id: PageId,
     rollback_free_list: FreeList,
     rollback_uninitialized_pages: PageSet,
@@ -223,14 +221,6 @@ struct PagerSavepoint {
     free_page_set: PageSet,
     /// Rollback mode only; empty for WAL, which has no uninitialised-page concept.
     uninitialized_pages: PageSet,
-    /// Shared, not copied.
-    ///
-    /// A savepoint is taken per row and used to deep-clone this map, which is O(all
-    /// checksummed pages) each time. The map only changes at flush and on page
-    /// deallocation, never per row, so almost every one of those copies reproduced an
-    /// identical map. `Arc` makes taking a savepoint a refcount bump and defers the
-    /// copy to `Arc::make_mut` at the rare point something actually writes to it.
-    page_checksums: Arc<HashMap<PageId, u32>>,
     /// Pre-images of the pages modified since the savepoint was taken — the undo log.
     ///
     /// Captured lazily, one copy per page per savepoint, by `snapshot_original_page`.
@@ -251,7 +241,6 @@ pub(crate) struct WalTransaction {
     wal_next_page_id: PageId,
     wal_free_pages: Vec<PageId>,
     wal_free_page_set: PageSet,
-    original_checksums: HashMap<PageId, u32>,
     savepoints: Vec<PagerSavepoint>,
     next_savepoint_id: u64,
 }
@@ -298,14 +287,6 @@ pub struct Pager {
     /// and the journal/WAL land in one place.
     stats: Arc<PagerStats>,
     cache: RwLock<PageCache>,
-    /// Shared, not copied.
-    ///
-    /// A savepoint is taken per row and used to deep-clone this map, which is O(all
-    /// checksummed pages) each time. The map only changes at flush and on page
-    /// deallocation, never per row, so almost every one of those copies reproduced an
-    /// identical map. `Arc` makes taking a savepoint a refcount bump and defers the
-    /// copy to `Arc::make_mut` at the rare point something actually writes to it.
-    page_checksums: Arc<HashMap<PageId, u32>>,
     journal_mode: JournalMode,
     journal_path: Option<PathBuf>,
     wal_path: Option<PathBuf>,
@@ -381,7 +362,6 @@ impl Pager {
             file_manager,
             stats,
             cache: RwLock::new(PageCache::new(cache_capacity)),
-            page_checksums: Arc::new(HashMap::new()),
             journal_mode: JournalMode::Rollback,
             journal_path,
             wal_path,
@@ -421,7 +401,6 @@ impl Pager {
             file_manager,
             stats,
             cache: RwLock::new(PageCache::new(cache_capacity)),
-            page_checksums: Arc::new(HashMap::new()),
             journal_mode: JournalMode::Rollback,
             journal_path: None,
             wal_path: None,

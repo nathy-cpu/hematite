@@ -1,7 +1,6 @@
 use crate::error::{HematiteError, Result};
 use crate::storage::pager::JournalMode;
 use crate::storage::PageId;
-use std::collections::HashMap;
 
 const METADATA_MAGIC: [u8; 4] = *b"HPM1";
 
@@ -9,18 +8,10 @@ const METADATA_MAGIC: [u8; 4] = *b"HPM1";
 pub(crate) struct PersistedPagerState {
     pub(crate) journal_mode: JournalMode,
     pub(crate) free_pages: Vec<PageId>,
-    pub(crate) checksums: HashMap<PageId, u32>,
 }
 
 impl PersistedPagerState {
     pub(crate) fn encode(&self, version: u32) -> Vec<u8> {
-        let mut entries = self
-            .checksums
-            .iter()
-            .map(|(page_id, checksum)| (*page_id, *checksum))
-            .collect::<Vec<_>>();
-        entries.sort_by_key(|(page_id, _)| *page_id);
-
         let mut free_pages = self.free_pages.clone();
         free_pages.sort_unstable();
 
@@ -32,21 +23,15 @@ impl PersistedPagerState {
             JournalMode::Wal => 1,
         });
         bytes.extend_from_slice(&(free_pages.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+        // A checksum count of zero: each page carries its own checksum in its trailer
+        // now, so there is no map here. The field stays so the layout is unchanged.
+        bytes.extend_from_slice(&0u32.to_le_bytes());
 
         let mut prev = 0u32;
         for page_id in free_pages {
             let delta = page_id.saturating_sub(prev);
             encode_varint_u32(delta, &mut bytes);
             prev = page_id;
-        }
-
-        let mut prev_checksum_page = 0u32;
-        for (page_id, checksum) in entries {
-            let delta = page_id.saturating_sub(prev_checksum_page);
-            encode_varint_u32(delta, &mut bytes);
-            encode_varint_u32(checksum, &mut bytes);
-            prev_checksum_page = page_id;
         }
 
         bytes
@@ -107,24 +92,18 @@ impl PersistedPagerState {
             prev = page_id;
         }
 
-        let mut checksums = HashMap::with_capacity(checksum_count);
+        // Any checksum entries a previous format wrote are skipped: pages carry their
+        // own checksums now.
         let mut prev_checksum_page = 0u32;
         for _ in 0..checksum_count {
             let delta = decode_varint_u32(contents, &mut offset)?;
-            let page_id = prev_checksum_page.saturating_add(delta);
-            let checksum = decode_varint_u32(contents, &mut offset)?;
-            if checksums.insert(page_id, checksum).is_some() {
-                return Err(HematiteError::StorageError(format!(
-                    "Duplicate pager checksum entry for page {page_id}",
-                )));
-            }
-            prev_checksum_page = page_id;
+            prev_checksum_page = prev_checksum_page.saturating_add(delta);
+            let _ = decode_varint_u32(contents, &mut offset)?;
         }
 
         Ok(Self {
             journal_mode,
             free_pages,
-            checksums,
         })
     }
 }

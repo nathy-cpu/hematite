@@ -85,7 +85,6 @@ impl Pager {
 
         self.journal_mode = JournalMode::Rollback;
         self.file_manager.set_free_pages(Vec::new());
-        Arc::make_mut(&mut self.page_checksums).clear();
         Ok(())
     }
 
@@ -99,7 +98,6 @@ impl Pager {
             PersistedPagerState::decode_bytes(contents, Self::CHECKSUM_METADATA_VERSION)?;
         self.journal_mode = persisted.journal_mode;
         self.file_manager.set_free_pages(persisted.free_pages);
-        self.page_checksums = Arc::new(persisted.checksums);
         Ok(())
     }
 
@@ -144,7 +142,6 @@ impl Pager {
         Ok(Arc::new(VisibleWalState::from_database_state(
             self.logical_file_len()?,
             self.logical_free_pages().to_vec(),
-            self.page_checksums.as_ref().clone(),
         )))
     }
 
@@ -203,7 +200,6 @@ impl Pager {
             path,
             self.file_manager.file_len()?,
             self.file_manager.free_pages().to_vec(),
-            self.page_checksums.as_ref().clone(),
             metadata_page,
         )?
         .map(Arc::new);
@@ -246,27 +242,12 @@ impl Pager {
         let full_state = PersistedPagerState {
             journal_mode: self.journal_mode,
             free_pages: free_pages.clone(),
-            checksums: self.page_checksums.as_ref().clone(),
         };
 
         let encoded = full_state.encode(Self::CHECKSUM_METADATA_VERSION);
         let metadata_page_bytes =
             match metadata_page::write_pager_metadata(&existing_page.data, &encoded) {
                 Ok(bytes) => bytes,
-                Err(crate::error::HematiteError::StorageError(ref msg))
-                    if msg.contains("exceeds page size") =>
-                {
-                    // Fallback: exclude checksums if they cause an overflow.
-                    // This ensures large databases remain functional while small
-                    // databases retain persistent integrity checking.
-                    let fallback_state = PersistedPagerState {
-                        journal_mode: self.journal_mode,
-                        free_pages,
-                        checksums: std::collections::HashMap::new(),
-                    };
-                    let fallback_encoded = fallback_state.encode(Self::CHECKSUM_METADATA_VERSION);
-                    metadata_page::write_pager_metadata(&existing_page.data, &fallback_encoded)?
-                }
                 Err(err) => return Err(err),
             };
 
@@ -422,16 +403,11 @@ impl Pager {
         };
 
         let original_free_pages = transaction.original_free_pages.clone();
-        let original_checksums: Vec<(PageId, u32)> = transaction
-            .original_checksums
-            .iter()
-            .map(|(page_id, checksum)| (*page_id, *checksum))
-            .collect();
         let (file, header_len) = initialize_journal_file(
             path,
             transaction.original_file_len,
             &original_free_pages,
-            &original_checksums,
+            &[],
         )?;
 
         self.journal_file = Some(file);
@@ -648,10 +624,6 @@ impl Pager {
             state: JournalState::Active,
             original_file_len: transaction.original_file_len,
             original_free_pages: transaction.original_free_pages,
-            original_checksums: transaction
-                .original_checksums
-                .into_iter()
-                .collect::<Vec<_>>(),
             page_records: transaction.page_records,
             // An in-memory rollback of a live transaction; nothing has been declared
             // committed, so there is nothing for recovery to weigh up.
@@ -673,16 +645,14 @@ impl Pager {
         }
         self.file_manager.flush()?;
 
-        self.page_checksums = Arc::new(journal.original_checksums.iter().copied().collect());
-        self.persist_checksums()
+        Ok(())
     }
 
     pub(super) fn rollback_wal_transaction(&mut self) -> Result<()> {
-        let transaction = self.active_wal_transaction().cloned().ok_or_else(|| {
+        let _transaction = self.active_wal_transaction().cloned().ok_or_else(|| {
             crate::error::HematiteError::StorageError("Pager transaction is not active".to_string())
         })?;
         self.cache_mut()?.reset();
-        self.page_checksums = Arc::new(transaction.original_checksums);
         Ok(())
     }
 
@@ -703,10 +673,6 @@ impl Pager {
             .as_ref()
             .map(|state| state.visible_sequence + 1)
             .unwrap_or(1);
-
-        // The frames and the metadata page below both carry checksums, so bring them
-        // up to date first; `write_page` no longer does it per call.
-        self.refresh_dirty_page_checksums()?;
 
         let mut page_ids = self.cache_read()?.dirty_page_ids();
         page_ids.sort_unstable();
@@ -736,7 +702,6 @@ impl Pager {
                 next_sequence,
                 wal_next_page_id,
                 &wal_free_pages,
-                &self.page_checksums,
                 &metadata_page.data,
                 &frames,
             )
@@ -759,14 +724,12 @@ impl Pager {
             VisibleWalState::from_database_state(
                 self.file_manager.file_len()?,
                 self.file_manager.free_pages().to_vec(),
-                self.page_checksums.as_ref().clone(),
             )
         };
         updated_visible_state.apply_committed_delta(
             next_sequence,
             file_len_for_next_page_id(wal_next_page_id),
             wal_free_pages.clone(),
-            self.page_checksums.as_ref().clone(),
             frames,
             &frame_offsets,
         )?;

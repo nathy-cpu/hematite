@@ -1,8 +1,6 @@
 use super::{compact_transaction_free_pages, JournalMode, Pager};
 use crate::error::Result;
 use crate::storage::PageId;
-use std::collections::HashMap;
-use std::sync::Arc;
 
 impl Pager {
     pub fn allocate_page(&mut self) -> Result<PageId> {
@@ -38,7 +36,6 @@ impl Pager {
         Self::can_deallocate_page(page_id)?;
         self.snapshot_original_page(page_id)?;
         self.cache_mut()?.remove(page_id);
-        Arc::make_mut(&mut self.page_checksums).remove(&page_id);
         if let Some(transaction) = self.active_rollback_transaction_mut() {
             transaction.rollback_uninitialized_pages.remove(&page_id);
             if !transaction.rollback_free_list.contains(page_id) {
@@ -71,17 +68,6 @@ impl Pager {
 
     pub fn set_free_pages(&mut self, free_pages: Vec<PageId>) {
         self.file_manager.set_free_pages(free_pages);
-    }
-
-    pub fn checksum_entries(&self) -> Vec<(PageId, u32)> {
-        self.page_checksums
-            .iter()
-            .map(|(page_id, checksum)| (*page_id, *checksum))
-            .collect()
-    }
-
-    pub fn replace_checksums(&mut self, checksums: HashMap<PageId, u32>) {
-        self.page_checksums = Arc::new(checksums);
     }
 
     pub fn file_len(&self) -> Result<u64> {

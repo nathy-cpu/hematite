@@ -4,8 +4,6 @@ use super::{
 };
 use crate::error::Result;
 use crate::storage::page_hash::PageSet;
-use std::collections::HashMap;
-use std::sync::Arc;
 
 /// Recycle a finished transaction into the scratch slots, freeing any data that is
 /// only needed for rollback (dirty-page images, page-record copies, savepoint
@@ -24,14 +22,12 @@ fn stash_transaction(
             r.savepoints.clear();
             r.page_records.clear();
             // Clear stale scalar caches; they will be refilled by begin_transaction.
-            r.original_checksums.clear();
             r.original_free_pages.clear();
             r.rollback_uninitialized_pages.clear();
             r.journaled_pages.clear();
             *rollback_scratch = Some(r);
         }
         Some(PagerTransaction::Wal(mut w)) => {
-            w.original_checksums.clear();
             w.wal_free_pages.clear();
             w.wal_free_page_set.clear();
             *wal_scratch = Some(w);
@@ -67,7 +63,6 @@ impl Pager {
                         .unwrap_or_else(|| RollbackTransaction {
                             original_file_len: 0,
                             original_free_pages: Vec::new(),
-                            original_checksums: HashMap::new(),
                             rollback_next_page_id: 0,
                             rollback_free_list: crate::storage::free_list::FreeList::new(),
                             rollback_uninitialized_pages: PageSet::default(),
@@ -81,7 +76,6 @@ impl Pager {
                 rollback
                     .original_free_pages
                     .extend_from_slice(self.file_manager.free_pages());
-                rollback.original_checksums.clone_from(&self.page_checksums);
                 rollback.rollback_next_page_id = self.file_manager.next_page_id();
                 rollback.rollback_free_list = rollback_free_list;
                 rollback.rollback_uninitialized_pages.clear();
@@ -101,7 +95,6 @@ impl Pager {
                         .copied()
                         .collect(),
                     uninitialized_pages: rollback.rollback_uninitialized_pages.clone(),
-                    page_checksums: self.page_checksums.clone(),
                     created_page_ids: PageSet::default(),
                     page_records: Vec::new(),
                     captured_page_ids: PageSet::default(),
@@ -111,13 +104,11 @@ impl Pager {
             }
             JournalMode::Wal => {
                 let visible_state = self.snapshot_wal_visible_state()?;
-                self.page_checksums = Arc::new(visible_state.page_checksums.clone());
                 // Reuse a pre-allocated WalTransaction when available.
                 let mut wal = self.wal_scratch.take().unwrap_or_else(|| WalTransaction {
                     wal_next_page_id: 0,
                     wal_free_pages: Vec::new(),
                     wal_free_page_set: PageSet::default(),
-                    original_checksums: HashMap::new(),
                     savepoints: Vec::new(),
                     next_savepoint_id: 1,
                 });
@@ -127,8 +118,6 @@ impl Pager {
                 wal.wal_free_pages.clone_from(&visible_state.free_pages);
                 wal.wal_free_page_set
                     .clone_from(&visible_state.free_page_set);
-                wal.original_checksums
-                    .clone_from(&visible_state.page_checksums);
                 PagerTransaction::Wal(wal)
             }
         });

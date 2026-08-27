@@ -1,7 +1,6 @@
 use super::{Pager, PagerSavepoint, PagerState, PagerTransaction};
 use crate::error::Result;
-use crate::storage::{file_manager::FileManagerSnapshot, Page, PageId};
-use std::collections::HashMap;
+use crate::storage::{file_manager::FileManagerSnapshot, Page};
 use std::sync::Arc;
 
 /// The contents of a [`PagerSnapshot::Full`].
@@ -30,7 +29,6 @@ pub(crate) struct FullSnapshot {
     /// the page for the snapshot's lifetime, which is what stops a later write
     /// from mutating the image out from under it.
     pub(crate) dirty_pages: Vec<Arc<Page>>,
-    pub(crate) page_checksums: HashMap<PageId, u32>,
     pub(crate) transaction: Option<PagerTransaction>,
     pub(crate) state: PagerState,
 }
@@ -76,7 +74,6 @@ impl Pager {
     /// filled lazily by `snapshot_original_page` as pages are modified.
     pub(crate) fn create_savepoint(&mut self) -> Result<u64> {
         let file_manager = self.file_manager.snapshot()?;
-        let page_checksums = self.page_checksums.clone();
 
         let savepoint = match &self.transaction {
             Some(super::PagerTransaction::Rollback(transaction)) => PagerSavepoint {
@@ -91,7 +88,6 @@ impl Pager {
                     .copied()
                     .collect(),
                 uninitialized_pages: transaction.rollback_uninitialized_pages.clone(),
-                page_checksums,
                 page_records: Vec::new(),
                 captured_page_ids: crate::storage::page_hash::PageSet::default(),
                 created_page_ids: crate::storage::page_hash::PageSet::default(),
@@ -103,7 +99,6 @@ impl Pager {
                 free_pages: transaction.wal_free_pages.clone(),
                 free_page_set: transaction.wal_free_page_set.clone(),
                 uninitialized_pages: crate::storage::page_hash::PageSet::default(),
-                page_checksums,
                 page_records: Vec::new(),
                 captured_page_ids: crate::storage::page_hash::PageSet::default(),
                 created_page_ids: crate::storage::page_hash::PageSet::default(),
@@ -153,7 +148,6 @@ impl Pager {
 
         self.file_manager
             .restore_snapshot(savepoint.file_manager.clone())?;
-        self.page_checksums = savepoint.page_checksums.clone();
 
         // Undo exactly what changed, rather than resetting the cache and rebuilding
         // it. The reset was why the savepoint had to hold an image of every dirty
@@ -218,7 +212,6 @@ impl Pager {
         Ok(PagerSnapshot::Full(Box::new(FullSnapshot {
             file_manager: self.file_manager.snapshot()?,
             dirty_pages: self.share_dirty_pages()?,
-            page_checksums: self.page_checksums.as_ref().clone(),
             transaction: self.transaction.clone(),
             state: self.state,
         })))
@@ -276,7 +269,6 @@ impl Pager {
                 let FullSnapshot {
                     file_manager,
                     dirty_pages,
-                    page_checksums,
                     transaction,
                     state,
                 } = *full;
@@ -299,7 +291,6 @@ impl Pager {
                     cache.mark_dirty(page_id);
                 }
 
-                self.page_checksums = Arc::new(page_checksums);
                 self.transaction = transaction;
                 self.sync_rollback_journal_from_transaction()?;
                 self.state = state;

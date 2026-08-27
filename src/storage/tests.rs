@@ -80,7 +80,6 @@ mod wal_tests {
             &wal_path,
             file_len_for_next_page_id(2),
             Vec::new(),
-            HashMap::new(),
             &vec![0u8; PAGE_SIZE],
         )
         .unwrap_err();
@@ -93,7 +92,6 @@ mod wal_tests {
         let payload = PersistedPagerState {
             journal_mode: JournalMode::Wal,
             free_pages: vec![],
-            checksums: HashMap::new(),
         }
         .encode(1);
         metadata_page::write_pager_metadata(&vec![0u8; PAGE_SIZE], &payload)
@@ -154,7 +152,6 @@ mod wal_tests {
             &wal_path,
             file_len_for_next_page_id(6),
             Vec::new(),
-            HashMap::new(),
             &vec![0u8; PAGE_SIZE],
         )?
         .expect("visible state should be loaded from the WAL file");
@@ -211,21 +208,15 @@ mod wal_tests {
         fs::write(&wal_path, wal.encode()?)?;
 
         // Sentinel offset (0) should still work via the legacy full-file scan.
-        let mut sentinel_state = VisibleWalState::from_database_state(
-            file_len_for_next_page_id(8),
-            Vec::new(),
-            HashMap::new(),
-        );
+        let mut sentinel_state =
+            VisibleWalState::from_database_state(file_len_for_next_page_id(8), Vec::new());
         sentinel_state.wal_path = Some(wal_path.clone());
         sentinel_state.page_override_offsets.insert(page_id, 0);
         assert_eq!(sentinel_state.read_page_data(page_id)?, Some(page_bytes));
 
         // An out-of-bounds offset should be treated as a miss, not a panic/error.
-        let mut oob_state = VisibleWalState::from_database_state(
-            file_len_for_next_page_id(8),
-            Vec::new(),
-            HashMap::new(),
-        );
+        let mut oob_state =
+            VisibleWalState::from_database_state(file_len_for_next_page_id(8), Vec::new());
         oob_state.wal_path = Some(wal_path.clone());
         oob_state.page_override_offsets.insert(page_id, 10_000_000);
         assert_eq!(oob_state.read_page_data(page_id)?, None);
@@ -235,11 +226,8 @@ mod wal_tests {
         // not silently returned as if it were the requested page's data.
         let frame_size = crate::storage::wal::V3_WAL_FRAME_PREFIX_SIZE as u64 + PAGE_SIZE as u64;
         let metadata_frame_offset = crate::storage::wal::V3_WAL_HEADER_SIZE as u64 + frame_size;
-        let mut mismatched_state = VisibleWalState::from_database_state(
-            file_len_for_next_page_id(8),
-            Vec::new(),
-            HashMap::new(),
-        );
+        let mut mismatched_state =
+            VisibleWalState::from_database_state(file_len_for_next_page_id(8), Vec::new());
         mismatched_state.wal_path = Some(wal_path);
         mismatched_state
             .page_override_offsets
@@ -712,26 +700,20 @@ mod pager_tests {
         let test_db = TestDbFile::new("_test_pager_open_discards_committed_journal");
         let journal_path = std::path::PathBuf::from(format!("{}.journal", test_db.path()));
 
-        let (page_id, file_len, free_pages, checksums) = {
+        let (page_id, file_len, free_pages) = {
             let mut pager = Pager::new(test_db.path(), 8)?;
             let page_id = pager.allocate_page()?;
             let mut page = Page::new(page_id);
             page.data[0] = 55;
             pager.write_page(page)?;
             pager.flush()?;
-            (
-                page_id,
-                pager.file_len()?,
-                pager.free_pages().to_vec(),
-                pager.checksum_entries(),
-            )
+            (page_id, pager.file_len()?, pager.free_pages().to_vec())
         };
 
         let journal = RollbackJournal {
             state: JournalState::Committed,
             original_file_len: file_len,
             original_free_pages: free_pages,
-            original_checksums: checksums,
             commit_intents: Vec::new(),
             page_records: vec![JournalRecord {
                 page_id,
@@ -1050,7 +1032,6 @@ mod pager_tests {
         let mut invalid_payload = PersistedPagerState {
             journal_mode: JournalMode::Rollback,
             free_pages: vec![],
-            checksums: HashMap::new(),
         }
         .encode(1);
         if invalid_payload.len() > 8 {
@@ -1228,7 +1209,6 @@ mod pager_tests {
             &wal_path,
             crate::storage::file_len_for_next_page_id(3),
             Vec::new(),
-            HashMap::new(),
             &vec![0u8; PAGE_SIZE],
         )?
         .expect("WAL state should exist after committed transactions");

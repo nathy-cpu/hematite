@@ -7,9 +7,17 @@ use crate::storage::{
     FIRST_ALLOCATABLE_PAGE_ID, STORAGE_METADATA_PAGE_ID,
 };
 use std::collections::HashSet;
-use std::sync::Arc;
 
 impl Pager {
+    /// A checksum of a page's contents, excluding its trailer.
+    ///
+    /// Not the trailer's own checksum: this is what the rollback journal's commit
+    /// intents are compared against, which is a different question — whether a
+    /// specific commit landed, rather than whether a page is intact.
+    pub(super) fn calculate_page_checksum(page: &Page) -> u32 {
+        checksum::hash32(0, &page.data[..crate::storage::USABLE_PAGE_SIZE])
+    }
+
     pub fn validate_integrity(&mut self) -> Result<PagerIntegrityReport> {
         let (max_page_id_exclusive, logical_free_pages, wal_override_page_ids) =
             if let Some(state) = &self.latest_wal_state {
@@ -117,47 +125,5 @@ impl Pager {
             checksummed_page_count,
             verified_checksum_pages,
         })
-    }
-
-    /// Covers a page's contents, not its trailer.
-    ///
-    /// The trailer holds the page's own checksum, written by the file layer, so it is
-    /// zero in memory and non-zero on disk. Hashing it would make every page fail
-    /// verification the moment it was read back.
-    pub(super) fn calculate_page_checksum(page: &Page) -> u32 {
-        checksum::hash32(0, &page.data[..crate::storage::USABLE_PAGE_SIZE])
-    }
-
-    /// Recomputes the checksum of every dirty page.
-    ///
-    /// `write_page` used to do this on every call, so a transaction that wrote the
-    /// same leaf once per row hashed 4 KiB once per row where once per commit would
-    /// do — `hash64` was 5.8 % of a batched insert's instructions, most of it
-    /// recomputing checksums that were about to be superseded. What a checksum has
-    /// to describe is a page's *final* contents, and only a flush or a WAL commit
-    /// makes them final.
-    ///
-    /// Deferring is safe because a dirty page is never evicted: `evict_if_needed`
-    /// only takes clean, unpinned pages and would rather exceed its capacity than
-    /// drop one. So between the write and the flush the page is always served from
-    /// cache, and its checksum is never consulted.
-    ///
-    /// Must run before the metadata page is staged, since that page carries the
-    /// serialized checksum map and would otherwise describe the previous contents.
-    pub(super) fn refresh_dirty_page_checksums(&mut self) -> Result<()> {
-        let dirty_ids = self.cache_read()?.dirty_page_ids();
-        for page_id in dirty_ids {
-            // The metadata page deliberately has no entry: it is where the map is
-            // stored, so it cannot describe itself.
-            if page_id == crate::storage::STORAGE_METADATA_PAGE_ID {
-                continue;
-            }
-            let page = self.cache_read()?.peek_shared(page_id);
-            if let Some(page) = page {
-                let checksum = Self::calculate_page_checksum(&page);
-                Arc::make_mut(&mut self.page_checksums).insert(page_id, checksum);
-            }
-        }
-        Ok(())
     }
 }
