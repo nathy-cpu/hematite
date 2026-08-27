@@ -255,6 +255,17 @@ const MIN_FREEBLOCK_SIZE: usize = 4;
 /// Calculate total usable free space on a page: gap + freeblock chain + fragments.
 pub(crate) fn total_free_space(page: &Page, is_page_one: bool) -> Result<usize> {
     let header = BTreePageHeaderV3::parse(page, is_page_one)?;
+    total_free_space_with_header(page, &header)
+}
+
+/// The same, for a caller that has already parsed the header.
+///
+/// Parsing it is a page-kind match and four field reads, and the callers that hold
+/// one are the hot ones — `serialized_size_on_page` runs on every delete.
+pub(crate) fn total_free_space_with_header(
+    page: &Page,
+    header: &BTreePageHeaderV3,
+) -> Result<usize> {
     let gap = header.writable_gap_size();
     let fragments = header.fragmented_free_bytes as usize;
 

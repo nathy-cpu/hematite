@@ -92,7 +92,8 @@
 
 use crate::btree::page_format::{
     compute_cell_size, insert_cell as pf_insert_cell, remove_cell as pf_remove_cell,
-    total_free_space as pf_total_free_space, BTreePageHeaderV3,
+    total_free_space as pf_total_free_space,
+    total_free_space_with_header as pf_total_free_space_with_header, BTreePageHeaderV3,
 };
 use crate::btree::{BTreeKey, BTreeValue, NodeType, BTREE_ORDER};
 use crate::error::{HematiteError, Result};
@@ -233,11 +234,11 @@ impl BTreeNode {
             NodeType::Internal => INTERIOR_HEADER_SIZE,
         };
         let (page, header) = self.raw_page_and_header()?;
-        let is_p1 = is_page_one(self.page_id);
         // `total_free_space` counts the gap as free as well, and the gap is not in
-        // the content area, so it comes back off.
-        let free_in_content =
-            pf_total_free_space(page, is_p1)?.saturating_sub(header.writable_gap_size());
+        // the content area, so it comes back off. The header is the one this node
+        // already parsed rather than a fresh parse of the same bytes.
+        let free_in_content = pf_total_free_space_with_header(page, header)?
+            .saturating_sub(header.writable_gap_size());
         let content_span =
             USABLE_PAGE_SIZE.saturating_sub(header.cell_content_start as usize);
         let cell_body_bytes = content_span.saturating_sub(free_in_content);
