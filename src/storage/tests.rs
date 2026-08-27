@@ -3685,6 +3685,41 @@ mod work_performed_tests {
         );
     }
 
+    /// Taking a snapshot used to cost a `statx`.
+    ///
+    /// `ByteTree::run_atomically` takes one pager snapshot per row it writes, and
+    /// each one recorded the database file's length by asking the operating system
+    /// for it — a number the pager had just computed itself, since it is the only
+    /// writer of that file. Under `strace`, 200 single-row transactions issued
+    /// 12 031 `statx` calls, more than any other syscall including `fsync`, and more
+    /// than 60 per transaction.
+    ///
+    /// The length is now maintained in memory by the paths that change it, and the
+    /// OS is asked only at open and during recovery.
+    #[test]
+    fn taking_a_snapshot_does_not_stat_the_file() {
+        let db = TestDbFile::new("_test_work_snapshot_statx");
+        let mut pager = Pager::new(db.path(), 64).expect("open");
+        let page_id = pager.allocate_page().expect("allocate");
+
+        pager.begin_transaction().expect("begin");
+        let mut page = Page::new(page_id);
+        page.data[0] = 1;
+        pager.write_page(page).expect("write");
+
+        let before = pager.stats();
+        for _ in 0..32 {
+            let _ = pager.snapshot().expect("snapshot");
+        }
+        let work = pager.stats().since(&before);
+        pager.commit_transaction().expect("commit");
+
+        assert_eq!(
+            work.file_stats, 0,
+            "32 snapshots asked the OS for the file length: {work:?}"
+        );
+    }
+
     #[test]
     fn wal_commit_issues_exactly_one_fsync() {
         let db = TestDbFile::new("_test_work_wal_fsyncs");

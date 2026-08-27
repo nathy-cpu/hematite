@@ -54,6 +54,14 @@ pub struct PagerStats {
     pub wal_frames: AtomicU64,
     /// Completed WAL checkpoints.
     pub checkpoints: AtomicU64,
+    /// Times the database file's length was asked of the operating system.
+    ///
+    /// The pager already knows how long its file is -- it is the only writer, and
+    /// every path that changes the length goes through it. Asking the OS is a
+    /// `statx` per call, and this counter exists because that call used to sit
+    /// inside `deallocate_page`, so a transaction that freed pages paid one syscall
+    /// per page to re-learn a number it had just computed.
+    pub file_stats: AtomicU64,
 }
 
 impl PagerStats {
@@ -84,6 +92,7 @@ impl PagerStats {
             journal_bytes: self.journal_bytes.load(Ordering::Relaxed),
             wal_frames: self.wal_frames.load(Ordering::Relaxed),
             checkpoints: self.checkpoints.load(Ordering::Relaxed),
+            file_stats: self.file_stats.load(Ordering::Relaxed),
         }
     }
 }
@@ -101,6 +110,7 @@ pub struct StatsSnapshot {
     pub journal_bytes: u64,
     pub wal_frames: u64,
     pub checkpoints: u64,
+    pub file_stats: u64,
 }
 
 impl StatsSnapshot {
@@ -120,6 +130,7 @@ impl StatsSnapshot {
             journal_bytes: self.journal_bytes.saturating_sub(earlier.journal_bytes),
             wal_frames: self.wal_frames.saturating_sub(earlier.wal_frames),
             checkpoints: self.checkpoints.saturating_sub(earlier.checkpoints),
+            file_stats: self.file_stats.saturating_sub(earlier.file_stats),
         }
     }
 }

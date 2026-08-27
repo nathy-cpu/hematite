@@ -49,6 +49,12 @@ use std::os::windows::fs::FileExt;
 pub struct FileManager {
     backend: FileBackend,
     next_page_id: u32,
+    /// The database file's length, as this manager last left it.
+    ///
+    /// The pager is the only writer of this file, so its length is always something
+    /// this process just did. Reading it back from the OS is a `statx`, and
+    /// `deallocate_page` used to issue one per freed page.
+    file_len: u64,
     free_list: FreeList,
     /// Shared with the `Pager` that owns this backend, so both halves of the
     /// storage layer report into one set of counters.
@@ -87,6 +93,7 @@ impl FileManager {
         let manager = Self {
             backend: FileBackend::Disk { file },
             next_page_id: 0,
+            file_len: 0,
             free_list: FreeList::new(),
             stats: Arc::new(PagerStats::default()),
             #[cfg(test)]
@@ -104,6 +111,7 @@ impl FileManager {
         let manager = Self {
             backend: FileBackend::Memory(Vec::new()),
             next_page_id: 0,
+            file_len: 0,
             free_list: FreeList::new(),
             stats: Arc::new(PagerStats::default()),
             #[cfg(test)]
@@ -118,7 +126,7 @@ impl FileManager {
     }
 
     fn initialize(&mut self) -> Result<()> {
-        let file_len = self.len()?;
+        let file_len = self.stat_len()?;
         if file_len == 0 {
             self.initialize_new_file()?;
         } else {
@@ -141,11 +149,15 @@ impl FileManager {
             )));
         }
         self.next_page_id = next_page_id_for_file_len(file_len);
+        self.file_len = file_len;
         Ok(())
     }
 
+    /// Re-reads the file's length from the OS, for the one case where this process
+    /// is not the only thing that has touched it: recovery, which may have replayed
+    /// a journal written by a previous process.
     pub fn sync_with_disk(&mut self) -> Result<()> {
-        let file_len = self.len()?;
+        let file_len = self.stat_len()?;
         self.load_existing_file(file_len)
     }
 
@@ -280,6 +292,7 @@ impl FileManager {
             }
             FileBackend::Memory(buffer) => *buffer = durable.clone(),
         }
+        self.file_len = durable.len() as u64;
         self.durable = durable;
         Ok(())
     }
@@ -325,7 +338,7 @@ impl FileManager {
     }
 
     pub fn file_len(&self) -> Result<u64> {
-        self.len()
+        Ok(self.len())
     }
 
     pub fn restore_file_len(&mut self, len: u64) -> Result<()> {
@@ -379,7 +392,7 @@ impl FileManager {
 
     pub(crate) fn snapshot(&self) -> Result<FileManagerSnapshot> {
         Ok(FileManagerSnapshot {
-            file_len: self.file_len()?,
+            file_len: self.len(),
             free_pages: self.free_pages().to_vec(),
         })
     }
@@ -396,7 +409,7 @@ impl FileManager {
             .compact_trailing_pages(&mut self.next_page_id, minimum_next_page_id);
         let target_next_page_id = self.next_page_id.max(minimum_next_page_id);
         let target_len = file_len_for_next_page_id(target_next_page_id);
-        let current_len = self.len()?;
+        let current_len = self.len();
 
         if target_len < current_len {
             self.set_len(target_len)?;
@@ -409,7 +422,16 @@ impl FileManager {
         Ok(page_id as u64 * PAGE_SIZE as u64)
     }
 
-    fn len(&self) -> Result<u64> {
+    fn len(&self) -> u64 {
+        self.file_len
+    }
+
+    /// The file's length according to the OS, at the cost of a `statx`.
+    ///
+    /// Only open and recovery need this. Everything else reads [`Self::len`], which
+    /// is maintained by the write paths below.
+    fn stat_len(&self) -> Result<u64> {
+        PagerStats::bump(&self.stats.file_stats);
         match &self.backend {
             FileBackend::Disk { file, .. } => Ok(file.metadata()?.len()),
             FileBackend::Memory(buffer) => Ok(buffer.len() as u64),
@@ -474,6 +496,9 @@ impl FileManager {
                 buffer[offset..end].copy_from_slice(buf);
             }
         }
+        // A positional write past the end extends the file, so this is one of the
+        // two places the length can change.
+        self.file_len = self.file_len.max(offset + buf.len() as u64);
         Ok(())
     }
 
@@ -486,7 +511,7 @@ impl FileManager {
                 buffer.resize(len as usize, 0);
             }
         }
-
+        self.file_len = len;
         Ok(())
     }
 }
