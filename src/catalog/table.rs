@@ -2,7 +2,7 @@
 
 use super::column::Column;
 use super::ids::TableId;
-use super::types::Value;
+use super::types::{DataType, Value};
 use crate::catalog::object::{NamedConstraint, NamedConstraintKind};
 use crate::HematiteError;
 use crate::Result;
@@ -199,6 +199,55 @@ impl Table {
 
     pub fn primary_key_count(&self) -> usize {
         self.primary_key_columns.len()
+    }
+
+    /// The column whose value *is* this table's row id, if it has one.
+    ///
+    /// A table keyed by a single integer column does not need an index from that
+    /// column to the row id: the two are the same number, and the table's own tree
+    /// is already sorted by row id. Building one anyway is a second B-tree holding
+    /// a copy of a key the table already has — 34 % of the file on a five-integer
+    /// row, and a second tree descent on every insert and delete.
+    ///
+    /// `UInt64` is excluded on purpose. Row ids are mapped through `i64` so that
+    /// negative keys sort below positive ones, and a `u64` past `i64::MAX` has
+    /// nowhere to go in that mapping; such a table keeps an ordinary index.
+    pub fn rowid_alias_column(&self) -> Option<usize> {
+        let [index] = self.primary_key_columns[..] else {
+            return None;
+        };
+        Self::column_aliases_rowid(self.columns.get(index)?).then_some(index)
+    }
+
+    /// The same rule, applied before a `Table` exists.
+    ///
+    /// `CREATE TABLE` has to decide whether to build a primary-key index before it
+    /// has anything to ask, and the two answers must agree or a table would be
+    /// written one way and read the other.
+    pub fn columns_alias_rowid(columns: &[Column]) -> bool {
+        let mut keys = columns.iter().filter(|column| column.primary_key);
+        match (keys.next(), keys.next()) {
+            (Some(column), None) => Self::column_aliases_rowid(column),
+            _ => false,
+        }
+    }
+
+    fn column_aliases_rowid(column: &Column) -> bool {
+        matches!(
+            column.data_type,
+            DataType::Int8
+                | DataType::Int16
+                | DataType::Int
+                | DataType::Int64
+                | DataType::UInt8
+                | DataType::UInt16
+                | DataType::UInt
+        )
+    }
+
+    /// Whether this table's primary key is its row id.
+    pub fn has_rowid_alias(&self) -> bool {
+        self.rowid_alias_column().is_some()
     }
 
     pub fn validate_row(&self, values: &[Value]) -> Result<()> {

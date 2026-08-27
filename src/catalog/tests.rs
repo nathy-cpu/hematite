@@ -1681,6 +1681,51 @@ mod catalog_new_tests {
         Ok(())
     }
 
+    /// `insert_table_row` refuses a duplicate key on a table that keeps no index
+    /// for it.
+    ///
+    /// The executor checks for duplicates before it ever gets here, so this is a
+    /// backstop rather than the primary defence — but for a table keyed by its row
+    /// id it is the *only* defence a direct engine caller has, and the failure it
+    /// prevents is silent: writing a row under an id another row already holds
+    /// overwrites that row, where a real primary-key index would have refused the
+    /// second entry.
+    #[test]
+    fn inserting_a_duplicate_key_is_refused_without_an_index() -> Result<()> {
+        let test_db = TestDbFile::new("_test_aliased_duplicate_refused");
+        let mut engine = crate::catalog::CatalogEngine::new(test_db.path())?;
+        let root_page_id = engine.create_table("t")?;
+        let table = crate::catalog::Table::new(
+            crate::catalog::TableId::new(1),
+            "t".to_string(),
+            vec![
+                Column::new(ColumnId::new(1), "id".to_string(), DataType::Int).primary_key(true),
+                Column::new(ColumnId::new(2), "a".to_string(), DataType::Int),
+            ],
+            root_page_id,
+        )?;
+        assert!(table.has_rowid_alias(), "fixture should alias its row id");
+
+        let row = vec![Value::Integer(4), Value::Integer(40)];
+        assert_eq!(engine.insert_table_row(&table, row.clone())?, 4);
+
+        let duplicate = engine.insert_table_row(&table, vec![Value::Integer(4), Value::Integer(99)]);
+        assert!(
+            duplicate
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.to_string().contains("Duplicate primary key")),
+            "a duplicate key was accepted: {duplicate:?}"
+        );
+
+        // And the row it collided with is still the one that was there.
+        let found = engine
+            .lookup_row_by_primary_key(&table, &[Value::Integer(4)])?
+            .expect("row should still exist");
+        assert_eq!(found.values, row, "the refused insert overwrote a row");
+        Ok(())
+    }
+
     #[test]
     fn test_catalog_auto_vacuum_compaction() -> Result<()> {
         let test_db = TestDbFile::new("_test_auto_vacuum_compaction");
@@ -1718,7 +1763,11 @@ mod catalog_new_tests {
         catalog.with_engine(|engine| {
             for i in 0..50 {
                 let vals1 = vec![Value::Integer(i), Value::Text(format!("row {}", i))];
-                let row_id1 = engine.insert_into_table("table1", vals1.clone())?;
+                // `insert_table_row` rather than `insert_into_table` plus a manual
+                // registration: these tables are keyed by a single integer column,
+                // so the row id is the key and picking one from the counter would
+                // store rows nothing could look up.
+                let row_id1 = engine.insert_table_row(&table1_def, vals1.clone())?;
                 engine.register_primary_key_row(
                     &table1_def,
                     crate::catalog::StoredRow {
@@ -1728,7 +1777,7 @@ mod catalog_new_tests {
                 )?;
 
                 let vals2 = vec![Value::Integer(i), Value::Text(format!("row {}", i))];
-                let row_id2 = engine.insert_into_table("table2", vals2.clone())?;
+                let row_id2 = engine.insert_table_row(&table2_def, vals2.clone())?;
                 engine.register_primary_key_row(
                     &table2_def,
                     crate::catalog::StoredRow {

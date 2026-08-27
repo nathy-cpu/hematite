@@ -3207,7 +3207,14 @@ impl QueryExecutor for CreateExecutor {
 
         // Create storage structures first so the catalog only persists the final roots once.
         let root_page_id = ctx.engine.create_table(&self.statement.table)?;
-        let primary_key_root_page_id = ctx.engine.create_empty_btree()?;
+        // A single integer primary key is the row id, so the table's own tree is
+        // already an index on it. Zero means "no primary-key index", which every
+        // reader of this field already understands.
+        let primary_key_root_page_id = if crate::catalog::Table::columns_alias_rowid(&columns) {
+            0
+        } else {
+            ctx.engine.create_empty_btree()?
+        };
         Arc::make_mut(&mut ctx.catalog).create_table_with_roots(
             self.statement.table.clone(),
             columns,
@@ -4465,7 +4472,22 @@ fn write_stored_row(
     mut row: StoredRow,
     preserve_row_id: bool,
 ) -> Result<u64> {
-    let row_id = if preserve_row_id {
+    // For a table whose primary key is its row id, the key names the id and there
+    // is nothing separate to preserve: an UPDATE that changes the key moves the
+    // row. Callers that pass `preserve_row_id` have already removed what they are
+    // replacing, so the id they are about to take is theirs; the others have to
+    // find it unoccupied first.
+    let keyed_row_id = if preserve_row_id {
+        ctx.engine.aliased_rowid_for_row(table, &row.values)?
+    } else {
+        ctx.engine.reserve_aliased_rowid(table, &row.values)?
+    };
+
+    let row_id = if let Some(keyed_row_id) = keyed_row_id {
+        row.row_id = keyed_row_id;
+        ctx.engine.insert_row_with_rowid(table_name, row.clone())?;
+        keyed_row_id
+    } else if preserve_row_id {
         ctx.engine.insert_row_with_rowid(table_name, row.clone())?;
         row.row_id
     } else {

@@ -24,6 +24,39 @@ impl RowCodec {
         record_v4::decode(data)
     }
 
+    /// The row id a table keyed by a single integer column stores a row under.
+    ///
+    /// The key *is* the row id. Not a mapping of it — an `AUTO_INCREMENT` primary
+    /// key is already filled from the row-id counter, so the two have always been
+    /// the same number for the commonest case, and keeping them the same is what
+    /// lets `RowIdLookup` and `PrimaryKeyLookup` reach the same row.
+    ///
+    /// Row ids compare unsigned, so a negative key lands above every positive one
+    /// and a full scan returns it last. That costs nothing here: the planner's only
+    /// key-driven access paths are point lookups, and row-id order was never
+    /// primary-key order anyway — under the counter it was insertion order.
+    ///
+    /// `None` for anything that is not an integer, or a `u64` past what `i64`
+    /// holds — [`Table::rowid_alias_column`] refuses those tables, and this is the
+    /// second half of the same rule.
+    ///
+    /// [`Table::rowid_alias_column`]: crate::catalog::Table::rowid_alias_column
+    pub fn rowid_for_primary_key(value: &Value) -> Option<u64> {
+        let signed: i64 = match value {
+            Value::Integer(v) => i64::from(*v),
+            Value::BigInt(v) => *v,
+            Value::UInteger(v) => i64::from(*v),
+            Value::UBigInt(v) => i64::try_from(*v).ok()?,
+            _ => return None,
+        };
+        Some(signed as u64)
+    }
+
+    /// The primary-key integer a row id was derived from.
+    pub fn primary_key_for_rowid(row_id: u64) -> i64 {
+        row_id as i64
+    }
+
     /// Encodes a `u64` row ID into a lexicographically sortable variable-length byte array.
     pub fn encode_row_id_key(row_id: u64) -> Vec<u8> {
         let bytes_needed = match row_id {
@@ -227,4 +260,61 @@ mod tests {
         padded.push(0xFF);
         assert!(RowCodec::decode_values(&padded).is_err());
     }
+
+    /// The key and the row id are the same number, in both directions and for
+    /// every `i64`. An `AUTO_INCREMENT` key is filled from the row-id counter, so
+    /// anything else would make those two disagree.
+    #[test]
+    fn a_primary_key_and_its_rowid_are_the_same_number() {
+        for key in [i64::MIN, -1_000_000, -1, 0, 1, 1_000_000, i64::MAX] {
+            let row_id = RowCodec::rowid_for_primary_key(&Value::BigInt(key)).expect("integer key");
+            assert_eq!(RowCodec::primary_key_for_rowid(row_id), key);
+        }
+        assert_eq!(
+            RowCodec::rowid_for_primary_key(&Value::Integer(42)),
+            Some(42)
+        );
+    }
+
+    /// Non-negative keys sort in key order once encoded, which is what makes a
+    /// table keyed by its primary key scan in that order. Row ids compare
+    /// unsigned, so a negative key sorts last — documented, and harmless while
+    /// every key-driven access path is a point lookup.
+    #[test]
+    fn encoded_rowid_keys_sort_in_key_order_above_zero() {
+        let mut keys: Vec<i64> = vec![0, 1, 255, 256, 70_000, i64::MAX];
+        let mut encoded: Vec<(i64, Vec<u8>)> = keys
+            .iter()
+            .map(|&key| {
+                let row_id =
+                    RowCodec::rowid_for_primary_key(&Value::BigInt(key)).expect("integer key");
+                (key, RowCodec::encode_row_id_key(row_id))
+            })
+            .collect();
+        encoded.sort_by(|left, right| left.1.cmp(&right.1));
+        keys.sort_unstable();
+        assert_eq!(
+            encoded.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+            keys,
+            "encoded row-id keys did not sort in key order"
+        );
+
+        let negative =
+            RowCodec::encode_row_id_key(RowCodec::rowid_for_primary_key(&Value::BigInt(-1)).unwrap());
+        assert!(
+            negative > encoded.last().expect("keys").1,
+            "a negative key is expected to sort last, and did not"
+        );
+    }
+
+    #[test]
+    fn only_integers_within_i64_get_a_rowid() {
+        assert!(RowCodec::rowid_for_primary_key(&Value::Integer(7)).is_some());
+        assert!(RowCodec::rowid_for_primary_key(&Value::UInteger(7)).is_some());
+        assert!(RowCodec::rowid_for_primary_key(&Value::UBigInt(7)).is_some());
+        assert!(RowCodec::rowid_for_primary_key(&Value::UBigInt(u64::MAX)).is_none());
+        assert!(RowCodec::rowid_for_primary_key(&Value::Text("7".into())).is_none());
+        assert!(RowCodec::rowid_for_primary_key(&Value::Null).is_none());
+    }
+
 }

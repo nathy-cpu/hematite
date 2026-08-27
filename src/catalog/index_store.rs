@@ -8,7 +8,7 @@ use crate::error::{HematiteError, Result};
 use super::cursor::IndexCursor;
 use super::engine::CatalogEngine;
 use super::record::StoredRow;
-use super::serialization::IndexKeyCodec;
+use super::serialization::{IndexKeyCodec, RowCodec};
 use super::table_store;
 use crate::catalog::column::normalize_text_for_collation;
 
@@ -43,11 +43,61 @@ pub(crate) fn lookup_row_by_primary_key(
     }
 }
 
+/// The row id a table whose primary key *is* its row id stores this row under.
+///
+/// `None` when the table keeps a real primary-key index, which is every table
+/// whose key is composite or not an integer.
+fn aliased_rowid(table: &Table, values: &[Value]) -> Result<Option<u64>> {
+    let Some(column_index) = table.rowid_alias_column() else {
+        return Ok(None);
+    };
+    let value = values.get(column_index).ok_or_else(|| {
+        HematiteError::StorageError(format!(
+            "Primary key value not found for table '{}'",
+            table.name
+        ))
+    })?;
+    let row_id = RowCodec::rowid_for_primary_key(value).ok_or_else(|| {
+        HematiteError::StorageError(format!(
+            "Primary key for table '{}' is not an integer row id: {value:?}",
+            table.name
+        ))
+    })?;
+    Ok(Some(row_id))
+}
+
+/// The row id for a key given as the primary-key tuple rather than a whole row.
+fn aliased_rowid_for_key(table: &Table, key_values: &[Value]) -> Result<Option<u64>> {
+    if table.rowid_alias_column().is_none() {
+        return Ok(None);
+    }
+    let value = key_values.first().ok_or_else(|| {
+        HematiteError::StorageError(format!(
+            "Primary key lookup for table '{}' supplied no value",
+            table.name
+        ))
+    })?;
+    let row_id = RowCodec::rowid_for_primary_key(value).ok_or_else(|| {
+        HematiteError::StorageError(format!(
+            "Primary key for table '{}' is not an integer row id: {value:?}",
+            table.name
+        ))
+    })?;
+    Ok(Some(row_id))
+}
+
 pub(crate) fn lookup_primary_key_rowid(
     engine: &mut CatalogEngine,
     table: &Table,
     key_values: &[Value],
 ) -> Result<Option<u64>> {
+    if let Some(row_id) = aliased_rowid_for_key(table, key_values)? {
+        // The key is the row id, so the table's own tree answers this. There is no
+        // index to consult and nothing to decode: the question is whether the tree
+        // holds that key.
+        return Ok(table_store::rowid_exists(engine, &table.name, row_id)?.then_some(row_id));
+    }
+
     let key_values = normalize_primary_key_values(table, key_values);
     let tree = open_required_tree(
         engine,
@@ -60,11 +110,64 @@ pub(crate) fn lookup_primary_key_rowid(
     }
 }
 
+/// The row id a row's primary key names, without asking whether it is free.
+///
+/// For the paths that are replacing a row they have already removed, where the id
+/// being taken is the point rather than a collision.
+pub(crate) fn aliased_rowid_for_row(table: &Table, values: &[Value]) -> Result<Option<u64>> {
+    aliased_rowid(table, values)
+}
+
+/// Claims the row id a row keyed by its primary key must occupy.
+///
+/// Returns the row id, having established that nothing else holds it. This has to
+/// happen *before* the row is written: the table tree keyed by row id will happily
+/// overwrite a colliding row, where a real primary-key index would refuse to take
+/// a second entry for the same key.
+pub(crate) fn reserve_aliased_rowid(
+    engine: &mut CatalogEngine,
+    table: &Table,
+    values: &[Value],
+) -> Result<Option<u64>> {
+    let Some(row_id) = aliased_rowid(table, values)? else {
+        return Ok(None);
+    };
+    if table_store::rowid_exists(engine, &table.name, row_id)? {
+        return Err(HematiteError::StorageError(format!(
+            "Duplicate primary key for table '{}'",
+            table.name
+        )));
+    }
+    Ok(Some(row_id))
+}
+
 pub(crate) fn register_primary_key_row(
     engine: &mut CatalogEngine,
     table: &Table,
     row: StoredRow,
 ) -> Result<()> {
+    if let Some(expected_row_id) = aliased_rowid(table, &row.values)? {
+        // Nothing to record: the row is already stored under its primary key.
+        // Uniqueness was settled before the row was written -- see
+        // `reserve_aliased_rowid`, which has to run first because inserting a
+        // duplicate row id would overwrite the row it collided with.
+        //
+        // What is worth checking is that the row went in under the id its key
+        // says it should have. A caller that allocated a row id from the counter
+        // and then registered a different primary key would leave a row nothing
+        // can find, and that is exactly what the low-level engine API does if it
+        // is used the pre-alias way.
+        if row.row_id != expected_row_id {
+            return Err(HematiteError::StorageError(format!(
+                "Row in table '{}' is stored under row id {} but its primary key is \
+row id {expected_row_id}; a table keyed by a single integer column stores rows \
+under that key",
+                table.name, row.row_id
+            )));
+        }
+        return Ok(());
+    }
+
     let key_values = normalized_primary_key_values(table, &row.values)?;
     let mut tree = open_required_tree(
         engine,
@@ -157,6 +260,13 @@ pub(crate) fn rebuild_primary_key_index(
     table: &Table,
     rows: &[StoredRow],
 ) -> Result<()> {
+    if table.has_rowid_alias() {
+        // Nothing to rebuild. The rows arrive keyed by their primary key, so the
+        // table tree they are written into *is* the index, and its keys are unique
+        // by construction.
+        return Ok(());
+    }
+
     let root_page_id = require_index_root_page(
         table.primary_key_index_root_page_id,
         IndexLabel::PrimaryKey { table: &table.name },
@@ -221,6 +331,11 @@ pub(crate) fn delete_primary_key_row(
     table: &Table,
     row: &StoredRow,
 ) -> Result<bool> {
+    if table.has_rowid_alias() {
+        // The entry the caller means is the row itself, which it removes next.
+        return Ok(true);
+    }
+
     let key_values = normalized_primary_key_values(table, &row.values)?;
     let mut tree = open_required_tree(
         engine,
@@ -306,6 +421,24 @@ pub(crate) fn validate_table_indexes(engine: &mut CatalogEngine, table: &Table) 
     // Guarded on there being rows because opening is also what *requires* the index
     // to exist: a table with no rows previously never entered the loop, so a missing
     // index root went unchallenged, and some callers rely on that.
+    if table.has_rowid_alias() {
+        // There is no index to check against. The invariant is that every row sits
+        // under the row id its key names — the same one `register_primary_key_row`
+        // enforces on the way in, checked here against what is actually stored.
+        for row in &rows {
+            let expected = aliased_rowid(table, &row.values)?
+                .expect("a table with a row-id alias derives a row id from every row");
+            if row.row_id != expected {
+                return Err(HematiteError::CorruptedData(format!(
+                    "Row in table '{}' is stored under row id {} but its primary key is \
+row id {expected}",
+                    table.name, row.row_id
+                )));
+            }
+        }
+        return validate_secondary_indexes(engine, table, &rows);
+    }
+
     let primary_tree = if rows.is_empty() {
         None
     } else {
@@ -339,6 +472,14 @@ pub(crate) fn validate_table_indexes(engine: &mut CatalogEngine, table: &Table) 
         }
     }
 
+    validate_secondary_indexes(engine, table, &rows)
+}
+
+fn validate_secondary_indexes(
+    engine: &mut CatalogEngine,
+    table: &Table,
+    rows: &[StoredRow],
+) -> Result<()> {
     for index in &table.secondary_indexes {
         if rows.is_empty() {
             continue;
@@ -352,7 +493,7 @@ pub(crate) fn validate_table_indexes(engine: &mut CatalogEngine, table: &Table) 
                 table: &table.name,
             },
         )?;
-        for row in &rows {
+        for row in rows {
             let key_values = secondary_index_values(index, row);
             let key_values = normalize_secondary_index_values(table, index, &key_values);
             let rowids = secondary_index_rowids_for_key(&tree, &key_values)?;

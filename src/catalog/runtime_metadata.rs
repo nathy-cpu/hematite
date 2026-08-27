@@ -81,7 +81,11 @@ pub(crate) fn apply_insert(
         metadata.root_page_id = new_root_page_id;
         metadata.row_count += 1;
         if let Some(next_row_id) = next_row_id {
-            metadata.next_row_id = next_row_id;
+            // Never backwards. A row written under an explicit id has to push the
+            // counter past it, or the next generated id would collide with a row
+            // that already exists — which for a table keyed by its row id means
+            // silently overwriting it.
+            metadata.next_row_id = metadata.next_row_id.max(next_row_id);
         }
     }
 }

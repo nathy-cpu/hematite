@@ -654,13 +654,6 @@ not available yet.",
         runtime_metadata::apply_insert(self, table_name, new_root_page_id, Some(row_id + 1));
     }
 
-    pub(crate) fn record_explicit_row_insert(
-        &mut self,
-        table_name: &str,
-        new_root_page_id: PageId,
-    ) {
-        runtime_metadata::apply_insert(self, table_name, new_root_page_id, None);
-    }
 
     pub(crate) fn record_row_delete(
         &mut self,
@@ -780,6 +773,36 @@ not available yet.",
         key_values: &[Value],
     ) -> Result<Option<u64>> {
         index_store::lookup_primary_key_rowid(self, table, key_values)
+    }
+
+    /// Writes a row under the row id this table's shape requires, and returns it.
+    ///
+    /// For a table whose primary key is a single integer column, the key *is* the
+    /// row id and the caller does not get to choose. Otherwise the id comes from
+    /// the table's counter, as it always did.
+    ///
+    /// Prefer this over `insert_into_table` followed by `register_primary_key_row`:
+    /// that pair lets a caller store a row under a counter id and then claim a
+    /// different primary key for it, leaving a row nothing can look up. Three tests
+    /// in this repository did exactly that before the two were joined here.
+    pub fn insert_table_row(&mut self, table: &Table, values: Vec<Value>) -> Result<u64> {
+        match self.reserve_aliased_rowid(table, &values)? {
+            Some(row_id) => {
+                self.insert_row_with_rowid(&table.name, StoredRow { row_id, values })?;
+                Ok(row_id)
+            }
+            None => self.insert_into_table(&table.name, values),
+        }
+    }
+
+    /// See [`index_store::aliased_rowid_for_row`].
+    pub fn aliased_rowid_for_row(&self, table: &Table, values: &[Value]) -> Result<Option<u64>> {
+        index_store::aliased_rowid_for_row(table, values)
+    }
+
+    /// See [`index_store::reserve_aliased_rowid`].
+    pub fn reserve_aliased_rowid(&mut self, table: &Table, values: &[Value]) -> Result<Option<u64>> {
+        index_store::reserve_aliased_rowid(self, table, values)
     }
 
     pub fn register_primary_key_row(&mut self, table: &Table, row: StoredRow) -> Result<()> {

@@ -2635,6 +2635,113 @@ mod connection_tests {
     /// move for another process's commit too, and it is the read scope opened just
     /// above the check that notices one — this test is what holds that ordering in
     /// place. Nothing else in the suite reads a second connection's DDL.
+    /// A table keyed by a single integer column stores its rows under that key and
+    /// keeps no separate index for it.
+    ///
+    /// The index would map an integer to a row id while the table's own tree is
+    /// already sorted by row id — a second B-tree holding a copy of a key the table
+    /// already has. It was 34 % of the file on a five-integer row.
+    #[test]
+    fn an_integer_primary_key_needs_no_index() -> Result<()> {
+        let db = TestDbFile::new("_test_integer_pk_needs_no_index");
+        let mut conn = Connection::new(db.path())?;
+        conn.execute("CREATE TABLE keyed (id INT PRIMARY KEY, a INT);")?;
+        // Composite keys are declared per column in this dialect.
+        conn.execute("CREATE TABLE composite (a INT PRIMARY KEY, b INT PRIMARY KEY);")?;
+        conn.execute("CREATE TABLE texty (name TEXT PRIMARY KEY, a INT);")?;
+
+        let schema = conn.schema_snapshot()?;
+        let keyed = schema.get_table_by_name("keyed").expect("keyed");
+        assert!(keyed.has_rowid_alias(), "single integer key should alias");
+        assert_eq!(
+            keyed.primary_key_index_root_page_id, 0,
+            "a table keyed by its row id should have no primary-key index"
+        );
+
+        for name in ["composite", "texty"] {
+            let table = schema.get_table_by_name(name).expect(name);
+            assert!(!table.has_rowid_alias(), "{name} should not alias");
+            assert_ne!(
+                table.primary_key_index_root_page_id, 0,
+                "{name} still needs a primary-key index"
+            );
+        }
+        conn.close()?;
+        Ok(())
+    }
+
+    /// Everything a primary key has to do, on a table that no longer has an index
+    /// for it: find a row, refuse a duplicate, move a row when the key changes, and
+    /// remove it.
+    #[test]
+    fn an_aliased_primary_key_behaves_like_a_primary_key() -> Result<()> {
+        let db = TestDbFile::new("_test_aliased_pk_behaviour");
+        let mut conn = Connection::new(db.path())?;
+        conn.execute("CREATE TABLE t (id INT PRIMARY KEY, a INT);")?;
+        conn.execute("INSERT INTO t (id, a) VALUES (1, 10), (2, 20), (5, 50);")?;
+
+        assert_eq!(
+            conn.execute("SELECT a FROM t WHERE id = 5;")?.rows.len(),
+            1,
+            "point lookup by primary key"
+        );
+
+        let duplicate = conn.execute("INSERT INTO t (id, a) VALUES (2, 99);");
+        assert!(
+            duplicate
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.to_string().contains("Duplicate primary key")),
+            "a duplicate key was accepted: {duplicate:?}"
+        );
+        assert_eq!(
+            conn.execute("SELECT a FROM t WHERE id = 2;")?.rows.len(),
+            1,
+            "the refused insert must not have overwritten the row it collided with"
+        );
+
+        // The key names the row id, so changing the key moves the row.
+        conn.execute("UPDATE t SET id = 7 WHERE id = 1;")?;
+        assert!(conn.execute("SELECT a FROM t WHERE id = 1;")?.rows.is_empty());
+        assert_eq!(conn.execute("SELECT a FROM t WHERE id = 7;")?.rows.len(), 1);
+
+        conn.execute("DELETE FROM t WHERE id = 2;")?;
+        assert!(conn.execute("SELECT a FROM t WHERE id = 2;")?.rows.is_empty());
+        assert_eq!(conn.execute("SELECT id FROM t;")?.rows.len(), 2);
+
+        // Survives a reopen: the rows have to be findable by key with nothing but
+        // the table tree to go on.
+        conn.close()?;
+        let mut reopened = Connection::new(db.path())?;
+        assert_eq!(
+            reopened.execute("SELECT a FROM t WHERE id = 7;")?.rows.len(),
+            1
+        );
+        reopened.close()?;
+        Ok(())
+    }
+
+    /// A negative key is stored where an unsigned row id puts it, which is after
+    /// every non-negative one. Looking it up still works; only the order a bare
+    /// scan returns rows in is affected, and that was never primary-key order.
+    #[test]
+    fn a_negative_primary_key_is_stored_and_found() -> Result<()> {
+        let db = TestDbFile::new("_test_negative_pk");
+        let mut conn = Connection::new(db.path())?;
+        conn.execute("CREATE TABLE t (id INT PRIMARY KEY, a INT);")?;
+        conn.execute("INSERT INTO t (id, a) VALUES (5, 50), (-3, 30), (1, 10);")?;
+
+        assert_eq!(conn.execute("SELECT a FROM t WHERE id = -3;")?.rows.len(), 1);
+        assert_eq!(conn.execute("SELECT id FROM t;")?.rows.len(), 3);
+        assert_eq!(
+            conn.execute("SELECT id FROM t ORDER BY id;")?.rows.len(),
+            3,
+            "ORDER BY still sorts them"
+        );
+        conn.close()?;
+        Ok(())
+    }
+
     #[test]
     fn a_connection_sees_a_table_another_one_created() -> Result<()> {
         let db = TestDbFile::new("_test_connection_sees_foreign_ddl");

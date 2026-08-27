@@ -238,6 +238,20 @@ pub(crate) fn read_table_columns(
     Ok(rows)
 }
 
+/// Whether a row with this id exists, without decoding it.
+///
+/// The uniqueness check for a table whose primary key is its row id. Decoding the
+/// row to find out it is there would parse a record the caller is about to reject.
+pub(crate) fn rowid_exists(
+    engine: &mut CatalogEngine,
+    table_name: &str,
+    rowid: u64,
+) -> Result<bool> {
+    let root_page_id = engine.table_runtime_metadata(table_name)?.root_page_id;
+    let tree = engine.open_tree(root_page_id)?;
+    Ok(tree.get(&RowCodec::encode_row_id_key(rowid))?.is_some())
+}
+
 pub(crate) fn lookup_row_by_rowid(
     engine: &mut CatalogEngine,
     table_name: &str,
@@ -263,6 +277,9 @@ pub(crate) fn insert_stored_row(
         .insert_with_mutation(&RowCodec::encode_row_id_key(row.row_id), &encoded_row)?
         .root_page_id;
 
-    engine.record_explicit_row_insert(table_name, new_root_page_id);
+    // The row id came from the caller rather than the counter, so the counter has
+    // to be moved past it. For a table whose primary key *is* its row id this is
+    // what keeps `AUTO_INCREMENT` handing out ids nobody holds.
+    engine.record_generated_row_insert(table_name, new_root_page_id, row.row_id);
     Ok(())
 }

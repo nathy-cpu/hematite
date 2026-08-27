@@ -2729,8 +2729,11 @@ mod mod_tests {
                 unique: false,
             })?;
 
-            let row_id = storage.insert_into_table(
-                "users",
+            // `insert_table_row`, not `insert_into_table`: this table is keyed by
+            // a single integer column, so the row id is the key rather than the
+            // next counter value.
+            let row_id = storage.insert_table_row(
+                &table,
                 vec![
                     Value::Integer(7),
                     Value::Text("persist@example.com".to_string()),
@@ -2892,8 +2895,9 @@ mod mod_tests {
             unique: false,
         })?;
 
-        let row_id = storage.insert_into_table(
-            "users",
+        // See `test_durable_indexes_survive_reopen`: the row id is the key here.
+        let row_id = storage.insert_table_row(
+            &table,
             vec![
                 Value::Integer(11),
                 Value::Text("gone@example.com".to_string()),
