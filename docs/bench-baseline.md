@@ -1045,3 +1045,165 @@ as a node that passed its fit check and then failed to serialise — loud, but b
 rather than design. There is now one definition, and two tests pin the agreement
 between what a cell is declared to cost, what encoding writes, and what reading
 reports.
+
+---
+
+## The syscall axis, and the write path
+
+The one dimension this rewrite had never measured. Instruction counts and allocation
+counts had both been in use for months; neither can see a syscall. `strace -c` on 200
+single-row transactions was the first look, and the first thing it showed was not a
+close call.
+
+`examples/storage_profile.rs` was written for this. One workload per run — `setup`,
+`scan`, `lookup`, `update`, `delete`, `rollback`, `append_txns` — so a phase can be
+isolated by subtraction, with `MODE=rollback|wal`. It prints the storage counters for
+the measured phase at the end of every run, which is what makes a syscall or a memcpy
+into a recycled buffer visible without any tooling at all.
+
+### Syscalls: 200 single-row rollback transactions
+
+| syscall | before | after | |
+|---|---|---|---|
+| `statx` | 12 031 | **413** | −96.6 % |
+| `lseek` | 1 859 | **0** | |
+| `write` | 1 860 | **16** | the journal writes positionally now |
+| `pread64` | 1 844 | **415** | −77.5 % |
+| `pwrite64` | 1 296 | 3 155 | the `write`s moved here |
+| `fsync` | 411 | 411 | unchanged, and correct: 2 per commit |
+| `openat` / `unlink` / `ftruncate` | 212 / 207 / 206 | unchanged | the journal is still created and deleted per transaction |
+| **total** | **~20 000** | **5 737** | **−71 %** |
+
+Three causes, none of which a code reading had flagged:
+
+- **`statx` — 60 per transaction.** `ByteTree::run_atomically` takes a pager snapshot
+  per row, and each one asked the OS for the database file's length. The pager is the
+  only writer of that file; every path that changes its length goes through it.
+- **`lseek` — 9.3 per transaction.** The journal was the last writer still driving a
+  shared cursor. Updating the header's record count, once per journalled page, was a
+  seek back, four bytes, and a seek forward.
+- **`pread64` — 9.2 per transaction.** The page cache was emptied at the start of
+  every transaction. See below.
+
+WAL mode still shows 1 235 `statx` and 613 `lseek` over the same 200 transactions,
+from the WAL file-stamp check and the WAL read path. Not yet touched.
+
+### The page cache was thrown away on every commit
+
+Rollback mode has no WAL to version reads, so a transaction that starts after another
+writer committed has to drop every cached page. Telling their commit from ours was
+done with a fingerprint of the persisted metadata page as last read from disk, on the
+stated grounds that it "encodes per-page checksums and therefore changes on any
+commit".
+
+The per-page checksums moved into page trailers three commits earlier, and that page
+is shared with the catalog, whose section carries row counts. So our own commits
+changed it, the fingerprint never matched, and the cache was reset at the start of
+every single transaction — **205 resets over 205 one-row transactions**, which is
+precisely what the fingerprint had been introduced to prevent.
+
+The cached copy of that page is the better witness and needs no separate bookkeeping:
+a commit writes it through the cache, so bytes still on disk that differ from it are
+bytes we did not write.
+
+| | before | after |
+|---|---|---|
+| `pool_misses` per 200 transactions | 1 400 | **0** |
+| `page_reads` | 1 800 | **400** |
+
+Instructions per scanned row went 1 348 → 1 361 and wall clock was flat across six
+alternating runs. Both are consistent with the counter: a pool hit costs more client
+instructions than a `pread` stub, and callgrind cannot see what the syscall costs.
+
+### Copies that no profiler was showing
+
+`snapshot_original_page` preserves a page's pre-image for two customers: each live
+savepoint, and once per transaction the rollback journal. It was making four copies
+where one was owed — a clone of the cached page it only read from, a clone of the
+finished journal record, a fresh `Vec` per record inside the journal encoder, and a
+full 4 KiB copy for every savepoint that had not yet captured the page.
+
+**None of it appeared in dhat**, because the page-buffer pool hands the same recycled
+buffers back. They were pure memcpy, and a savepoint is taken per row. `PagerStats`
+gained `undo_page_copies` to count them directly.
+
+| workload, 5 000 rows | undo copies before | after |
+|---|---|---|
+| delete | 29 367 | **51** |
+| update | 49 455 | **51** |
+
+The savepoint copies went to zero by holding the cache's `Arc<Page>` rather than a
+byte copy. That also pins the page, which is what makes it safe: the write path
+unwraps the `Arc` in place only when it is unique, so a page a savepoint is holding is
+copied on its next write instead of overwritten — at most one copy per page per
+savepoint, and only if it is written again.
+
+### Allocations
+
+`PHASE=setup` is a 20 000-row insert; `delete` and `update` are 5 000 rows and are
+quoted net of the fixture.
+
+| | blocks | per row | |
+|---|---|---|---|
+| insert, start | 1 270 834 | 63.5 | |
+| insert, now | **770 089** | **38.5** | −39.4 % |
+| delete, start | 2 803 828 | 561 | |
+| delete, now | **338 926** | **67.8** | −87.9 % |
+| update, start | 3 074 039 | 615 | |
+| update, now | **589 093** | **117.8** | −80.8 % |
+
+What the insert path was spending them on, in order of what was removed:
+
+- the catalog's table-metadata map, deep cloned by `run_atomically` — three times per
+  row, plus a fourth that was cloned unconditionally and dropped unread on the branch
+  that cannot reach it. Behind an `Arc` now, and keyed by the same `Arc<str>` the
+  metadata's `name` field holds, so the one copy that remains costs one allocation
+  rather than four;
+- `&format!("primary-key index for table '{}'", …)`, built on every call that opens
+  an index tree to name it in an error that fires only on a corrupt catalog;
+- taking a row's key columns into a `Vec<Value>` and then normalising that into a
+  second one.
+
+And what the delete path was spending them on — 76 % of them in `BTreeNode::decode`,
+which materialises a `Vec` per key and per value, around four hundred for a pair of
+full leaves:
+
+- **borrow eligibility**: both nodes decoded in full to answer `keys.len() <=
+  min_keys`, a number that is in the page header;
+- **merge eligibility**: both decoded before `can_merge_with`, which already works
+  from cell pointers, and before `merge_leaf` decodes for itself;
+- **the rotation**: a borrow moves one cell, and decoded both leaves, moved one
+  element between two `VecDeque`s, and re-serialised both pages from scratch;
+- **descent**: every interior node on the path decoded on every delete, for a
+  rebalance that usually does not happen. Insert had already been lazy here.
+
+| workload, 5 000 rows | Ir before | Ir after | |
+|---|---|---|---|
+| delete | 1 725 854 950 | **449 220 741** | −74.0 % |
+| update | — | **639 007 283** | |
+| insert (20 000 rows) | 986 903 595 | **845 154 690** | −14.4 % |
+
+### A test that ran zero times
+
+The leaf-borrow rotation had **no coverage at all**. A probe compiled into it fired
+zero times across all 745 tests and 1 672 times in a single 5 000-row `DELETE`. Every
+test in `btree/tests.rs` uses ~900-byte values, so its leaves fill at a handful of
+cells and never reach the 199 an underflow needs; only tiny entries take a leaf past
+two hundred cells and back down.
+
+The three tests added for it assert on a `leaf_rotations` counter rather than on tree
+validity alone, so a version that stops rotating fails instead of passing quietly.
+Checked against three mutations — separator read off the wrong page, wrong donor cell,
+donor cell not removed — each caught.
+
+This is the same failure mode as the three vacuous tests earlier in the rewrite, and
+the same remedy: assert that the work happened, not only that the result looks right.
+
+### Still open, measured
+
+| | cost | why it is not done |
+|---|---|---|
+| journal created and unlinked per transaction | `openat` + `unlink` + `ftruncate` per commit, ~32 % of syscall *time* in rollback mode | needs the journal invalidated by a zeroed magic instead of by absence, which is a recovery-semantics change and several format-bound tests |
+| WAL file stamp and read path | 1 235 `statx` + 613 `lseek` per 200 WAL transactions | untouched; the same two fixes as the rollback journal apply |
+| `Table::clone` on the lookup path | 280 714 blocks / 18.9 MB per 5 000 point lookups, 18.7 % of that workload | in `src/query/`, outside this rewrite's scope |
+| per-row `Vec<Value>` on scans | ~9 % of a scan | needs `QueryResult` to become a flat buffer, a public API change |
