@@ -428,13 +428,17 @@ impl BTreeIndex {
             return Ok(None);
         }
 
-        let mut node = BTreeNode::from_shared_page_decoded(shared)?;
+        // Undecoded. Descent needs one key comparison per level and one child
+        // pointer, both of which read off the page; decoding materialised every
+        // separator on every interior node on the path, on every delete, for a
+        // rebalance that usually does not happen.
+        let mut node = BTreeNode::from_shared_page(shared)?;
 
         let result = match node.node_type {
             NodeType::Leaf => unreachable!(),
             NodeType::Internal => {
                 let child_index = node.find_child_index(key)?;
-                let child_page_id = node.children[child_index];
+                let child_page_id = node.get_child_procedural(child_index)?;
 
                 let deleted_value = self.delete_recursive(pager, child_page_id, key)?;
 
@@ -444,6 +448,9 @@ impl BTreeIndex {
                 // zero the DB header bytes on page 0).
                 let mut node_modified = false;
                 if deleted_value.is_some() && self.is_child_underflow(pager, child_page_id)? {
+                    // Now it has to be decoded: rebalancing edits the separators and
+                    // child pointers in place, and writes the node back.
+                    node.decode()?;
                     self.rebalance_node(pager, &mut node, child_index)?;
                     node_modified = true;
                 }
@@ -463,11 +470,12 @@ impl BTreeIndex {
 
     pub(crate) fn check_root_underflow(&mut self, pager: &mut Pager) -> Result<Option<PageId>> {
         let shared = pager.read_page_shared(self.root_page_id)?;
-        // Underflow check needs decoded node to check lengths
-        let node = BTreeNode::from_shared_page_decoded(shared)?;
+        // "No separators left, but still has a child" is a cell count and a page
+        // kind, both in the header. Decoding to ask it materialised the whole root.
+        let node = BTreeNode::from_shared_page(shared)?;
 
-        if node.keys.is_empty() && !node.children.is_empty() {
-            let child_page_id = node.children[0];
+        if node.key_count == 0 && node.node_type == NodeType::Internal {
+            let child_page_id = node.get_child_procedural(0)?;
             let child_page = pager.read_page_shared(child_page_id)?;
             // Read an owned snapshot of the existing root page so we preserve any
             // database-header bytes that live at the start of page 0.
