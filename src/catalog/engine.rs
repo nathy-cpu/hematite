@@ -486,6 +486,30 @@ not available yet.",
     ///
     /// The early exit is what lets a capped scan stop after the rows it needs
     /// instead of walking the whole tree and discarding the tail.
+    /// Walks a tree's values, without locating each entry's key.
+    ///
+    /// A projecting scan never reads the key, and finding it costs a second cell range
+    /// and view per row.
+    pub(crate) fn visit_tree_values_while<F>(
+        &self,
+        root_page_id: PageId,
+        mut visit: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&[u8]) -> Result<bool>,
+    {
+        let tree = self.open_tree(root_page_id)?;
+        let mut cursor = tree.cursor()?;
+        cursor.first()?;
+        while let Some(keep_going) = cursor.with_current_value(&mut visit)? {
+            if !keep_going {
+                break;
+            }
+            cursor.next()?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn visit_tree_entries_while<F>(
         &self,
         root_page_id: PageId,

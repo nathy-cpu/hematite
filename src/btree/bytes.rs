@@ -643,6 +643,30 @@ impl ByteTreeCursor {
         visit(key, &hydrated).map(Some)
     }
 
+    /// Like [`with_current`](Self::with_current) but reads only the value.
+    ///
+    /// A table scan that projects columns never looks at the key — the row id is not
+    /// one of the columns — yet locating the key means computing a second cell range
+    /// and decoding a second view per row. Skipping it removes `get_key_view` and one
+    /// of the two `cell_range_for_index` calls from every scanned row.
+    pub fn with_current_value<R>(
+        &self,
+        visit: impl FnOnce(&[u8]) -> Result<R>,
+    ) -> Result<Option<R>> {
+        let Some(value) = self.inner.value_view()? else {
+            return Ok(None);
+        };
+
+        if let Some(payload) = inline_payload(value)? {
+            return visit(payload).map(Some);
+        }
+
+        let storage = self.lock_storage()?;
+        let hydrated = hydrate_stored_value(&storage, value)?;
+        drop(storage);
+        visit(&hydrated).map(Some)
+    }
+
     pub fn collect_all(&mut self) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         self.first()?;
         self.collect_remaining()

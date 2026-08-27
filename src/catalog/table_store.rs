@@ -231,7 +231,7 @@ pub(crate) fn read_table_columns(
     if max_rows == Some(0) {
         return Ok(rows);
     }
-    engine.visit_tree_entries_while(root_page_id, |_key, value| {
+    engine.visit_tree_values_while(root_page_id, |value| {
         rows.push(RowCodec::decode_row_fields(value, indices)?);
         Ok(max_rows.is_none_or(|cap| rows.len() < cap))
     })?;
