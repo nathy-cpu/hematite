@@ -372,7 +372,6 @@ impl Pager {
             None => Arc::new(self.file_manager.read_page(page_id)?),
         };
 
-        let mut copies = 0u64;
         if let Some(savepoints) = self.active_savepoints_mut() {
             for savepoint in savepoints.iter_mut() {
                 if !page_is_live_at_savepoint(page_id, savepoint) {
@@ -380,21 +379,16 @@ impl Pager {
                     continue;
                 }
                 if savepoint.captured_page_ids.insert(page_id) {
-                    copies += 1;
-                    savepoint.page_records.push(JournalRecord {
-                        page_id,
-                        data: page.data.to_vec(),
-                    });
+                    savepoint.page_images.push(Arc::clone(&page));
                 }
             }
         }
 
         if !needs_journal_record || self.active_rollback_transaction().is_none() {
-            crate::storage::stats::PagerStats::add(&self.stats.undo_page_copies, copies);
             return Ok(());
         }
 
-        crate::storage::stats::PagerStats::add(&self.stats.undo_page_copies, copies + 1);
+        crate::storage::stats::PagerStats::bump(&self.stats.undo_page_copies);
         let record = JournalRecord {
             page_id,
             data: page.data.to_vec(),

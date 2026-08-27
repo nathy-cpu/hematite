@@ -88,7 +88,7 @@ impl Pager {
                     .copied()
                     .collect(),
                 uninitialized_pages: Arc::clone(&transaction.rollback_uninitialized_pages),
-                page_records: Vec::new(),
+                page_images: Vec::new(),
                 captured_page_ids: crate::storage::page_hash::PageSet::default(),
                 created_page_ids: crate::storage::page_hash::PageSet::default(),
             },
@@ -99,7 +99,7 @@ impl Pager {
                 free_pages: transaction.wal_free_pages.clone(),
                 free_page_set: transaction.wal_free_page_set.clone(),
                 uninitialized_pages: Arc::default(),
-                page_records: Vec::new(),
+                page_images: Vec::new(),
                 captured_page_ids: crate::storage::page_hash::PageSet::default(),
                 created_page_ids: crate::storage::page_hash::PageSet::default(),
             },
@@ -157,11 +157,11 @@ impl Pager {
         for page_id in savepoint.created_page_ids.iter().copied() {
             self.cache_mut()?.remove(page_id);
         }
-        for record in &savepoint.page_records {
-            let page = Page::from_bytes(record.page_id, record.data.clone())?;
+        for image in &savepoint.page_images {
+            let page_id = image.id;
             let cache = self.cache_mut()?;
-            cache.put(page);
-            cache.mark_dirty(record.page_id);
+            cache.put_shared_with_view(Arc::clone(image), 0);
+            cache.mark_dirty(page_id);
         }
 
         // Restore the allocation state each mode tracks separately, then drop the

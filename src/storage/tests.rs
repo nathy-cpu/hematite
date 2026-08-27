@@ -3720,19 +3720,24 @@ mod work_performed_tests {
         );
     }
 
-    /// Preserving a page's pre-image costs exactly the copies it owes.
+    /// Preserving a page's pre-image costs exactly one copy: the journal's.
     ///
-    /// `snapshot_original_page` has two customers: each live savepoint that has not
-    /// yet captured this page, and — once per page per transaction — the rollback
-    /// journal. That is the floor. It used to make two copies beyond it: it cloned
-    /// the cached page it was only reading from, and it cloned the finished journal
-    /// record so the in-memory list and the journal writer could each hold one.
+    /// `snapshot_original_page` has two customers. The rollback journal needs the
+    /// bytes, once per page per transaction, because they go into a file. A
+    /// savepoint needs the page as it stood at the mark, and takes a shared handle
+    /// to the version the cache already holds — the write path replaces pages
+    /// rather than mutating them while a handle is out, so the handle stays valid
+    /// and nothing is copied.
     ///
-    /// Neither showed up in an allocation profile, because the page-buffer pool
-    /// hands the same recycled buffers back — they were pure memcpy, 79 MB of it
-    /// over a 20 000-row insert. This counts the copies directly instead.
+    /// It used to make three copies beyond the journal's: it cloned the cached page
+    /// it was only reading from, cloned the finished journal record so the
+    /// in-memory list and the journal writer could each hold one, and copied the
+    /// whole page again for every savepoint that had not yet captured it. None of
+    /// them showed up in an allocation profile, because the page-buffer pool hands
+    /// the same recycled buffers back — they were pure memcpy, and a savepoint is
+    /// taken per row.
     #[test]
-    fn preserving_a_page_image_copies_it_once_per_customer() {
+    fn preserving_a_page_image_copies_it_once_for_the_journal() {
         let db = TestDbFile::new("_test_work_undo_copies");
         let mut pager = Pager::new(db.path(), 64).expect("open");
         let page_id = pager.allocate_page().expect("allocate");
@@ -3748,39 +3753,24 @@ mod work_performed_tests {
         pager.begin_transaction().expect("begin");
         let before = pager.stats();
         for fill in 2..=6u8 {
+            // A savepoint per write, as `run_atomically` takes one per row.
+            let savepoint = pager.snapshot().expect("snapshot");
             let mut page = Page::new(page_id);
             page.data[0] = fill;
             pager.write_page(page).expect("write");
+            pager.release_snapshot(savepoint).expect("release");
         }
         let work = pager.stats().since(&before);
         pager.commit_transaction().expect("commit");
 
-        // Five writes to one page inside one transaction, with only the baseline
-        // savepoint live: one copy for that savepoint, one for the journal, and the
-        // four writes after them find the page already captured.
+        // One: the journal, on the first write. The four writes after it find the
+        // page already journalled, and the five savepoints each take a handle.
         assert_eq!(
-            work.undo_page_copies, 2,
+            work.undo_page_copies, 1,
             "page pre-image copy count changed: {work:?}"
         );
     }
 
-    /// What a rollback transaction writes to its journal, byte for byte.
-    ///
-    /// One record per page touched: an 8-byte prefix and the page. On top of that
-    /// the header's record count is rewritten each time, four bytes, because the
-    /// decoder requires the count to describe the file exactly and recovery may
-    /// read the journal at any point.
-    ///
-    /// The count used to cost three syscalls instead of one — seek to the header,
-    /// write four bytes, seek back to the end — and every record was framed into a
-    /// freshly allocated `Vec`. Bytes are what survive both of those being fixed.
-    /// Two transaction sizes are compared rather than an absolute figure, so the
-    /// assertion is about the per-page cost and not about how long the header is or
-    /// which internal pages a commit happens to touch.
-    ///
-    /// `journal_bytes` had been declared since the counters were introduced and
-    /// never incremented, so any earlier assertion on it would have passed reading
-    /// zero.
     #[test]
     fn a_rollback_transaction_journals_one_record_per_page() {
         fn journal_bytes_for(label: &str, pages: usize) -> u64 {

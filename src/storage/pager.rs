@@ -230,13 +230,23 @@ struct PagerSavepoint {
     uninitialized_pages: Arc<PageSet>,
     /// Pre-images of the pages modified since the savepoint was taken — the undo log.
     ///
-    /// Captured lazily, one copy per page per savepoint, by `snapshot_original_page`.
+    /// Shared handles, not copies. The cache already holds pages behind an `Arc`
+    /// and replaces rather than mutates them when one is written, so the version a
+    /// savepoint needs is the handle that was current when it captured. Keeping
+    /// that handle also pins it: the write path's in-place fast path unwraps the
+    /// `Arc` only when it is unique, so a page a savepoint is holding is copied on
+    /// the next write instead of overwritten. That is one copy at most per page
+    /// per savepoint, and only if the page is written again — where copying at
+    /// capture time was 5.9 pages per deleted row, 120 MB of memcpy over 5 000
+    /// deletes.
+    ///
+    /// Captured lazily by `snapshot_original_page`.
     /// The savepoint used to *also* hold shared images of every page already dirty
     /// when it was taken, because the capture below was skipped for any page the
     /// transaction had already journalled, leaving a hole. Separating the journal's
     /// per-transaction dedup from this per-savepoint one closed the hole and made
     /// taking a savepoint O(1) rather than O(dirty pages) — it ran per row.
-    page_records: Vec<JournalRecord>,
+    page_images: Vec<Arc<Page>>,
     captured_page_ids: PageSet,
     /// Pages the transaction created after this savepoint, which therefore have no
     /// pre-image. Rolling back drops them instead of restoring them.
