@@ -1,5 +1,7 @@
 //! In-memory table runtime metadata helpers.
 
+use std::sync::Arc;
+
 use crate::error::{HematiteError, Result};
 
 use super::engine::{CatalogEngine, TableRuntimeMetadata};
@@ -17,10 +19,11 @@ pub(crate) fn create_table_metadata(
         )));
     }
 
-    engine.table_metadata.insert(
-        table_name.to_string(),
+    let name: Arc<str> = Arc::from(table_name);
+    Arc::make_mut(&mut engine.table_metadata).insert(
+        Arc::clone(&name),
         TableRuntimeMetadata {
-            name: table_name.to_string(),
+            name: Arc::clone(&name),
             root_page_id,
             row_count: 0,
             next_row_id: 1,
@@ -42,7 +45,9 @@ pub(crate) fn remove_table_metadata(
     engine: &mut CatalogEngine,
     table_name: &str,
 ) -> Result<TableRuntimeMetadata> {
-    engine.table_metadata.remove(table_name).ok_or_else(|| {
+    Arc::make_mut(&mut engine.table_metadata)
+        .remove(table_name)
+        .ok_or_else(|| {
         HematiteError::StorageError(format!("Table '{}' does not exist", table_name))
     })
 }
@@ -60,8 +65,9 @@ pub(crate) fn rename_table_metadata(
     }
 
     let mut metadata = remove_table_metadata(engine, old_name)?;
-    metadata.name = new_name.to_string();
-    engine.table_metadata.insert(new_name.to_string(), metadata);
+    let new_name: Arc<str> = Arc::from(new_name);
+    metadata.name = Arc::clone(&new_name);
+    Arc::make_mut(&mut engine.table_metadata).insert(new_name, metadata);
     Ok(())
 }
 
@@ -71,7 +77,7 @@ pub(crate) fn apply_insert(
     new_root_page_id: u32,
     next_row_id: Option<u64>,
 ) {
-    if let Some(metadata) = engine.table_metadata.get_mut(table_name) {
+    if let Some(metadata) = Arc::make_mut(&mut engine.table_metadata).get_mut(table_name) {
         metadata.root_page_id = new_root_page_id;
         metadata.row_count += 1;
         if let Some(next_row_id) = next_row_id {
@@ -86,7 +92,7 @@ pub(crate) fn apply_delete(
     new_root_page_id: u32,
     deleted: bool,
 ) {
-    if let Some(metadata) = engine.table_metadata.get_mut(table_name) {
+    if let Some(metadata) = Arc::make_mut(&mut engine.table_metadata).get_mut(table_name) {
         metadata.root_page_id = new_root_page_id;
         if deleted {
             metadata.row_count = metadata.row_count.saturating_sub(1);
@@ -103,7 +109,7 @@ pub(crate) fn prepare_replace(engine: &mut CatalogEngine, table_name: &str, rows
     let next_row_id =
         preserved_next_row_id.max(rows.iter().map(|row| row.row_id).max().unwrap_or(0) + 1);
 
-    if let Some(metadata) = engine.table_metadata.get_mut(table_name) {
+    if let Some(metadata) = Arc::make_mut(&mut engine.table_metadata).get_mut(table_name) {
         metadata.row_count = 0;
         metadata.next_row_id = next_row_id;
     }

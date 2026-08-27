@@ -34,6 +34,7 @@ use crate::btree::{
 use crate::catalog::{DatabaseHeader, JournalMode, Table, TableId, Value};
 use crate::error::{HematiteError, Result};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::path::Path;
 
 use super::cursor::{IndexCursor, TableCursor};
@@ -42,9 +43,24 @@ use super::{
     table_store, Schema,
 };
 
+/// Runtime metadata for every open table, keyed by name.
+///
+/// Held behind an `Arc` by the engine. `run_atomically` wraps each single-row
+/// insert and delete and snapshots this so a failed operation can put the row
+/// counts back, and there are three such wrappers per inserted row — the table,
+/// the primary-key index, and each secondary index. Cloning the map at each one
+/// was eleven allocations a row. Only the first mutation after a snapshot copies
+/// it now, via `Arc::make_mut`.
+pub type TableMetadataMap = HashMap<Arc<str>, TableRuntimeMetadata>;
+
 #[derive(Debug, Clone)]
 pub struct TableRuntimeMetadata {
-    pub name: String,
+    /// The same handle the map is keyed by, not a second copy of the string.
+    ///
+    /// Cloning the map costs one allocation for its table plus one per `String` it
+    /// owns, and it owned two per table: the key and this. `Arc<str>` borrows as
+    /// `str`, so lookups by `&str` are unchanged.
+    pub name: Arc<str>,
     pub root_page_id: PageId,
     pub row_count: u64,
     pub next_row_id: u64,
@@ -78,7 +94,7 @@ pub struct CatalogIntegrityReport {
 
 #[derive(Debug, Clone)]
 pub struct CatalogEngineSnapshot {
-    table_metadata: HashMap<String, TableRuntimeMetadata>,
+    table_metadata: Arc<TableMetadataMap>,
     tree_store: ByteTreeStoreSnapshot,
 }
 
@@ -92,7 +108,7 @@ impl CatalogEngineSnapshot {
 #[derive(Debug)]
 pub struct CatalogEngine {
     pub(crate) tree_store: ByteTreeStore,
-    pub(crate) table_metadata: HashMap<String, TableRuntimeMetadata>,
+    pub(crate) table_metadata: Arc<TableMetadataMap>,
 }
 
 impl CatalogEngine {
@@ -136,7 +152,7 @@ not available yet.",
     pub(crate) fn from_tree_store(tree_store: ByteTreeStore) -> Result<Self> {
         let mut engine = Self {
             tree_store,
-            table_metadata: HashMap::new(),
+            table_metadata: Arc::default(),
         };
         engine_metadata::load_table_metadata(&mut engine)?;
         Ok(engine)
@@ -343,7 +359,7 @@ not available yet.",
     }
 
     pub(crate) fn refresh_runtime_metadata(&mut self) -> Result<()> {
-        self.table_metadata.clear();
+        Arc::make_mut(&mut self.table_metadata).clear();
         engine_metadata::load_table_metadata(self)
     }
 
@@ -358,7 +374,7 @@ not available yet.",
 
     pub fn snapshot(&self) -> Result<CatalogEngineSnapshot> {
         Ok(CatalogEngineSnapshot {
-            table_metadata: self.table_metadata.clone(),
+            table_metadata: Arc::clone(&self.table_metadata),
             tree_store: self.tree_store.snapshot()?,
         })
     }
@@ -373,13 +389,13 @@ not available yet.",
         self.tree_store.release_snapshot(snapshot.tree_store)
     }
 
-    fn restore_runtime_metadata(&mut self, table_metadata: HashMap<String, TableRuntimeMetadata>) {
+    fn restore_runtime_metadata(&mut self, table_metadata: Arc<TableMetadataMap>) {
         self.table_metadata = table_metadata;
     }
 
     fn rollback_failed_atomic_operation(
         &mut self,
-        table_metadata: HashMap<String, TableRuntimeMetadata>,
+        table_metadata: Arc<TableMetadataMap>,
     ) -> Result<()> {
         self.restore_runtime_metadata(table_metadata);
         self.rollback_transaction()
@@ -408,7 +424,7 @@ not available yet.",
         } else {
             // No snapshot on this path: the transaction is ours, so rolling it back
             // undoes the storage side. Only the in-memory metadata needs a pre-image.
-            let table_metadata = self.table_metadata.clone();
+            let table_metadata = Arc::clone(&self.table_metadata);
             self.begin_transaction()?;
             match operation(self) {
                 Ok(result) => match self.commit_transaction() {
@@ -430,7 +446,7 @@ not available yet.",
         self.tree_store().create_tree()
     }
 
-    pub(crate) fn get_table_metadata(&self) -> &HashMap<String, TableRuntimeMetadata> {
+    pub(crate) fn get_table_metadata(&self) -> &TableMetadataMap {
         &self.table_metadata
     }
 

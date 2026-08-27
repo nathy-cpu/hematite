@@ -526,7 +526,10 @@ impl Catalog {
                 for table in self.schema.tables_mut().values_mut() {
                     if table.root_page_id == old_id {
                         table.root_page_id = new_id;
-                        if let Some(metadata) = self.engine.table_metadata.get_mut(&table.name) {
+                        if let Some(metadata) =
+                            std::sync::Arc::make_mut(&mut self.engine.table_metadata)
+                                .get_mut(table.name.as_str())
+                        {
                             metadata.root_page_id = new_id;
                         }
                         self.schema_dirty = true;
@@ -711,7 +714,7 @@ impl Catalog {
             .engine
             .get_table_metadata()
             .iter()
-            .map(|(name, metadata)| (name.clone(), metadata.root_page_id))
+            .map(|(name, metadata)| (name.to_string(), metadata.root_page_id))
             .collect::<HashMap<_, _>>();
 
         for (table_name, root_page_id) in &schema_tables {

@@ -1,5 +1,7 @@
 //! Catalog engine metadata persistence codec.
 
+use std::sync::Arc;
+
 use crate::btree::ByteTreeStore;
 use crate::error::{HematiteError, Result};
 use crate::storage::metadata_page;
@@ -110,7 +112,7 @@ fn parse_storage_metadata(engine: &mut CatalogEngine, metadata_str: &str) -> Res
             })?;
 
             runtime_metadata::create_table_metadata(engine, name, root_page_id)?;
-            if let Some(metadata) = engine.table_metadata.get_mut(name) {
+            if let Some(metadata) = Arc::make_mut(&mut engine.table_metadata).get_mut(name) {
                 metadata.row_count = row_count;
                 metadata.next_row_id = next_row_id;
             }

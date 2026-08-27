@@ -2450,7 +2450,7 @@ impl InsertExecutor {
         let next_row_id = ctx
             .engine
             .get_table_metadata()
-            .get(&self.statement.table)
+            .get(self.statement.table.as_str())
             .map(|metadata| metadata.next_row_id)
             .ok_or_else(|| {
                 HematiteError::InternalError(format!(
@@ -3648,7 +3648,7 @@ fn current_table_row_counts(engine: &crate::catalog::CatalogEngine) -> HashMap<S
     engine
         .get_table_metadata()
         .iter()
-        .map(|(name, metadata)| (name.clone(), metadata.row_count as usize))
+        .map(|(name, metadata)| (name.to_string(), metadata.row_count as usize))
         .collect()
 }
 

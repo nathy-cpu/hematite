@@ -1135,7 +1135,7 @@ impl Connection {
         engine
             .get_table_metadata()
             .iter()
-            .map(|(name, metadata)| (name.clone(), metadata.row_count as usize))
+            .map(|(name, metadata)| (name.to_string(), metadata.row_count as usize))
             .collect()
     }
 
