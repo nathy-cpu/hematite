@@ -172,7 +172,8 @@ impl Pager {
                 transaction
                     .rollback_free_list
                     .replace(savepoint.free_pages.clone());
-                transaction.rollback_uninitialized_pages = Arc::clone(&savepoint.uninitialized_pages);
+                transaction.rollback_uninitialized_pages =
+                    Arc::clone(&savepoint.uninitialized_pages);
                 transaction.savepoints.truncate(position + 1);
             }
             Some(super::PagerTransaction::Wal(transaction)) => {

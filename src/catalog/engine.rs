@@ -34,8 +34,8 @@ use crate::btree::{
 use crate::catalog::{DatabaseHeader, JournalMode, Table, TableId, Value};
 use crate::error::{HematiteError, Result};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::path::Path;
+use std::sync::Arc;
 
 use super::cursor::{IndexCursor, TableCursor};
 use super::{

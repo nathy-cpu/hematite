@@ -357,10 +357,7 @@ pub(crate) fn append_journal_record(file: &mut JournalFile, record: &JournalReco
 }
 
 pub(crate) fn write_journal_record_count(file: &mut JournalFile, record_count: u32) -> Result<()> {
-    file.write_at(
-        V3_JOURNAL_RECORD_COUNT_OFFSET,
-        &record_count.to_be_bytes(),
-    )
+    file.write_at(V3_JOURNAL_RECORD_COUNT_OFFSET, &record_count.to_be_bytes())
 }
 
 /// Appends the commit intent: what every page the commit touches must contain if

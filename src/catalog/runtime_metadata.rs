@@ -48,8 +48,8 @@ pub(crate) fn remove_table_metadata(
     Arc::make_mut(&mut engine.table_metadata)
         .remove(table_name)
         .ok_or_else(|| {
-        HematiteError::StorageError(format!("Table '{}' does not exist", table_name))
-    })
+            HematiteError::StorageError(format!("Table '{}' does not exist", table_name))
+        })
 }
 
 pub(crate) fn rename_table_metadata(

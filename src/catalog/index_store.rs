@@ -52,7 +52,7 @@ pub(crate) fn lookup_primary_key_rowid(
     let tree = open_required_tree(
         engine,
         table.primary_key_index_root_page_id,
-        &format!("primary-key index for table '{}'", table.name),
+        IndexLabel::PrimaryKey { table: &table.name },
     )?;
     match tree.get(&IndexKeyCodec::encode_key(&key_values)?)? {
         Some(value) => IndexKeyCodec::decode_row_id(&value).map(Some),
@@ -65,12 +65,11 @@ pub(crate) fn register_primary_key_row(
     table: &Table,
     row: StoredRow,
 ) -> Result<()> {
-    let key_values = table.get_primary_key_values(&row.values)?;
-    let key_values = normalize_primary_key_values(table, &key_values);
+    let key_values = normalized_primary_key_values(table, &row.values)?;
     let mut tree = open_required_tree(
         engine,
         table.primary_key_index_root_page_id,
-        &format!("primary-key index for table '{}'", table.name),
+        IndexLabel::PrimaryKey { table: &table.name },
     )?;
     let encoded_key = IndexKeyCodec::encode_key(&key_values)?;
     if tree.get(&encoded_key)?.is_some() {
@@ -113,7 +112,10 @@ pub(crate) fn lookup_secondary_index_rowids(
     let tree = open_required_tree(
         engine,
         index.root_page_id,
-        &format!("secondary index '{}' on table '{}'", index.name, table.name),
+        IndexLabel::Secondary {
+            index: &index.name,
+            table: &table.name,
+        },
     )?;
     tree.entries_with_prefix(&IndexKeyCodec::encode_key(&key_values)?)?
         .into_iter()
@@ -132,7 +134,10 @@ pub(crate) fn register_secondary_index_row(
         let mut tree = open_required_tree(
             engine,
             index.root_page_id,
-            &format!("secondary index '{}' on table '{}'", index.name, table.name),
+            IndexLabel::Secondary {
+                index: &index.name,
+                table: &table.name,
+            },
         )?;
         if index.unique && tree_has_secondary_key(&tree, &key_values)? {
             return Err(unique_index_storage_error(&index.name, &table.name));
@@ -154,14 +159,13 @@ pub(crate) fn rebuild_primary_key_index(
 ) -> Result<()> {
     let root_page_id = require_index_root_page(
         table.primary_key_index_root_page_id,
-        &format!("primary-key index for table '{}'", table.name),
+        IndexLabel::PrimaryKey { table: &table.name },
     )?;
     engine.reset_tree(root_page_id)?;
     let mut seen = HashSet::new();
     let mut tree = engine.open_tree(root_page_id)?;
     for row in rows {
-        let key_values = table.get_primary_key_values(&row.values)?;
-        let key_values = normalize_primary_key_values(table, &key_values);
+        let key_values = normalized_primary_key_values(table, &row.values)?;
         let encoded = IndexKeyCodec::encode_key(&key_values)?;
         if !seen.insert(encoded) {
             return Err(HematiteError::StorageError(format!(
@@ -185,7 +189,10 @@ pub(crate) fn rebuild_secondary_indexes(
     for index in &table.secondary_indexes {
         let root_page_id = require_index_root_page(
             index.root_page_id,
-            &format!("secondary index '{}' on table '{}'", index.name, table.name),
+            IndexLabel::Secondary {
+                index: &index.name,
+                table: &table.name,
+            },
         )?;
         engine.reset_tree(root_page_id)?;
         let mut seen = HashSet::new();
@@ -214,12 +221,11 @@ pub(crate) fn delete_primary_key_row(
     table: &Table,
     row: &StoredRow,
 ) -> Result<bool> {
-    let key_values = table.get_primary_key_values(&row.values)?;
-    let key_values = normalize_primary_key_values(table, &key_values);
+    let key_values = normalized_primary_key_values(table, &row.values)?;
     let mut tree = open_required_tree(
         engine,
         table.primary_key_index_root_page_id,
-        &format!("primary-key index for table '{}'", table.name),
+        IndexLabel::PrimaryKey { table: &table.name },
     )?;
     Ok(tree
         .delete(&IndexKeyCodec::encode_key(&key_values)?)?
@@ -257,7 +263,7 @@ pub(crate) fn open_primary_key_cursor(
 ) -> Result<IndexCursor> {
     let root_page_id = require_index_root_page(
         table.primary_key_index_root_page_id,
-        &format!("primary-key index for table '{}'", table.name),
+        IndexLabel::PrimaryKey { table: &table.name },
     )?;
     let mut entries = Vec::new();
     engine.visit_tree_entries(root_page_id, |key, value| {
@@ -278,7 +284,10 @@ pub(crate) fn open_secondary_index_cursor(
     let index = get_secondary_index(table, index_name)?;
     let root_page_id = require_index_root_page(
         index.root_page_id,
-        &format!("secondary index '{}' on table '{}'", index.name, table.name),
+        IndexLabel::Secondary {
+            index: &index.name,
+            table: &table.name,
+        },
     )?;
     let mut entries = Vec::new();
     engine.visit_tree_entries(root_page_id, |key, value| {
@@ -303,15 +312,14 @@ pub(crate) fn validate_table_indexes(engine: &mut CatalogEngine, table: &Table) 
         Some(open_required_tree(
             engine,
             table.primary_key_index_root_page_id,
-            &format!("primary-key index for table '{}'", table.name),
+            IndexLabel::PrimaryKey { table: &table.name },
         )?)
     };
     for row in &rows {
         let primary_tree = primary_tree
             .as_ref()
             .expect("a non-empty row set opens the tree");
-        let key_values = table.get_primary_key_values(&row.values)?;
-        let key_values = normalize_primary_key_values(table, &key_values);
+        let key_values = normalized_primary_key_values(table, &row.values)?;
         let stored_rowid = primary_tree
             .get(&IndexKeyCodec::encode_key(&key_values)?)?
             .map(|value| IndexKeyCodec::decode_row_id(&value))
@@ -339,7 +347,10 @@ pub(crate) fn validate_table_indexes(engine: &mut CatalogEngine, table: &Table) 
         let tree = open_required_tree(
             engine,
             index.root_page_id,
-            &format!("secondary index '{}' on table '{}'", index.name, table.name),
+            IndexLabel::Secondary {
+                index: &index.name,
+                table: &table.name,
+            },
         )?;
         for row in &rows {
             let key_values = secondary_index_values(index, row);
@@ -361,6 +372,25 @@ pub(crate) fn validate_table_indexes(engine: &mut CatalogEngine, table: &Table) 
     }
 
     Ok(())
+}
+
+/// Pulls a row's primary-key columns out and normalises them in one pass.
+///
+/// Taking the key values first and normalising them after built two `Vec<Value>`
+/// per row, and cloned each value twice: once out of the row, once into the
+/// normalised copy. Every index registration and deletion did it, so it was four
+/// allocations a row before the key was even encoded.
+fn normalized_primary_key_values(table: &Table, row_values: &[Value]) -> Result<Vec<Value>> {
+    table
+        .primary_key_columns
+        .iter()
+        .map(|&index| {
+            let value = row_values.get(index).ok_or_else(|| {
+                HematiteError::StorageError("Primary key value not found".to_string())
+            })?;
+            Ok(normalize_index_value(&table.columns[index], value))
+        })
+        .collect()
 }
 
 fn normalize_primary_key_values(table: &Table, key_values: &[Value]) -> Vec<Value> {
@@ -401,7 +431,7 @@ fn normalize_index_value(column: &Column, value: &Value) -> Value {
 fn open_required_tree(
     engine: &CatalogEngine,
     root_page_id: u32,
-    label: &str,
+    label: IndexLabel<'_>,
 ) -> Result<crate::btree::ByteTree> {
     engine.open_tree(require_index_root_page(root_page_id, label)?)
 }
@@ -452,7 +482,7 @@ fn unique_index_storage_error(index_name: &str, table_name: &str) -> HematiteErr
     ))
 }
 
-pub(crate) fn require_index_root_page(root_page_id: u32, label: &str) -> Result<u32> {
+pub(crate) fn require_index_root_page(root_page_id: u32, label: IndexLabel<'_>) -> Result<u32> {
     if root_page_id == 0 || root_page_id == INVALID_ROOT_PAGE_ID {
         return Err(HematiteError::StorageError(format!(
             "Missing durable {} root page",
@@ -460,6 +490,29 @@ pub(crate) fn require_index_root_page(root_page_id: u32, label: &str) -> Result<
         )));
     }
     Ok(root_page_id)
+}
+
+/// Names an index for an error message, without building the message.
+///
+/// Every call that opens an index tree passes one of these to say what to call
+/// the tree if it turns out not to be there. They used to be `&format!(...)`,
+/// which allocated and formatted the sentence on every call — once per row on the
+/// primary-key path — for an error that fires only on a corrupt catalog.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum IndexLabel<'a> {
+    PrimaryKey { table: &'a str },
+    Secondary { index: &'a str, table: &'a str },
+}
+
+impl std::fmt::Display for IndexLabel<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PrimaryKey { table } => write!(f, "primary-key index for table '{table}'"),
+            Self::Secondary { index, table } => {
+                write!(f, "secondary index '{index}' on table '{table}'")
+            }
+        }
+    }
 }
 
 /// Secondary entries carry no payload, so both halves come from the key.

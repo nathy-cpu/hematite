@@ -118,10 +118,7 @@ fn main() {
     // The counters are the point of this harness as much as the workload is:
     // callgrind cannot see a syscall and dhat cannot see a memcpy into a recycled
     // buffer, and these see both.
-    let work = h
-        .storage_counters()
-        .expect("counters")
-        .since(&baseline);
+    let work = h.storage_counters().expect("counters").since(&baseline);
     println!("phase={phase} rows={rows} reps={reps} sink={sink}");
     println!("{work:#?}");
 }

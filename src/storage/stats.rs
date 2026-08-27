@@ -142,7 +142,9 @@ impl StatsSnapshot {
             journal_bytes: self.journal_bytes.saturating_sub(earlier.journal_bytes),
             wal_frames: self.wal_frames.saturating_sub(earlier.wal_frames),
             checkpoints: self.checkpoints.saturating_sub(earlier.checkpoints),
-            undo_page_copies: self.undo_page_copies.saturating_sub(earlier.undo_page_copies),
+            undo_page_copies: self
+                .undo_page_copies
+                .saturating_sub(earlier.undo_page_copies),
             file_stats: self.file_stats.saturating_sub(earlier.file_stats),
         }
     }

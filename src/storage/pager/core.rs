@@ -1,10 +1,10 @@
-use std::sync::Arc;
 use super::{
     JournalMode, Pager, PagerSavepoint, PagerState, PagerTransaction, RollbackTransaction,
     WalTransaction,
 };
 use crate::error::Result;
 use crate::storage::page_hash::PageSet;
+use std::sync::Arc;
 
 /// Recycle a finished transaction into the scratch slots, freeing any data that is
 /// only needed for rollback (dirty-page images, page-record copies, savepoint
@@ -66,7 +66,7 @@ impl Pager {
                             original_free_pages: Vec::new(),
                             rollback_next_page_id: 0,
                             rollback_free_list: crate::storage::free_list::FreeList::new(),
-                                        rollback_uninitialized_pages: Arc::default(),
+                            rollback_uninitialized_pages: Arc::default(),
                             journaled_pages: PageSet::default(),
                             page_records: Vec::new(),
                             savepoints: Vec::new(),

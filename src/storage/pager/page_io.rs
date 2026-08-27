@@ -134,10 +134,7 @@ impl Pager {
             // it. Pages sit in this set only between being allocated and first
             // written, so the membership test almost always says no and the copy
             // almost never happens.
-            if transaction
-                .rollback_uninitialized_pages
-                .contains(&page_id)
-            {
+            if transaction.rollback_uninitialized_pages.contains(&page_id) {
                 Arc::make_mut(&mut transaction.rollback_uninitialized_pages).remove(&page_id);
             }
         }

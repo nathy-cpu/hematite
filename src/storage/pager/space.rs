@@ -1,7 +1,7 @@
-use std::sync::Arc;
 use super::{compact_transaction_free_pages, JournalMode, Pager};
 use crate::error::Result;
 use crate::storage::PageId;
+use std::sync::Arc;
 
 impl Pager {
     pub fn allocate_page(&mut self) -> Result<PageId> {
@@ -42,10 +42,7 @@ impl Pager {
             // it. Pages sit in this set only between being allocated and first
             // written, so the membership test almost always says no and the copy
             // almost never happens.
-            if transaction
-                .rollback_uninitialized_pages
-                .contains(&page_id)
-            {
+            if transaction.rollback_uninitialized_pages.contains(&page_id) {
                 Arc::make_mut(&mut transaction.rollback_uninitialized_pages).remove(&page_id);
             }
             if !transaction.rollback_free_list.contains(page_id) {
