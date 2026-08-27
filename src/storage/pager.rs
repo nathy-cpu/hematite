@@ -248,9 +248,6 @@ struct PagerSavepoint {
     /// taking a savepoint O(1) rather than O(dirty pages) — it ran per row.
     page_images: Vec<Arc<Page>>,
     captured_page_ids: PageSet,
-    /// Pages the transaction created after this savepoint, which therefore have no
-    /// pre-image. Rolling back drops them instead of restoring them.
-    created_page_ids: PageSet,
 }
 
 #[derive(Debug, Clone)]

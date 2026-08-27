@@ -178,6 +178,16 @@ impl PageCache {
             .unwrap_or(0)
     }
 
+    /// Every page id the cache currently holds.
+    ///
+    /// For `restore_savepoint`, which has to drop pages that did not exist at the
+    /// mark. Recording them as they were written cost a hash insert per page per
+    /// live savepoint on the write path; deriving them here costs a scan on a
+    /// path taken only when a savepoint is actually rolled back.
+    pub(crate) fn resident_page_ids(&self) -> Vec<PageId> {
+        self.entries.keys().copied().collect()
+    }
+
     #[cfg(test)]
     pub(crate) fn entry_count(&self) -> usize {
         self.entries.len()

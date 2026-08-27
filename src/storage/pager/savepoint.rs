@@ -90,7 +90,6 @@ impl Pager {
                 uninitialized_pages: Arc::clone(&transaction.rollback_uninitialized_pages),
                 page_images: Vec::new(),
                 captured_page_ids: crate::storage::page_hash::PageSet::default(),
-                created_page_ids: crate::storage::page_hash::PageSet::default(),
             },
             Some(super::PagerTransaction::Wal(transaction)) => PagerSavepoint {
                 id: transaction.next_savepoint_id,
@@ -101,7 +100,6 @@ impl Pager {
                 uninitialized_pages: Arc::default(),
                 page_images: Vec::new(),
                 captured_page_ids: crate::storage::page_hash::PageSet::default(),
-                created_page_ids: crate::storage::page_hash::PageSet::default(),
             },
             None => {
                 return Err(crate::error::HematiteError::StorageError(
@@ -154,8 +152,20 @@ impl Pager {
         // page: it threw away pages that were dirty at the mark and never written
         // again, and those exist nowhere on disk. Leaving them alone is both correct
         // and free -- they still hold the contents the savepoint recorded.
-        for page_id in savepoint.created_page_ids.iter().copied() {
-            self.cache_mut()?.remove(page_id);
+        // Pages that did not exist at the mark, derived rather than recorded: a
+        // resident page is one of them exactly when it fails the same liveness test
+        // the capture path applies. Recording them as they were written cost a hash
+        // insert per page per live savepoint on the write path, and there are four
+        // live savepoints per row.
+        //
+        // This drops a little more than the recorded set did — a cached page that
+        // sat in the savepoint's free list, say — and dropping those is harmless:
+        // they are free, so re-reading gives the version on disk.
+        let resident = self.cache_read()?.resident_page_ids();
+        for page_id in resident {
+            if !super::recovery::page_is_live_at_savepoint_for_restore(page_id, &savepoint) {
+                self.cache_mut()?.remove(page_id);
+            }
         }
         for image in &savepoint.page_images {
             let page_id = image.id;

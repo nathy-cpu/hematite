@@ -395,14 +395,9 @@ impl Pager {
         });
 
         if beyond_original_file || !(is_live_somewhere || needs_journal_record) {
-            // Nothing to preserve. Record it as created so a rollback drops it.
-            if let Some(savepoints) = self.active_savepoints_mut() {
-                for savepoint in savepoints.iter_mut() {
-                    if !page_is_live_at_savepoint(page_id, savepoint) {
-                        savepoint.created_page_ids.insert(page_id);
-                    }
-                }
-            }
+            // Nothing to preserve, and nothing to record: a page that did not exist
+            // at a savepoint is recognised as such at restore time, by the same
+            // `page_is_live_at_savepoint` test used here.
             return Ok(());
         }
 
@@ -429,7 +424,6 @@ impl Pager {
         if let Some(savepoints) = self.active_savepoints_mut() {
             for savepoint in savepoints.iter_mut() {
                 if !page_is_live_at_savepoint(page_id, savepoint) {
-                    savepoint.created_page_ids.insert(page_id);
                     continue;
                 }
                 if savepoint.captured_page_ids.insert(page_id) {
@@ -881,6 +875,13 @@ impl Pager {
 /// A page that did not is one the transaction created afterwards: it has no
 /// pre-image, and rolling back to the savepoint should drop it rather than restore
 /// anything.
+pub(super) fn page_is_live_at_savepoint_for_restore(
+    page_id: PageId,
+    savepoint: &super::PagerSavepoint,
+) -> bool {
+    page_is_live_at_savepoint(page_id, savepoint)
+}
+
 fn page_is_live_at_savepoint(page_id: PageId, savepoint: &super::PagerSavepoint) -> bool {
     page_id < savepoint.next_page_id && !savepoint.free_page_set.contains(&page_id)
 }

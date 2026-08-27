@@ -96,7 +96,6 @@ impl Pager {
                         .copied()
                         .collect(),
                     uninitialized_pages: Arc::clone(&rollback.rollback_uninitialized_pages),
-                    created_page_ids: PageSet::default(),
                     page_images: Vec::new(),
                     captured_page_ids: PageSet::default(),
                 };
