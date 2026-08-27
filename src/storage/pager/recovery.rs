@@ -430,20 +430,29 @@ impl Pager {
     /// Write the journal header and metadata section once at transaction begin.
     /// Keeps the file handle open for incremental record appending.
     pub(super) fn initialize_rollback_journal(&mut self) -> Result<()> {
-        let Some(transaction) = self.active_rollback_transaction() else {
+        let Some(path) = self.journal_path.clone() else {
             return Ok(());
         };
-        let Some(path) = &self.journal_path else {
+        let Some((original_file_len, original_free_pages)) = self
+            .active_rollback_transaction()
+            .map(|transaction| {
+                (
+                    transaction.original_file_len,
+                    transaction.original_free_pages.clone(),
+                )
+            })
+        else {
             return Ok(());
         };
 
-        let original_free_pages = transaction.original_free_pages.clone();
+        let reuse = self.journal_file.take();
         let (file, header_len) = initialize_journal_file(
-            path,
-            transaction.original_file_len,
+            &path,
+            original_file_len,
             &original_free_pages,
             &[],
             Arc::clone(&self.stats),
+            reuse,
         )?;
 
         self.journal_file = Some(file);
@@ -561,6 +570,23 @@ impl Pager {
         }
     }
 
+    /// Retires the journal without giving up the file or the handle.
+    ///
+    /// The end of a transaction, which is the hot path: one `ftruncate` where
+    /// deleting the file cost an `unlink` here and an `openat` plus a truncating
+    /// `open` at the next `BEGIN`.
+    pub(super) fn retire_journal_file(&mut self) -> Result<()> {
+        self.journal_record_count = 0;
+        self.journal_header_len = 0;
+        self.journal_needs_sync = false;
+        match &mut self.journal_file {
+            Some(file) => file.retire(),
+            // Nothing open: fall back to removing whatever is on disk, since
+            // something may have been left there by an earlier process.
+            None => self.remove_journal_file(),
+        }
+    }
+
     /// Close the journal file handle and remove the file from disk.
     pub(super) fn remove_journal_file(&mut self) -> Result<()> {
         // Close the handle first so the file can be removed cleanly.
@@ -599,6 +625,12 @@ impl Pager {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(err) => return Err(err.into()),
         };
+        // An empty file is a retired journal: the transaction that owned it
+        // finished, and emptying it is what says so. Distinct from a file with
+        // unrecognisable contents, which is corruption and still an error.
+        if bytes.is_empty() {
+            return Ok(());
+        }
 
         let journal = RollbackJournal::decode(&bytes)?;
         match journal.state {

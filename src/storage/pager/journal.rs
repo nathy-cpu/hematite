@@ -31,6 +31,6 @@ impl Pager {
 
     pub(super) fn rollback_rollback_transaction(&mut self) -> Result<()> {
         self.rollback_from_active_transaction()?;
-        self.remove_journal_file()
+        self.retire_journal_file()
     }
 }

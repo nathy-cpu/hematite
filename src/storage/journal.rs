@@ -258,6 +258,26 @@ impl JournalFile {
         Ok(())
     }
 
+    /// Empties the journal, which is how a finished transaction retires it.
+    ///
+    /// An empty file means "no journal" to recovery, so this stands in for
+    /// deleting it — and the file, and the open handle, survive to be reused by
+    /// the next transaction. Deleting it cost an `unlink` here and an `openat`
+    /// plus a truncating `open` at the next `BEGIN`, three syscalls per commit,
+    /// and `unlink` was the most expensive of them.
+    ///
+    /// Unsynced, exactly as the `unlink` it replaces was. A crash before it
+    /// reaches the disk leaves a journal that looks live, and the commit intents
+    /// recorded in it are what tell recovery the commit had already landed.
+    pub(crate) fn retire(&mut self) -> Result<()> {
+        // Already empty: the last transaction retired it and nothing has been
+        // written since, so there is nothing for the kernel to do.
+        if self.len == 0 {
+            return Ok(());
+        }
+        self.set_len(0)
+    }
+
     pub(crate) fn set_len(&mut self, len: u64) -> Result<()> {
         self.file.set_len(len)?;
         self.len = len;
@@ -294,6 +314,7 @@ pub(crate) fn initialize_journal_file(
     original_free_pages: &[PageId],
     original_checksums: &[(PageId, u32)],
     stats: Arc<PagerStats>,
+    reuse: Option<JournalFile>,
 ) -> Result<(JournalFile, u64)> {
     let header = JournalHeader {
         state: JournalFileState::Active,
@@ -317,13 +338,23 @@ pub(crate) fn initialize_journal_file(
     }
 
     let header_len = bytes.len() as u64;
-    let file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .read(true)
-        .truncate(true)
-        .open(path)?;
-    let mut journal = JournalFile::new(file, stats);
+    // Reuse the handle from the last transaction when there is one. Reopening cost
+    // an `openat` per `BEGIN` to arrive at a file this pager already had open.
+    let mut journal = match reuse {
+        Some(mut journal) => {
+            journal.retire()?;
+            journal
+        }
+        None => {
+            let file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .read(true)
+                .truncate(true)
+                .open(path)?;
+            JournalFile::new(file, stats)
+        }
+    };
     journal.append(&bytes)?;
     Ok((journal, header_len))
 }

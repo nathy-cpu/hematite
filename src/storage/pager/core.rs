@@ -153,7 +153,7 @@ impl Pager {
             #[cfg(not(test))]
             let keep = false;
             if !keep {
-                self.remove_journal_file()?;
+                self.retire_journal_file()?;
             }
         }
         let old_txn = self.transaction.take();

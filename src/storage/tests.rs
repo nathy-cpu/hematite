@@ -728,6 +728,83 @@ mod pager_tests {
         Ok(())
     }
 
+    /// A committed transaction empties its journal rather than deleting it, and
+    /// an empty journal means "nothing to recover".
+    ///
+    /// Deleting it cost an `unlink` at every commit and an `openat` plus a
+    /// truncating `open` at the next `BEGIN` — three syscalls per transaction to
+    /// arrive back at a file this pager already had open, and `unlink` was the
+    /// most expensive of the three.
+    #[test]
+    fn a_committed_transaction_empties_its_journal_and_keeps_it() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_journal_retired_not_removed");
+        let journal_path = std::path::PathBuf::from(format!("{}.journal", test_db.path()));
+
+        let mut pager = Pager::new(test_db.path(), 8)?;
+        let page_id = pager.allocate_page()?;
+        pager.begin_transaction()?;
+        let mut page = Page::new(page_id);
+        page.data[0] = 7;
+        pager.write_page(page)?;
+        pager.commit_transaction()?;
+
+        pager.begin_transaction()?;
+        let mut page = Page::new(page_id);
+        page.data[0] = 8;
+        pager.write_page(page)?;
+        pager.commit_transaction()?;
+
+        assert!(
+            journal_path.exists(),
+            "the journal should survive a commit, to be reused by the next transaction"
+        );
+        assert_eq!(
+            fs::metadata(&journal_path)?.len(),
+            0,
+            "a retired journal should be empty"
+        );
+
+        // And an empty one is not something to recover from: reopening must leave
+        // the committed page alone rather than replaying anything.
+        drop(pager);
+        let mut reopened = Pager::new(test_db.path(), 8)?;
+        reopened.begin_read()?;
+        assert_eq!(reopened.read_page(page_id)?.data[0], 8);
+        reopened.end_read()?;
+        Ok(())
+    }
+
+    /// An empty journal is ignored; a non-empty one that does not parse is still
+    /// an error. Retiring a journal must not have turned corruption into silence.
+    #[test]
+    fn an_empty_journal_is_ignored_but_a_corrupt_one_is_not() -> crate::error::Result<()> {
+        let test_db = TestDbFile::new("_test_empty_journal_ignored");
+        let journal_path = std::path::PathBuf::from(format!("{}.journal", test_db.path()));
+
+        let mut pager = Pager::new(test_db.path(), 8)?;
+        let page_id = pager.allocate_page()?;
+        pager.begin_transaction()?;
+        let mut page = Page::new(page_id);
+        page.data[0] = 42;
+        pager.write_page(page)?;
+        pager.commit_transaction()?;
+        drop(pager);
+
+        fs::write(&journal_path, b"")?;
+        let mut reopened = Pager::new(test_db.path(), 8)?;
+        reopened.begin_read()?;
+        assert_eq!(reopened.read_page(page_id)?.data[0], 42);
+        reopened.end_read()?;
+        drop(reopened);
+
+        fs::write(&journal_path, b"not a journal at all")?;
+        assert!(
+            Pager::new(test_db.path(), 8).is_err(),
+            "a journal with unrecognisable contents should still be rejected"
+        );
+        Ok(())
+    }
+
     #[test]
     fn test_pager_open_rejects_truncated_rollback_journal() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_pager_open_rejects_truncated_journal");
