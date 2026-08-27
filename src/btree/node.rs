@@ -734,6 +734,79 @@ impl BTreeNode {
         Ok(true)
     }
 
+    /// Moves one whole cell between two leaf pages, touching neither node's
+    /// decoded form.
+    ///
+    /// This is what a rebalance rotation actually needs. Doing it through
+    /// `BTreeNode` decoded both leaves — a `Vec` per key and per value in each, so
+    /// four hundred allocations for two full pages — moved one element between the
+    /// two `VecDeque`s, and then re-serialised both pages from scratch. All to move
+    /// a single cell that is already sitting on the donor page in exactly the form
+    /// the receiver wants.
+    ///
+    /// Returns `false` if the receiver has no room, leaving both pages untouched.
+    /// The caller must still update the parent separator; `leaf_key_at` reads it
+    /// back off the page afterwards.
+    pub fn rotate_leaf_cell(
+        donor: &mut Page,
+        donor_index: usize,
+        receiver: &mut Page,
+        receiver_index: usize,
+    ) -> Result<bool> {
+        let donor_is_p1 = is_page_one(donor.id);
+        let receiver_is_p1 = is_page_one(receiver.id);
+        let donor_header = BTreePageHeaderV3::parse(donor, donor_is_p1)?;
+        let receiver_header = BTreePageHeaderV3::parse(receiver, receiver_is_p1)?;
+        if donor_header.kind != PageKind::LeafTable || receiver_header.kind != PageKind::LeafTable {
+            return Ok(false);
+        }
+        if donor_index >= donor_header.cell_count as usize
+            || receiver_index > receiver_header.cell_count as usize
+        {
+            return Ok(false);
+        }
+        if receiver_header.cell_count as usize >= MAX_KEYS {
+            return Ok(false);
+        }
+
+        let start = cell_pointer_from_header(donor, &donor_header, donor_index)? as usize;
+        let size = compute_cell_size(donor, &donor_header, start)?;
+        // The pointer array grows by two as well, which is what `insert_cell`
+        // checks for; asking first keeps a refusal from disturbing either page.
+        if pf_total_free_space(receiver, receiver_is_p1)? < size + 2 {
+            return Ok(false);
+        }
+
+        let cell = donor.data[start..start + size].to_vec();
+        pf_insert_cell(receiver, receiver_is_p1, receiver_index, &cell)?;
+        pf_remove_cell(donor, donor_is_p1, donor_index)?;
+        Ok(true)
+    }
+
+    /// The key of a leaf cell, read straight off the page.
+    ///
+    /// For reading a separator back after [`Self::rotate_leaf_cell`], where
+    /// building a node just to reach one key would undo the point of it.
+    pub fn leaf_key_at(page: &Page, index: usize) -> Result<BTreeKey> {
+        let is_p1 = is_page_one(page.id);
+        let header = BTreePageHeaderV3::parse(page, is_p1)?;
+        if index >= header.cell_count as usize {
+            return Err(HematiteError::StorageError(
+                "Index out of bounds".to_string(),
+            ));
+        }
+        let cell = cell_pointer_from_header(page, &header, index)? as usize;
+        let key_len = read_cell_len(page, cell)?;
+        let key_start = cell + LEAF_CELL_HEADER_SIZE;
+        let key_end = key_start + key_len;
+        if key_end > USABLE_PAGE_SIZE {
+            return Err(HematiteError::CorruptedData(
+                "Leaf cell key runs past the usable page".to_string(),
+            ));
+        }
+        Ok(BTreeKey::new(page.data[key_start..key_end].to_vec()))
+    }
+
     /// Try to remove a cell at `index` directly on the page bytes without
     /// a full decode + rebuild.  Returns `true` if successful.
     pub fn try_remove_cell_in_place(&mut self, page: &mut Page, index: usize) -> Result<bool> {

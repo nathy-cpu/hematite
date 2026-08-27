@@ -186,6 +186,127 @@ mod mod_tests {
         Ok(())
     }
 
+    /// Builds a tree with several full leaves of tiny entries.
+    ///
+    /// Everything else in this file uses large values, which is why none of it
+    /// reaches rebalancing: a leaf underflows at `MAX_KEYS / 2` cells, and a leaf
+    /// of 900-byte values fills up at a handful. Only small entries get a leaf
+    /// past two hundred cells and back down again.
+    fn build_dense_byte_tree(entries: u32) -> Result<(ByteTreeStore, crate::storage::PageId)> {
+        let trees = ByteTreeStore::new(Pager::new_in_memory(400)?);
+        let root_page_id = trees.create_tree()?;
+        let mut tree = trees.open_tree(root_page_id)?;
+        for i in 0..entries {
+            tree.insert(&i.to_be_bytes(), &[i as u8; 4])?;
+        }
+        Ok((trees, root_page_id))
+    }
+
+    fn assert_dense_tree_intact(
+        trees: &ByteTreeStore,
+        root_page_id: crate::storage::PageId,
+        expected: &std::collections::BTreeMap<u32, Vec<u8>>,
+    ) -> Result<()> {
+        assert!(trees.validate_tree(root_page_id)?, "tree failed validation");
+        let tree = trees.open_tree(root_page_id)?;
+        for (key, value) in expected {
+            assert_eq!(
+                tree.get(&key.to_be_bytes())?.as_deref(),
+                Some(value.as_slice()),
+                "key {key} did not read back"
+            );
+        }
+        let scanned = tree.entries_with_prefix(&[])?;
+        assert_eq!(
+            scanned.len(),
+            expected.len(),
+            "scan returned a different number of entries than were left"
+        );
+        Ok(())
+    }
+
+    /// Deleting from a middle leaf until it underflows borrows from the right.
+    ///
+    /// The counter is asserted, not just tree validity, because this path is one a
+    /// test can silently fail to reach: before this test existed, the entire suite
+    /// ran it zero times while a 5 000-row `DELETE` ran it 1 672 times, so a
+    /// rewrite of it would have shipped with 745 tests green.
+    #[test]
+    fn deleting_from_a_middle_leaf_borrows_a_cell_from_its_right_sibling() -> Result<()> {
+        let entries = 900u32;
+        let (trees, root_page_id) = build_dense_byte_tree(entries)?;
+        let mut expected: std::collections::BTreeMap<u32, Vec<u8>> =
+            (0..entries).map(|i| (i, vec![i as u8; 4])).collect();
+
+        let before = trees.storage_stats()?;
+        let pages_before = trees.collect_page_ids(root_page_id)?.len();
+
+        // From the front, so the leaf being drained always has a right sibling.
+        let mut tree = trees.open_tree(root_page_id)?;
+        for key in 0..entries / 3 {
+            assert!(tree.delete(&key.to_be_bytes())?.is_some(), "missing {key}");
+            expected.remove(&key);
+        }
+        let work = trees.storage_stats()?.since(&before);
+
+        assert!(
+            work.leaf_rotations > 0,
+            "no leaf rotation happened, so this test proves nothing: {work:?}"
+        );
+        assert!(
+            trees.collect_page_ids(root_page_id)?.len() <= pages_before,
+            "borrowing should not add pages"
+        );
+        assert_dense_tree_intact(&trees, root_page_id, &expected)
+    }
+
+    /// Deleting from the last leaf borrows from the left, which `rebalance_node`
+    /// tries first whenever the child has a left sibling.
+    #[test]
+    fn deleting_from_the_last_leaf_borrows_a_cell_from_its_left_sibling() -> Result<()> {
+        let entries = 900u32;
+        let (trees, root_page_id) = build_dense_byte_tree(entries)?;
+        let mut expected: std::collections::BTreeMap<u32, Vec<u8>> =
+            (0..entries).map(|i| (i, vec![i as u8; 4])).collect();
+
+        let before = trees.storage_stats()?;
+        let mut tree = trees.open_tree(root_page_id)?;
+        for key in (entries - entries / 3..entries).rev() {
+            assert!(tree.delete(&key.to_be_bytes())?.is_some(), "missing {key}");
+            expected.remove(&key);
+        }
+        let work = trees.storage_stats()?.since(&before);
+
+        assert!(
+            work.leaf_rotations > 0,
+            "no leaf rotation happened, so this test proves nothing: {work:?}"
+        );
+        assert_dense_tree_intact(&trees, root_page_id, &expected)
+    }
+
+    /// Every key still readable after deleting most of a dense tree in an order
+    /// that mixes borrowing with merging.
+    #[test]
+    fn a_dense_tree_survives_interleaved_deletes() -> Result<()> {
+        let entries = 1200u32;
+        let (trees, root_page_id) = build_dense_byte_tree(entries)?;
+        let mut expected: std::collections::BTreeMap<u32, Vec<u8>> =
+            (0..entries).map(|i| (i, vec![i as u8; 4])).collect();
+
+        let mut tree = trees.open_tree(root_page_id)?;
+        // Strided, so underflow happens in every leaf rather than marching a hole
+        // along the tree from one end.
+        for step in [7u32, 3, 2] {
+            let victims: Vec<u32> = expected.keys().copied().step_by(step as usize).collect();
+            for key in victims {
+                assert!(tree.delete(&key.to_be_bytes())?.is_some(), "missing {key}");
+                expected.remove(&key);
+            }
+            assert_dense_tree_intact(&trees, root_page_id, &expected)?;
+        }
+        Ok(())
+    }
+
     #[test]
     fn test_byte_tree_store_raw_bytes_boundary() -> Result<()> {
         let path = tmp_db();

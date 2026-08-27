@@ -662,6 +662,14 @@ impl Pager {
     /// this page will be committed via exactly one `write_page` call with no
     /// other pager access to the same `page_id` in between. See
     /// `PageCache::take_page_for_write_owned` for the exact contract.
+    /// Records that the B-tree moved one cell between two leaf pages.
+    ///
+    /// The rotation itself is above the pager, but this is the counter set the
+    /// storage tests read, and the path is one a test can easily fail to reach.
+    pub(crate) fn note_leaf_rotation(&self) {
+        crate::storage::stats::PagerStats::bump(&self.stats.leaf_rotations);
+    }
+
     pub(crate) fn take_page_for_write_owned(&mut self, page_id: PageId) -> Result<Page> {
         self.check_error_state()?;
         self.snapshot_original_page(page_id)?;

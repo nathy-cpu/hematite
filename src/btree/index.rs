@@ -545,11 +545,11 @@ impl BTreeIndex {
         left_sibling_id: PageId,
     ) -> Result<bool> {
         let left_page = pager.read_page_shared(left_sibling_id)?;
-        let mut left_sibling = BTreeNode::from_shared_page_decoded(left_page)?;
+        let mut left_sibling = BTreeNode::from_shared_page(left_page)?;
 
         let child_id = parent.children[child_index];
         let child_page = pager.read_page_shared(child_id)?;
-        let mut child_node = BTreeNode::from_shared_page_decoded(child_page)?;
+        let mut child_node = BTreeNode::from_shared_page(child_page)?;
 
         if left_sibling.node_type != child_node.node_type {
             return Err(HematiteError::StorageError(
@@ -557,10 +557,51 @@ impl BTreeIndex {
             ));
         }
 
+        // The cell count comes from the page header, so the usual answer -- the
+        // sibling has nothing to spare -- costs no decode at all. Decoding a node
+        // allocates a `Vec` per key and per value, so asking this question the
+        // expensive way was 457 allocations per deleted row.
         let min_keys = Self::min_keys_for(left_sibling.node_type);
-        if left_sibling.keys.len() <= min_keys {
+        if left_sibling.key_count <= min_keys {
             return Ok(false);
         }
+
+        // Leaves rotate a cell between the two pages directly. The decoded path
+        // below stays for interior nodes, where the move also shuffles a child
+        // pointer and a separator between three places.
+        if child_node.node_type == NodeType::Leaf {
+            let donor_index = left_sibling.key_count - 1;
+            // Drop every pin this call holds on the two cached pages, so
+            // `take_page_for_write_owned` can hand back the buffer instead of
+            // copying it -- the same dance `delete_recursive` does.
+            drop(left_sibling);
+            drop(child_node);
+            let mut donor = pager.take_page_for_write_owned(left_sibling_id)?;
+            let mut receiver = pager.take_page_for_write_owned(child_id)?;
+            let rotated = BTreeNode::rotate_leaf_cell(&mut donor, donor_index, &mut receiver, 0)?;
+            let separator = if rotated {
+                pager.note_leaf_rotation();
+                Some(BTreeNode::leaf_key_at(&receiver, 0)?)
+            } else {
+                // Taking a page for writing leaves a zero-filled placeholder in the
+                // cache, so both pages have to go back even when the rotation
+                // declined and neither was touched. Declining means the receiver had
+                // no room, and the caller falls through to a merge.
+                None
+            };
+            pager.write_page(donor)?;
+            pager.write_page(receiver)?;
+            match separator {
+                Some(separator) => {
+                    parent.keys[child_index - 1] = separator;
+                    return Ok(true);
+                }
+                None => return Ok(false),
+            }
+        }
+
+        left_sibling.decode()?;
+        child_node.decode()?;
 
         match child_node.node_type {
             NodeType::Leaf => {
@@ -607,11 +648,11 @@ impl BTreeIndex {
         right_sibling_id: PageId,
     ) -> Result<bool> {
         let right_page = pager.read_page_shared(right_sibling_id)?;
-        let mut right_sibling = BTreeNode::from_shared_page_decoded(right_page)?;
+        let mut right_sibling = BTreeNode::from_shared_page(right_page)?;
 
         let child_id = parent.children[child_index];
         let child_page = pager.read_page_shared(child_id)?;
-        let mut child_node = BTreeNode::from_shared_page_decoded(child_page)?;
+        let mut child_node = BTreeNode::from_shared_page(child_page)?;
 
         if right_sibling.node_type != child_node.node_type {
             return Err(HematiteError::StorageError(
@@ -619,10 +660,43 @@ impl BTreeIndex {
             ));
         }
 
+        // See the left-sibling case: the header answers this, so the common
+        // rejection decodes nothing.
         let min_keys = Self::min_keys_for(right_sibling.node_type);
-        if right_sibling.keys.len() <= min_keys {
+        if right_sibling.key_count <= min_keys {
             return Ok(false);
         }
+
+        if child_node.node_type == NodeType::Leaf {
+            let receiver_index = child_node.key_count;
+            drop(right_sibling);
+            drop(child_node);
+            let mut donor = pager.take_page_for_write_owned(right_sibling_id)?;
+            let mut receiver = pager.take_page_for_write_owned(child_id)?;
+            let rotated =
+                BTreeNode::rotate_leaf_cell(&mut donor, 0, &mut receiver, receiver_index)?;
+            // The separator is the donor's new first key: everything at or after it
+            // still lives on the right.
+            let separator = if rotated {
+                pager.note_leaf_rotation();
+                Some(BTreeNode::leaf_key_at(&donor, 0)?)
+            } else {
+                // See the left-sibling case: the pages must go back regardless.
+                None
+            };
+            pager.write_page(donor)?;
+            pager.write_page(receiver)?;
+            match separator {
+                Some(separator) => {
+                    parent.keys[child_index] = separator;
+                    return Ok(true);
+                }
+                None => return Ok(false),
+            }
+        }
+
+        right_sibling.decode()?;
+        child_node.decode()?;
 
         match child_node.node_type {
             NodeType::Leaf => {
@@ -678,11 +752,15 @@ impl BTreeIndex {
         let left_sibling_id = parent.children[child_index - 1];
         let child_id = parent.children[child_index];
 
+        // Undecoded: `can_merge_with` answers from the page headers and cell
+        // pointers, and `merge_leaf`/`merge_internal` decode for themselves once the
+        // merge is actually going ahead. Decoding here allocated a `Vec` per key and
+        // per value in both nodes, most often to conclude they do not fit.
         let left_page = pager.read_page_shared(left_sibling_id)?;
-        let mut left_sibling = BTreeNode::from_shared_page_decoded(left_page)?;
+        let mut left_sibling = BTreeNode::from_shared_page(left_page)?;
 
         let child_page = pager.read_page_shared(child_id)?;
-        let mut child_node = BTreeNode::from_shared_page_decoded(child_page)?;
+        let mut child_node = BTreeNode::from_shared_page(child_page)?;
 
         let separator_key = parent.keys[child_index - 1].clone();
 
@@ -737,11 +815,13 @@ impl BTreeIndex {
         let child_id = parent.children[child_index];
         let right_sibling_id = parent.children[child_index + 1];
 
+        // See the left-sibling case: the eligibility test needs no decode, and the
+        // merge decodes for itself.
         let child_page = pager.read_page_shared(child_id)?;
-        let mut child_node = BTreeNode::from_shared_page_decoded(child_page)?;
+        let mut child_node = BTreeNode::from_shared_page(child_page)?;
 
         let right_page = pager.read_page_shared(right_sibling_id)?;
-        let mut right_sibling = BTreeNode::from_shared_page_decoded(right_page)?;
+        let mut right_sibling = BTreeNode::from_shared_page(right_page)?;
 
         let separator_key = parent.keys[child_index].clone();
 
