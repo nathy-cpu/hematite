@@ -11,15 +11,25 @@ use crate::query::rewrite::rewrite_select;
 use crate::query::validation::validate_statement;
 use crate::HematiteError;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct QueryPlanner {
-    catalog: Schema,
+    catalog: Arc<Schema>,
     table_row_counts: HashMap<String, usize>,
 }
 
 impl QueryPlanner {
     pub fn new(catalog: Schema) -> Self {
+        Self::with_shared_schema(Arc::new(catalog))
+    }
+
+    /// Plans against a schema the caller already holds a handle to.
+    ///
+    /// The connection has one per statement and used to hand over a deep copy:
+    /// a `Table` per table and a `Column` per column, 56 allocations on a
+    /// one-table point lookup.
+    pub fn with_shared_schema(catalog: Arc<Schema>) -> Self {
         Self {
             catalog,
             table_row_counts: HashMap::new(),

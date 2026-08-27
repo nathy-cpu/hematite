@@ -592,7 +592,7 @@ impl SelectExecutor {
         } else {
             subquery.clone()
         };
-        let planner = QueryPlanner::new(ctx.catalog.clone())
+        let planner = QueryPlanner::with_shared_schema(Arc::clone(&ctx.catalog))
             .with_table_row_counts(self.table_row_counts.as_ref().clone());
         let plan = planner.plan(Statement::Select(effective_subquery))?;
         match plan.program {
@@ -2521,7 +2521,7 @@ impl QueryExecutor for InsertExecutor {
                 .map(|row| self.evaluate_value_row(ctx, &mut cache, row))
                 .collect::<Result<Vec<_>>>()?,
             InsertSource::Select(select) => {
-                let planner = QueryPlanner::new(ctx.catalog.clone())
+                let planner = QueryPlanner::with_shared_schema(Arc::clone(&ctx.catalog))
                     .with_table_row_counts(current_table_row_counts(ctx.engine));
                 let plan = planner.plan(Statement::Select((**select).clone()))?;
                 match plan.program {
@@ -3208,7 +3208,7 @@ impl QueryExecutor for CreateExecutor {
         // Create storage structures first so the catalog only persists the final roots once.
         let root_page_id = ctx.engine.create_table(&self.statement.table)?;
         let primary_key_root_page_id = ctx.engine.create_empty_btree()?;
-        ctx.catalog.create_table_with_roots(
+        Arc::make_mut(&mut ctx.catalog).create_table_with_roots(
             self.statement.table.clone(),
             columns,
             root_page_id,
@@ -3223,7 +3223,7 @@ impl QueryExecutor for CreateExecutor {
         let constraints = self.constraints(&table)?;
         for (index_name, column_indices) in self.unique_index_specs()? {
             let unique_index_root_page_id = ctx.engine.create_empty_btree()?;
-            ctx.catalog.add_secondary_index(
+            Arc::make_mut(&mut ctx.catalog).add_secondary_index(
                 table.id,
                 crate::catalog::SecondaryIndex {
                     name: index_name,
@@ -3234,10 +3234,10 @@ impl QueryExecutor for CreateExecutor {
             )?;
         }
         for constraint in constraints.check_constraints {
-            ctx.catalog.add_check_constraint(table.id, constraint)?;
+            Arc::make_mut(&mut ctx.catalog).add_check_constraint(table.id, constraint)?;
         }
         for foreign_key in constraints.foreign_keys {
-            ctx.catalog.add_foreign_key(table.id, foreign_key)?;
+            Arc::make_mut(&mut ctx.catalog).add_foreign_key(table.id, foreign_key)?;
         }
 
         Ok(QueryResult {
@@ -3274,7 +3274,7 @@ impl QueryExecutor for DropExecutor {
         let table = catalog_table(ctx, &self.statement.table)?;
 
         ctx.engine.drop_table_with_indexes(&table)?;
-        ctx.catalog
+        Arc::make_mut(&mut ctx.catalog)
             .drop_table(table.id)
             .map_err(|err| HematiteError::ParseError(err.to_string()))?;
 
@@ -3304,13 +3304,13 @@ impl QueryExecutor for AlterExecutor {
         match &self.statement.operation {
             AlterOperation::RenameTo(new_name) => {
                 let table = catalog_table(ctx, &self.statement.table)?;
-                ctx.catalog.rename_table(table.id, new_name.clone())?;
+                Arc::make_mut(&mut ctx.catalog).rename_table(table.id, new_name.clone())?;
                 ctx.engine
                     .rename_table_runtime_metadata(&self.statement.table, new_name)?;
             }
             AlterOperation::RenameColumn { old_name, new_name } => {
                 let table = catalog_table(ctx, &self.statement.table)?;
-                ctx.catalog
+                Arc::make_mut(&mut ctx.catalog)
                     .rename_column(table.id, old_name, new_name.clone())?;
             }
             AlterOperation::AddColumn(column_def) => {
@@ -3339,14 +3339,14 @@ impl QueryExecutor for AlterExecutor {
                     row.values.push(fill_value.clone());
                 }
 
-                ctx.catalog.add_column(table.id, column)?;
+                Arc::make_mut(&mut ctx.catalog).add_column(table.id, column)?;
                 ctx.engine.replace_table_rows(&self.statement.table, rows)?;
             }
             AlterOperation::AddConstraint(constraint) => {
                 let table = catalog_table(ctx, &self.statement.table)?;
                 match constraint {
                     TableConstraint::Check(check) => {
-                        ctx.catalog.add_check_constraint(
+                        Arc::make_mut(&mut ctx.catalog).add_check_constraint(
                             table.id,
                             CheckConstraint {
                                 name: check.name.clone(),
@@ -3368,7 +3368,7 @@ impl QueryExecutor for AlterExecutor {
                                 })
                             })
                             .collect::<Result<Vec<_>>>()?;
-                        ctx.catalog.add_secondary_index(
+                        Arc::make_mut(&mut ctx.catalog).add_secondary_index(
                             table.id,
                             crate::catalog::SecondaryIndex {
                                 name: unique.name.clone().ok_or_else(|| {
@@ -3408,7 +3408,7 @@ impl QueryExecutor for AlterExecutor {
                                 })
                             })
                             .collect::<Result<Vec<_>>>()?;
-                        ctx.catalog.add_foreign_key(
+                        Arc::make_mut(&mut ctx.catalog).add_foreign_key(
                             table.id,
                             ForeignKeyConstraint {
                                 name: foreign_key.name.clone(),
@@ -3435,7 +3435,7 @@ impl QueryExecutor for AlterExecutor {
                     row.values.remove(column_index);
                 }
 
-                ctx.catalog.drop_column(table.id, column_name)?;
+                Arc::make_mut(&mut ctx.catalog).drop_column(table.id, column_name)?;
                 ctx.engine.replace_table_rows(&self.statement.table, rows)?;
             }
             AlterOperation::DropConstraint(constraint_name) => {
@@ -3443,7 +3443,7 @@ impl QueryExecutor for AlterExecutor {
                 if let Some(index) = table.get_secondary_index(constraint_name) {
                     if index.unique {
                         ctx.engine.delete_tree(index.root_page_id)?;
-                        ctx.catalog
+                        Arc::make_mut(&mut ctx.catalog)
                             .drop_secondary_index(table.id, constraint_name)?;
                     } else {
                         return Err(HematiteError::ParseError(format!(
@@ -3452,7 +3452,7 @@ impl QueryExecutor for AlterExecutor {
                         )));
                     }
                 } else {
-                    ctx.catalog
+                    Arc::make_mut(&mut ctx.catalog)
                         .drop_named_constraint(table.id, constraint_name)?;
                 }
             }
@@ -3467,7 +3467,7 @@ impl QueryExecutor for AlterExecutor {
                         column_name, self.statement.table
                     ))
                 })?;
-                ctx.catalog.set_column_default(
+                Arc::make_mut(&mut ctx.catalog).set_column_default(
                     table.id,
                     column_name,
                     Some(coerce_column_value(
@@ -3478,7 +3478,7 @@ impl QueryExecutor for AlterExecutor {
             }
             AlterOperation::AlterColumnDropDefault { column_name } => {
                 let table = catalog_table(ctx, &self.statement.table)?;
-                ctx.catalog
+                Arc::make_mut(&mut ctx.catalog)
                     .set_column_default(table.id, column_name, None)?;
             }
             AlterOperation::AlterColumnSetNotNull { column_name } => {
@@ -3505,12 +3505,12 @@ impl QueryExecutor for AlterExecutor {
                         column_name
                     )));
                 }
-                ctx.catalog
+                Arc::make_mut(&mut ctx.catalog)
                     .set_column_nullable(table.id, column_name, false)?;
             }
             AlterOperation::AlterColumnDropNotNull { column_name } => {
                 let table = catalog_table(ctx, &self.statement.table)?;
-                ctx.catalog
+                Arc::make_mut(&mut ctx.catalog)
                     .set_column_nullable(table.id, column_name, true)?;
             }
         }
@@ -3568,7 +3568,7 @@ impl QueryExecutor for CreateIndexExecutor {
             .collect::<Result<Vec<_>>>()?;
 
         let root_page_id = ctx.engine.create_empty_btree()?;
-        ctx.catalog.add_secondary_index(
+        Arc::make_mut(&mut ctx.catalog).add_secondary_index(
             table.id,
             crate::catalog::SecondaryIndex {
                 name: self.statement.index_name.clone(),
@@ -6175,7 +6175,7 @@ impl QueryExecutor for DropIndexExecutor {
             .clone();
 
         ctx.engine.delete_tree(index.root_page_id)?;
-        ctx.catalog
+        Arc::make_mut(&mut ctx.catalog)
             .drop_secondary_index(table.id, &self.statement.index_name)?;
 
         Ok(QueryResult {

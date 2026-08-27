@@ -905,7 +905,7 @@ impl Connection {
             other => other,
         };
         let (schema, table_row_counts) = self.read_planning_state()?;
-        let planner = QueryPlanner::new(schema).with_table_row_counts(table_row_counts);
+        let planner = QueryPlanner::with_shared_schema(schema).with_table_row_counts(table_row_counts);
         let plan = planner.plan(statement)?;
         Ok(QueryResult {
             affected_rows: 0,
@@ -1047,7 +1047,7 @@ impl Connection {
         let result = {
             let mut catalog_guard = self.lock_catalog()?;
             catalog_guard.with_read_engine(|engine| {
-                let mut ctx = ExecutionContext::for_read(&schema, engine);
+                let mut ctx = ExecutionContext::for_read(Arc::clone(&schema), engine);
                 executor.execute(&mut ctx)
             })?
         };
@@ -1078,7 +1078,7 @@ impl Connection {
         let execution_result = {
             let mut catalog_guard = self.lock_catalog()?;
             catalog_guard.with_engine(|engine| {
-                let mut ctx = ExecutionContext::for_mutation(&schema, engine);
+                let mut ctx = ExecutionContext::for_mutation(Arc::clone(&schema), engine);
                 let result = executor.execute(&mut ctx)?;
                 Ok((result, ctx.catalog))
             })
@@ -1088,7 +1088,7 @@ impl Connection {
             Ok((result, updated_schema)) => {
                 if persists_schema {
                     let mut catalog_guard = self.lock_catalog()?;
-                    if let Err(err) = catalog_guard.replace_schema(updated_schema) {
+                    if let Err(err) = catalog_guard.replace_shared_schema(updated_schema) {
                         drop(catalog_guard);
                         if let Some(implicit_mutation) = implicit_mutation.take() {
                             implicit_mutation.rollback(self)?;
@@ -1115,15 +1115,16 @@ impl Connection {
     fn plan_executor(
         &self,
         statement: crate::parser::ast::Statement,
-    ) -> Result<(Schema, Box<dyn QueryExecutor>)> {
+    ) -> Result<(Arc<Schema>, Box<dyn QueryExecutor>)> {
         let (schema, table_row_counts) = self.read_planning_state()?;
         let statement = Self::normalize_statement(statement, &schema)?;
-        let planner = QueryPlanner::new(schema.clone()).with_table_row_counts(table_row_counts);
+        let planner =
+            QueryPlanner::with_shared_schema(Arc::clone(&schema)).with_table_row_counts(table_row_counts);
         let plan = planner.plan(statement)?;
         Ok((schema, plan.into_executor()))
     }
 
-    fn read_planning_state(&self) -> Result<(Schema, HashMap<String, usize>)> {
+    fn read_planning_state(&self) -> Result<(Arc<Schema>, HashMap<String, usize>)> {
         let mut catalog_guard = self.lock_catalog()?;
         let schema = catalog_guard.clone_schema();
         let table_row_counts =
@@ -1244,7 +1245,7 @@ impl Connection {
     #[cfg(test)]
     pub(crate) fn schema_snapshot(&self) -> Result<Schema> {
         let catalog_guard = self.lock_catalog()?;
-        Ok(catalog_guard.clone_schema())
+        Ok((*catalog_guard.clone_schema()).clone())
     }
 
     fn active_transaction_mut(&mut self, action: &str) -> Result<&mut ConnectionTransaction> {
