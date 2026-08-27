@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use super::{
     JournalMode, Pager, PagerSavepoint, PagerState, PagerTransaction, RollbackTransaction,
     WalTransaction,
@@ -23,7 +24,7 @@ fn stash_transaction(
             r.page_records.clear();
             // Clear stale scalar caches; they will be refilled by begin_transaction.
             r.original_free_pages.clear();
-            r.rollback_uninitialized_pages.clear();
+            Arc::make_mut(&mut r.rollback_uninitialized_pages).clear();
             r.journaled_pages.clear();
             *rollback_scratch = Some(r);
         }
@@ -65,7 +66,7 @@ impl Pager {
                             original_free_pages: Vec::new(),
                             rollback_next_page_id: 0,
                             rollback_free_list: crate::storage::free_list::FreeList::new(),
-                            rollback_uninitialized_pages: PageSet::default(),
+                                        rollback_uninitialized_pages: Arc::default(),
                             journaled_pages: PageSet::default(),
                             page_records: Vec::new(),
                             savepoints: Vec::new(),
@@ -78,7 +79,7 @@ impl Pager {
                     .extend_from_slice(self.file_manager.free_pages());
                 rollback.rollback_next_page_id = self.file_manager.next_page_id();
                 rollback.rollback_free_list = rollback_free_list;
-                rollback.rollback_uninitialized_pages.clear();
+                Arc::make_mut(&mut rollback.rollback_uninitialized_pages).clear();
                 rollback.journaled_pages.clear();
                 rollback.page_records.clear();
                 rollback.savepoints.clear();
@@ -94,7 +95,7 @@ impl Pager {
                         .iter()
                         .copied()
                         .collect(),
-                    uninitialized_pages: rollback.rollback_uninitialized_pages.clone(),
+                    uninitialized_pages: Arc::clone(&rollback.rollback_uninitialized_pages),
                     created_page_ids: PageSet::default(),
                     page_records: Vec::new(),
                     captured_page_ids: PageSet::default(),

@@ -202,7 +202,14 @@ pub(crate) struct RollbackTransaction {
     original_free_pages: Vec<PageId>,
     rollback_next_page_id: PageId,
     rollback_free_list: FreeList,
-    rollback_uninitialized_pages: PageSet,
+    /// Pages this transaction allocated but has not yet written.
+    ///
+    /// Shared rather than copied: a savepoint is taken per row, each one recorded a
+    /// full copy of this set, and page allocation is two orders of magnitude rarer
+    /// than row insertion. Under `Arc`, taking a savepoint is a refcount bump and
+    /// the copy happens on the next allocation instead — see `Arc::make_mut` at the
+    /// three mutation sites.
+    rollback_uninitialized_pages: Arc<PageSet>,
     journaled_pages: PageSet,
     page_records: Vec<JournalRecord>,
     savepoints: Vec<PagerSavepoint>,
@@ -220,7 +227,7 @@ struct PagerSavepoint {
     free_pages: Vec<PageId>,
     free_page_set: PageSet,
     /// Rollback mode only; empty for WAL, which has no uninitialised-page concept.
-    uninitialized_pages: PageSet,
+    uninitialized_pages: Arc<PageSet>,
     /// Pre-images of the pages modified since the savepoint was taken — the undo log.
     ///
     /// Captured lazily, one copy per page per savepoint, by `snapshot_original_page`.

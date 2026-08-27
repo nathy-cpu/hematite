@@ -130,7 +130,16 @@ impl Pager {
         let page_id = page.id;
         self.snapshot_original_page(page_id)?;
         if let Some(transaction) = self.active_rollback_transaction_mut() {
-            transaction.rollback_uninitialized_pages.remove(&page_id);
+            // Guarded, because `Arc::make_mut` on a set a savepoint is sharing copies
+            // it. Pages sit in this set only between being allocated and first
+            // written, so the membership test almost always says no and the copy
+            // almost never happens.
+            if transaction
+                .rollback_uninitialized_pages
+                .contains(&page_id)
+            {
+                Arc::make_mut(&mut transaction.rollback_uninitialized_pages).remove(&page_id);
+            }
         }
         let rollback_transaction_active = self.active_rollback_transaction().is_some();
         let journal_needs_sync = self.journal_needs_sync;

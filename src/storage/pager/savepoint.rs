@@ -87,7 +87,7 @@ impl Pager {
                     .iter()
                     .copied()
                     .collect(),
-                uninitialized_pages: transaction.rollback_uninitialized_pages.clone(),
+                uninitialized_pages: Arc::clone(&transaction.rollback_uninitialized_pages),
                 page_records: Vec::new(),
                 captured_page_ids: crate::storage::page_hash::PageSet::default(),
                 created_page_ids: crate::storage::page_hash::PageSet::default(),
@@ -98,7 +98,7 @@ impl Pager {
                 next_page_id: transaction.wal_next_page_id,
                 free_pages: transaction.wal_free_pages.clone(),
                 free_page_set: transaction.wal_free_page_set.clone(),
-                uninitialized_pages: crate::storage::page_hash::PageSet::default(),
+                uninitialized_pages: Arc::default(),
                 page_records: Vec::new(),
                 captured_page_ids: crate::storage::page_hash::PageSet::default(),
                 created_page_ids: crate::storage::page_hash::PageSet::default(),
@@ -172,7 +172,7 @@ impl Pager {
                 transaction
                     .rollback_free_list
                     .replace(savepoint.free_pages.clone());
-                transaction.rollback_uninitialized_pages = savepoint.uninitialized_pages.clone();
+                transaction.rollback_uninitialized_pages = Arc::clone(&savepoint.uninitialized_pages);
                 transaction.savepoints.truncate(position + 1);
             }
             Some(super::PagerTransaction::Wal(transaction)) => {

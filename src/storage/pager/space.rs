@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use super::{compact_transaction_free_pages, JournalMode, Pager};
 use crate::error::Result;
 use crate::storage::PageId;
@@ -14,7 +15,7 @@ impl Pager {
                     transaction.rollback_next_page_id.saturating_add(1);
                 page_id
             };
-            transaction.rollback_uninitialized_pages.insert(page_id);
+            Arc::make_mut(&mut transaction.rollback_uninitialized_pages).insert(page_id);
             return Ok(page_id);
         }
         if self.journal_mode == JournalMode::Wal {
@@ -37,7 +38,16 @@ impl Pager {
         self.snapshot_original_page(page_id)?;
         self.cache_mut()?.remove(page_id);
         if let Some(transaction) = self.active_rollback_transaction_mut() {
-            transaction.rollback_uninitialized_pages.remove(&page_id);
+            // Guarded, because `Arc::make_mut` on a set a savepoint is sharing copies
+            // it. Pages sit in this set only between being allocated and first
+            // written, so the membership test almost always says no and the copy
+            // almost never happens.
+            if transaction
+                .rollback_uninitialized_pages
+                .contains(&page_id)
+            {
+                Arc::make_mut(&mut transaction.rollback_uninitialized_pages).remove(&page_id);
+            }
             if !transaction.rollback_free_list.contains(page_id) {
                 transaction.rollback_free_list.push_free_page(page_id);
             }
