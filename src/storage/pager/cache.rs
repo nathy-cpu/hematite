@@ -10,6 +10,14 @@ pub(crate) struct CachedPageMeta {
     pub(crate) need_sync: bool,
     pub(crate) dirty_sequence: Option<u64>,
     pub(crate) view_token: u64,
+    /// Set while the entry's page is out on loan to `take_page_for_write_owned`.
+    ///
+    /// The placeholder left behind holds recycled bytes that no one may look at,
+    /// which the contract on that function has always said. This makes a violation
+    /// fail an assertion in tests rather than quietly hand back another page's
+    /// stale content.
+    #[cfg(debug_assertions)]
+    pub(crate) borrowed: bool,
 }
 
 #[derive(Debug)]
@@ -120,15 +128,41 @@ impl PageCache {
         if let Some(entry) = self.entries.get_mut(&page_id) {
             entry.page = page;
             entry.meta.view_token = view_token;
+            #[cfg(debug_assertions)]
+            {
+                entry.meta.borrowed = false;
+            }
         }
         self.touch(page_id);
     }
 
     pub(crate) fn peek(&self, page_id: PageId) -> Option<&Page> {
-        self.entries.get(&page_id).map(|entry| entry.page.as_ref())
+        self.entries.get(&page_id).map(|entry| {
+            debug_assert!(
+                !Self::is_borrowed(&entry.meta),
+                "page {page_id} was read while out on loan to take_page_for_write_owned"
+            );
+            entry.page.as_ref()
+        })
+    }
+
+    #[cfg(debug_assertions)]
+    fn is_borrowed(meta: &CachedPageMeta) -> bool {
+        meta.borrowed
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn is_borrowed(_meta: &CachedPageMeta) -> bool {
+        false
     }
 
     pub(crate) fn peek_shared(&self, page_id: PageId) -> Option<Arc<Page>> {
+        debug_assert!(
+            self.entries
+                .get(&page_id)
+                .is_none_or(|entry| !Self::is_borrowed(&entry.meta)),
+            "page {page_id} was read while out on loan to take_page_for_write_owned"
+        );
         self.entries.get(&page_id).map(|entry| entry.page.clone())
     }
 
@@ -440,10 +474,16 @@ impl PageCache {
     /// call sites that unconditionally commit their mutation.
     pub(crate) fn take_page_for_write_owned(&mut self, page_id: PageId) -> Page {
         self.ensure_entry(page_id);
-        // Stands in as the entry's page, so its content is the zeros.
-        let placeholder = Arc::new(Page::new(page_id));
+        // Unzeroed: nothing may read this, which is what the contract above says,
+        // so the 4 KiB of zeroing was spent on bytes with no reader. It was 14 % of
+        // a delete workload.
+        let placeholder = Arc::new(Page::new_for_overwrite(page_id));
         let entry = self.entries.get_mut(&page_id).expect("entry should exist");
         entry.meta.writeable = true;
+        #[cfg(debug_assertions)]
+        {
+            entry.meta.borrowed = true;
+        }
         let arc = std::mem::replace(&mut entry.page, placeholder);
         match Arc::try_unwrap(arc) {
             Ok(page) => page,
