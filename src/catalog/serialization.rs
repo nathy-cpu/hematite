@@ -143,6 +143,15 @@ impl RowCodec {
         record_v4::decode_fields(data, indices)
     }
 
+    /// Appends the fields at `indices` to `out`. See [`record_v4::decode_fields_into`].
+    pub fn decode_row_fields_into(
+        data: &[u8],
+        indices: &[usize],
+        out: &mut Vec<Value>,
+    ) -> Result<()> {
+        record_v4::decode_fields_into(data, indices, out)
+    }
+
     pub fn decode_stored_row(row_id: u64, data: &[u8]) -> Result<StoredRow> {
         Ok(StoredRow {
             row_id,

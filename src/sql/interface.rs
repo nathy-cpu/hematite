@@ -61,7 +61,7 @@ impl Hematite {
         let result_set = self.query(sql)?;
 
         if let Some(row) = result_set.get_row(0) {
-            Ok(Some(f(row)?))
+            Ok(Some(f(&row)?))
         } else {
             Ok(None)
         }
@@ -92,7 +92,10 @@ impl Hematite {
     where
         T: FromRow,
     {
-        self.query(sql)?.get_row(0).map(T::from_row).transpose()
+        self.query(sql)?
+            .get_row(0)
+            .map(|row| T::from_row(&row))
+            .transpose()
     }
 
     /// Prepare a SQL statement for repeated execution

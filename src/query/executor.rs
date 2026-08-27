@@ -898,15 +898,14 @@ impl SelectExecutor {
     ) -> Result<Value> {
         let result =
             self.execute_subquery_cached(ctx, cache, subquery, current_sources, current_row)?;
-        if result.rows.len() > 1 {
+        if result.rows().len() > 1 {
             return Err(HematiteError::ParseError(
                 "Scalar subquery returned more than one row".to_string(),
             ));
         }
         Ok(result
-            .rows
-            .iter()
-            .next()
+            .rows()
+            .first()
             .and_then(|row| row.first().cloned())
             .unwrap_or(Value::Null))
     }
@@ -1215,13 +1214,13 @@ impl SelectExecutor {
         let named_source = self.named_source(ctx, table_name, alias, 0)?;
         let rows = match named_source.kind {
             NamedSourceKind::BaseTable => ctx.engine.read_from_table(table_name)?,
-            NamedSourceKind::MaterializedCte(result) => result.rows.clone(),
+            NamedSourceKind::MaterializedCte(result) => result.rows().to_vec(),
             NamedSourceKind::Cte(cte) => {
                 let key = Self::cte_key(table_name);
                 if let Some(result) = self.materialized_ctes.get(&key) {
-                    result.as_ref().rows.clone()
+                    result.as_ref().rows().to_vec()
                 } else {
-                    self.materialize_cte(ctx, &cte)?.rows.clone()
+                    self.materialize_cte(ctx, &cte)?.rows().to_vec()
                 }
             }
         };
@@ -1264,7 +1263,7 @@ impl SelectExecutor {
                         None,
                         0,
                     )],
-                    result.rows,
+                    result.into_row_vecs(),
                 ))
             }
             TableReference::CrossJoin(left, right) => {
@@ -1406,7 +1405,7 @@ impl SelectExecutor {
             left_executor.outer_scopes = self.outer_scopes.clone();
             left_executor.materialized_ctes = self.materialized_ctes.clone();
             left_executor.table_row_counts = self.table_row_counts.clone();
-            let mut left_result = left_executor.execute_body(ctx)?;
+            let left_result = left_executor.execute_body(ctx)?;
             let right_result = self.execute_subquery_cached(
                 ctx,
                 &mut subquery_cache,
@@ -1415,13 +1414,16 @@ impl SelectExecutor {
                 None,
             )?;
 
-            left_result.rows = apply_set_operation(
+            let combined = apply_set_operation(
                 set_operation.operator,
-                left_result.rows,
-                right_result.rows.clone(),
+                left_result.rows().to_vec(),
+                right_result.rows().to_vec(),
             );
-            left_result.affected_rows = left_result.rows.len();
-            return Ok(left_result);
+            return Ok(QueryResult::new(
+                combined.len(),
+                left_result.columns,
+                combined,
+            ));
         }
 
         if let Some(result) = self.try_direct_projection(ctx)? {
@@ -1574,13 +1576,20 @@ impl SelectExecutor {
 
         // `scan_row_cap` already refuses everything this path refuses, so when it
         // answers it is safe to stop the scan there.
-        let mut rows = ctx
+        let values = ctx
             .engine
             .read_table_columns(&table_name, &indices, self.scan_row_cap())?;
-        self.apply_select_window(&mut rows);
-        Ok(Some(
-            self.build_query_result(self.get_column_names(&sources), rows),
-        ))
+        let columns = self.get_column_names(&sources);
+        // The window is applied to the flat buffer directly. Splitting it back into
+        // rows to slice it and rejoining afterwards would put back the per-row
+        // vector this path exists to avoid.
+        let values = self.apply_select_window_flat(values, columns.len());
+        let row_count = if columns.is_empty() {
+            0
+        } else {
+            values.len() / columns.len()
+        };
+        Ok(Some(QueryResult::from_values(row_count, columns, values)))
     }
 
     fn materialize_filtered_rows(
@@ -1652,12 +1661,30 @@ impl SelectExecutor {
         }
     }
 
-    fn build_query_result(&self, columns: Vec<String>, rows: Vec<Vec<Value>>) -> QueryResult {
-        QueryResult {
-            affected_rows: rows.len(),
-            columns,
-            rows,
+    /// The same window, applied to rows laid end to end in one buffer.
+    ///
+    /// `OFFSET` and `LIMIT` are whole numbers of rows, so on a flat buffer they are
+    /// a drain and a truncate at row-width multiples.
+    fn apply_select_window_flat(&self, mut values: Vec<Value>, width: usize) -> Vec<Value> {
+        if width == 0 {
+            return values;
         }
+        if let Some(offset) = self.statement.offset {
+            let cut = offset.saturating_mul(width);
+            if cut >= values.len() {
+                values.clear();
+                return values;
+            }
+            values.drain(0..cut);
+        }
+        if let Some(limit) = self.statement.limit {
+            values.truncate(limit.saturating_mul(width));
+        }
+        values
+    }
+
+    fn build_query_result(&self, columns: Vec<String>, rows: Vec<Vec<Value>>) -> QueryResult {
+        QueryResult::new(rows.len(), columns, rows)
     }
 
     fn evaluate_aggregate_value(
@@ -2537,7 +2564,7 @@ impl QueryExecutor for InsertExecutor {
                     } => {
                         SelectExecutor::new(statement, access_path)
                             .execute(ctx)?
-                            .rows
+                            .into_row_vecs()
                     }
                     _ => {
                         return Err(HematiteError::InternalError(
@@ -3253,11 +3280,7 @@ impl QueryExecutor for CreateExecutor {
             Arc::make_mut(&mut ctx.catalog).add_foreign_key(table.id, foreign_key)?;
         }
 
-        Ok(QueryResult {
-            affected_rows: 0,
-            columns: Vec::new(),
-            rows: Vec::new(),
-        })
+        Ok(QueryResult::new(0, Vec::new(), Vec::new()))
     }
 }
 
@@ -3291,11 +3314,7 @@ impl QueryExecutor for DropExecutor {
             .drop_table(table.id)
             .map_err(|err| HematiteError::ParseError(err.to_string()))?;
 
-        Ok(QueryResult {
-            affected_rows: 0,
-            columns: Vec::new(),
-            rows: Vec::new(),
-        })
+        Ok(QueryResult::new(0, Vec::new(), Vec::new()))
     }
 }
 
@@ -3528,11 +3547,7 @@ impl QueryExecutor for AlterExecutor {
             }
         }
 
-        Ok(QueryResult {
-            affected_rows: 0,
-            columns: Vec::new(),
-            rows: Vec::new(),
-        })
+        Ok(QueryResult::new(0, Vec::new(), Vec::new()))
     }
 }
 
@@ -3605,11 +3620,7 @@ impl QueryExecutor for CreateIndexExecutor {
         ctx.engine
             .rebuild_secondary_indexes(&updated_table, &rows)?;
 
-        Ok(QueryResult {
-            affected_rows: 0,
-            columns: Vec::new(),
-            rows: Vec::new(),
-        })
+        Ok(QueryResult::new(0, Vec::new(), Vec::new()))
     }
 }
 
@@ -3625,11 +3636,7 @@ fn secondary_index_key_values(
 }
 
 fn mutation_result(affected_rows: usize) -> QueryResult {
-    QueryResult {
-        affected_rows,
-        columns: Vec::new(),
-        rows: Vec::new(),
-    }
+    QueryResult::new(affected_rows, Vec::new(), Vec::new())
 }
 
 fn duplicate_primary_key_parse_error(table_name: &str, key_values: &[Value]) -> HematiteError {
@@ -6214,11 +6221,7 @@ impl QueryExecutor for DropIndexExecutor {
         Arc::make_mut(&mut ctx.catalog)
             .drop_secondary_index(table.id, &self.statement.index_name)?;
 
-        Ok(QueryResult {
-            affected_rows: 0,
-            columns: Vec::new(),
-            rows: Vec::new(),
-        })
+        Ok(QueryResult::new(0, Vec::new(), Vec::new()))
     }
 }
 
@@ -6569,7 +6572,7 @@ fn evaluate_boolean_expression_generic<R: ColumnResolver>(
             let probe = evaluate_expression_generic(ctx, cache, expr, resolver)?;
             let subquery_result = resolver.execute_subquery(ctx, cache, subquery)?;
             let candidates = subquery_result
-                .rows
+                .rows()
                 .iter()
                 .map(|row| row.first().cloned().unwrap_or(Value::Null))
                 .collect::<Vec<_>>();
@@ -6607,7 +6610,7 @@ fn evaluate_boolean_expression_generic<R: ColumnResolver>(
         ),
         Expression::Exists { subquery, is_not } => {
             let subquery_result = resolver.execute_subquery(ctx, cache, subquery)?;
-            let exists = !subquery_result.rows.is_empty();
+            let exists = !subquery_result.rows().is_empty();
             Ok(Some(if *is_not { !exists } else { exists }))
         }
         Expression::NullCheck { expr, is_not } => {

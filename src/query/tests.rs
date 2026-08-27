@@ -72,7 +72,7 @@ mod executor_tests {
         let result = executor.execute(&mut ctx)?;
 
         assert_eq!(result.columns, vec!["id"]);
-        assert_eq!(result.rows.len(), 3); // 3 simulated rows
+        assert_eq!(result.rows().len(), 3); // 3 simulated rows
         storage.flush()?;
         Ok(())
     }
@@ -186,7 +186,7 @@ mod executor_tests {
         );
         let result = executor.execute(&mut ctx)?;
 
-        assert_eq!(result.rows, vec![vec![Value::Integer(2)]]);
+        assert_eq!(result.rows(), vec![vec![Value::Integer(2)]]);
         storage.flush()?;
         Ok(())
     }
@@ -275,7 +275,7 @@ mod executor_tests {
         );
         let result = executor.execute(&mut ctx)?;
 
-        assert_eq!(result.rows, vec![vec![Value::Text("Bob".to_string())]]);
+        assert_eq!(result.rows(), vec![vec![Value::Text("Bob".to_string())]]);
         storage.flush()?;
         Ok(())
     }
@@ -338,7 +338,7 @@ mod executor_tests {
             crate::query::planner::SelectAccessPath::RowIdLookup,
         );
         let result = executor.execute(&mut ctx)?;
-        assert_eq!(result.rows, vec![vec![Value::Integer(1)]]);
+        assert_eq!(result.rows(), vec![vec![Value::Integer(1)]]);
         Ok(())
     }
 
@@ -385,7 +385,7 @@ mod executor_tests {
         let result = executor.execute(&mut ctx)?;
 
         assert!(result.columns.is_empty());
-        assert!(result.rows.is_empty());
+        assert!(result.rows().is_empty());
         storage.flush()?;
         Ok(())
     }
@@ -754,7 +754,7 @@ mod executor_tests {
         let result = executor.execute(&mut ctx)?;
 
         assert!(result.columns.is_empty());
-        assert!(result.rows.is_empty());
+        assert!(result.rows().is_empty());
         assert!(ctx.catalog.get_table_by_name("test_table").is_some());
         storage.flush()?;
         Ok(())

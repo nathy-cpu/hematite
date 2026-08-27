@@ -16,7 +16,7 @@
 //!
 //!     let names = db.query("SELECT name FROM users ORDER BY id;")?;
 //!     assert_eq!(names.columns, vec!["name"]);
-//!     assert_eq!(names.rows.len(), 1);
+//!     assert_eq!(names.len(), 1);
 //!     Ok(())
 //! }
 //! ```

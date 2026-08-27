@@ -219,23 +219,26 @@ pub(crate) fn read_from_table_capped(
 ///
 /// The narrow path behind a `SELECT a, b FROM t` with nothing else in it: no
 /// predicate, no ordering, no grouping. Rows come back already in projection order,
-/// so the executor does not build a second row per result to reorder into.
+/// so the executor does not build a second row per result to reorder into — and
+/// laid end to end in one buffer, which is the shape `QueryResult` stores, so a
+/// scanned row is never given a vector of its own.
 pub(crate) fn read_table_columns(
     engine: &mut CatalogEngine,
     table_name: &str,
     indices: &[usize],
     max_rows: Option<usize>,
-) -> Result<Vec<Vec<Value>>> {
+) -> Result<Vec<Value>> {
     let root_page_id = engine.table_runtime_metadata(table_name)?.root_page_id;
-    let mut rows = Vec::new();
-    if max_rows == Some(0) {
-        return Ok(rows);
+    let mut values = Vec::new();
+    if max_rows == Some(0) || indices.is_empty() {
+        return Ok(values);
     }
+    let width = indices.len();
     engine.visit_tree_values_while(root_page_id, |value| {
-        rows.push(RowCodec::decode_row_fields(value, indices)?);
-        Ok(max_rows.is_none_or(|cap| rows.len() < cap))
+        RowCodec::decode_row_fields_into(value, indices, &mut values)?;
+        Ok(max_rows.is_none_or(|cap| values.len() / width < cap))
     })?;
-    Ok(rows)
+    Ok(values)
 }
 
 /// Whether a row with this id exists, without decoding it.

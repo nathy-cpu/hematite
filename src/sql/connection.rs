@@ -200,19 +200,11 @@ impl Connection {
     const SELECT_INTO_ROWID_COLUMN: &'static str = "__hematite_select_into_rowid";
 
     fn empty_result() -> QueryResult {
-        QueryResult {
-            affected_rows: 0,
-            columns: Vec::new(),
-            rows: Vec::new(),
-        }
+        QueryResult::new(0, Vec::new(), Vec::new())
     }
 
     fn mutation_result(affected_rows: usize) -> QueryResult {
-        QueryResult {
-            affected_rows,
-            columns: Vec::new(),
-            rows: Vec::new(),
-        }
+        QueryResult::new(affected_rows, Vec::new(), Vec::new())
     }
 
     fn select_into_synthetic_pk_name(column_names: &[String]) -> String {
@@ -411,7 +403,7 @@ impl Connection {
             .map(|(index, name)| {
                 Ok(ColumnDefinition {
                     name: name.clone(),
-                    data_type: Self::infer_select_into_type(name, &result.rows, index)?,
+                    data_type: Self::infer_select_into_type(name, &result.rows().to_vec(), index)?,
                     character_set: None,
                     collation: None,
                     nullable: true,
@@ -907,10 +899,10 @@ impl Connection {
         let (schema, table_row_counts) = self.read_planning_state()?;
         let planner = QueryPlanner::with_shared_schema(schema).with_table_row_counts(table_row_counts);
         let plan = planner.plan(statement)?;
-        Ok(QueryResult {
-            affected_rows: 0,
-            columns: vec!["kind".to_string(), "detail".to_string()],
-            rows: vec![
+        Ok(QueryResult::new(
+            0,
+            vec!["kind".to_string(), "detail".to_string()],
+            vec![
                 vec![
                     Value::Text("node".to_string()),
                     Value::Text(format!("{:?}", plan.node)),
@@ -920,7 +912,7 @@ impl Connection {
                     Value::Text(format!("{}", plan.estimated_cost)),
                 ],
             ],
-        })
+        ))
     }
 
     fn execute_describe_statement(&mut self, table_name: &str) -> Result<QueryResult> {

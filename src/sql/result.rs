@@ -7,40 +7,77 @@ use std::collections::HashMap;
 #[derive(Debug, Clone)]
 pub struct ResultSet {
     pub columns: Vec<String>,
-    pub rows: Vec<Row>,
+    /// Every row's values end to end, `columns.len()` of them per row.
+    ///
+    /// A row used to own its own `Vec<Value>`, which made one allocation per row
+    /// returned; `malloc` and `free` for it were 24 % of a full scan. A [`Row`] is
+    /// a view into this buffer now.
+    values: Vec<Value>,
     column_index: HashMap<String, usize>,
 }
 
 impl ResultSet {
     pub fn new(columns: Vec<String>, rows: Vec<Vec<Value>>) -> Self {
+        let mut values = Vec::with_capacity(rows.len() * columns.len().max(1));
+        for row in rows {
+            values.extend(row);
+        }
+        Self::from_values(columns, values)
+    }
+
+    /// Builds a result set from values already laid out row-major.
+    pub fn from_values(columns: Vec<String>, values: Vec<Value>) -> Self {
         let mut column_index = HashMap::new();
         for (i, col) in columns.iter().enumerate() {
             column_index.insert(col.clone(), i);
         }
-
-        let rows = rows.into_iter().map(Row::new).collect();
-
         Self {
             columns,
-            rows,
+            values,
             column_index,
         }
     }
 
+    /// The row width, which is how many values belong to each row.
+    fn width(&self) -> usize {
+        self.columns.len()
+    }
+
+    /// The rows, as views into the one buffer.
+    pub fn rows(&self) -> impl Iterator<Item = Row<'_>> + '_ {
+        let width = self.width();
+        let chunks = if width == 0 {
+            [].chunks_exact(1)
+        } else {
+            self.values.chunks_exact(width)
+        };
+        chunks.map(|values| Row { values })
+    }
+
     pub fn len(&self) -> usize {
-        self.rows.len()
+        if self.width() == 0 {
+            0
+        } else {
+            self.values.len() / self.width()
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.rows.is_empty()
+        self.len() == 0
     }
 
-    pub fn get_row(&self, index: usize) -> Option<&Row> {
-        self.rows.get(index)
+    pub fn get_row(&self, index: usize) -> Option<Row<'_>> {
+        let width = self.width();
+        if width == 0 {
+            return None;
+        }
+        self.values
+            .get(index * width..(index + 1) * width)
+            .map(|values| Row { values })
     }
 
-    pub fn iter(&'_ self) -> std::slice::Iter<'_, Row> {
-        self.rows.iter()
+    pub fn iter(&self) -> impl Iterator<Item = Row<'_>> + '_ {
+        self.rows()
     }
 
     pub fn column_count(&self) -> usize {
@@ -52,7 +89,7 @@ impl ResultSet {
     }
 
     pub fn to_structs<T: FromRow>(&self) -> Result<Vec<T>> {
-        self.rows.iter().map(T::from_row).collect()
+        self.rows().map(|row| T::from_row(&row)).collect()
     }
 
     pub fn render_ascii_table(&self) -> String {
@@ -67,8 +104,7 @@ impl ResultSet {
             .collect::<Vec<_>>();
 
         let rendered_rows = self
-            .rows
-            .iter()
+            .rows()
             .map(|row| {
                 row.values
                     .iter()
@@ -101,22 +137,45 @@ impl ResultSet {
     }
 }
 
-impl IntoIterator for ResultSet {
-    type Item = Row;
-    type IntoIter = std::vec::IntoIter<Row>;
+impl<'a> IntoIterator for &'a ResultSet {
+    type Item = Row<'a>;
+    type IntoIter = std::iter::Map<std::slice::ChunksExact<'a, Value>, fn(&'a [Value]) -> Row<'a>>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.rows.into_iter()
+        let width = self.width();
+        let chunks = if width == 0 {
+            [].chunks_exact(1)
+        } else {
+            self.values.chunks_exact(width)
+        };
+        chunks.map(|values| Row { values })
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Row {
-    pub values: Vec<Value>,
+impl ResultSet {
+    /// The rows as owned vectors, for a caller that needs to keep them past the
+    /// result set.
+    pub fn into_row_vecs(self) -> Vec<Vec<Value>> {
+        let width = self.columns.len();
+        if width == 0 {
+            return Vec::new();
+        }
+        self.values.chunks_exact(width).map(<[Value]>::to_vec).collect()
+    }
 }
 
-impl Row {
-    pub fn new(values: Vec<Value>) -> Self {
+/// One row of a [`ResultSet`], borrowed from its buffer.
+///
+/// A row used to own a `Vec<Value>` of its own. That was the single allocation a
+/// scanned row made, and it was 24 % of a full scan's instructions.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Row<'a> {
+    pub values: &'a [Value],
+}
+
+impl<'a> Row<'a> {
+    /// A row borrowing an existing slice of values.
+    pub fn new(values: &'a [Value]) -> Self {
         Self { values }
     }
 
@@ -282,15 +341,15 @@ impl Row {
 }
 
 pub trait FromRow: Sized {
-    fn from_row(row: &Row) -> Result<Self>;
+    fn from_row(row: &Row<'_>) -> Result<Self>;
 }
 
-impl IntoIterator for Row {
-    type Item = Value;
-    type IntoIter = std::vec::IntoIter<Value>;
+impl<'a> IntoIterator for Row<'a> {
+    type Item = &'a Value;
+    type IntoIter = std::slice::Iter<'a, Value>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.values.into_iter()
+        self.values.iter()
     }
 }
 
@@ -333,7 +392,13 @@ impl ExecutedStatement {
                 "Ok".to_string(),
             ))
         } else {
-            Self::Query(ResultSet::new(query_result.columns, query_result.rows))
+            {
+                // Straight through: both sides store rows end to end in one buffer,
+                // so this is a move. Splitting it into a vector per row and joining
+                // it back would put back the allocation the flat layout removes.
+                let columns = query_result.columns.clone();
+                Self::Query(ResultSet::from_values(columns, query_result.into_values()))
+            }
         }
     }
 

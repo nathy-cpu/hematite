@@ -23,7 +23,7 @@ mod connection_tests {
     fn count_rows(conn: &mut Connection, table: &str) -> Result<i64> {
         let result = conn.execute(&format!("SELECT COUNT(*) FROM {table};"))?;
         let value = result
-            .rows
+            .rows()
             .first()
             .and_then(|row| row.first())
             .ok_or_else(|| HematiteError::InternalError("COUNT(*) returned no rows".to_string()))?;
@@ -66,15 +66,15 @@ mod connection_tests {
 
         let result = conn.execute("CREATE TABLE test (id INT PRIMARY KEY, name TEXT);")?;
         assert!(result.columns.is_empty());
-        assert!(result.rows.is_empty());
+        assert!(result.rows().is_empty());
 
         let result = conn.execute("INSERT INTO test (id, name) VALUES (1, 'test');")?;
         assert!(result.columns.is_empty());
-        assert!(result.rows.is_empty());
+        assert!(result.rows().is_empty());
 
         let result = conn.execute("SELECT * FROM test;")?;
         assert_eq!(result.columns, vec!["id", "name"]);
-        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows().len(), 1);
 
         conn.close()?;
         Ok(())
@@ -89,7 +89,7 @@ mod connection_tests {
 
         let result = conn.execute("SELECT * FROM test;")?;
         assert_eq!(result.columns, vec!["id", "name"]);
-        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows().len(), 1);
 
         conn.close()?;
         Ok(())
@@ -106,7 +106,7 @@ mod connection_tests {
         let result = conn.execute("SELECT i % 2 AS k FROM integers WHERE k <> 0 ORDER BY i;")?;
         assert_eq!(result.columns, vec!["k"]);
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![crate::catalog::Value::Integer(1)],
                 vec![crate::catalog::Value::Integer(1)],
@@ -128,7 +128,7 @@ mod connection_tests {
         let result = conn.execute("SELECT i % 2 AS i FROM integers WHERE i <> 0;")?;
         assert_eq!(result.columns, vec!["i"]);
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![crate::catalog::Value::Integer(1)],
                 vec![crate::catalog::Value::Integer(0)],
@@ -152,7 +152,7 @@ mod connection_tests {
             conn.execute("SELECT d.id, d.name FROM (SELECT * FROM items) AS d ORDER BY d.id;")?;
         assert_eq!(derived.columns, vec!["id", "name"]);
         assert_eq!(
-            derived.rows,
+            derived.rows(),
             vec![
                 vec![
                     crate::catalog::Value::Integer(1),
@@ -169,7 +169,7 @@ mod connection_tests {
             "WITH copied AS (SELECT * FROM items) SELECT id, name FROM copied ORDER BY id;",
         )?;
         assert_eq!(cte.columns, vec!["id", "name"]);
-        assert_eq!(cte.rows, derived.rows);
+        assert_eq!(cte.rows(), derived.rows());
 
         conn.close()?;
         Ok(())
@@ -193,7 +193,7 @@ mod connection_tests {
         let copied = conn.execute("SELECT state, score FROM copied_source ORDER BY score;")?;
         assert_eq!(copied.columns, vec!["state", "score"]);
         assert_eq!(
-            copied.rows,
+            copied.rows(),
             vec![
                 vec![
                     crate::catalog::Value::Text("draft".to_string()),
@@ -208,7 +208,7 @@ mod connection_tests {
 
         let show_create = conn.execute("SHOW CREATE TABLE copied_source;")?;
         assert!(matches!(
-            show_create.rows.first().and_then(|row| row.get(1)),
+            show_create.rows().first().and_then(|row| row.get(1)),
             Some(crate::catalog::Value::Text(sql))
                 if sql.contains("state TEXT")
                     && sql.contains("score INT")
@@ -294,7 +294,7 @@ mod connection_tests {
 
         let result = conn.execute("SELECT date, char, enum, binary FROM t WHERE id = 1;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![
                 crate::catalog::Value::Integer(2),
                 crate::catalog::Value::Integer(3),
@@ -319,7 +319,7 @@ mod connection_tests {
             "SELECT HEX(payload), LENGTH(payload), OCTET_LENGTH(payload), BIT_LENGTH(payload), UNHEX('48656C6C6F') FROM files;",
         )?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![
                 crate::catalog::Value::Text("48656C6C6F".to_string()),
                 crate::catalog::Value::Integer(5),
@@ -333,7 +333,7 @@ mod connection_tests {
             "SELECT CAST(X'78563412' AS INT), CAST(X'FFFFFFFF' AS INT), CAST(X'78563412' AS UINT) FROM files;",
         )?;
         assert_eq!(
-            int_casts.rows,
+            int_casts.rows(),
             vec![vec![
                 crate::catalog::Value::Integer(305419896),
                 crate::catalog::Value::Integer(-1),
@@ -400,11 +400,11 @@ mod connection_tests {
         let mut stmt = conn.prepare("INSERT INTO test (id, name) VALUES (1, 'test');")?;
         let result = stmt.execute(&mut conn)?;
         assert!(result.columns.is_empty());
-        assert!(result.rows.is_empty());
+        assert!(result.rows().is_empty());
         assert_eq!(result.affected_rows, 1);
 
         let query = conn.execute("SELECT * FROM test;")?;
-        assert_eq!(query.rows.len(), 1);
+        assert_eq!(query.rows().len(), 1);
 
         conn.close()?;
         Ok(())
@@ -424,9 +424,9 @@ mod connection_tests {
         stmt.execute(&mut conn)?;
 
         let query = conn.execute("SELECT * FROM test;")?;
-        assert_eq!(query.rows.len(), 1);
+        assert_eq!(query.rows().len(), 1);
         assert_eq!(
-            query.rows[0],
+            query.rows()[0],
             vec![
                 crate::catalog::Value::Integer(1),
                 crate::catalog::Value::Text("test".to_string()),
@@ -468,7 +468,7 @@ mod connection_tests {
         }
 
         let result = conn.execute("SELECT * FROM test;")?;
-        assert!(result.rows.is_empty());
+        assert!(result.rows().is_empty());
 
         {
             let mut tx = conn.begin_transaction()?;
@@ -477,9 +477,9 @@ mod connection_tests {
         }
 
         let result = conn.execute("SELECT * FROM test;")?;
-        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows().len(), 1);
         assert_eq!(
-            result.rows[0],
+            result.rows()[0],
             vec![
                 crate::catalog::Value::Integer(2),
                 crate::catalog::Value::Text("Bob".to_string()),
@@ -502,16 +502,16 @@ mod connection_tests {
         conn.execute("ROLLBACK;")?;
 
         let result = conn.execute("SELECT * FROM test;")?;
-        assert!(result.rows.is_empty());
+        assert!(result.rows().is_empty());
 
         conn.execute("BEGIN;")?;
         conn.execute("INSERT INTO test (id, name) VALUES (2, 'Bob');")?;
         conn.execute("COMMIT;")?;
 
         let result = conn.execute("SELECT * FROM test;")?;
-        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows().len(), 1);
         assert_eq!(
-            result.rows[0],
+            result.rows()[0],
             vec![
                 crate::catalog::Value::Integer(2),
                 crate::catalog::Value::Text("Bob".to_string()),
@@ -533,7 +533,7 @@ mod connection_tests {
 
         let explain = conn.execute("EXPLAIN SELECT * FROM users WHERE id = 1;")?;
         assert_eq!(explain.columns, vec!["kind", "detail"]);
-        assert!(!explain.rows.is_empty());
+        assert!(!explain.rows().is_empty());
 
         let describe = conn.execute("DESCRIBE users;")?;
         assert_eq!(
@@ -550,18 +550,19 @@ mod connection_tests {
                 "indexes",
             ]
         );
-        assert_eq!(describe.rows.len(), 3);
+        assert_eq!(describe.rows().len(), 3);
         assert_eq!(
-            describe.rows[0][7],
+            describe.rows()[0][7],
             crate::catalog::Value::Text("PRIMARY KEY".to_string())
         );
-        assert_eq!(describe.rows[0][8], crate::catalog::Value::Null);
-        let constraints = match &describe.rows[2][7] {
+        assert_eq!(describe.rows()[0][8], crate::catalog::Value::Null);
+        let describe_rows = describe.rows();
+        let constraints = match &describe_rows[2][7] {
             crate::catalog::Value::Text(value) => value,
             other => panic!("expected constraint text, found {other:?}"),
         };
         assert!(constraints.contains("UNIQUE"));
-        let indexes = match &describe.rows[2][8] {
+        let indexes = match &describe_rows[2][8] {
             crate::catalog::Value::Text(value) => value,
             other => panic!("expected index text, found {other:?}"),
         };
@@ -570,7 +571,7 @@ mod connection_tests {
         let show_tables = conn.execute("SHOW TABLES;")?;
         assert_eq!(show_tables.columns, vec!["table_name"]);
         assert_eq!(
-            show_tables.rows,
+            show_tables.rows(),
             vec![vec![crate::catalog::Value::Text("users".to_string())]]
         );
 
@@ -593,13 +594,14 @@ mod connection_tests {
             vec!["table_name", "index_name", "unique", "columns"]
         );
         assert!(indexes
-            .rows
+            .rows()
             .iter()
             .any(|row| { row[1] == crate::catalog::Value::Text("idx_users_org".to_string()) }));
 
         let show_create_table = conn.execute("SHOW CREATE TABLE users;")?;
         assert_eq!(show_create_table.columns, vec!["table_name", "create_sql"]);
-        let table_sql = match &show_create_table.rows[0][1] {
+        let show_create_rows = show_create_table.rows();
+        let table_sql = match &show_create_rows[0][1] {
             crate::catalog::Value::Text(sql) => sql,
             other => panic!("expected create sql text, found {other:?}"),
         };
@@ -627,17 +629,17 @@ mod connection_tests {
         let mut reopened = Connection::new(db.path())?;
 
         let show_tables = reopened.execute("SHOW TABLES;")?;
-        assert_eq!(show_tables.rows.len(), 2);
+        assert_eq!(show_tables.rows().len(), 2);
 
         let show_indexes = reopened.execute("SHOW INDEXES FROM users;")?;
         assert!(show_indexes
-            .rows
+            .rows()
             .iter()
             .any(|row| row[1] == crate::catalog::Value::Text("idx_users_org".to_string())));
 
         let show_create_table = reopened.execute("SHOW CREATE TABLE users;")?;
         assert_eq!(
-            show_create_table.rows[0][0],
+            show_create_table.rows()[0][0],
             crate::catalog::Value::Text("users".to_string())
         );
 
@@ -690,7 +692,7 @@ mod connection_tests {
 
         let result = conn.execute("SELECT id, name FROM users ORDER BY id ASC;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![
                     crate::catalog::Value::Integer(1),
@@ -755,7 +757,7 @@ mod connection_tests {
 
         let describe = conn.execute("DESCRIBE users;")?;
         assert!(describe
-            .rows
+            .rows()
             .iter()
             .any(|row| row[0] == crate::catalog::Value::Text("email".to_string())));
 
@@ -791,7 +793,7 @@ mod connection_tests {
         )?;
 
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![
                 crate::catalog::Value::Integer(1),
                 crate::catalog::Value::Boolean(true),
@@ -813,7 +815,7 @@ mod connection_tests {
         conn.execute("INSERT INTO metrics (id, precise) VALUES (1, 1.25);")?;
 
         let result = conn.execute("SELECT precise + 0.25 FROM metrics;")?;
-        assert_eq!(result.rows, vec![vec![crate::catalog::Value::Float(1.5)]]);
+        assert_eq!(result.rows(), vec![vec![crate::catalog::Value::Float(1.5)]]);
 
         conn.close()?;
         Ok(())
@@ -834,7 +836,7 @@ mod connection_tests {
         let result =
             conn.execute("SELECT id, ratio, amount, code, tiny, small, exact FROM metrics;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![
                 crate::catalog::Value::UBigInt(1),
                 crate::catalog::Value::Float32(1.5),
@@ -872,7 +874,7 @@ mod connection_tests {
 
         let result = conn.execute("SELECT tiny, small, normal, large FROM ints ORDER BY id;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![
                 crate::catalog::Value::Integer(127),
                 crate::catalog::Value::Integer(32000),
@@ -883,7 +885,7 @@ mod connection_tests {
 
         let show_create = conn.execute("SHOW CREATE TABLE ints;")?;
         assert!(matches!(
-            show_create.rows.first().and_then(|row| row.get(1)),
+            show_create.rows().first().and_then(|row| row.get(1)),
             Some(crate::catalog::Value::Text(sql))
                 if sql.contains("tiny INT8")
                     && sql.contains("small INT16")
@@ -921,7 +923,7 @@ mod connection_tests {
 
         let result = conn.execute("SELECT id, tiny, small, normal, large FROM uints;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![
                 crate::catalog::Value::UInteger(1),
                 crate::catalog::Value::UInteger(255),
@@ -932,7 +934,7 @@ mod connection_tests {
         );
 
         let result_set =
-            crate::sql::result::ResultSet::new(result.columns.clone(), result.rows.clone());
+            crate::sql::result::ResultSet::new(result.columns.clone(), result.rows().to_vec());
         let row = result_set.get_row(0).unwrap();
         assert_eq!(row.get_uint(0)?, 1);
         assert_eq!(row.get_uint(1)?, 255);
@@ -954,7 +956,7 @@ mod connection_tests {
         conn.execute("ALTER TABLE users RENAME TO members;")?;
 
         let result = conn.execute("SELECT * FROM members;")?;
-        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows().len(), 1);
         assert!(conn.execute("SELECT * FROM users;").is_err());
 
         conn.close()?;
@@ -972,7 +974,7 @@ mod connection_tests {
 
         let result = conn.execute("SELECT full_name FROM users;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![crate::catalog::Value::Text("alice".to_string())]]
         );
         assert!(conn.execute("SELECT name FROM users;").is_err());
@@ -996,7 +998,7 @@ mod connection_tests {
         )?;
 
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![
                     crate::catalog::Value::Text("ally".to_string()),
@@ -1030,7 +1032,7 @@ mod connection_tests {
 
         let result = conn.execute("SELECT name, nickname FROM users WHERE id = 1;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![
                 crate::catalog::Value::Text("alice".to_string()),
                 crate::catalog::Value::Null,
@@ -1056,7 +1058,7 @@ mod connection_tests {
         )?;
 
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![
                     crate::catalog::Value::Text("alice".to_string()),
@@ -1089,7 +1091,7 @@ mod connection_tests {
         let result =
             conn.execute("SELECT nickname FROM users WHERE LOWER(TRIM(name)) = 'alice';")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![crate::catalog::Value::Text("ALICE".to_string())]]
         );
 
@@ -1112,7 +1114,7 @@ mod connection_tests {
         )?;
 
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![
                     crate::catalog::Value::Integer(7),
@@ -1146,7 +1148,7 @@ mod connection_tests {
 
         let result = conn.execute("SELECT amount, delta FROM metrics WHERE ABS(delta) = 4;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![
                 crate::catalog::Value::Float(1.3),
                 crate::catalog::Value::Integer(4),
@@ -1169,7 +1171,7 @@ mod connection_tests {
         let result =
             conn.execute("SELECT id FROM metrics WHERE ROUND(amount) IN (1, 2) ORDER BY id ASC;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![crate::catalog::Value::Integer(1)],
                 vec![crate::catalog::Value::Integer(2)],
@@ -1213,7 +1215,7 @@ mod connection_tests {
         )?;
 
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![crate::catalog::Value::Text("A".to_string())],
                 vec![crate::catalog::Value::Text("B".to_string())],
@@ -1237,7 +1239,7 @@ mod connection_tests {
 
         let result = conn.execute("SELECT label FROM grades ORDER BY id ASC;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![crate::catalog::Value::Text("top".to_string())],
                 vec![crate::catalog::Value::Text("base".to_string())],
@@ -1263,7 +1265,7 @@ mod connection_tests {
         )?;
 
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![
                     crate::catalog::Value::Boolean(false),
@@ -1297,7 +1299,7 @@ mod connection_tests {
 
         let result = conn.execute("SELECT id, enabled FROM flags ORDER BY id ASC;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![
                     crate::catalog::Value::Integer(1),
@@ -1343,7 +1345,7 @@ mod connection_tests {
         )?;
 
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![
                     crate::catalog::Value::Text("Ada Lovelace".to_string()),
@@ -1371,7 +1373,7 @@ mod connection_tests {
         let result = conn
             .execute("SELECT CONCAT(name, nickname), CONCAT_WS(':', name, nickname) FROM users;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![
                 crate::catalog::Value::Null,
                 crate::catalog::Value::Text("Ada".to_string()),
@@ -1394,7 +1396,7 @@ mod connection_tests {
             "SELECT SUBSTRING(title, 2, 4), SUBSTR(title, -4), LEFT(title, 3), RIGHT(title, 2) FROM docs;",
         )?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![
                 crate::catalog::Value::Text("emat".to_string()),
                 crate::catalog::Value::Text("tite".to_string()),
@@ -1421,7 +1423,7 @@ mod connection_tests {
         let result =
             conn.execute("SELECT short_code FROM docs WHERE SUBSTRING(title, 5) = 'tite';")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![crate::catalog::Value::Text("ite".to_string())]]
         );
 
@@ -1441,7 +1443,7 @@ mod connection_tests {
             "SELECT GREATEST(score, floor, 6), LEAST(score, floor, 6) FROM metrics ORDER BY id ASC;",
         )?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![
                     crate::catalog::Value::Integer(8),
@@ -1467,7 +1469,7 @@ mod connection_tests {
             "SELECT CASE WHEN score > 10 THEN 'high' END, LEAST(score, 7) FROM metrics;",
         )?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![
                 crate::catalog::Value::Null,
                 crate::catalog::Value::Integer(5),
@@ -1497,7 +1499,7 @@ mod connection_tests {
             "SELECT REPLACE(title, '-', ' '), REPEAT(code, 3), REVERSE(code) FROM docs;",
         )?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![
                 crate::catalog::Value::Text("hematite db".to_string()),
                 crate::catalog::Value::Text("ababab".to_string()),
@@ -1522,7 +1524,7 @@ mod connection_tests {
 
         let result = conn.execute("SELECT title, code, REVERSE(NULL) FROM docs;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![
                 crate::catalog::Value::Text("hematite_db".to_string()),
                 crate::catalog::Value::Text("baba".to_string()),
@@ -1546,7 +1548,7 @@ mod connection_tests {
             "SELECT LOCATE('ti', title), LOCATE('ta', title, 4) FROM docs ORDER BY id ASC;",
         )?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![
                     crate::catalog::Value::Integer(5),
@@ -1573,7 +1575,7 @@ mod connection_tests {
 
         let result =
             conn.execute("SELECT id FROM docs WHERE LOCATE('ta', title) > 0 ORDER BY id ASC;")?;
-        assert_eq!(result.rows, vec![vec![crate::catalog::Value::Integer(2)]]);
+        assert_eq!(result.rows(), vec![vec![crate::catalog::Value::Integer(2)]]);
 
         conn.close()?;
         Ok(())
@@ -1591,7 +1593,7 @@ mod connection_tests {
             "SELECT CEIL(score), CEILING(score), FLOOR(score), POWER(score, exponent), POW(2, exponent) FROM metrics;",
         )?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![
                 crate::catalog::Value::Float(3.0),
                 crate::catalog::Value::Float(3.0),
@@ -1616,7 +1618,7 @@ mod connection_tests {
 
         let result =
             conn.execute("SELECT bucket FROM metrics WHERE POWER(FLOOR(score), 2) = 4;")?;
-        assert_eq!(result.rows, vec![vec![crate::catalog::Value::Float(3.0)]]);
+        assert_eq!(result.rows(), vec![vec![crate::catalog::Value::Float(3.0)]]);
 
         conn.close()?;
         Ok(())
@@ -1634,7 +1636,7 @@ mod connection_tests {
             "SELECT REPEAT(title, -2), LOCATE('', title, 2), CEIL(NULL), POWER(NULL, 2) FROM docs;",
         )?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![
                 crate::catalog::Value::Text(String::new()),
                 crate::catalog::Value::Integer(2),
@@ -1811,7 +1813,7 @@ mod connection_tests {
         conn.execute("UPDATE parents SET x = 11, y = 21 WHERE x = 10 AND y = 20;")?;
         let result = conn.execute("SELECT parent_x, parent_y FROM children WHERE id = 1;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![
                 crate::catalog::Value::Integer(11),
                 crate::catalog::Value::Integer(21),
@@ -1837,7 +1839,7 @@ mod connection_tests {
         conn.execute("DELETE FROM parents WHERE x = 10 AND y = 20;")?;
         let result = conn.execute("SELECT parent_x, parent_y FROM children WHERE id = 1;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![
                 crate::catalog::Value::Null,
                 crate::catalog::Value::Null,
@@ -1909,7 +1911,7 @@ mod connection_tests {
 
         let result = conn.execute("SELECT * FROM users;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![
                 crate::catalog::Value::Integer(1),
                 crate::catalog::Value::Text("alice".to_string()),
@@ -1920,7 +1922,7 @@ mod connection_tests {
         conn.execute("INSERT INTO users (id, name) VALUES (2, 'bob');")?;
         let result = conn.execute("SELECT active FROM users WHERE id = 2;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![crate::catalog::Value::Boolean(true)]]
         );
 
@@ -1939,7 +1941,7 @@ mod connection_tests {
 
         let result = conn.execute("SELECT * FROM users;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![
                 crate::catalog::Value::Integer(1),
                 crate::catalog::Value::Text("alice".to_string()),
@@ -2018,7 +2020,7 @@ mod connection_tests {
 
         let result = conn.execute("SELECT id, active FROM users ORDER BY id ASC;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![
                     crate::catalog::Value::Integer(1),
@@ -2049,7 +2051,7 @@ mod connection_tests {
         conn.execute("INSERT INTO users (id) VALUES (1);")?;
         let result = conn.execute("SELECT active FROM users WHERE id = 1;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![crate::catalog::Value::Boolean(true)]]
         );
 
@@ -2067,7 +2069,7 @@ mod connection_tests {
         conn.execute("INSERT INTO users (id) VALUES (1);")?;
 
         let result = conn.execute("SELECT active FROM users WHERE id = 1;")?;
-        assert_eq!(result.rows, vec![vec![crate::catalog::Value::Null]]);
+        assert_eq!(result.rows(), vec![vec![crate::catalog::Value::Null]]);
 
         conn.close()?;
         Ok(())
@@ -2139,7 +2141,7 @@ mod connection_tests {
         conn.execute("INSERT INTO users (id, active) VALUES (1, NULL);")?;
 
         let result = conn.execute("SELECT active FROM users WHERE id = 1;")?;
-        assert_eq!(result.rows, vec![vec![crate::catalog::Value::Null]]);
+        assert_eq!(result.rows(), vec![vec![crate::catalog::Value::Null]]);
 
         conn.close()?;
         Ok(())
@@ -2260,7 +2262,7 @@ mod connection_tests {
         conn.execute("INSERT INTO edges (src, dst, weight) VALUES (1, 3, 9);")?;
 
         let result = conn.execute("SELECT weight FROM edges WHERE src = 1 AND dst = 2;")?;
-        assert_eq!(result.rows, vec![vec![crate::catalog::Value::Integer(7)]]);
+        assert_eq!(result.rows(), vec![vec![crate::catalog::Value::Integer(7)]]);
 
         conn.close()?;
         Ok(())
@@ -2284,7 +2286,7 @@ mod connection_tests {
         let result =
             conn.execute("SELECT role FROM memberships WHERE user_id = 10 AND org_id = 20;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![crate::catalog::Value::Text("owner".to_string())]]
         );
 
@@ -2329,7 +2331,7 @@ mod connection_tests {
 
         conn2.execute("INSERT INTO test (id, name) VALUES (2, 'Bob');")?;
         let result = conn2.execute("SELECT * FROM test;")?;
-        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows().len(), 1);
 
         conn1.close()?;
         conn2.close()?;
@@ -2354,7 +2356,7 @@ mod connection_tests {
         drop(tx);
 
         let result = conn2.execute("SELECT * FROM test;")?;
-        assert!(result.rows.is_empty());
+        assert!(result.rows().is_empty());
 
         conn1.close()?;
         conn2.close()?;
@@ -2377,9 +2379,9 @@ mod connection_tests {
         tx.execute("INSERT INTO test (id, name) VALUES (2, 'Bob');")?;
 
         let result = conn2.execute("SELECT * FROM test ORDER BY id;")?;
-        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows().len(), 1);
         assert_eq!(
-            result.rows[0],
+            result.rows()[0],
             vec![
                 crate::catalog::Value::Integer(1),
                 crate::catalog::Value::Text("Alice".to_string()),
@@ -2390,9 +2392,9 @@ mod connection_tests {
         drop(tx);
 
         let result = conn2.execute("SELECT * FROM test ORDER BY id;")?;
-        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.rows().len(), 2);
         assert_eq!(
-            result.rows[1],
+            result.rows()[1],
             vec![
                 crate::catalog::Value::Integer(2),
                 crate::catalog::Value::Text("Bob".to_string()),
@@ -2497,7 +2499,7 @@ mod connection_tests {
         let total = count_rows(&mut verify, "items")?;
         assert_eq!(total, (WRITERS * INSERTS_PER_WRITER) as i64);
         let ordered = verify.execute("SELECT id FROM items ORDER BY id;")?;
-        assert_eq!(ordered.rows.len(), WRITERS * INSERTS_PER_WRITER);
+        assert_eq!(ordered.rows().len(), WRITERS * INSERTS_PER_WRITER);
         verify.close()?;
         Ok(())
     }
@@ -2681,7 +2683,7 @@ mod connection_tests {
         conn.execute("INSERT INTO t (id, a) VALUES (1, 10), (2, 20), (5, 50);")?;
 
         assert_eq!(
-            conn.execute("SELECT a FROM t WHERE id = 5;")?.rows.len(),
+            conn.execute("SELECT a FROM t WHERE id = 5;")?.rows().len(),
             1,
             "point lookup by primary key"
         );
@@ -2695,26 +2697,26 @@ mod connection_tests {
             "a duplicate key was accepted: {duplicate:?}"
         );
         assert_eq!(
-            conn.execute("SELECT a FROM t WHERE id = 2;")?.rows.len(),
+            conn.execute("SELECT a FROM t WHERE id = 2;")?.rows().len(),
             1,
             "the refused insert must not have overwritten the row it collided with"
         );
 
         // The key names the row id, so changing the key moves the row.
         conn.execute("UPDATE t SET id = 7 WHERE id = 1;")?;
-        assert!(conn.execute("SELECT a FROM t WHERE id = 1;")?.rows.is_empty());
-        assert_eq!(conn.execute("SELECT a FROM t WHERE id = 7;")?.rows.len(), 1);
+        assert!(conn.execute("SELECT a FROM t WHERE id = 1;")?.rows().is_empty());
+        assert_eq!(conn.execute("SELECT a FROM t WHERE id = 7;")?.rows().len(), 1);
 
         conn.execute("DELETE FROM t WHERE id = 2;")?;
-        assert!(conn.execute("SELECT a FROM t WHERE id = 2;")?.rows.is_empty());
-        assert_eq!(conn.execute("SELECT id FROM t;")?.rows.len(), 2);
+        assert!(conn.execute("SELECT a FROM t WHERE id = 2;")?.rows().is_empty());
+        assert_eq!(conn.execute("SELECT id FROM t;")?.rows().len(), 2);
 
         // Survives a reopen: the rows have to be findable by key with nothing but
         // the table tree to go on.
         conn.close()?;
         let mut reopened = Connection::new(db.path())?;
         assert_eq!(
-            reopened.execute("SELECT a FROM t WHERE id = 7;")?.rows.len(),
+            reopened.execute("SELECT a FROM t WHERE id = 7;")?.rows().len(),
             1
         );
         reopened.close()?;
@@ -2736,13 +2738,13 @@ mod connection_tests {
         conn.execute("CREATE TABLE t (id INT PRIMARY KEY, a INT);")?;
         conn.execute("INSERT INTO t (id, a) VALUES (5, 50), (-3, 30), (1, 10), (-100, 99), (0, 0);")?;
 
-        assert_eq!(conn.execute("SELECT a FROM t WHERE id = -3;")?.rows.len(), 1);
-        assert_eq!(conn.execute("SELECT a FROM t WHERE id = -100;")?.rows.len(), 1);
+        assert_eq!(conn.execute("SELECT a FROM t WHERE id = -3;")?.rows().len(), 1);
+        assert_eq!(conn.execute("SELECT a FROM t WHERE id = -100;")?.rows().len(), 1);
 
         // No ORDER BY: this is the order the table itself is in.
         let scanned: Vec<i32> = conn
             .execute("SELECT id FROM t;")?
-            .rows
+            .rows()
             .iter()
             .map(|row| match row.first() {
                 Some(crate::catalog::Value::Integer(value)) => *value,
@@ -2867,7 +2869,7 @@ mod connection_tests {
         let mut reopened = Connection::new(db.path())?;
         assert_eq!(reopened.journal_mode()?, JournalMode::Rollback);
         let result = reopened.execute("SELECT * FROM test;")?;
-        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows().len(), 1);
         reopened.close()?;
         Ok(())
     }
@@ -2888,9 +2890,9 @@ mod connection_tests {
         conn.execute("INSERT INTO test (name, id) VALUES ('test', 1);")?;
 
         let result = conn.execute("SELECT * FROM test;")?;
-        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows().len(), 1);
         assert_eq!(
-            result.rows[0],
+            result.rows()[0],
             vec![
                 crate::catalog::Value::Integer(1),
                 crate::catalog::Value::Text("test".to_string()),
@@ -2951,9 +2953,9 @@ mod connection_tests {
         assert!(result.is_err());
 
         let result = conn.execute("SELECT * FROM test;")?;
-        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows().len(), 1);
         assert_eq!(
-            result.rows[0],
+            result.rows()[0],
             vec![
                 crate::catalog::Value::Integer(1),
                 crate::catalog::Value::Text("Alice".to_string()),
@@ -2975,7 +2977,7 @@ mod connection_tests {
         assert!(result.is_err());
 
         let result = conn.execute("SELECT * FROM test;")?;
-        assert!(result.rows.is_empty());
+        assert!(result.rows().is_empty());
 
         conn.close()?;
         Ok(())
@@ -2998,7 +3000,7 @@ mod connection_tests {
         assert_eq!(index.column_indices, vec![1]);
 
         let result = conn.execute("SELECT id FROM users WHERE email = 'b@example.com';")?;
-        assert_eq!(result.rows, vec![vec![crate::catalog::Value::Integer(2)]]);
+        assert_eq!(result.rows(), vec![vec![crate::catalog::Value::Integer(2)]]);
 
         conn.execute("DROP INDEX idx_users_email ON users;")?;
         let schema = conn.schema_snapshot()?;
@@ -3035,18 +3037,18 @@ mod connection_tests {
         conn.execute("INSERT INTO test (id, name) VALUES (2, 'Alice');")?;
 
         let eq_null = conn.execute("SELECT * FROM test WHERE name = NULL;")?;
-        assert_eq!(eq_null.rows.len(), 0);
+        assert_eq!(eq_null.rows().len(), 0);
 
         let neq_null = conn.execute("SELECT * FROM test WHERE name != NULL;")?;
-        assert_eq!(neq_null.rows.len(), 0);
+        assert_eq!(neq_null.rows().len(), 0);
 
         let null_eq_null = conn.execute("SELECT * FROM test WHERE NULL = NULL;")?;
-        assert_eq!(null_eq_null.rows.len(), 0);
+        assert_eq!(null_eq_null.rows().len(), 0);
 
         let eq_text = conn.execute("SELECT * FROM test WHERE name = 'Alice';")?;
-        assert_eq!(eq_text.rows.len(), 1);
+        assert_eq!(eq_text.rows().len(), 1);
         assert_eq!(
-            eq_text.rows[0],
+            eq_text.rows()[0],
             vec![
                 crate::catalog::Value::Integer(2),
                 crate::catalog::Value::Text("Alice".to_string()),
@@ -3075,15 +3077,15 @@ mod connection_tests {
         let result =
             conn.execute("SELECT id FROM test WHERE id = 1 OR id = 2 AND active = TRUE;")?;
 
-        assert_eq!(result.rows.len(), 2);
-        assert_eq!(result.rows[0], vec![crate::catalog::Value::Integer(1)]);
-        assert_eq!(result.rows[1], vec![crate::catalog::Value::Integer(2)]);
+        assert_eq!(result.rows().len(), 2);
+        assert_eq!(result.rows()[0], vec![crate::catalog::Value::Integer(1)]);
+        assert_eq!(result.rows()[1], vec![crate::catalog::Value::Integer(2)]);
 
         let parenthesized =
             conn.execute("SELECT id FROM test WHERE (id = 1 OR id = 2) AND active = TRUE;")?;
-        assert_eq!(parenthesized.rows.len(), 1);
+        assert_eq!(parenthesized.rows().len(), 1);
         assert_eq!(
-            parenthesized.rows[0],
+            parenthesized.rows()[0],
             vec![crate::catalog::Value::Integer(2)]
         );
 
@@ -3101,12 +3103,12 @@ mod connection_tests {
         conn.execute("INSERT INTO test (id, name) VALUES (2, 'Alice');")?;
 
         let is_null = conn.execute("SELECT * FROM test WHERE name IS NULL;")?;
-        assert_eq!(is_null.rows.len(), 1);
-        assert_eq!(is_null.rows[0][0], crate::catalog::Value::Integer(1));
+        assert_eq!(is_null.rows().len(), 1);
+        assert_eq!(is_null.rows()[0][0], crate::catalog::Value::Integer(1));
 
         let is_not_null = conn.execute("SELECT * FROM test WHERE name IS NOT NULL;")?;
-        assert_eq!(is_not_null.rows.len(), 1);
-        assert_eq!(is_not_null.rows[0][0], crate::catalog::Value::Integer(2));
+        assert_eq!(is_not_null.rows().len(), 1);
+        assert_eq!(is_not_null.rows()[0][0], crate::catalog::Value::Integer(2));
 
         conn.close()?;
         Ok(())
@@ -3124,7 +3126,7 @@ mod connection_tests {
 
         let asc = conn.execute("SELECT id FROM test ORDER BY name ASC, id ASC;")?;
         assert_eq!(
-            asc.rows,
+            asc.rows(),
             vec![
                 vec![crate::catalog::Value::Integer(3)],
                 vec![crate::catalog::Value::Integer(1)],
@@ -3134,7 +3136,7 @@ mod connection_tests {
 
         let desc = conn.execute("SELECT id FROM test ORDER BY name DESC, id DESC;")?;
         assert_eq!(
-            desc.rows,
+            desc.rows(),
             vec![
                 vec![crate::catalog::Value::Integer(2)],
                 vec![crate::catalog::Value::Integer(1)],
@@ -3161,7 +3163,7 @@ mod connection_tests {
 
         assert_eq!(result.columns, vec!["user_name"]);
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![crate::catalog::Value::Text("Alice".to_string())]]
         );
 
@@ -3186,9 +3188,9 @@ mod connection_tests {
         )?;
 
         assert_eq!(result.columns, vec!["name", "title"]);
-        assert_eq!(result.rows.len(), 4);
+        assert_eq!(result.rows().len(), 4);
         assert_eq!(
-            result.rows[0],
+            result.rows()[0],
             vec![
                 crate::catalog::Value::Text("Alice".to_string()),
                 crate::catalog::Value::Text("First".to_string()),
@@ -3218,7 +3220,7 @@ mod connection_tests {
 
         assert_eq!(result.columns, vec!["name", "title"]);
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![
                     crate::catalog::Value::Text("Alice".to_string()),
@@ -3274,7 +3276,7 @@ mod connection_tests {
 
         assert_eq!(result.columns, vec!["name", "post_count"]);
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![
                     crate::catalog::Value::Text("Alice".to_string()),
@@ -3305,7 +3307,7 @@ mod connection_tests {
 
         assert_eq!(result.columns, vec!["name"]);
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![crate::catalog::Value::Text("Alice".to_string())],
                 vec![crate::catalog::Value::Text("Bob".to_string())],
@@ -3328,7 +3330,7 @@ mod connection_tests {
 
         let included = conn.execute("SELECT id FROM test WHERE id IN (1, 3) ORDER BY id ASC;")?;
         assert_eq!(
-            included.rows,
+            included.rows(),
             vec![
                 vec![crate::catalog::Value::Integer(1)],
                 vec![crate::catalog::Value::Integer(3)],
@@ -3337,7 +3339,7 @@ mod connection_tests {
 
         let excluded =
             conn.execute("SELECT id FROM test WHERE id NOT IN (1, 3) ORDER BY id ASC;")?;
-        assert_eq!(excluded.rows, vec![vec![crate::catalog::Value::Integer(2)]]);
+        assert_eq!(excluded.rows(), vec![vec![crate::catalog::Value::Integer(2)]]);
 
         conn.close()?;
         Ok(())
@@ -3361,7 +3363,7 @@ mod connection_tests {
             "SELECT id FROM users WHERE id IN (SELECT user_id FROM posts) ORDER BY id ASC;",
         )?;
         assert_eq!(
-            in_result.rows,
+            in_result.rows(),
             vec![
                 vec![crate::catalog::Value::Integer(1)],
                 vec![crate::catalog::Value::Integer(3)],
@@ -3372,7 +3374,7 @@ mod connection_tests {
             "SELECT id FROM users WHERE id NOT IN (SELECT user_id FROM posts) ORDER BY id ASC;",
         )?;
         assert_eq!(
-            not_in_result.rows,
+            not_in_result.rows(),
             vec![vec![crate::catalog::Value::Integer(2)]]
         );
 
@@ -3380,7 +3382,7 @@ mod connection_tests {
             "SELECT id FROM users WHERE EXISTS (SELECT user_id FROM posts WHERE user_id = 1) ORDER BY id ASC;",
         )?;
         assert_eq!(
-            exists_result.rows,
+            exists_result.rows(),
             vec![
                 vec![crate::catalog::Value::Integer(1)],
                 vec![crate::catalog::Value::Integer(2)],
@@ -3392,7 +3394,7 @@ mod connection_tests {
             "SELECT id FROM users WHERE NOT EXISTS (SELECT user_id FROM posts WHERE user_id = 99) ORDER BY id ASC;",
         )?;
         assert_eq!(
-            not_exists_result.rows,
+            not_exists_result.rows(),
             vec![
                 vec![crate::catalog::Value::Integer(1)],
                 vec![crate::catalog::Value::Integer(2)],
@@ -3420,7 +3422,7 @@ mod connection_tests {
         let union_result = conn.execute("SELECT id FROM users UNION SELECT user_id FROM posts;")?;
         assert_eq!(union_result.columns, vec!["id"]);
         assert_eq!(
-            union_result.rows,
+            union_result.rows(),
             vec![
                 vec![crate::catalog::Value::Integer(1)],
                 vec![crate::catalog::Value::Integer(2)],
@@ -3430,7 +3432,7 @@ mod connection_tests {
         let union_all_result =
             conn.execute("SELECT id FROM users UNION ALL SELECT user_id FROM posts;")?;
         assert_eq!(
-            union_all_result.rows,
+            union_all_result.rows(),
             vec![
                 vec![crate::catalog::Value::Integer(1)],
                 vec![crate::catalog::Value::Integer(2)],
@@ -3461,7 +3463,7 @@ mod connection_tests {
         let intersect = conn
             .execute("SELECT id FROM users INTERSECT SELECT user_id FROM posts ORDER BY id ASC;")?;
         assert_eq!(
-            intersect.rows,
+            intersect.rows(),
             vec![
                 vec![crate::catalog::Value::Integer(2)],
                 vec![crate::catalog::Value::Integer(3)],
@@ -3470,7 +3472,7 @@ mod connection_tests {
 
         let except =
             conn.execute("SELECT id FROM users EXCEPT SELECT user_id FROM posts ORDER BY id ASC;")?;
-        assert_eq!(except.rows, vec![vec![crate::catalog::Value::Integer(1)]]);
+        assert_eq!(except.rows(), vec![vec![crate::catalog::Value::Integer(1)]]);
 
         conn.close()?;
         Ok(())
@@ -3492,14 +3494,14 @@ mod connection_tests {
             "SELECT (SELECT COUNT(*) FROM posts) AS post_count FROM users ORDER BY id ASC LIMIT 1;",
         )?;
         assert_eq!(
-            projected.rows,
+            projected.rows(),
             vec![vec![crate::catalog::Value::Integer(2)]]
         );
 
         let filtered =
             conn.execute("SELECT name FROM users WHERE id = (SELECT MIN(user_id) FROM posts);")?;
         assert_eq!(
-            filtered.rows,
+            filtered.rows(),
             vec![vec![crate::catalog::Value::Text("alice".to_string())]]
         );
 
@@ -3525,7 +3527,7 @@ mod connection_tests {
             "SELECT u.id FROM users AS u WHERE EXISTS (SELECT p.user_id FROM posts AS p WHERE p.user_id = u.id) ORDER BY u.id ASC;",
         )?;
         assert_eq!(
-            exists.rows,
+            exists.rows(),
             vec![
                 vec![crate::catalog::Value::Integer(1)],
                 vec![crate::catalog::Value::Integer(3)],
@@ -3536,7 +3538,7 @@ mod connection_tests {
             "SELECT u.id FROM users AS u WHERE u.id IN (SELECT p.user_id FROM posts AS p WHERE p.user_id = u.id) ORDER BY u.id ASC;",
         )?;
         assert_eq!(
-            in_result.rows,
+            in_result.rows(),
             vec![
                 vec![crate::catalog::Value::Integer(1)],
                 vec![crate::catalog::Value::Integer(3)],
@@ -3565,7 +3567,7 @@ mod connection_tests {
             "SELECT u.id, (SELECT COUNT(*) FROM posts AS p WHERE p.user_id = u.id) AS post_count FROM users AS u ORDER BY u.id ASC;",
         )?;
         assert_eq!(
-            projected.rows,
+            projected.rows(),
             vec![
                 vec![
                     crate::catalog::Value::Integer(1),
@@ -3601,7 +3603,7 @@ mod connection_tests {
 
         assert_eq!(result.columns, vec!["user_id"]);
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![crate::catalog::Value::Integer(1)],
                 vec![crate::catalog::Value::Integer(2)],
@@ -3628,7 +3630,7 @@ mod connection_tests {
 
         assert_eq!(result.columns, vec!["user_id"]);
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![crate::catalog::Value::Integer(1)],
                 vec![crate::catalog::Value::Integer(2)],
@@ -3656,7 +3658,7 @@ mod connection_tests {
 
         assert_eq!(result.columns, vec!["name", "title"]);
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![
                     crate::catalog::Value::Text("Alice".to_string()),
@@ -3689,7 +3691,7 @@ mod connection_tests {
         )?;
 
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![
                     crate::catalog::Value::Text("Alice".to_string()),
@@ -3723,7 +3725,7 @@ mod connection_tests {
         )?;
 
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![
                     crate::catalog::Value::Null,
@@ -3814,7 +3816,7 @@ mod connection_tests {
         let mut reopened = Connection::new(db.path())?;
 
         let describe = reopened.execute("DESCRIBE users;")?;
-        let email_constraints = match &describe.rows[1][7] {
+        let email_constraints = match &describe.rows()[1][7] {
             crate::catalog::Value::Text(value) => value.clone(),
             crate::catalog::Value::Null => String::new(),
             other => panic!("expected text or null, found {other:?}"),
@@ -3823,7 +3825,7 @@ mod connection_tests {
 
         let show_indexes = reopened.execute("SHOW INDEXES FROM users;")?;
         assert!(show_indexes
-            .rows
+            .rows()
             .iter()
             .any(|row| row[1] == crate::catalog::Value::Text("idx_users_org".to_string())));
 
@@ -3845,7 +3847,7 @@ mod connection_tests {
         let result =
             conn.execute("SELECT id FROM test WHERE id BETWEEN 2 AND 3 ORDER BY id ASC;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![crate::catalog::Value::Integer(2)],
                 vec![crate::catalog::Value::Integer(3)],
@@ -3868,7 +3870,7 @@ mod connection_tests {
 
         let like = conn.execute("SELECT id FROM test WHERE name LIKE 'Al%' ORDER BY id ASC;")?;
         assert_eq!(
-            like.rows,
+            like.rows(),
             vec![
                 vec![crate::catalog::Value::Integer(1)],
                 vec![crate::catalog::Value::Integer(2)],
@@ -3877,7 +3879,7 @@ mod connection_tests {
 
         let not_like =
             conn.execute("SELECT id FROM test WHERE name NOT LIKE 'Al%' ORDER BY id ASC;")?;
-        assert_eq!(not_like.rows, vec![vec![crate::catalog::Value::Integer(3)]]);
+        assert_eq!(not_like.rows(), vec![vec![crate::catalog::Value::Integer(3)]]);
 
         conn.close()?;
         Ok(())
@@ -3895,7 +3897,7 @@ mod connection_tests {
 
         let result =
             conn.execute("SELECT id FROM test WHERE NOT (id = 1 OR id = 2) ORDER BY id ASC;")?;
-        assert_eq!(result.rows, vec![vec![crate::catalog::Value::Integer(3)]]);
+        assert_eq!(result.rows(), vec![vec![crate::catalog::Value::Integer(3)]]);
 
         conn.close()?;
         Ok(())
@@ -3916,7 +3918,7 @@ mod connection_tests {
         )?;
         assert_eq!(result.columns, vec!["next_score"]);
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![crate::catalog::Value::Integer(3)],
                 vec![crate::catalog::Value::Integer(4)],
@@ -3938,7 +3940,7 @@ mod connection_tests {
 
         let result = conn.execute("SELECT id, score FROM test ORDER BY id ASC;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![
                 crate::catalog::Value::Integer(2),
                 crate::catalog::Value::Integer(2)
@@ -3964,7 +3966,7 @@ mod connection_tests {
         )?;
 
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![
                 crate::catalog::Value::Float(3.75),
                 crate::catalog::Value::Decimal(crate::catalog::DecimalValue::parse("-5.5")?),
@@ -4000,7 +4002,7 @@ mod connection_tests {
         )?;
 
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![
                 crate::catalog::Value::Integer(-2),
                 crate::catalog::Value::Decimal(crate::catalog::DecimalValue::parse("7.75")?),
@@ -4035,7 +4037,7 @@ mod connection_tests {
             "SELECT score % 2 AS remainder, CAST(label AS INT) AS parsed FROM test WHERE id = 1;",
         )?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![
                 crate::catalog::Value::Integer(1),
                 crate::catalog::Value::Integer(7),
@@ -4044,7 +4046,7 @@ mod connection_tests {
 
         conn.execute("UPDATE test SET score = CAST(label AS INT) % 3 WHERE id = 1;")?;
         let updated = conn.execute("SELECT score FROM test WHERE id = 1;")?;
-        assert_eq!(updated.rows, vec![vec![crate::catalog::Value::Integer(1)]]);
+        assert_eq!(updated.rows(), vec![vec![crate::catalog::Value::Integer(1)]]);
 
         let bad_cast = conn.execute("SELECT CAST(label AS INT) FROM test WHERE id = 2;");
         assert!(bad_cast.is_err());
@@ -4075,7 +4077,7 @@ mod connection_tests {
 
         let result = conn.execute("SELECT id, amount, payload FROM typed;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![
                 crate::catalog::Value::BigInt(5_000_000_000),
                 crate::catalog::Value::Decimal(crate::catalog::DecimalValue::parse("12.34")?),
@@ -4099,7 +4101,7 @@ mod connection_tests {
 
         let result = conn.execute("SELECT id FROM test ORDER BY id ASC LIMIT 2;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![crate::catalog::Value::Integer(1)],
                 vec![crate::catalog::Value::Integer(2)],
@@ -4107,7 +4109,7 @@ mod connection_tests {
         );
 
         let zero = conn.execute("SELECT id FROM test ORDER BY id ASC LIMIT 0;")?;
-        assert_eq!(zero.rows.len(), 0);
+        assert_eq!(zero.rows().len(), 0);
 
         conn.close()?;
         Ok(())
@@ -4125,7 +4127,7 @@ mod connection_tests {
 
         let result = conn.execute("SELECT id FROM test ORDER BY id ASC OFFSET 1;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![crate::catalog::Value::Integer(2)],
                 vec![crate::catalog::Value::Integer(3)],
@@ -4133,7 +4135,7 @@ mod connection_tests {
         );
 
         let paged = conn.execute("SELECT id FROM test ORDER BY id ASC LIMIT 1 OFFSET 1;")?;
-        assert_eq!(paged.rows, vec![vec![crate::catalog::Value::Integer(2)]]);
+        assert_eq!(paged.rows(), vec![vec![crate::catalog::Value::Integer(2)]]);
 
         conn.close()?;
         Ok(())
@@ -4150,7 +4152,7 @@ mod connection_tests {
         conn.execute("INSERT INTO test (id, name) VALUES (2, 'Bob');")?;
 
         let result = conn.execute("SELECT id FROM test ORDER BY id ASC LIMIT 1, 1;")?;
-        assert_eq!(result.rows, vec![vec![crate::catalog::Value::Integer(2)]]);
+        assert_eq!(result.rows(), vec![vec![crate::catalog::Value::Integer(2)]]);
 
         conn.close()?;
         Ok(())
@@ -4167,7 +4169,7 @@ mod connection_tests {
         let result =
             conn.execute("SELECT id, name, active FROM test WHERE id = 1 ORDER BY id ASC;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![
                 crate::catalog::Value::Integer(1),
                 crate::catalog::Value::Text("Alice".to_string()),
@@ -4192,7 +4194,7 @@ mod connection_tests {
 
         let result = conn.execute("SELECT id, name FROM target ORDER BY id ASC;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![
                 crate::catalog::Value::Integer(2),
                 crate::catalog::Value::Text("Bob".to_string()),
@@ -4217,7 +4219,7 @@ mod connection_tests {
 
         let result = conn.execute("SELECT id, name, visits FROM test ORDER BY id ASC;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![
                 crate::catalog::Value::Integer(1),
                 crate::catalog::Value::Text("Alice".to_string()),
@@ -4240,7 +4242,7 @@ mod connection_tests {
 
         let result = conn.execute("SELECT id, name FROM test ORDER BY id ASC;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![
                     crate::catalog::Value::Integer(1),
@@ -4271,7 +4273,7 @@ mod connection_tests {
         reopened.execute("INSERT INTO test (name) VALUES ('Bob');")?;
         let result = reopened.execute("SELECT id, name FROM test ORDER BY id ASC;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![
                     crate::catalog::Value::Integer(1),
@@ -4298,7 +4300,7 @@ mod connection_tests {
         conn.execute("INSERT INTO users (id, name) VALUES (1, 'Alice');")?;
         let result = conn.execute("SELECT name FROM users WHERE id = 1;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![crate::catalog::Value::Text("Alice".to_string())]]
         );
 
@@ -4333,10 +4335,10 @@ mod connection_tests {
 
         let result = conn.execute("SELECT COUNT(*) FROM test;")?;
         assert_eq!(result.columns, vec!["COUNT(*)"]);
-        assert_eq!(result.rows, vec![vec![crate::catalog::Value::Integer(3)]]);
+        assert_eq!(result.rows(), vec![vec![crate::catalog::Value::Integer(3)]]);
 
         let filtered = conn.execute("SELECT COUNT(*) FROM test WHERE name IS NOT NULL;")?;
-        assert_eq!(filtered.rows, vec![vec![crate::catalog::Value::Integer(2)]]);
+        assert_eq!(filtered.rows(), vec![vec![crate::catalog::Value::Integer(2)]]);
 
         conn.close()?;
         Ok(())
@@ -4353,16 +4355,16 @@ mod connection_tests {
         conn.execute("INSERT INTO test (id, score) VALUES (3, NULL);")?;
 
         let sum = conn.execute("SELECT SUM(score) FROM test;")?;
-        assert_eq!(sum.rows, vec![vec![crate::catalog::Value::Float(30.0)]]);
+        assert_eq!(sum.rows(), vec![vec![crate::catalog::Value::Float(30.0)]]);
 
         let avg = conn.execute("SELECT AVG(score) FROM test;")?;
-        assert_eq!(avg.rows, vec![vec![crate::catalog::Value::Float(15.0)]]);
+        assert_eq!(avg.rows(), vec![vec![crate::catalog::Value::Float(15.0)]]);
 
         let min = conn.execute("SELECT MIN(score) FROM test;")?;
-        assert_eq!(min.rows, vec![vec![crate::catalog::Value::Float(10.0)]]);
+        assert_eq!(min.rows(), vec![vec![crate::catalog::Value::Float(10.0)]]);
 
         let max = conn.execute("SELECT MAX(score) FROM test;")?;
-        assert_eq!(max.rows, vec![vec![crate::catalog::Value::Float(20.0)]]);
+        assert_eq!(max.rows(), vec![vec![crate::catalog::Value::Float(20.0)]]);
 
         conn.close()?;
         Ok(())
@@ -4386,7 +4388,7 @@ mod connection_tests {
 
         assert_eq!(result.columns, vec!["name", "score_count", "total_score"]);
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![
                     crate::catalog::Value::Text("Alice".to_string()),
@@ -4425,7 +4427,7 @@ mod connection_tests {
 
         assert_eq!(result.columns, vec!["score_count", "total_score"]);
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![
                 crate::catalog::Value::Integer(2),
                 crate::catalog::Value::Integer(15),
@@ -4453,7 +4455,7 @@ mod connection_tests {
 
         assert_eq!(result.columns, vec!["name", "total_count"]);
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![
                 crate::catalog::Value::Text("Alice".to_string()),
                 crate::catalog::Value::Integer(2),
@@ -4475,11 +4477,11 @@ mod connection_tests {
 
         let result =
             conn.execute("SELECT COUNT(score) AS score_count FROM test HAVING score_count = 1;")?;
-        assert_eq!(result.rows, vec![vec![crate::catalog::Value::Integer(1)]]);
+        assert_eq!(result.rows(), vec![vec![crate::catalog::Value::Integer(1)]]);
 
         let filtered_out =
             conn.execute("SELECT COUNT(score) AS score_count FROM test HAVING score_count > 1;")?;
-        assert!(filtered_out.rows.is_empty());
+        assert!(filtered_out.rows().is_empty());
 
         conn.close()?;
         Ok(())
@@ -4499,13 +4501,13 @@ mod connection_tests {
             "SELECT name FROM test GROUP BY name HAVING COUNT(*) > 1 ORDER BY name ASC;",
         )?;
         assert_eq!(
-            grouped.rows,
+            grouped.rows(),
             vec![vec![crate::catalog::Value::Text("Alice".to_string())]]
         );
 
         let implicit =
             conn.execute("SELECT COUNT(*) AS total_rows FROM test HAVING SUM(score) > 10;")?;
-        assert_eq!(implicit.rows, vec![vec![crate::catalog::Value::Integer(3)]]);
+        assert_eq!(implicit.rows(), vec![vec![crate::catalog::Value::Integer(3)]]);
 
         conn.close()?;
         Ok(())
@@ -4554,7 +4556,7 @@ mod connection_tests {
             let result = conn.execute("SELECT * FROM users;")?;
             assert_eq!(result.columns, vec!["id", "name", "active"]);
             assert_eq!(
-                result.rows[0],
+                result.rows()[0],
                 vec![
                     crate::catalog::Value::Integer(1),
                     crate::catalog::Value::Text("Alice".to_string()),
@@ -4635,7 +4637,7 @@ mod connection_tests {
             "SELECT CAST(42 AS VARCHAR(10)), CAST(TRUE AS VARCHAR(5)) FROM seed WHERE id = 1;",
         )?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![
                 crate::catalog::Value::Text("42".to_string()),
                 crate::catalog::Value::Text("TRUE".to_string()),
@@ -4663,10 +4665,10 @@ mod connection_tests {
             .is_err());
 
         let equals = conn.execute("SELECT id FROM users WHERE name = 'ALICE';")?;
-        assert_eq!(equals.rows, vec![vec![crate::catalog::Value::Integer(1)]]);
+        assert_eq!(equals.rows(), vec![vec![crate::catalog::Value::Integer(1)]]);
 
         let like = conn.execute("SELECT id FROM users WHERE name LIKE 'al%';")?;
-        assert_eq!(like.rows, vec![vec![crate::catalog::Value::Integer(1)]]);
+        assert_eq!(like.rows(), vec![vec![crate::catalog::Value::Integer(1)]]);
 
         conn.close()?;
         Ok(())
@@ -4685,7 +4687,7 @@ mod connection_tests {
             );",
         )?;
         let show_create = conn.execute("SHOW CREATE TABLE users;")?;
-        let sql = match &show_create.rows[0][1] {
+        let sql = match &show_create.rows()[0][1] {
             crate::catalog::Value::Text(sql) => sql.clone(),
             other => panic!("expected SHOW CREATE TABLE SQL text, found {:?}", other),
         };
@@ -4696,7 +4698,7 @@ mod connection_tests {
 
         let mut reopened = Connection::new(db.path())?;
         let show_create = reopened.execute("SHOW CREATE TABLE users;")?;
-        let sql = match &show_create.rows[0][1] {
+        let sql = match &show_create.rows()[0][1] {
             crate::catalog::Value::Text(sql) => sql.clone(),
             other => panic!("expected SHOW CREATE TABLE SQL text, found {:?}", other),
         };
@@ -4720,16 +4722,16 @@ mod connection_tests {
         assert_eq!(result.affected_rows, 1);
 
         let result = conn.execute("SELECT * FROM test;")?;
-        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.rows().len(), 2);
         assert_eq!(
-            result.rows[0],
+            result.rows()[0],
             vec![
                 crate::catalog::Value::Integer(1),
                 crate::catalog::Value::Text("Alice".to_string()),
             ]
         );
         assert_eq!(
-            result.rows[1],
+            result.rows()[1],
             vec![
                 crate::catalog::Value::Integer(3),
                 crate::catalog::Value::Text("Cara".to_string()),
@@ -4753,7 +4755,7 @@ mod connection_tests {
         assert_eq!(result.affected_rows, 2);
 
         let result = conn.execute("SELECT * FROM test;")?;
-        assert_eq!(result.rows.len(), 0);
+        assert_eq!(result.rows().len(), 0);
 
         conn.close()?;
         Ok(())
@@ -4807,9 +4809,9 @@ mod connection_tests {
         assert_eq!(result.affected_rows, 1);
 
         let result = conn.execute("SELECT * FROM test WHERE id = 2;")?;
-        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows().len(), 1);
         assert_eq!(
-            result.rows[0],
+            result.rows()[0],
             vec![
                 crate::catalog::Value::Integer(2),
                 crate::catalog::Value::Text("Bobby".to_string()),
@@ -4834,7 +4836,7 @@ mod connection_tests {
         assert_eq!(result.affected_rows, 2);
 
         let result = conn.execute("SELECT * FROM test WHERE active = TRUE;")?;
-        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.rows().len(), 2);
 
         conn.close()?;
         Ok(())
@@ -4853,7 +4855,7 @@ mod connection_tests {
         assert!(result.is_err());
 
         let result = conn.execute("SELECT * FROM test;")?;
-        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.rows().len(), 2);
 
         conn.close()?;
         Ok(())
@@ -4889,7 +4891,7 @@ mod connection_tests {
 
         let rows = conn.execute("SELECT id, name FROM users ORDER BY id;")?;
         assert_eq!(
-            rows.rows,
+            rows.rows(),
             vec![
                 vec![
                     crate::catalog::Value::Integer(1),
@@ -4935,7 +4937,7 @@ mod connection_tests {
 
         let rows = conn.execute("SELECT id, name FROM users ORDER BY id;")?;
         assert_eq!(
-            rows.rows,
+            rows.rows(),
             vec![vec![
                 crate::catalog::Value::Integer(1),
                 crate::catalog::Value::Text("Alice".to_string())
@@ -5095,7 +5097,7 @@ mod interface_tests {
 
         // Note: This is a simplified implementation - real prepared statements would support parameters
         let result = stmt.execute(&mut db.connection)?;
-        assert_eq!(result.rows.len(), 0);
+        assert_eq!(result.rows().len(), 0);
 
         Ok(())
     }
@@ -5346,7 +5348,7 @@ mod result_tests {
             Value::Null,
         ];
 
-        let row = Row::new(values);
+        let row = Row::new(&values);
 
         assert_eq!(row.get_int(0)?, 42);
         assert_eq!(row.get_string(1)?, "test");
@@ -5404,7 +5406,7 @@ mod result_tests {
             Value::Text("live".to_string()),
         ];
 
-        let row = Row::new(values);
+        let row = Row::new(&values);
 
         assert_eq!(row.get_bigint(0)?, 5_000_000_000);
         assert_eq!(row.get_decimal(1)?.to_string(), "12.34");
@@ -5431,20 +5433,12 @@ mod result_tests {
 
     #[test]
     fn test_executed_statement_helpers() -> Result<()> {
-        let query = ExecutedStatement::from_query_result(QueryResult {
-            affected_rows: 0,
-            columns: vec!["value".to_string()],
-            rows: vec![vec![Value::Integer(7)]],
-        });
+        let query = ExecutedStatement::from_query_result(QueryResult::new(0, vec!["value".to_string()], vec![vec![Value::Integer(7)]]));
         assert!(matches!(query, ExecutedStatement::Query(_)));
         assert_eq!(query.as_query().unwrap().get_row(0).unwrap().get_int(0)?, 7);
         assert!(query.as_statement().is_none());
 
-        let statement = ExecutedStatement::from_query_result(QueryResult {
-            affected_rows: 2,
-            columns: Vec::new(),
-            rows: Vec::new(),
-        });
+        let statement = ExecutedStatement::from_query_result(QueryResult::new(2, Vec::new(), Vec::new()));
         assert!(matches!(statement, ExecutedStatement::Statement(_)));
         assert_eq!(statement.as_statement().unwrap().affected_rows, 2);
         assert!(statement.as_query().is_none());
@@ -5453,11 +5447,7 @@ mod result_tests {
 
     #[test]
     fn test_executed_statement_render_ascii() -> Result<()> {
-        let query = ExecutedStatement::from_query_result(QueryResult {
-            affected_rows: 0,
-            columns: vec!["value".to_string()],
-            rows: vec![vec![Value::Integer(7)]],
-        });
+        let query = ExecutedStatement::from_query_result(QueryResult::new(0, vec!["value".to_string()], vec![vec![Value::Integer(7)]]));
         assert_eq!(
             query.render_ascii(),
             "\
@@ -5469,11 +5459,7 @@ mod result_tests {
 1 row(s)"
         );
 
-        let statement = ExecutedStatement::from_query_result(QueryResult {
-            affected_rows: 2,
-            columns: Vec::new(),
-            rows: Vec::new(),
-        });
+        let statement = ExecutedStatement::from_query_result(QueryResult::new(2, Vec::new(), Vec::new()));
         assert_eq!(statement.render_ascii(), "Ok (2)");
         Ok(())
     }
@@ -5519,7 +5505,7 @@ mod limit_pushdown_tests {
     fn ids(conn: &mut Connection, sql: &str) -> Result<Vec<i32>> {
         let result = conn.execute(sql)?;
         Ok(result
-            .rows
+            .rows()
             .iter()
             .map(|row| match &row[0] {
                 Value::Integer(value) => *value,
@@ -5530,8 +5516,8 @@ mod limit_pushdown_tests {
 
     fn count_of(conn: &mut Connection, sql: &str) -> Result<i64> {
         let result = conn.execute(sql)?;
-        assert_eq!(result.rows.len(), 1, "expected exactly one aggregate row");
-        match &result.rows[0][0] {
+        assert_eq!(result.rows().len(), 1, "expected exactly one aggregate row");
+        match &result.rows()[0][0] {
             Value::Integer(count) => Ok(i64::from(*count)),
             Value::BigInt(count) => Ok(*count),
             other => panic!("expected a count, got {other:?}"),
@@ -5649,9 +5635,9 @@ mod limit_pushdown_tests {
         let (_db, mut conn) = seeded("_test_limit_group_by")?;
         let result = conn
             .execute("SELECT bucket, COUNT(*) FROM t GROUP BY bucket ORDER BY bucket LIMIT 2;")?;
-        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.rows().len(), 2);
         // Buckets 0 and 1 each hold four of the twenty rows.
-        for row in &result.rows {
+        for row in &result.rows() {
             let count = match &row[1] {
                 Value::Integer(count) => i64::from(*count),
                 Value::BigInt(count) => *count,
@@ -5691,7 +5677,7 @@ mod direct_projection_tests {
         let result = conn.execute("SELECT b, id FROM t;")?;
         assert_eq!(result.columns, vec!["b", "id"]);
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![Value::Integer(100), Value::Integer(1)],
                 vec![Value::Integer(200), Value::Integer(2)],
@@ -5706,8 +5692,8 @@ mod direct_projection_tests {
     fn repeats_a_column_named_twice() -> Result<()> {
         let (mut conn, _db) = seeded("_test_direct_projection_repeat")?;
         let result = conn.execute("SELECT a, a FROM t;")?;
-        assert_eq!(result.rows.len(), 3);
-        assert_eq!(result.rows[0], vec![Value::Integer(10), Value::Integer(10)]);
+        assert_eq!(result.rows().len(), 3);
+        assert_eq!(result.rows()[0], vec![Value::Integer(10), Value::Integer(10)]);
         Ok(())
     }
 
@@ -5717,7 +5703,7 @@ mod direct_projection_tests {
         let (mut conn, _db) = seeded("_test_direct_projection_text")?;
         let result = conn.execute("SELECT c FROM t;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![Value::Text("x".to_string())],
                 vec![Value::Text("y".to_string())],
@@ -5737,12 +5723,12 @@ mod direct_projection_tests {
 
         // WHERE on a column that is not projected.
         let result = conn.execute("SELECT a FROM t WHERE b = 200;")?;
-        assert_eq!(result.rows, vec![vec![Value::Integer(20)]]);
+        assert_eq!(result.rows(), vec![vec![Value::Integer(20)]]);
 
         // ORDER BY on a column that is not projected.
         let result = conn.execute("SELECT a FROM t ORDER BY b DESC;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![
                 vec![Value::Integer(30)],
                 vec![Value::Integer(20)],
@@ -5752,23 +5738,23 @@ mod direct_projection_tests {
 
         // An aggregate over a column that is not projected.
         let result = conn.execute("SELECT COUNT(*) FROM t;")?;
-        assert_eq!(result.rows, vec![vec![Value::Integer(3)]]);
+        assert_eq!(result.rows(), vec![vec![Value::Integer(3)]]);
 
         // GROUP BY.
         let result = conn.execute("SELECT a FROM t GROUP BY a ORDER BY a;")?;
-        assert_eq!(result.rows.len(), 3);
+        assert_eq!(result.rows().len(), 3);
 
         // An expression, rather than a bare column reference.
         let result = conn.execute("SELECT a + b FROM t ORDER BY a;")?;
-        assert_eq!(result.rows[0], vec![Value::Integer(110)]);
+        assert_eq!(result.rows()[0], vec![Value::Integer(110)]);
 
         // A wildcard needs every column.
         let result = conn.execute("SELECT * FROM t;")?;
-        assert_eq!(result.rows[0].len(), 4);
+        assert_eq!(result.rows()[0].len(), 4);
 
         // DISTINCT.
         let result = conn.execute("SELECT DISTINCT a FROM t;")?;
-        assert_eq!(result.rows.len(), 3);
+        assert_eq!(result.rows().len(), 3);
 
         Ok(())
     }
@@ -5780,12 +5766,12 @@ mod direct_projection_tests {
         let (mut conn, _db) = seeded("_test_direct_projection_window")?;
         let result = conn.execute("SELECT id FROM t LIMIT 2;")?;
         assert_eq!(
-            result.rows,
+            result.rows(),
             vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]
         );
 
         let result = conn.execute("SELECT id FROM t LIMIT 1 OFFSET 1;")?;
-        assert_eq!(result.rows, vec![vec![Value::Integer(2)]]);
+        assert_eq!(result.rows(), vec![vec![Value::Integer(2)]]);
         Ok(())
     }
 }

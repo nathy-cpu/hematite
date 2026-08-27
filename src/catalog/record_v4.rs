@@ -646,6 +646,21 @@ impl<'a> Iterator for RecordIter<'a> {
 /// Emitting in projection order rather than table order lets the caller skip building
 /// a second row to reorder into.
 pub(crate) fn decode_fields(bytes: &[u8], indices: &[usize]) -> Result<Vec<Value>> {
+    let mut values = Vec::with_capacity(indices.len());
+    decode_fields_into(bytes, indices, &mut values)?;
+    Ok(values)
+}
+
+/// Appends the wanted fields to `out`, in `indices` order.
+///
+/// The scan path, which lays every row into one buffer rather than giving each its
+/// own vector. A row's own vector was the single allocation a scanned row made, and
+/// `malloc` and `free` for it were 24 % of a full scan's instructions.
+pub(crate) fn decode_fields_into(
+    bytes: &[u8],
+    indices: &[usize],
+    out: &mut Vec<Value>,
+) -> Result<()> {
     let record = RecordRef::new(bytes)?;
 
     // Stop at the last field anyone asked for. A `SELECT id, a` over five columns has
@@ -658,19 +673,20 @@ pub(crate) fn decode_fields(bytes: &[u8], indices: &[usize]) -> Result<Vec<Value
     // trade the B-tree makes for cell ranges: verify what is used, and leave
     // whole-object structure to the integrity check.
     let Some(&last_wanted) = indices.iter().max() else {
-        return Ok(Vec::new());
+        return Ok(());
     };
 
-    // The output vector is the only allocation: fields are written into their slots as
-    // the single header walk reaches them.
-    let mut values = vec![Value::Null; indices.len()];
+    // Slots are reserved up front and written as the single header walk reaches
+    // them, so the fields can be found in any order but land in the caller's.
+    let base = out.len();
+    out.resize(base + indices.len(), Value::Null);
     let mut filled = 0usize;
 
     for (position, entry) in record.types().enumerate() {
         let (code, range) = entry?;
         for (slot, wanted) in indices.iter().enumerate() {
             if *wanted == position {
-                values[slot] = record.value_at(code, range.clone())?.to_value()?;
+                out[base + slot] = record.value_at(code, range.clone())?.to_value()?;
                 filled += 1;
             }
         }
@@ -680,11 +696,12 @@ pub(crate) fn decode_fields(bytes: &[u8], indices: &[usize]) -> Result<Vec<Value
     }
 
     if filled != indices.len() {
+        out.truncate(base);
         return Err(corrupt(format!(
             "Record has no field at index {last_wanted}"
         )));
     }
-    Ok(values)
+    Ok(())
 }
 
 pub(crate) fn decode(bytes: &[u8]) -> Result<Vec<Value>> {

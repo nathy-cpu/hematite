@@ -753,7 +753,7 @@ not available yet.",
         table_name: &str,
         indices: &[usize],
         max_rows: Option<usize>,
-    ) -> Result<Vec<Vec<Value>>> {
+    ) -> Result<Vec<Value>> {
         table_store::read_table_columns(self, table_name, indices, max_rows)
     }
 

@@ -34,9 +34,7 @@ pub(crate) fn describe_table(catalog: &Catalog, table_name: &str) -> Result<Quer
         })
         .collect();
 
-    Ok(QueryResult {
-        affected_rows: 0,
-        columns: vec![
+    Ok(QueryResult::new(0, vec![
             "column".to_string(),
             "type".to_string(),
             "nullable".to_string(),
@@ -46,23 +44,17 @@ pub(crate) fn describe_table(catalog: &Catalog, table_name: &str) -> Result<Quer
             "auto_increment".to_string(),
             "constraints".to_string(),
             "indexes".to_string(),
-        ],
-        rows,
-    })
+        ], rows))
 }
 
 pub(crate) fn show_tables(catalog: &Catalog) -> Result<QueryResult> {
     let mut tables = catalog.list_tables()?;
     tables.sort_by(|left, right| left.1.cmp(&right.1));
 
-    Ok(QueryResult {
-        affected_rows: 0,
-        columns: vec!["table_name".to_string()],
-        rows: tables
+    Ok(QueryResult::new(0, vec!["table_name".to_string()], tables
             .into_iter()
             .map(|(_, name)| vec![Value::Text(name)])
-            .collect(),
-    })
+            .collect()))
 }
 
 pub(crate) fn show_indexes(catalog: &Catalog, table_name: Option<&str>) -> Result<QueryResult> {
@@ -93,16 +85,12 @@ pub(crate) fn show_indexes(catalog: &Catalog, table_name: Option<&str>) -> Resul
         }
     }
 
-    Ok(QueryResult {
-        affected_rows: 0,
-        columns: vec![
+    Ok(QueryResult::new(0, vec![
             "table_name".to_string(),
             "index_name".to_string(),
             "unique".to_string(),
             "columns".to_string(),
-        ],
-        rows,
-    })
+        ], rows))
 }
 
 pub(crate) fn show_create_table(catalog: &Catalog, table_name: &str) -> Result<QueryResult> {
@@ -110,14 +98,14 @@ pub(crate) fn show_create_table(catalog: &Catalog, table_name: &str) -> Result<Q
         HematiteError::ParseError(format!("Table '{}' does not exist", table_name))
     })?;
 
-    Ok(QueryResult {
-        affected_rows: 0,
-        columns: vec!["table_name".to_string(), "create_sql".to_string()],
-        rows: vec![vec![
+    Ok(QueryResult::new(
+        0,
+        vec!["table_name".to_string(), "create_sql".to_string()],
+        vec![vec![
             Value::Text(table.name.clone()),
             Value::Text(render_create_table_sql(&table)),
         ]],
-    })
+    ))
 }
 
 struct TableColumnMetadata {
