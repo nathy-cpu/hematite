@@ -3720,6 +3720,50 @@ mod work_performed_tests {
         );
     }
 
+    /// Preserving a page's pre-image costs exactly the copies it owes.
+    ///
+    /// `snapshot_original_page` has two customers: each live savepoint that has not
+    /// yet captured this page, and — once per page per transaction — the rollback
+    /// journal. That is the floor. It used to make two copies beyond it: it cloned
+    /// the cached page it was only reading from, and it cloned the finished journal
+    /// record so the in-memory list and the journal writer could each hold one.
+    ///
+    /// Neither showed up in an allocation profile, because the page-buffer pool
+    /// hands the same recycled buffers back — they were pure memcpy, 79 MB of it
+    /// over a 20 000-row insert. This counts the copies directly instead.
+    #[test]
+    fn preserving_a_page_image_copies_it_once_per_customer() {
+        let db = TestDbFile::new("_test_work_undo_copies");
+        let mut pager = Pager::new(db.path(), 64).expect("open");
+        let page_id = pager.allocate_page().expect("allocate");
+
+        // Give the page a durable pre-image, so the writes below have something to
+        // preserve rather than being treated as pages the transaction created.
+        pager.begin_transaction().expect("begin");
+        let mut page = Page::new(page_id);
+        page.data[0] = 1;
+        pager.write_page(page).expect("write");
+        pager.commit_transaction().expect("commit");
+
+        pager.begin_transaction().expect("begin");
+        let before = pager.stats();
+        for fill in 2..=6u8 {
+            let mut page = Page::new(page_id);
+            page.data[0] = fill;
+            pager.write_page(page).expect("write");
+        }
+        let work = pager.stats().since(&before);
+        pager.commit_transaction().expect("commit");
+
+        // Five writes to one page inside one transaction, with only the baseline
+        // savepoint live: one copy for that savepoint, one for the journal, and the
+        // four writes after them find the page already captured.
+        assert_eq!(
+            work.undo_page_copies, 2,
+            "page pre-image copy count changed: {work:?}"
+        );
+    }
+
     #[test]
     fn wal_commit_issues_exactly_one_fsync() {
         let db = TestDbFile::new("_test_work_wal_fsyncs");

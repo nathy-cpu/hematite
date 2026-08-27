@@ -54,6 +54,16 @@ pub struct PagerStats {
     pub wal_frames: AtomicU64,
     /// Completed WAL checkpoints.
     pub checkpoints: AtomicU64,
+    /// 4 KiB page images copied to preserve a pre-image, for a savepoint's undo log
+    /// or for the rollback journal.
+    ///
+    /// One per savepoint that needs the page, plus one for the journal, is the
+    /// floor. `snapshot_original_page` used to make two more on top of that — a
+    /// clone of the cached page it was only reading, and a clone of the journal
+    /// record so the in-memory list and the journal writer could each have one.
+    /// A savepoint is taken per row, so those two came to 79 MB of memcpy over a
+    /// 20 000-row insert.
+    pub undo_page_copies: AtomicU64,
     /// Times the database file's length was asked of the operating system.
     ///
     /// The pager already knows how long its file is -- it is the only writer, and
@@ -92,6 +102,7 @@ impl PagerStats {
             journal_bytes: self.journal_bytes.load(Ordering::Relaxed),
             wal_frames: self.wal_frames.load(Ordering::Relaxed),
             checkpoints: self.checkpoints.load(Ordering::Relaxed),
+            undo_page_copies: self.undo_page_copies.load(Ordering::Relaxed),
             file_stats: self.file_stats.load(Ordering::Relaxed),
         }
     }
@@ -110,6 +121,7 @@ pub struct StatsSnapshot {
     pub journal_bytes: u64,
     pub wal_frames: u64,
     pub checkpoints: u64,
+    pub undo_page_copies: u64,
     pub file_stats: u64,
 }
 
@@ -130,6 +142,7 @@ impl StatsSnapshot {
             journal_bytes: self.journal_bytes.saturating_sub(earlier.journal_bytes),
             wal_frames: self.wal_frames.saturating_sub(earlier.wal_frames),
             checkpoints: self.checkpoints.saturating_sub(earlier.checkpoints),
+            undo_page_copies: self.undo_page_copies.saturating_sub(earlier.undo_page_copies),
             file_stats: self.file_stats.saturating_sub(earlier.file_stats),
         }
     }

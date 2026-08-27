@@ -340,17 +340,24 @@ impl Pager {
         // The pre-image: the page as it stands *before* this write, which is why this
         // runs ahead of `cache.put`. In WAL mode the newest version may be a WAL frame
         // rather than the file, so go through the WAL-aware path when the cache misses.
-        let mut page = if let Some(page) = self.cache_mut()?.peek(page_id) {
-            page.clone()
-        } else if self.journal_mode == JournalMode::Wal {
-            match self.read_wal_page_data(page_id)? {
-                Some(data) => Page::from_bytes(page_id, data)?,
-                None => self.file_manager.read_page(page_id)?,
+        // Shared, not copied. The copies that this function genuinely owes are the
+        // ones below -- one per savepoint that still needs a pre-image, plus one for
+        // the journal -- and cloning the cached page here added a fourth 4 KiB memcpy
+        // of bytes nobody was going to mutate. A savepoint is taken per row, so that
+        // clone alone was 79 MB of memcpy over a 20 000-row insert.
+        let cached = self.cache_read()?.peek_shared(page_id);
+        let page: Arc<Page> = match cached {
+            Some(page) => page,
+            None if self.journal_mode == JournalMode::Wal => {
+                match self.read_wal_page_data(page_id)? {
+                    Some(data) => Arc::new(Page::from_bytes(page_id, data)?),
+                    None => Arc::new(self.file_manager.read_page(page_id)?),
+                }
             }
-        } else {
-            self.file_manager.read_page(page_id)?
+            None => Arc::new(self.file_manager.read_page(page_id)?),
         };
 
+        let mut copies = 0u64;
         if let Some(savepoints) = self.active_savepoints_mut() {
             for savepoint in savepoints.iter_mut() {
                 if !page_is_live_at_savepoint(page_id, savepoint) {
@@ -358,6 +365,7 @@ impl Pager {
                     continue;
                 }
                 if savepoint.captured_page_ids.insert(page_id) {
+                    copies += 1;
                     savepoint.page_records.push(JournalRecord {
                         page_id,
                         data: page.data.to_vec(),
@@ -366,21 +374,15 @@ impl Pager {
             }
         }
 
-        if !needs_journal_record {
+        if !needs_journal_record || self.active_rollback_transaction().is_none() {
+            crate::storage::stats::PagerStats::add(&self.stats.undo_page_copies, copies);
             return Ok(());
         }
 
-        let record = {
-            let Some(transaction) = self.active_rollback_transaction_mut() else {
-                return Ok(());
-            };
-            let record = JournalRecord {
-                page_id,
-                data: page.take_data(),
-            };
-            transaction.page_records.push(record.clone());
-            transaction.journaled_pages.insert(page_id);
-            record
+        crate::storage::stats::PagerStats::add(&self.stats.undo_page_copies, copies + 1);
+        let record = JournalRecord {
+            page_id,
+            data: page.data.to_vec(),
         };
         {
             let cache = self.cache_mut()?;
@@ -389,6 +391,20 @@ impl Pager {
         }
         self.journal_needs_sync = true;
         self.append_rollback_journal_record(&record)?;
+
+        // Appended first, then handed over. The record used to be cloned so that the
+        // in-memory list could take one copy and the journal writer another -- a
+        // second 4 KiB copy of a page that was already copied once above.
+        //
+        // This also puts the two in a safer order. The file is sized from this
+        // vector's length by `sync_rollback_journal_from_transaction`, so a failed
+        // append now leaves the vector short and the partial record gets truncated
+        // away; pushing first would have claimed a record the file does not hold.
+        let Some(transaction) = self.active_rollback_transaction_mut() else {
+            return Ok(());
+        };
+        transaction.journaled_pages.insert(page_id);
+        transaction.page_records.push(record);
         Ok(())
     }
 
