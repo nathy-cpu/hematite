@@ -646,14 +646,27 @@ impl Pager {
             return self.restore_from_journal(&journal);
         }
 
-        let transaction = self.active_rollback_transaction().cloned().ok_or_else(|| {
-            crate::error::HematiteError::StorageError("Pager transaction is not active".to_string())
-        })?;
+        // Taken, not cloned. Cloning the transaction to read three fields off it
+        // copied every 4 KiB pre-image in the undo log, plus the savepoints and page
+        // sets, to build a journal that is used once and dropped. The transaction is
+        // being rolled back, so it has no use for them either.
+        let (original_file_len, original_free_pages, page_records) = {
+            let transaction = self.active_rollback_transaction_mut().ok_or_else(|| {
+                crate::error::HematiteError::StorageError(
+                    "Pager transaction is not active".to_string(),
+                )
+            })?;
+            (
+                transaction.original_file_len,
+                std::mem::take(&mut transaction.original_free_pages),
+                std::mem::take(&mut transaction.page_records),
+            )
+        };
         let journal = RollbackJournal {
             state: JournalState::Active,
-            original_file_len: transaction.original_file_len,
-            original_free_pages: transaction.original_free_pages,
-            page_records: transaction.page_records,
+            original_file_len,
+            original_free_pages,
+            page_records,
             // An in-memory rollback of a live transaction; nothing has been declared
             // committed, so there is nothing for recovery to weigh up.
             commit_intents: Vec::new(),
@@ -669,8 +682,8 @@ impl Pager {
             .set_free_pages(journal.original_free_pages.clone());
 
         for record in &journal.page_records {
-            let page = Page::from_bytes(record.page_id, record.data.clone())?;
-            self.file_manager.write_page(&page)?;
+            self.file_manager
+                .write_page_data(record.page_id, &record.data)?;
         }
         self.file_manager.flush()?;
 

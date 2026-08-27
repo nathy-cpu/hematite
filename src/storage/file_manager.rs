@@ -221,10 +221,25 @@ impl FileManager {
     /// is not in `std`, and seeking to use the vectored path would cost the syscall it
     /// saved.
     pub fn write_page(&mut self, page: &Page) -> Result<()> {
-        let offset = Self::page_offset(page.id)?;
+        self.write_page_data(page.id, &page.data)
+    }
+
+    /// Writes a page from bytes that are not already inside a [`Page`].
+    ///
+    /// Journal replay holds its pre-images as plain byte vectors, and building a
+    /// `Page` around each one to call [`Self::write_page`] copied all 4 KiB for
+    /// nothing.
+    pub(crate) fn write_page_data(&mut self, page_id: PageId, data: &[u8]) -> Result<()> {
+        if data.len() < USABLE_PAGE_SIZE {
+            return Err(crate::error::HematiteError::StorageError(format!(
+                "Page {page_id} image is {} bytes, short of the usable {USABLE_PAGE_SIZE}",
+                data.len()
+            )));
+        }
+        let offset = Self::page_offset(page_id)?;
         PagerStats::bump(&self.stats.page_writes);
-        let content = &page.data[..USABLE_PAGE_SIZE];
-        let trailer = page_trailer(page.id, content);
+        let content = &data[..USABLE_PAGE_SIZE];
+        let trailer = page_trailer(page_id, content);
         self.write_all_at(offset, content)?;
         self.write_all_at(offset + USABLE_PAGE_SIZE as u64, &trailer)
     }

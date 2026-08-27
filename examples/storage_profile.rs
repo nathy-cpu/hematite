@@ -11,7 +11,7 @@
 //! out its inserts.
 //!
 //!     PHASE=setup   valgrind --tool=callgrind --callgrind-out-file=.scratch/a.out ...
-//!     PHASE=update  valgrind --tool=callgrind --callgrind-out-file=.scratch/b.out ...
+//!     PHASE=rollback valgrind --tool=callgrind --callgrind-out-file=.scratch/b.out ...
 //!
 //! Syscalls, which is the metric callgrind cannot see:
 //!
@@ -97,6 +97,30 @@ fn main() {
             for rep in 0..reps.max(1) {
                 h.execute(&format!("UPDATE t SET a = a + {};", rep + 1))
                     .expect("update");
+            }
+        }
+        // Builds a large transaction and throws it away, which is what exercises
+        // the undo log and journal replay rather than the commit path.
+        "rollback" => {
+            for rep in 0..reps.max(1) {
+                h.execute("BEGIN;").expect("begin");
+                let base = rows + rep * rows;
+                let mut i = 0;
+                while i < rows {
+                    let end = (i + 500).min(rows);
+                    let mut sql = String::from("INSERT INTO t (id, a, b, c, d) VALUES ");
+                    for offset in i..end {
+                        if offset > i {
+                            sql.push(',');
+                        }
+                        let id = base + offset;
+                        sql.push_str(&format!("({id},{id},{id},{id},{id})"));
+                    }
+                    sql.push(';');
+                    h.execute(&sql).expect("insert");
+                    i = end;
+                }
+                h.execute("ROLLBACK;").expect("rollback");
             }
         }
         // Deletes every row in one transaction, exercising merge and free-page churn.
