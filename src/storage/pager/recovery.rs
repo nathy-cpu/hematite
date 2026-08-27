@@ -424,6 +424,7 @@ impl Pager {
             transaction.original_file_len,
             &original_free_pages,
             &[],
+            Arc::clone(&self.stats),
         )?;
 
         self.journal_file = Some(file);
@@ -443,9 +444,12 @@ impl Pager {
         append_journal_record(file, record)?;
         self.journal_record_count += 1;
 
-        // Keep record count current so crash leaves decodable journal file.
+        // Written per record, not deferred to the sync: the decoder requires the
+        // header's count to describe the file exactly, and rejects a journal with
+        // records beyond it as truncated. Recovery and the tests read the journal
+        // mid-transaction, so it has to be decodable at every point. It is one
+        // positional write now rather than a seek, four bytes, and a seek back.
         write_journal_record_count(file, self.journal_record_count)?;
-
         Ok(())
     }
 

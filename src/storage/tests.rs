@@ -3764,6 +3764,70 @@ mod work_performed_tests {
         );
     }
 
+    /// What a rollback transaction writes to its journal, byte for byte.
+    ///
+    /// One record per page touched: an 8-byte prefix and the page. On top of that
+    /// the header's record count is rewritten each time, four bytes, because the
+    /// decoder requires the count to describe the file exactly and recovery may
+    /// read the journal at any point.
+    ///
+    /// The count used to cost three syscalls instead of one — seek to the header,
+    /// write four bytes, seek back to the end — and every record was framed into a
+    /// freshly allocated `Vec`. Bytes are what survive both of those being fixed.
+    /// Two transaction sizes are compared rather than an absolute figure, so the
+    /// assertion is about the per-page cost and not about how long the header is or
+    /// which internal pages a commit happens to touch.
+    ///
+    /// `journal_bytes` had been declared since the counters were introduced and
+    /// never incremented, so any earlier assertion on it would have passed reading
+    /// zero.
+    #[test]
+    fn a_rollback_transaction_journals_one_record_per_page() {
+        fn journal_bytes_for(label: &str, pages: usize) -> u64 {
+            let db = TestDbFile::new(label);
+            let mut pager = Pager::new(db.path(), 64).expect("open");
+            let page_ids: Vec<u32> = (0..pages)
+                .map(|_| pager.allocate_page().expect("allocate"))
+                .collect();
+
+            // Give every page a durable pre-image, so the writes below have
+            // something to journal rather than being pages the transaction created.
+            pager.begin_transaction().expect("begin");
+            for &page_id in &page_ids {
+                let mut page = Page::new(page_id);
+                page.data[0] = 1;
+                pager.write_page(page).expect("write");
+            }
+            pager.commit_transaction().expect("commit");
+
+            let before = pager.stats();
+            pager.begin_transaction().expect("begin");
+            for &page_id in &page_ids {
+                // Twice each: the second write finds the page already journalled.
+                for fill in 2..=3u8 {
+                    let mut page = Page::new(page_id);
+                    page.data[0] = fill;
+                    pager.write_page(page).expect("write");
+                }
+            }
+            pager.commit_transaction().expect("commit");
+            pager.stats().since(&before).journal_bytes
+        }
+
+        let two = journal_bytes_for("_test_work_journal_bytes_two", 2);
+        let five = journal_bytes_for("_test_work_journal_bytes_five", 5);
+
+        // Per page: the record — an 8-byte prefix and the page — the four-byte
+        // record count the append rewrites in the header, and the commit intent,
+        // a page id and the checksum the page must carry if the commit landed.
+        let per_page = (8 + crate::storage::PAGE_SIZE + 4 + 8) as u64;
+        assert_eq!(
+            five - two,
+            3 * per_page,
+            "journal cost per page changed: {two} bytes for 2 pages, {five} for 5"
+        );
+    }
+
     #[test]
     fn wal_commit_issues_exactly_one_fsync() {
         let db = TestDbFile::new("_test_work_wal_fsyncs");

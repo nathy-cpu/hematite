@@ -6,7 +6,11 @@ use crate::storage::next_page_id_for_file_len;
 use crate::storage::{file_len_for_next_page_id, PageId, PAGE_SIZE};
 use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
-use std::io::{Seek, SeekFrom, Write};
+use std::sync::Arc;
+
+use crate::storage::stats::PagerStats;
+#[cfg(test)]
+use std::io::{Seek, SeekFrom};
 use std::path::Path;
 
 const V3_JOURNAL_MAGIC: &[u8; 4] = b"HTJ3";
@@ -199,6 +203,24 @@ impl RollbackJournal {
 #[derive(Debug)]
 pub(crate) struct JournalFile {
     file: File,
+    /// Offset the next append lands at.
+    ///
+    /// Tracked so every write can be positional. Updating the record count in the
+    /// header used to cost a seek back, a four-byte write, and a seek forward
+    /// again — three syscalls to change one field, once per journalled page.
+    len: u64,
+    /// Reused buffer for framing a record before it is written.
+    ///
+    /// A record is an 8-byte prefix followed by a whole page, and it has to reach
+    /// the file as one write. Building it used to allocate a fresh `Vec` per record
+    /// and copy the page into it, on top of the copy that produced the record in the
+    /// first place.
+    scratch: Vec<u8>,
+    /// Shared with the pager, so journal traffic lands in the same counter set as
+    /// database-file traffic. `journal_bytes` was declared from the start and never
+    /// incremented, which made it a counter any test could assert on and always
+    /// pass.
+    stats: Arc<PagerStats>,
     /// Contents as of the last successful `sync_all`.
     ///
     /// Re-read whole rather than tracked incrementally: journals in tests are a few
@@ -209,25 +231,36 @@ pub(crate) struct JournalFile {
 }
 
 impl JournalFile {
-    fn new(file: File) -> Self {
+    fn new(file: File, stats: Arc<PagerStats>) -> Self {
         Self {
             file,
+            len: 0,
+            scratch: Vec::new(),
+            stats,
             #[cfg(test)]
             durable: Vec::new(),
         }
     }
 
-    pub(crate) fn write_all(&mut self, bytes: &[u8]) -> Result<()> {
-        self.file.write_all(bytes)?;
+    /// Appends at the end of the journal, without a cursor.
+    pub(crate) fn append(&mut self, bytes: &[u8]) -> Result<()> {
+        write_all_at(&mut self.file, self.len, bytes)?;
+        PagerStats::add(&self.stats.journal_bytes, bytes.len() as u64);
+        self.len += bytes.len() as u64;
         Ok(())
     }
 
-    pub(crate) fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
-        Ok(self.file.seek(pos)?)
+    /// Overwrites a fixed-position header field.
+    pub(crate) fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<()> {
+        write_all_at(&mut self.file, offset, bytes)?;
+        PagerStats::add(&self.stats.journal_bytes, bytes.len() as u64);
+        self.len = self.len.max(offset + bytes.len() as u64);
+        Ok(())
     }
 
     pub(crate) fn set_len(&mut self, len: u64) -> Result<()> {
         self.file.set_len(len)?;
+        self.len = len;
         Ok(())
     }
 
@@ -237,10 +270,8 @@ impl JournalFile {
         {
             use std::io::Read;
             let mut durable = Vec::new();
-            let position = self.file.stream_position()?;
             self.file.seek(SeekFrom::Start(0))?;
             self.file.read_to_end(&mut durable)?;
-            self.file.seek(SeekFrom::Start(position))?;
             self.durable = durable;
         }
         Ok(())
@@ -250,10 +281,9 @@ impl JournalFile {
     #[cfg(test)]
     pub(crate) fn lose_unsynced_writes(&mut self) -> Result<()> {
         self.file.set_len(self.durable.len() as u64)?;
-        self.file.seek(SeekFrom::Start(0))?;
-        self.file.write_all(&self.durable)?;
+        write_all_at(&mut self.file, 0, &self.durable)?;
         self.file.sync_all()?;
-        self.file.seek(SeekFrom::End(0))?;
+        self.len = self.durable.len() as u64;
         Ok(())
     }
 }
@@ -263,6 +293,7 @@ pub(crate) fn initialize_journal_file(
     original_file_len: u64,
     original_free_pages: &[PageId],
     original_checksums: &[(PageId, u32)],
+    stats: Arc<PagerStats>,
 ) -> Result<(JournalFile, u64)> {
     let header = JournalHeader {
         state: JournalFileState::Active,
@@ -286,31 +317,50 @@ pub(crate) fn initialize_journal_file(
     }
 
     let header_len = bytes.len() as u64;
-    let mut file = OpenOptions::new()
+    let file = OpenOptions::new()
         .create(true)
         .write(true)
         .read(true)
         .truncate(true)
         .open(path)?;
-    file.write_all(&bytes)?;
-    Ok((JournalFile::new(file), header_len))
+    let mut journal = JournalFile::new(file, stats);
+    journal.append(&bytes)?;
+    Ok((journal, header_len))
 }
 
+/// Frames one page pre-image and appends it.
+///
+/// The framing goes into the journal's own scratch buffer rather than a fresh
+/// `Vec`. Building a `JournalFileRecord` first cost a copy of the page to fill it
+/// and another to encode it, on top of the copy that produced `record` — three
+/// copies of 4 KiB to write one page, once per journalled page.
 pub(crate) fn append_journal_record(file: &mut JournalFile, record: &JournalRecord) -> Result<()> {
-    let encoded = JournalFileRecord {
-        page_number: record.page_id,
-        page_bytes: record.data.clone(),
+    if record.data.len() != PAGE_SIZE {
+        return Err(HematiteError::StorageError(format!(
+            "v3 rollback journal record for page {} has invalid image size {}",
+            record.page_id,
+            record.data.len()
+        )));
     }
-    .encode(JournalHeader::default().checksum_seed)?;
-    file.write_all(&encoded)?;
-    Ok(())
+    let seed = JournalHeader::default().checksum_seed;
+    let checksum = record_checksum(record.page_id, seed, &record.data);
+
+    let mut scratch = std::mem::take(&mut file.scratch);
+    scratch.clear();
+    scratch.reserve(V3_JOURNAL_RECORD_PREFIX_SIZE + PAGE_SIZE);
+    scratch.extend_from_slice(&record.page_id.to_be_bytes());
+    scratch.extend_from_slice(&checksum.to_be_bytes());
+    scratch.extend_from_slice(&record.data);
+    let result = file.append(&scratch);
+    file.scratch = scratch;
+    result
 }
 
 pub(crate) fn write_journal_record_count(file: &mut JournalFile, record_count: u32) -> Result<()> {
-    file.seek(SeekFrom::Start(V3_JOURNAL_RECORD_COUNT_OFFSET))?;
-    file.write_all(&record_count.to_be_bytes())?;
-    file.seek(SeekFrom::End(0))?;
-    Ok(())
+    file.write_at(
+        V3_JOURNAL_RECORD_COUNT_OFFSET,
+        &record_count.to_be_bytes(),
+    )
 }
 
 /// Appends the commit intent: what every page the commit touches must contain if
@@ -338,13 +388,11 @@ pub(crate) fn write_commit_intents(
         bytes.extend_from_slice(&page_id.to_be_bytes());
         bytes.extend_from_slice(&checksum.to_be_bytes());
     }
-    file.seek(SeekFrom::End(0))?;
-    file.write_all(&bytes)?;
-
-    file.seek(SeekFrom::Start(V3_JOURNAL_INTENT_COUNT_OFFSET))?;
-    file.write_all(&(intents.len() as u32).to_be_bytes())?;
-    file.seek(SeekFrom::End(0))?;
-    Ok(())
+    file.append(&bytes)?;
+    file.write_at(
+        V3_JOURNAL_INTENT_COUNT_OFFSET,
+        &(intents.len() as u32).to_be_bytes(),
+    )
 }
 
 impl JournalHeader {
@@ -406,6 +454,9 @@ impl JournalHeader {
 }
 
 impl JournalFileRecord {
+    /// Only the whole-journal encoder needs this now; the live append path frames
+    /// records straight into the journal's scratch buffer.
+    #[cfg(test)]
     pub(crate) fn encode(&self, checksum_seed: u32) -> Result<Vec<u8>> {
         if self.page_bytes.len() != PAGE_SIZE {
             return Err(HematiteError::StorageError(format!(
@@ -582,4 +633,40 @@ fn read_u32_be(bytes: &[u8], offset: usize) -> u32 {
         bytes[offset + 2],
         bytes[offset + 3],
     ])
+}
+
+/// Positional write, looping until the whole buffer lands.
+///
+/// Mirrors the database file's helper: no shared cursor, so no `seek` syscall per
+/// write and no ordering dependency between the journal's writers.
+fn write_all_at(file: &mut File, offset: u64, buf: &[u8]) -> Result<()> {
+    #[cfg(unix)]
+    use std::os::unix::fs::FileExt;
+    #[cfg(windows)]
+    use std::os::windows::fs::FileExt;
+
+    #[cfg(any(unix, windows))]
+    {
+        let mut written = 0usize;
+        while written < buf.len() {
+            #[cfg(unix)]
+            let count = file.write_at(&buf[written..], offset + written as u64)?;
+            #[cfg(windows)]
+            let count = file.seek_write(&buf[written..], offset + written as u64)?;
+            if count == 0 {
+                return Err(HematiteError::IoError(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "failed to write whole journal buffer",
+                )));
+            }
+            written += count;
+        }
+        Ok(())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        file.seek(SeekFrom::Start(offset))?;
+        file.write_all(buf)?;
+        Ok(())
+    }
 }
