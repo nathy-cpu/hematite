@@ -210,6 +210,19 @@ impl BTreeNode {
         header_size + self.keys.len() * 2 + cell_body_bytes
     }
 
+    /// How many bytes this node occupies on its page.
+    ///
+    /// Derived from the header and the freeblock chain rather than by measuring
+    /// every cell. The cells occupy the content area minus whatever is free inside
+    /// it, and the page already records both: the content area starts at
+    /// `cell_content_start`, and `total_free_space` walks the freeblock chain,
+    /// which is a handful of entries where the cells are a couple of hundred.
+    ///
+    /// `is_underflow` calls this on every delete and `can_merge_with` on every
+    /// rebalance, and summing per-cell sizes made those two 21.8 % of a delete.
+    ///
+    /// [`Self::serialized_size_by_measuring_cells`] is the obvious slow version,
+    /// kept as the reference the differential test checks this against.
     pub fn serialized_size_on_page(&self) -> Result<usize> {
         if self.is_decoded {
             return Ok(self.estimate_serialized_size());
@@ -219,8 +232,35 @@ impl BTreeNode {
             NodeType::Leaf => LEAF_HEADER_SIZE,
             NodeType::Internal => INTERIOR_HEADER_SIZE,
         };
+        let (page, header) = self.raw_page_and_header()?;
+        let is_p1 = is_page_one(self.page_id);
+        // `total_free_space` counts the gap as free as well, and the gap is not in
+        // the content area, so it comes back off.
+        let free_in_content =
+            pf_total_free_space(page, is_p1)?.saturating_sub(header.writable_gap_size());
+        let content_span =
+            USABLE_PAGE_SIZE.saturating_sub(header.cell_content_start as usize);
+        let cell_body_bytes = content_span.saturating_sub(free_in_content);
 
-        // Sum cell body bytes without allocating an intermediate Vec.
+        Ok(header_size + self.key_count * 2 + cell_body_bytes)
+    }
+
+    /// The same number, measured one cell at a time.
+    ///
+    /// What `serialized_size_on_page` used to do. It survives as the reference for
+    /// the differential test, which is the only thing that can show the cheap
+    /// derivation still agrees with the page.
+    #[cfg(test)]
+    pub(crate) fn serialized_size_by_measuring_cells(&self) -> Result<usize> {
+        if self.is_decoded {
+            return Ok(self.estimate_serialized_size());
+        }
+
+        let header_size = match self.node_type {
+            NodeType::Leaf => LEAF_HEADER_SIZE,
+            NodeType::Internal => INTERIOR_HEADER_SIZE,
+        };
+
         let mut cell_body_bytes = 0usize;
         for index in 0..self.key_count {
             let (start, end) = self.cell_range_for_index(index)?;

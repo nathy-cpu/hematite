@@ -231,6 +231,63 @@ mod mod_tests {
     /// test can silently fail to reach: before this test existed, the entire suite
     /// ran it zero times while a 5 000-row `DELETE` ran it 1 672 times, so a
     /// rewrite of it would have shipped with 745 tests green.
+    /// The cheap node-size derivation agrees with measuring every cell.
+    ///
+    /// `serialized_size_on_page` reads the answer off the page header and the
+    /// freeblock chain instead of summing cell sizes, which took `is_underflow`
+    /// and `can_merge_with` from 21.8 % of a delete to a handful of loads. The
+    /// identity it relies on — cells occupy the content area minus whatever is
+    /// free inside it — holds only if freeblocks and fragments are accounted for
+    /// exactly, so this checks it against the slow version on pages that have
+    /// actually been churned: inserted into, deleted from, and refilled, which is
+    /// what puts freeblocks on a page in the first place.
+    #[test]
+    fn node_size_from_the_header_matches_measuring_every_cell() -> Result<()> {
+        let entries = 900u32;
+        let (trees, root_page_id) = build_dense_byte_tree(entries)?;
+
+        let mut check = |trees: &ByteTreeStore, label: &str| -> Result<()> {
+            let page_ids = trees.collect_page_ids(root_page_id)?;
+            let shared = trees.shared_storage();
+            let mut checked = 0usize;
+            for page_id in page_ids {
+                let page = {
+                    let mut pager = shared.write().unwrap();
+                    pager.read_page_shared(page_id)?
+                };
+                let Ok(node) = crate::btree::node::BTreeNode::from_shared_page(page) else {
+                    continue; // not a b-tree page (overflow, metadata)
+                };
+                assert_eq!(
+                    node.serialized_size_on_page()?,
+                    node.serialized_size_by_measuring_cells()?,
+                    "{label}: page {page_id} disagrees"
+                );
+                checked += 1;
+            }
+            assert!(checked > 1, "{label}: expected several pages, saw {checked}");
+            Ok(())
+        };
+
+        check(&trees, "after inserts")?;
+
+        // Delete a stride, which leaves freeblocks scattered through the content
+        // area rather than a single trailing gap.
+        let mut tree = trees.open_tree(root_page_id)?;
+        for key in (0..entries).step_by(3) {
+            tree.delete(&key.to_be_bytes())?;
+        }
+        check(&trees, "after strided deletes")?;
+
+        // Refill with differently sized values, so some reuse freeblocks and some
+        // do not.
+        for key in (0..entries).step_by(3) {
+            tree.insert(&key.to_be_bytes(), &vec![key as u8; 1 + (key % 11) as usize])?;
+        }
+        check(&trees, "after refill")?;
+        Ok(())
+    }
+
     #[test]
     fn deleting_from_a_middle_leaf_borrows_a_cell_from_its_right_sibling() -> Result<()> {
         let entries = 900u32;
