@@ -2303,9 +2303,11 @@ impl InsertExecutor {
     ) -> Result<()> {
         let candidate_pk = primary_key_values(table, candidate_row)?;
 
+        // The row id answers this; fetching and decoding the whole row to call
+        // `.is_some()` on it read a record only to drop it.
         if ctx
             .engine
-            .lookup_row_by_primary_key(table, &candidate_pk)?
+            .lookup_primary_key_rowid(table, &candidate_pk)?
             .is_some()
         {
             return Err(duplicate_primary_key_parse_error(
@@ -4477,15 +4479,20 @@ fn write_stored_row(
     // row. Callers that pass `preserve_row_id` have already removed what they are
     // replacing, so the id they are about to take is theirs; the others have to
     // find it unoccupied first.
-    let keyed_row_id = if preserve_row_id {
-        ctx.engine.aliased_rowid_for_row(table, &row.values)?
-    } else {
-        ctx.engine.reserve_aliased_rowid(table, &row.values)?
-    };
+    let keyed_row_id = ctx.engine.aliased_rowid_for_row(table, &row.values)?;
 
     let row_id = if let Some(keyed_row_id) = keyed_row_id {
         row.row_id = keyed_row_id;
-        ctx.engine.insert_row_with_rowid(table_name, row.clone())?;
+        if preserve_row_id {
+            // Replacing a row the caller has already removed, so taking the id is
+            // the point.
+            ctx.engine.insert_row_with_rowid(table_name, row.clone())?;
+        } else {
+            // The tree refuses to displace an existing row and says so, which is
+            // both the uniqueness check and the write in one descent.
+            ctx.engine
+                .insert_new_row_with_rowid(table_name, row.clone())?;
+        }
         keyed_row_id
     } else if preserve_row_id {
         ctx.engine.insert_row_with_rowid(table_name, row.clone())?;

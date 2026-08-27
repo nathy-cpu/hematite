@@ -265,6 +265,39 @@ pub(crate) fn lookup_row_by_rowid(
     }
 }
 
+/// Writes a row under a caller-chosen id, refusing to displace one already there.
+///
+/// For a table whose primary key is its row id. Writing over a colliding row is
+/// exactly the failure a primary-key index used to prevent, and the tree can say
+/// whether it happened without a separate probe — see
+/// [`ByteTree::insert_new_with_mutation`].
+///
+/// [`ByteTree::insert_new_with_mutation`]: crate::btree::ByteTree::insert_new_with_mutation
+pub(crate) fn insert_new_stored_row(
+    engine: &mut CatalogEngine,
+    table_name: &str,
+    row: StoredRow,
+) -> Result<()> {
+    let root_page_id = engine.table_runtime_metadata(table_name)?.root_page_id;
+    let mut tree = engine.open_tree(root_page_id)?;
+    let encoded_row = RowCodec::encode_stored_row(&row)?;
+    let owned_name = table_name.to_string();
+    let new_root_page_id = tree
+        .insert_new_with_mutation(
+            &RowCodec::encode_row_id_key(row.row_id),
+            &encoded_row,
+            || {
+                crate::error::HematiteError::StorageError(format!(
+                    "Duplicate primary key for table '{owned_name}'"
+                ))
+            },
+        )?
+        .root_page_id;
+
+    engine.record_generated_row_insert(table_name, new_root_page_id, row.row_id);
+    Ok(())
+}
+
 pub(crate) fn insert_stored_row(
     engine: &mut CatalogEngine,
     table_name: &str,

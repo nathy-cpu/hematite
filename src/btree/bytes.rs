@@ -418,6 +418,43 @@ impl ByteTree {
         })
     }
 
+    /// Inserts, refusing to replace an entry that is already there.
+    ///
+    /// The tree already knows whether it replaced something — `insert_with_mutation`
+    /// computes exactly that so it can free the old value's overflow pages, and then
+    /// discards it. Asking for it here costs nothing, where probing first costs a
+    /// whole descent.
+    ///
+    /// `on_duplicate` builds the error, so the caller can say what the key means in
+    /// its own terms. Refusing from inside the closure unwinds the write through the
+    /// tree's own savepoint, which is what makes detecting the collision after the
+    /// fact as safe as detecting it before.
+    pub fn insert_new_with_mutation(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        on_duplicate: impl Fn() -> HematiteError,
+    ) -> Result<TreeMutation> {
+        let encoded_key = key.to_vec();
+        self.run_atomically(|tree| {
+            let stored_value = {
+                let mut storage = tree.lock_storage()?;
+                materialize_stored_value(&mut storage, value)?
+            };
+
+            let (mutation, old_value) = tree.index.insert_replacing_with_mutation(
+                BTreeKey::new(encoded_key),
+                BTreeValue::new(stored_value),
+            )?;
+
+            if old_value.is_some() {
+                return Err(on_duplicate());
+            }
+
+            Ok(mutation)
+        })
+    }
+
     pub fn delete(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         self.delete_with_mutation(key).map(|(value, _)| value)
     }

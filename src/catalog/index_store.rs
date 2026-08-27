@@ -118,29 +118,6 @@ pub(crate) fn aliased_rowid_for_row(table: &Table, values: &[Value]) -> Result<O
     aliased_rowid(table, values)
 }
 
-/// Claims the row id a row keyed by its primary key must occupy.
-///
-/// Returns the row id, having established that nothing else holds it. This has to
-/// happen *before* the row is written: the table tree keyed by row id will happily
-/// overwrite a colliding row, where a real primary-key index would refuse to take
-/// a second entry for the same key.
-pub(crate) fn reserve_aliased_rowid(
-    engine: &mut CatalogEngine,
-    table: &Table,
-    values: &[Value],
-) -> Result<Option<u64>> {
-    let Some(row_id) = aliased_rowid(table, values)? else {
-        return Ok(None);
-    };
-    if table_store::rowid_exists(engine, &table.name, row_id)? {
-        return Err(HematiteError::StorageError(format!(
-            "Duplicate primary key for table '{}'",
-            table.name
-        )));
-    }
-    Ok(Some(row_id))
-}
-
 pub(crate) fn register_primary_key_row(
     engine: &mut CatalogEngine,
     table: &Table,

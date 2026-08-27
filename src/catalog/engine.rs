@@ -684,6 +684,15 @@ not available yet.",
         self.run_atomically(|engine| table_store::insert_row_with_rowid(engine, table_name, row))
     }
 
+    /// See [`table_store::insert_new_stored_row`].
+    pub fn insert_new_row_with_rowid(
+        &mut self,
+        table_name: &str,
+        row: StoredRow,
+    ) -> Result<()> {
+        self.run_atomically(|engine| table_store::insert_new_stored_row(engine, table_name, row))
+    }
+
     pub fn delete_from_table_by_rowid(&mut self, table_name: &str, rowid: u64) -> Result<bool> {
         self.run_atomically(|engine| {
             table_store::delete_from_table_by_rowid(engine, table_name, rowid)
@@ -786,9 +795,9 @@ not available yet.",
     /// different primary key for it, leaving a row nothing can look up. Three tests
     /// in this repository did exactly that before the two were joined here.
     pub fn insert_table_row(&mut self, table: &Table, values: Vec<Value>) -> Result<u64> {
-        match self.reserve_aliased_rowid(table, &values)? {
+        match self.aliased_rowid_for_row(table, &values)? {
             Some(row_id) => {
-                self.insert_row_with_rowid(&table.name, StoredRow { row_id, values })?;
+                self.insert_new_row_with_rowid(&table.name, StoredRow { row_id, values })?;
                 Ok(row_id)
             }
             None => self.insert_into_table(&table.name, values),
@@ -798,11 +807,6 @@ not available yet.",
     /// See [`index_store::aliased_rowid_for_row`].
     pub fn aliased_rowid_for_row(&self, table: &Table, values: &[Value]) -> Result<Option<u64>> {
         index_store::aliased_rowid_for_row(table, values)
-    }
-
-    /// See [`index_store::reserve_aliased_rowid`].
-    pub fn reserve_aliased_rowid(&mut self, table: &Table, values: &[Value]) -> Result<Option<u64>> {
-        index_store::reserve_aliased_rowid(self, table, values)
     }
 
     pub fn register_primary_key_row(&mut self, table: &Table, row: StoredRow) -> Result<()> {
