@@ -43,7 +43,7 @@ impl PersistedPagerState {
         }
 
         Err(HematiteError::StorageError(
-            "Legacy pager metadata format is unsupported".to_string(),
+            "Pager metadata does not carry the expected magic".to_string(),
         ))
     }
 

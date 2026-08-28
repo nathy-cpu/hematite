@@ -1,9 +1,11 @@
 //! Database header management for Hematite database.
 //!
-//! M0 storage contract notes:
+//! Storage contract:
 //! - The database header is always stored at reserved page 0.
-//! - Header versioning is strict: older on-disk versions are rejected.
-//! - Header checksum covers all semantic header fields to detect corruption.
+//! - The version field is checked strictly: a file that does not carry the current
+//!   version is refused at open rather than misread later.
+//! - The header checksum covers all semantic header fields, so corruption is caught
+//!   at open too.
 
 use super::ids::TableId;
 use crate::btree::checksum;
@@ -28,14 +30,7 @@ impl DatabaseHeader {
     /// Magic bytes for Hematite database files
     pub const MAGIC: [u8; 4] = *b"HMTD";
     /// Current database format version.
-    ///
-    /// - Version 1: the first version after the M0 storage reset. Checksums were
-    ///   FNV-1a, and the header's own checksum came from `DefaultHasher`.
-    /// - Version 2: every checksum in the file is XXH64. The bytes on disk are
-    ///   otherwise unchanged, but every stored checksum differs, so version 1 files
-    ///   are rejected here — at open, with the retired-format message — rather than
-    ///   surfacing later as a confusing corruption error.
-    pub const CURRENT_VERSION: u32 = 2;
+    pub const CURRENT_VERSION: u32 = 1;
     /// Fixed reserved page ID for the database header.
     pub const HEADER_PAGE_ID: u32 = 0;
 
@@ -54,11 +49,12 @@ impl DatabaseHeader {
 
     /// Calculate checksum for header integrity.
     ///
-    /// Hashes the semantic fields in their on-disk little-endian form — i.e. the
-    /// first 16 bytes of the serialized header, everything up to the checksum
-    /// itself. This used to run the fields through `DefaultHasher`, whose output is
-    /// explicitly not guaranteed stable across Rust releases, so a database written
-    /// by one toolchain could fail header verification under another.
+    /// Hashes the semantic fields in their on-disk little-endian form — the first
+    /// 16 bytes of the serialized header, everything up to the checksum itself.
+    ///
+    /// XXH64 rather than `DefaultHasher`, whose output is explicitly not guaranteed
+    /// stable across Rust releases: a database written by one toolchain would fail
+    /// header verification under another.
     pub fn calculate_checksum(&self) -> u32 {
         let mut fields = [0u8; 16];
         fields[0..4].copy_from_slice(&self.magic);

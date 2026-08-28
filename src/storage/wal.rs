@@ -227,10 +227,10 @@ impl PartialEq for WalPageCache {
 }
 impl Eq for WalPageCache {}
 
-const V3_WAL_MAGIC: &[u8; 4] = b"HTW3";
-const V3_WAL_VERSION: u32 = 1;
-pub(crate) const V3_WAL_HEADER_SIZE: usize = 24;
-pub(crate) const V3_WAL_FRAME_PREFIX_SIZE: usize = 28;
+const WAL_MAGIC: &[u8; 4] = b"HTW1";
+const WAL_VERSION: u32 = 1;
+pub(crate) const WAL_HEADER_SIZE: usize = 24;
+pub(crate) const WAL_FRAME_PREFIX_SIZE: usize = 28;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WalHeader {
@@ -519,7 +519,7 @@ pub(crate) fn append_committed_frames_to_path<P: AsRef<Path>>(
         frames,
     )?;
     let (start_offset, _header) = WalFile::append_frames_to_path(path, &frame_batch)?;
-    let frame_size = (V3_WAL_FRAME_PREFIX_SIZE + PAGE_SIZE) as u64;
+    let frame_size = (WAL_FRAME_PREFIX_SIZE + PAGE_SIZE) as u64;
     let offsets = frame_batch
         .iter()
         .enumerate()
@@ -649,13 +649,13 @@ fn read_page_from_wal_file_at_offset(
         Err(err) => return Err(err.into()),
     };
 
-    let frame_size = (V3_WAL_FRAME_PREFIX_SIZE + PAGE_SIZE) as u64;
+    let frame_size = (WAL_FRAME_PREFIX_SIZE + PAGE_SIZE) as u64;
     let file_len = file.metadata()?.len();
     if offset + frame_size > file_len {
         return Ok(None);
     }
 
-    let mut frame_bytes = vec![0u8; V3_WAL_FRAME_PREFIX_SIZE + PAGE_SIZE];
+    let mut frame_bytes = vec![0u8; WAL_FRAME_PREFIX_SIZE + PAGE_SIZE];
     file.seek(SeekFrom::Start(offset))?;
     file.read_exact(&mut frame_bytes)?;
 
@@ -672,7 +672,7 @@ fn read_page_from_wal_file_at_offset(
         )));
     }
 
-    Ok(Some(frame_bytes[V3_WAL_FRAME_PREFIX_SIZE..].to_vec()))
+    Ok(Some(frame_bytes[WAL_FRAME_PREFIX_SIZE..].to_vec()))
 }
 
 /// Read a specific page's data from the WAL file by scanning for the latest
@@ -688,11 +688,11 @@ fn read_page_from_wal_file(wal_path: &Path, target_page_id: PageId) -> Result<Op
     };
 
     let file_len = file.metadata()?.len();
-    if file_len < V3_WAL_HEADER_SIZE as u64 {
+    if file_len < WAL_HEADER_SIZE as u64 {
         return Ok(None);
     }
 
-    let mut header_bytes = [0u8; V3_WAL_HEADER_SIZE];
+    let mut header_bytes = [0u8; WAL_HEADER_SIZE];
     file.seek(SeekFrom::Start(0))?;
     file.read_exact(&mut header_bytes)?;
     let header = WalHeader::decode(&header_bytes)?;
@@ -700,13 +700,13 @@ fn read_page_from_wal_file(wal_path: &Path, target_page_id: PageId) -> Result<Op
     // Scan all frames, keeping track of the latest match.
     // Frames for the same page_id can appear multiple times across different
     // transactions; the last one wins (latest commit sequence).
-    let frame_size = (V3_WAL_FRAME_PREFIX_SIZE + PAGE_SIZE) as u64;
-    let mut offset = V3_WAL_HEADER_SIZE as u64;
+    let frame_size = (WAL_FRAME_PREFIX_SIZE + PAGE_SIZE) as u64;
+    let mut offset = WAL_HEADER_SIZE as u64;
     let mut latest_data: Option<Vec<u8>> = None;
 
     while offset + frame_size <= file_len {
         // Read just the frame prefix to check the page_id
-        let mut prefix = [0u8; V3_WAL_FRAME_PREFIX_SIZE];
+        let mut prefix = [0u8; WAL_FRAME_PREFIX_SIZE];
         file.seek(SeekFrom::Start(offset))?;
         file.read_exact(&mut prefix)?;
 
@@ -854,7 +854,7 @@ fn visible_pages_from_committed_groups(
     let mut database_page_count = 0u32;
     let mut pages = HashMap::new();
     let mut offsets = HashMap::new();
-    let frame_size = (V3_WAL_FRAME_PREFIX_SIZE + PAGE_SIZE) as u64;
+    let frame_size = (WAL_FRAME_PREFIX_SIZE + PAGE_SIZE) as u64;
 
     for group in groups {
         for &index in group {
@@ -863,7 +863,7 @@ fn visible_pages_from_committed_groups(
             pages.insert(frame.page_id, frame.data.clone());
             offsets.insert(
                 frame.page_id,
-                V3_WAL_HEADER_SIZE as u64 + index as u64 * frame_size,
+                WAL_HEADER_SIZE as u64 + index as u64 * frame_size,
             );
         }
     }
@@ -872,10 +872,10 @@ fn visible_pages_from_committed_groups(
 }
 
 impl WalHeader {
-    pub(crate) fn encode(&self) -> [u8; V3_WAL_HEADER_SIZE] {
-        let mut bytes = [0u8; V3_WAL_HEADER_SIZE];
-        bytes[..4].copy_from_slice(V3_WAL_MAGIC);
-        bytes[4..8].copy_from_slice(&V3_WAL_VERSION.to_be_bytes());
+    pub(crate) fn encode(&self) -> [u8; WAL_HEADER_SIZE] {
+        let mut bytes = [0u8; WAL_HEADER_SIZE];
+        bytes[..4].copy_from_slice(WAL_MAGIC);
+        bytes[4..8].copy_from_slice(&WAL_VERSION.to_be_bytes());
         bytes[8..10].copy_from_slice(&self.page_size.to_be_bytes());
         bytes[10..12].fill(0);
         bytes[12..16].copy_from_slice(&self.checkpoint_sequence.to_be_bytes());
@@ -885,27 +885,27 @@ impl WalHeader {
     }
 
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() < V3_WAL_HEADER_SIZE {
+        if bytes.len() < WAL_HEADER_SIZE {
             return Err(HematiteError::StorageError(
-                "v3 WAL header is truncated".to_string(),
+                "WAL header is truncated".to_string(),
             ));
         }
-        if &bytes[..4] != V3_WAL_MAGIC {
+        if &bytes[..4] != WAL_MAGIC {
             return Err(HematiteError::StorageError(
-                "v3 WAL header magic mismatch".to_string(),
+                "WAL header magic mismatch".to_string(),
             ));
         }
         let version = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
-        if version != V3_WAL_VERSION {
+        if version != WAL_VERSION {
             return Err(HematiteError::StorageError(format!(
-                "Unsupported v3 WAL version {version}"
+                "Unsupported WAL version {version}"
             )));
         }
 
         let page_size = u16::from_be_bytes([bytes[8], bytes[9]]);
         if page_size as usize != PAGE_SIZE {
             return Err(HematiteError::StorageError(format!(
-                "Unsupported v3 WAL page size {page_size}"
+                "Unsupported WAL page size {page_size}"
             )));
         }
 
@@ -923,13 +923,13 @@ impl WalFrame {
     pub(crate) fn encode(&self, header: &WalHeader) -> Result<Vec<u8>> {
         if self.data.len() != PAGE_SIZE {
             return Err(HematiteError::StorageError(format!(
-                "v3 WAL frame for page {} has invalid image size {}",
+                "WAL frame for page {} has invalid image size {}",
                 self.page_id,
                 self.data.len()
             )));
         }
 
-        let mut bytes = Vec::with_capacity(V3_WAL_FRAME_PREFIX_SIZE + PAGE_SIZE);
+        let mut bytes = Vec::with_capacity(WAL_FRAME_PREFIX_SIZE + PAGE_SIZE);
         bytes.extend_from_slice(&self.page_id.to_be_bytes());
         bytes.extend_from_slice(&self.database_page_count.to_be_bytes());
         bytes.extend_from_slice(&self.commit_sequence.to_be_bytes());
@@ -957,10 +957,10 @@ impl WalFrame {
     pub(crate) fn encode_prefix(
         &self,
         header: &WalHeader,
-    ) -> Result<[u8; V3_WAL_FRAME_PREFIX_SIZE]> {
+    ) -> Result<[u8; WAL_FRAME_PREFIX_SIZE]> {
         if self.data.len() != PAGE_SIZE {
             return Err(HematiteError::StorageError(format!(
-                "v3 WAL frame for page {} has invalid image size {}",
+                "WAL frame for page {} has invalid image size {}",
                 self.page_id,
                 self.data.len()
             )));
@@ -975,7 +975,7 @@ impl WalFrame {
             &self.data,
         );
 
-        let mut prefix = [0u8; V3_WAL_FRAME_PREFIX_SIZE];
+        let mut prefix = [0u8; WAL_FRAME_PREFIX_SIZE];
         prefix[..4].copy_from_slice(&self.page_id.to_be_bytes());
         prefix[4..8].copy_from_slice(&self.database_page_count.to_be_bytes());
         prefix[8..16].copy_from_slice(&self.commit_sequence.to_be_bytes());
@@ -987,9 +987,9 @@ impl WalFrame {
     }
 
     pub(crate) fn decode(bytes: &[u8], header: &WalHeader) -> Result<(Self, usize)> {
-        if bytes.len() < V3_WAL_FRAME_PREFIX_SIZE + PAGE_SIZE {
+        if bytes.len() < WAL_FRAME_PREFIX_SIZE + PAGE_SIZE {
             return Err(HematiteError::StorageError(
-                "v3 WAL frame is truncated".to_string(),
+                "WAL frame is truncated".to_string(),
             ));
         }
 
@@ -1003,7 +1003,7 @@ impl WalFrame {
 
         if salt_1 != header.salt_1 || salt_2 != header.salt_2 {
             return Err(HematiteError::StorageError(
-                "v3 WAL frame salt mismatch".to_string(),
+                "WAL frame salt mismatch".to_string(),
             ));
         }
 
@@ -1017,7 +1017,7 @@ impl WalFrame {
         );
         if checksum != expected_checksum {
             return Err(HematiteError::StorageError(
-                "v3 WAL frame checksum mismatch".to_string(),
+                "WAL frame checksum mismatch".to_string(),
             ));
         }
 
@@ -1028,7 +1028,7 @@ impl WalFrame {
                 commit_sequence,
                 page_bytes,
             ),
-            V3_WAL_FRAME_PREFIX_SIZE + PAGE_SIZE,
+            WAL_FRAME_PREFIX_SIZE + PAGE_SIZE,
         ))
     }
 }
@@ -1037,7 +1037,7 @@ impl WalFile {
     #[cfg(test)]
     pub(crate) fn encode(&self) -> Result<Vec<u8>> {
         let mut bytes = Vec::with_capacity(
-            V3_WAL_HEADER_SIZE + self.frames.len() * (V3_WAL_FRAME_PREFIX_SIZE + PAGE_SIZE),
+            WAL_HEADER_SIZE + self.frames.len() * (WAL_FRAME_PREFIX_SIZE + PAGE_SIZE),
         );
         bytes.extend_from_slice(&self.header.encode());
         for frame in &self.frames {
@@ -1048,10 +1048,10 @@ impl WalFile {
 
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self> {
         let header = WalHeader::decode(bytes)?;
-        let mut offset = V3_WAL_HEADER_SIZE;
+        let mut offset = WAL_HEADER_SIZE;
         let mut frames = Vec::new();
         while offset < bytes.len() {
-            if bytes.len() - offset < V3_WAL_FRAME_PREFIX_SIZE + PAGE_SIZE {
+            if bytes.len() - offset < WAL_FRAME_PREFIX_SIZE + PAGE_SIZE {
                 break;
             }
             let (frame, used) = WalFrame::decode(&bytes[offset..], &header)?;
@@ -1124,12 +1124,12 @@ impl WalFile {
             let header = WalHeader::default();
             file.write_all(&header.encode())?;
             header
-        } else if existing_len < V3_WAL_HEADER_SIZE as u64 {
+        } else if existing_len < WAL_HEADER_SIZE as u64 {
             return Err(HematiteError::StorageError(
-                "Existing v3 WAL file has a truncated header".to_string(),
+                "Existing WAL file has a truncated header".to_string(),
             ));
         } else {
-            let mut bytes = [0u8; V3_WAL_HEADER_SIZE];
+            let mut bytes = [0u8; WAL_HEADER_SIZE];
             file.seek(SeekFrom::Start(0))?;
             file.read_exact(&mut bytes)?;
             file.seek(SeekFrom::End(0))?;
@@ -1184,7 +1184,7 @@ fn validate_frame_order(frames: &[WalFrame]) -> Result<()> {
     for frame in frames {
         if frame.commit_sequence < previous_commit {
             return Err(HematiteError::StorageError(
-                "v3 WAL frames are not ordered by commit sequence".to_string(),
+                "WAL frames are not ordered by commit sequence".to_string(),
             ));
         }
         previous_commit = frame.commit_sequence;

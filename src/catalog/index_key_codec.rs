@@ -1,4 +1,4 @@
-//! The v4 index-key encoding: how a set of values becomes one sortable byte string.
+//! The index-key encoding: how a set of values becomes one sortable byte string.
 //!
 //! Reached through [`crate::catalog::serialization::IndexKeyCodec`], which is the name
 //! the rest of the catalog calls.

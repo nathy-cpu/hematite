@@ -13,15 +13,15 @@ use crate::storage::stats::PagerStats;
 use std::io::{Seek, SeekFrom};
 use std::path::Path;
 
-const V3_JOURNAL_MAGIC: &[u8; 4] = b"HTJ3";
-const V3_JOURNAL_VERSION: u32 = 2;
-const V3_JOURNAL_HEADER_SIZE: usize = 40;
-const V3_JOURNAL_RECORD_PREFIX_SIZE: usize = 8;
-const V3_JOURNAL_RECORD_COUNT_OFFSET: u64 = 32;
-const V3_JOURNAL_INTENT_COUNT_OFFSET: u64 = 36;
+const JOURNAL_MAGIC: &[u8; 4] = b"HTJ1";
+const JOURNAL_VERSION: u32 = 1;
+const JOURNAL_HEADER_SIZE: usize = 40;
+const JOURNAL_RECORD_PREFIX_SIZE: usize = 8;
+const JOURNAL_RECORD_COUNT_OFFSET: u64 = 32;
+const JOURNAL_INTENT_COUNT_OFFSET: u64 = 36;
 /// One commit-intent entry: page id and the checksum that page must have if the
 /// commit reached the disk.
-const V3_JOURNAL_INTENT_SIZE: usize = 8;
+const JOURNAL_INTENT_SIZE: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum JournalFileState {
@@ -39,7 +39,7 @@ impl JournalFileState {
             1 => Ok(Self::Active),
             2 => Ok(Self::Committed),
             _ => Err(HematiteError::StorageError(format!(
-                "Unsupported v3 rollback journal state {value}"
+                "Unsupported rollback journal state {value}"
             ))),
         }
     }
@@ -326,7 +326,7 @@ pub(crate) fn initialize_journal_file(
     };
 
     let mut bytes = Vec::with_capacity(
-        V3_JOURNAL_HEADER_SIZE + original_free_pages.len() * 4 + original_checksums.len() * 8,
+        JOURNAL_HEADER_SIZE + original_free_pages.len() * 4 + original_checksums.len() * 8,
     );
     bytes.extend_from_slice(&header.encode());
     for page_id in original_free_pages {
@@ -368,7 +368,7 @@ pub(crate) fn initialize_journal_file(
 pub(crate) fn append_journal_record(file: &mut JournalFile, record: &JournalRecord) -> Result<()> {
     if record.data.len() != PAGE_SIZE {
         return Err(HematiteError::StorageError(format!(
-            "v3 rollback journal record for page {} has invalid image size {}",
+            "rollback journal record for page {} has invalid image size {}",
             record.page_id,
             record.data.len()
         )));
@@ -378,7 +378,7 @@ pub(crate) fn append_journal_record(file: &mut JournalFile, record: &JournalReco
 
     let mut scratch = std::mem::take(&mut file.scratch);
     scratch.clear();
-    scratch.reserve(V3_JOURNAL_RECORD_PREFIX_SIZE + PAGE_SIZE);
+    scratch.reserve(JOURNAL_RECORD_PREFIX_SIZE + PAGE_SIZE);
     scratch.extend_from_slice(&record.page_id.to_be_bytes());
     scratch.extend_from_slice(&checksum.to_be_bytes());
     scratch.extend_from_slice(&record.data);
@@ -388,7 +388,7 @@ pub(crate) fn append_journal_record(file: &mut JournalFile, record: &JournalReco
 }
 
 pub(crate) fn write_journal_record_count(file: &mut JournalFile, record_count: u32) -> Result<()> {
-    file.write_at(V3_JOURNAL_RECORD_COUNT_OFFSET, &record_count.to_be_bytes())
+    file.write_at(JOURNAL_RECORD_COUNT_OFFSET, &record_count.to_be_bytes())
 }
 
 /// Appends the commit intent: what every page the commit touches must contain if
@@ -411,23 +411,23 @@ pub(crate) fn write_commit_intents(
     file: &mut JournalFile,
     intents: &[(PageId, u32)],
 ) -> Result<()> {
-    let mut bytes = Vec::with_capacity(intents.len() * V3_JOURNAL_INTENT_SIZE);
+    let mut bytes = Vec::with_capacity(intents.len() * JOURNAL_INTENT_SIZE);
     for (page_id, checksum) in intents {
         bytes.extend_from_slice(&page_id.to_be_bytes());
         bytes.extend_from_slice(&checksum.to_be_bytes());
     }
     file.append(&bytes)?;
     file.write_at(
-        V3_JOURNAL_INTENT_COUNT_OFFSET,
+        JOURNAL_INTENT_COUNT_OFFSET,
         &(intents.len() as u32).to_be_bytes(),
     )
 }
 
 impl JournalHeader {
-    pub(crate) fn encode(&self) -> [u8; V3_JOURNAL_HEADER_SIZE] {
-        let mut bytes = [0u8; V3_JOURNAL_HEADER_SIZE];
-        bytes[..4].copy_from_slice(V3_JOURNAL_MAGIC);
-        bytes[4..8].copy_from_slice(&V3_JOURNAL_VERSION.to_be_bytes());
+    pub(crate) fn encode(&self) -> [u8; JOURNAL_HEADER_SIZE] {
+        let mut bytes = [0u8; JOURNAL_HEADER_SIZE];
+        bytes[..4].copy_from_slice(JOURNAL_MAGIC);
+        bytes[4..8].copy_from_slice(&JOURNAL_VERSION.to_be_bytes());
         bytes[8] = self.state.encode();
         bytes[9..11].copy_from_slice(&self.page_size.to_be_bytes());
         bytes[11] = 0;
@@ -442,28 +442,28 @@ impl JournalHeader {
     }
 
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() < V3_JOURNAL_HEADER_SIZE {
+        if bytes.len() < JOURNAL_HEADER_SIZE {
             return Err(HematiteError::StorageError(
-                "v3 rollback journal header is truncated".to_string(),
+                "rollback journal header is truncated".to_string(),
             ));
         }
-        if &bytes[..4] != V3_JOURNAL_MAGIC {
+        if &bytes[..4] != JOURNAL_MAGIC {
             return Err(HematiteError::StorageError(
-                "v3 rollback journal header magic mismatch".to_string(),
+                "rollback journal header magic mismatch".to_string(),
             ));
         }
 
         let version = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
-        if version != V3_JOURNAL_VERSION {
+        if version != JOURNAL_VERSION {
             return Err(HematiteError::StorageError(format!(
-                "Unsupported v3 rollback journal version {version}"
+                "Unsupported rollback journal version {version}"
             )));
         }
 
         let page_size = u16::from_be_bytes([bytes[9], bytes[10]]);
         if page_size as usize != PAGE_SIZE {
             return Err(HematiteError::StorageError(format!(
-                "Unsupported v3 rollback journal page size {page_size}"
+                "Unsupported rollback journal page size {page_size}"
             )));
         }
 
@@ -488,14 +488,14 @@ impl JournalFileRecord {
     pub(crate) fn encode(&self, checksum_seed: u32) -> Result<Vec<u8>> {
         if self.page_bytes.len() != PAGE_SIZE {
             return Err(HematiteError::StorageError(format!(
-                "v3 rollback journal record for page {} has invalid image size {}",
+                "rollback journal record for page {} has invalid image size {}",
                 self.page_number,
                 self.page_bytes.len()
             )));
         }
 
         let checksum = record_checksum(self.page_number, checksum_seed, &self.page_bytes);
-        let mut bytes = Vec::with_capacity(V3_JOURNAL_RECORD_PREFIX_SIZE + PAGE_SIZE);
+        let mut bytes = Vec::with_capacity(JOURNAL_RECORD_PREFIX_SIZE + PAGE_SIZE);
         bytes.extend_from_slice(&self.page_number.to_be_bytes());
         bytes.extend_from_slice(&checksum.to_be_bytes());
         bytes.extend_from_slice(&self.page_bytes);
@@ -503,9 +503,9 @@ impl JournalFileRecord {
     }
 
     pub(crate) fn decode(bytes: &[u8], checksum_seed: u32) -> Result<(Self, usize)> {
-        if bytes.len() < V3_JOURNAL_RECORD_PREFIX_SIZE + PAGE_SIZE {
+        if bytes.len() < JOURNAL_RECORD_PREFIX_SIZE + PAGE_SIZE {
             return Err(HematiteError::StorageError(
-                "v3 rollback journal record is truncated".to_string(),
+                "rollback journal record is truncated".to_string(),
             ));
         }
 
@@ -515,7 +515,7 @@ impl JournalFileRecord {
         let expected = record_checksum(page_number, checksum_seed, &page_bytes);
         if checksum != expected {
             return Err(HematiteError::StorageError(
-                "v3 rollback journal record checksum mismatch".to_string(),
+                "rollback journal record checksum mismatch".to_string(),
             ));
         }
 
@@ -524,7 +524,7 @@ impl JournalFileRecord {
                 page_number,
                 page_bytes,
             },
-            V3_JOURNAL_RECORD_PREFIX_SIZE + PAGE_SIZE,
+            JOURNAL_RECORD_PREFIX_SIZE + PAGE_SIZE,
         ))
     }
 }
@@ -542,11 +542,11 @@ impl EncodedRollbackJournal {
             ..self.header.clone()
         };
         let mut bytes = Vec::with_capacity(
-            V3_JOURNAL_HEADER_SIZE
+            JOURNAL_HEADER_SIZE
                 + self.original_free_pages.len() * std::mem::size_of::<PageId>()
                 + self.original_checksums.len()
                     * (std::mem::size_of::<PageId>() + std::mem::size_of::<u32>())
-                + self.records.len() * (V3_JOURNAL_RECORD_PREFIX_SIZE + PAGE_SIZE),
+                + self.records.len() * (JOURNAL_RECORD_PREFIX_SIZE + PAGE_SIZE),
         );
         bytes.extend_from_slice(&header.encode());
 
@@ -572,13 +572,13 @@ impl EncodedRollbackJournal {
 
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self> {
         let header = JournalHeader::decode(bytes)?;
-        let mut offset = V3_JOURNAL_HEADER_SIZE;
+        let mut offset = JOURNAL_HEADER_SIZE;
 
         let mut original_free_pages = Vec::with_capacity(header.free_page_count as usize);
         for _ in 0..header.free_page_count {
             if offset + 4 > bytes.len() {
                 return Err(HematiteError::StorageError(
-                    "v3 rollback journal freelist metadata is truncated".to_string(),
+                    "rollback journal freelist metadata is truncated".to_string(),
                 ));
             }
             original_free_pages.push(read_u32_be(bytes, offset));
@@ -589,7 +589,7 @@ impl EncodedRollbackJournal {
         for _ in 0..header.checksum_count {
             if offset + 8 > bytes.len() {
                 return Err(HematiteError::StorageError(
-                    "v3 rollback journal checksum metadata is truncated".to_string(),
+                    "rollback journal checksum metadata is truncated".to_string(),
                 ));
             }
             original_checksums.push((read_u32_be(bytes, offset), read_u32_be(bytes, offset + 4)));
@@ -605,18 +605,18 @@ impl EncodedRollbackJournal {
 
         let mut commit_intents = Vec::with_capacity(header.intent_count as usize);
         for _ in 0..header.intent_count {
-            if offset + V3_JOURNAL_INTENT_SIZE > bytes.len() {
+            if offset + JOURNAL_INTENT_SIZE > bytes.len() {
                 return Err(HematiteError::StorageError(
-                    "v3 rollback journal commit intent is truncated".to_string(),
+                    "rollback journal commit intent is truncated".to_string(),
                 ));
             }
             commit_intents.push((read_u32_be(bytes, offset), read_u32_be(bytes, offset + 4)));
-            offset += V3_JOURNAL_INTENT_SIZE;
+            offset += JOURNAL_INTENT_SIZE;
         }
 
         if offset != bytes.len() {
             return Err(HematiteError::StorageError(
-                "v3 rollback journal has trailing bytes".to_string(),
+                "rollback journal has trailing bytes".to_string(),
             ));
         }
 
@@ -636,7 +636,7 @@ fn validate_record_set(records: &[JournalFileRecord]) -> Result<()> {
     for record in records {
         if !seen.insert(record.page_number) {
             return Err(HematiteError::StorageError(format!(
-                "v3 rollback journal contains duplicate page {}",
+                "rollback journal contains duplicate page {}",
                 record.page_number
             )));
         }

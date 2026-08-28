@@ -33,16 +33,13 @@ impl TestDbFile {
 
     /// Every file the pager may create alongside the database.
     ///
-    /// `.pager_checksums` is a retired format that nothing writes any more, but
-    /// `test_pager_open_rejects_legacy_checksum_sidecar` fabricates one and asserts
-    /// it survives the rejection — so cleanup has to know about it, or every test
-    /// run leaves another one behind in the repository root.
-    const SIDECAR_FILE_SUFFIXES: [&'static str; 5] = [
+    /// Cleanup has to know about all of them, or every test run leaves another set
+    /// behind in the repository root.
+    const SIDECAR_FILE_SUFFIXES: [&'static str; 4] = [
         ".wal",
         ".journal",
         ".rollback.lock",
         ".wal.write.lock",
-        ".pager_checksums",
     ];
 
     const SIDECAR_DIR_SUFFIXES: [&'static str; 1] = [".wal.readers"];

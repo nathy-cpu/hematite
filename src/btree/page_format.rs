@@ -98,7 +98,7 @@ const OFFSET_FRAGMENTED_FREE_BYTES: usize = 7;
 const OFFSET_RIGHTMOST_CHILD: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct BTreePageHeaderV3 {
+pub(crate) struct BTreePageHeader {
     pub(crate) kind: PageKind,
     pub(crate) header_offset: usize,
     pub(crate) header_size: usize,
@@ -109,12 +109,12 @@ pub(crate) struct BTreePageHeaderV3 {
     pub(crate) rightmost_child: Option<u32>,
 }
 
-impl BTreePageHeaderV3 {
+impl BTreePageHeader {
     pub(crate) fn parse(page: &Page, is_page_one: bool) -> Result<Self> {
         let header_offset = header_offset(is_page_one);
         if header_offset + LEAF_HEADER_SIZE > page.data.len() {
             return Err(HematiteError::CorruptedData(
-                "v3 b-tree page header is truncated".to_string(),
+                "b-tree page header is truncated".to_string(),
             ));
         }
 
@@ -122,7 +122,7 @@ impl BTreePageHeaderV3 {
         let header_size = page_header_size(kind)?;
         if header_offset + header_size > page.data.len() {
             return Err(HematiteError::CorruptedData(
-                "v3 b-tree page header exceeds page bounds".to_string(),
+                "b-tree page header exceeds page bounds".to_string(),
             ));
         }
 
@@ -141,14 +141,14 @@ impl BTreePageHeaderV3 {
 
         if header.cell_content_start as usize > USABLE_PAGE_SIZE {
             return Err(HematiteError::CorruptedData(
-                "v3 b-tree cell content start exceeds page bounds".to_string(),
+                "b-tree cell content start exceeds page bounds".to_string(),
             ));
         }
 
         let pointer_area_end = header.pointer_area_end();
         if pointer_area_end > header.cell_content_start as usize {
             return Err(HematiteError::CorruptedData(
-                "v3 b-tree pointer area overlaps cell content".to_string(),
+                "b-tree pointer area overlaps cell content".to_string(),
             ));
         }
 
@@ -178,7 +178,7 @@ pub(crate) fn initialize_btree_page(
     let header_size = page_header_size(kind)?;
     if header_offset + header_size > USABLE_PAGE_SIZE {
         return Err(HematiteError::StorageError(
-            "v3 b-tree header does not fit on page".to_string(),
+            "b-tree header does not fit on page".to_string(),
         ));
     }
 
@@ -190,7 +190,7 @@ pub(crate) fn initialize_btree_page(
             | PageKind::InteriorIndex
     ) {
         return Err(HematiteError::StorageError(format!(
-            "Page kind {:?} is not a v3 b-tree page",
+            "Page kind {:?} is not a b-tree page",
             kind
         )));
     }
@@ -220,7 +220,7 @@ pub(crate) fn initialize_btree_page(
 
 #[cfg(test)]
 pub(crate) fn cell_pointer(page: &Page, is_page_one: bool, index: usize) -> Result<u16> {
-    let header = BTreePageHeaderV3::parse(page, is_page_one)?;
+    let header = BTreePageHeader::parse(page, is_page_one)?;
     if index >= header.cell_count as usize {
         return Err(HematiteError::StorageError(format!(
             "Cell index {} out of bounds for {} cells",
@@ -235,7 +235,7 @@ pub(crate) fn cell_pointer(page: &Page, is_page_one: bool, index: usize) -> Resu
 
 #[cfg(test)]
 pub(crate) fn set_rightmost_child(page: &mut Page, is_page_one: bool, child: u32) -> Result<()> {
-    let header = BTreePageHeaderV3::parse(page, is_page_one)?;
+    let header = BTreePageHeader::parse(page, is_page_one)?;
     if !header.kind.is_interior() {
         return Err(HematiteError::StorageError(
             "Cannot set rightmost child on a leaf page".to_string(),
@@ -254,7 +254,7 @@ const MIN_FREEBLOCK_SIZE: usize = 4;
 
 /// Calculate total usable free space on a page: gap + freeblock chain + fragments.
 pub(crate) fn total_free_space(page: &Page, is_page_one: bool) -> Result<usize> {
-    let header = BTreePageHeaderV3::parse(page, is_page_one)?;
+    let header = BTreePageHeader::parse(page, is_page_one)?;
     total_free_space_with_header(page, &header)
 }
 
@@ -264,7 +264,7 @@ pub(crate) fn total_free_space(page: &Page, is_page_one: bool) -> Result<usize> 
 /// one are the hot ones — `serialized_size_on_page` runs on every delete.
 pub(crate) fn total_free_space_with_header(
     page: &Page,
-    header: &BTreePageHeaderV3,
+    header: &BTreePageHeader,
 ) -> Result<usize> {
     let gap = header.writable_gap_size();
     let fragments = header.fragmented_free_bytes as usize;
@@ -342,7 +342,7 @@ pub(crate) fn insert_cell(
     sorted_index: usize,
     cell_bytes: &[u8],
 ) -> Result<u16> {
-    let mut header = BTreePageHeaderV3::parse(page, is_page_one)?;
+    let mut header = BTreePageHeader::parse(page, is_page_one)?;
     if sorted_index > header.cell_count as usize {
         return Err(HematiteError::StorageError(format!(
             "Cannot insert cell pointer at index {} for {} existing cells",
@@ -358,14 +358,14 @@ pub(crate) fn insert_cell(
     let total_free = total_free_space(page, is_page_one)?;
     if total_free < cell_len + pointer_space_needed {
         return Err(HematiteError::StorageError(
-            "v3 b-tree page has insufficient total space for new cell".to_string(),
+            "b-tree page has insufficient total space for new cell".to_string(),
         ));
     }
 
     // Ensure the gap has room for the new pointer entry (2 bytes).
     if header.writable_gap_size() < pointer_space_needed {
         defragment_page(page, is_page_one)?;
-        header = BTreePageHeaderV3::parse(page, is_page_one)?;
+        header = BTreePageHeader::parse(page, is_page_one)?;
     }
 
     // Try allocating from freeblocks first.
@@ -379,11 +379,11 @@ pub(crate) fn insert_cell(
         let required_in_gap = cell_len + pointer_space_needed;
         if header.writable_gap_size() < required_in_gap {
             defragment_page(page, is_page_one)?;
-            header = BTreePageHeaderV3::parse(page, is_page_one)?;
+            header = BTreePageHeader::parse(page, is_page_one)?;
         }
         if header.writable_gap_size() < cell_len + pointer_space_needed {
             return Err(HematiteError::StorageError(
-                "v3 b-tree page has insufficient contiguous space for new cell".to_string(),
+                "b-tree page has insufficient contiguous space for new cell".to_string(),
             ));
         }
         let start = header.cell_content_start as usize - cell_len;
@@ -417,7 +417,7 @@ pub(crate) fn insert_cell(
 /// Remove a cell at `index` and add the freed space to the freeblock chain
 /// instead of defragmenting the entire page.
 pub(crate) fn remove_cell(page: &mut Page, is_page_one: bool, index: usize) -> Result<()> {
-    let header = BTreePageHeaderV3::parse(page, is_page_one)?;
+    let header = BTreePageHeader::parse(page, is_page_one)?;
     if index >= header.cell_count as usize {
         return Err(HematiteError::StorageError(format!(
             "Cell index {} out of bounds for {} cells",
@@ -470,7 +470,7 @@ pub(crate) fn remove_cell(page: &mut Page, is_page_one: bool, index: usize) -> R
     }
 
     // Trigger defragmentation only if fragmentation is excessive (>60 bytes).
-    let updated_header = BTreePageHeaderV3::parse(page, is_page_one)?;
+    let updated_header = BTreePageHeader::parse(page, is_page_one)?;
     if updated_header.fragmented_free_bytes > 60 {
         defragment_page(page, is_page_one)?;
     }
@@ -500,7 +500,7 @@ fn add_to_freeblock_chain(data: &mut [u8], header_offset: usize, offset: usize, 
 
 pub(crate) fn compute_cell_size(
     page: &Page,
-    header: &BTreePageHeaderV3,
+    header: &BTreePageHeader,
     cell_offset: usize,
 ) -> Result<usize> {
     if cell_offset >= USABLE_PAGE_SIZE {
@@ -555,7 +555,7 @@ pub(crate) fn compute_cell_size(
 /// Defragment a page by repacking all cells tightly from the end of the page.
 /// Clears the freeblock chain and fragment count.
 pub(crate) fn defragment_page(page: &mut Page, is_page_one: bool) -> Result<()> {
-    let header = BTreePageHeaderV3::parse(page, is_page_one)?;
+    let header = BTreePageHeader::parse(page, is_page_one)?;
     let cell_count = header.cell_count as usize;
     let pointer_start = header.pointer_area_start();
 
@@ -611,7 +611,7 @@ fn page_header_size(kind: PageKind) -> Result<usize> {
         PageKind::LeafIndex | PageKind::LeafTable => Ok(LEAF_HEADER_SIZE),
         PageKind::InteriorIndex | PageKind::InteriorTable => Ok(INTERIOR_HEADER_SIZE),
         _ => Err(HematiteError::StorageError(format!(
-            "Page kind {:?} is not a v3 b-tree page",
+            "Page kind {:?} is not a b-tree page",
             kind
         ))),
     }

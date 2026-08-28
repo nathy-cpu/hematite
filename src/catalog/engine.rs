@@ -116,7 +116,7 @@ pub struct CatalogEngine {
 impl CatalogEngine {
     pub(crate) const PAGE_SIZE: usize = ByteTreeStore::PAGE_SIZE;
     pub(crate) const INVALID_PAGE_ID: PageId = ByteTreeStore::INVALID_PAGE_ID;
-    pub(crate) const STORAGE_METADATA_VERSION: u32 = 3;
+    pub(crate) const STORAGE_METADATA_VERSION: u32 = 1;
 
     fn unsupported_storage_format_error(detail: impl Into<String>) -> HematiteError {
         HematiteError::StorageError(format!(

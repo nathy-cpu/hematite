@@ -1588,7 +1588,7 @@ mod mod_tests {
 mod page_format_tests {
     use crate::btree::page_format::{
         cell_pointer, defragment_page, initialize_btree_page, insert_cell, remove_cell,
-        set_rightmost_child, BTreePageHeaderV3,
+        set_rightmost_child, BTreePageHeader,
     };
     use crate::storage::format::PageKind;
     use crate::storage::Page;
@@ -1607,7 +1607,7 @@ mod page_format_tests {
         let mut page = Page::new(1);
         initialize_btree_page(&mut page, PageKind::LeafTable, true).unwrap();
 
-        let header = BTreePageHeaderV3::parse(&page, true).unwrap();
+        let header = BTreePageHeader::parse(&page, true).unwrap();
         assert_eq!(header.header_offset, 100);
         assert_eq!(header.cell_count, 0);
         // Content stops short of the pager's trailer, not at the end of the page.
@@ -1623,7 +1623,7 @@ mod page_format_tests {
         initialize_btree_page(&mut page, PageKind::InteriorTable, false).unwrap();
         set_rightmost_child(&mut page, false, 99).unwrap();
 
-        let header = BTreePageHeaderV3::parse(&page, false).unwrap();
+        let header = BTreePageHeader::parse(&page, false).unwrap();
         assert_eq!(header.rightmost_child, Some(99));
     }
 
@@ -1637,7 +1637,7 @@ mod page_format_tests {
         insert_cell(&mut page, false, 0, &first).unwrap();
         insert_cell(&mut page, false, 1, &second).unwrap();
 
-        let header = BTreePageHeaderV3::parse(&page, false).unwrap();
+        let header = BTreePageHeader::parse(&page, false).unwrap();
         assert_eq!(header.cell_count, 2);
         let first_ptr = cell_pointer(&page, false, 0).unwrap();
         let second_ptr = cell_pointer(&page, false, 1).unwrap();
@@ -1654,7 +1654,7 @@ mod page_format_tests {
 
         remove_cell(&mut page, false, 1).unwrap();
 
-        let header = BTreePageHeaderV3::parse(&page, false).unwrap();
+        let header = BTreePageHeader::parse(&page, false).unwrap();
         assert_eq!(header.cell_count, 2);
         assert_eq!(header.fragmented_free_bytes, 0);
         assert!(header.pointer_area_end() <= header.cell_content_start as usize);
@@ -1669,7 +1669,7 @@ mod page_format_tests {
 
         defragment_page(&mut page, false).unwrap();
 
-        let header = BTreePageHeaderV3::parse(&page, false).unwrap();
+        let header = BTreePageHeader::parse(&page, false).unwrap();
         assert_eq!(header.cell_count, 2);
         assert_eq!(header.fragmented_free_bytes, 0);
     }
@@ -1746,7 +1746,7 @@ mod index_extra_tests {
                 header.version,
                 crate::catalog::header::DatabaseHeader::CURRENT_VERSION
             );
-            let _bt_header = crate::btree::page_format::BTreePageHeaderV3::parse(&page0, true)
+            let _bt_header = crate::btree::page_format::BTreePageHeader::parse(&page0, true)
                 .expect("b-tree header parse");
         }
     }
@@ -2818,7 +2818,7 @@ mod space_budget_probe {
 /// check and then failed to serialise. These pin the agreement directly.
 mod cell_framing_agreement_tests {
     use crate::btree::node::BTreeNode;
-    use crate::btree::page_format::{compute_cell_size, BTreePageHeaderV3};
+    use crate::btree::page_format::{compute_cell_size, BTreePageHeader};
     use crate::btree::{BTreeKey, BTreeValue, NodeType};
     use crate::storage::format::PageKind;
     use crate::storage::Page;
@@ -2841,7 +2841,7 @@ mod cell_framing_agreement_tests {
             let mut page = Page::new(2);
             node.to_page(&mut page)?;
 
-            let header = BTreePageHeaderV3::parse(&page, false)?;
+            let header = BTreePageHeader::parse(&page, false)?;
             let offset = header.cell_content_start as usize;
             let read_back = compute_cell_size(&page, &header, offset)?;
 
@@ -2873,7 +2873,7 @@ mod cell_framing_agreement_tests {
             let mut page = Page::new(2);
             node.to_page(&mut page)?;
 
-            let header = BTreePageHeaderV3::parse(&page, false)?;
+            let header = BTreePageHeader::parse(&page, false)?;
             assert_eq!(header.kind, PageKind::InteriorTable);
             let offset = header.cell_content_start as usize;
             let read_back = compute_cell_size(&page, &header, offset)?;

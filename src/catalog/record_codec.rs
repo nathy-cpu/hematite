@@ -1,4 +1,4 @@
-//! The v4 record encoding: how a row's values become bytes.
+//! The record encoding: how a row's values become bytes.
 //!
 //! Reached through [`crate::catalog::serialization::RowCodec`], which is the name the
 //! rest of the catalog calls.

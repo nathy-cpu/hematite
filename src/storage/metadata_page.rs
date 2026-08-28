@@ -53,7 +53,7 @@ fn parse_sections(page: &[u8]) -> Result<MetadataSections<'_>> {
     }
 
     Err(HematiteError::StorageError(
-        "Legacy reserved metadata layout is unsupported".to_string(),
+        "Reserved metadata page does not carry the expected magic".to_string(),
     ))
 }
 

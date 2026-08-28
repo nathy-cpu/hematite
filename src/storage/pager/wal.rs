@@ -107,7 +107,7 @@ impl Pager {
                     .and_then(|path| std::fs::metadata(path).ok())
                     .map(|metadata| {
                         metadata.len()
-                            / (crate::storage::wal::V3_WAL_FRAME_PREFIX_SIZE
+                            / (crate::storage::wal::WAL_FRAME_PREFIX_SIZE
                                 + crate::storage::PAGE_SIZE) as u64
                     })
                     .unwrap_or(0);

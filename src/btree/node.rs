@@ -93,7 +93,7 @@
 use crate::btree::page_format::{
     compute_cell_size, insert_cell as pf_insert_cell, remove_cell as pf_remove_cell,
     total_free_space as pf_total_free_space,
-    total_free_space_with_header as pf_total_free_space_with_header, BTreePageHeaderV3,
+    total_free_space_with_header as pf_total_free_space_with_header, BTreePageHeader,
 };
 use crate::btree::{BTreeKey, BTreeValue, NodeType, BTREE_ORDER};
 use crate::error::{HematiteError, Result};
@@ -138,7 +138,7 @@ pub struct BTreeNode {
     /// on a scan — enough to cancel out what removing the eager whole-page pass
     /// saved. Every construction path already parses the header, so holding on to it
     /// is free.
-    pub(crate) header: Option<BTreePageHeaderV3>,
+    pub(crate) header: Option<BTreePageHeader>,
 }
 
 impl BTreeNode {
@@ -313,7 +313,7 @@ impl BTreeNode {
         }
 
         let is_page_one = is_page_one(page.id);
-        let header = BTreePageHeaderV3::parse(&page, is_page_one)?;
+        let header = BTreePageHeader::parse(&page, is_page_one)?;
         let node_type = match header.kind {
             PageKind::LeafTable => NodeType::Leaf,
             PageKind::InteriorTable => NodeType::Internal,
@@ -370,7 +370,7 @@ impl BTreeNode {
             .raw_page
             .as_ref()
             .ok_or_else(|| HematiteError::CorruptedData("Missing raw page".to_string()))?;
-        let header = BTreePageHeaderV3::parse(page, is_page_one(self.page_id))?;
+        let header = BTreePageHeader::parse(page, is_page_one(self.page_id))?;
 
         match self.node_type {
             NodeType::Leaf => {
@@ -493,7 +493,7 @@ impl BTreeNode {
             HematiteError::CorruptedData("Missing raw page for lazy node".to_string())
         })?;
         if target_index == self.key_count {
-            let header = BTreePageHeaderV3::parse(page, is_page_one(self.page_id))?;
+            let header = BTreePageHeader::parse(page, is_page_one(self.page_id))?;
             let rightmost = header.rightmost_child.ok_or_else(|| {
                 HematiteError::CorruptedData(
                     "Internal node is missing its rightmost child".to_string(),
@@ -765,7 +765,7 @@ impl BTreeNode {
         // Dropped, not refreshed; see `try_update_leaf_in_place` for why.
         self.raw_page = None;
         self.is_decoded = false;
-        let header = BTreePageHeaderV3::parse(page, is_p1)?;
+        let header = BTreePageHeader::parse(page, is_p1)?;
         self.key_count = header.cell_count as usize;
         self.payload_len = USABLE_PAGE_SIZE.saturating_sub(header.cell_content_start as usize);
         self.header = Some(header);
@@ -796,8 +796,8 @@ impl BTreeNode {
     ) -> Result<bool> {
         let donor_is_p1 = is_page_one(donor.id);
         let receiver_is_p1 = is_page_one(receiver.id);
-        let donor_header = BTreePageHeaderV3::parse(donor, donor_is_p1)?;
-        let receiver_header = BTreePageHeaderV3::parse(receiver, receiver_is_p1)?;
+        let donor_header = BTreePageHeader::parse(donor, donor_is_p1)?;
+        let receiver_header = BTreePageHeader::parse(receiver, receiver_is_p1)?;
         if donor_header.kind != PageKind::LeafTable || receiver_header.kind != PageKind::LeafTable {
             return Ok(false);
         }
@@ -830,7 +830,7 @@ impl BTreeNode {
     /// building a node just to reach one key would undo the point of it.
     pub fn leaf_key_at(page: &Page, index: usize) -> Result<BTreeKey> {
         let is_p1 = is_page_one(page.id);
-        let header = BTreePageHeaderV3::parse(page, is_p1)?;
+        let header = BTreePageHeader::parse(page, is_p1)?;
         if index >= header.cell_count as usize {
             return Err(HematiteError::StorageError(
                 "Index out of bounds".to_string(),
@@ -862,7 +862,7 @@ impl BTreeNode {
         // Dropped, not refreshed; see `try_update_leaf_in_place` for why.
         self.raw_page = None;
         self.is_decoded = false;
-        let header = BTreePageHeaderV3::parse(page, is_p1)?;
+        let header = BTreePageHeader::parse(page, is_p1)?;
         self.key_count = header.cell_count as usize;
         self.payload_len = USABLE_PAGE_SIZE.saturating_sub(header.cell_content_start as usize);
         self.header = Some(header);
@@ -969,7 +969,7 @@ impl BTreeNode {
             // into that buffer, and nothing here guarantees it is the same one
             // `raw_page` holds. One parse per internal in-place insert, which only
             // happens when a split propagates.
-            let page_header = BTreePageHeaderV3::parse(page, is_p1)?;
+            let page_header = BTreePageHeader::parse(page, is_p1)?;
             let cell_offset = cell_pointer_from_header(page, &page_header, pos)? as usize;
             u32::from_be_bytes([
                 page.data[cell_offset],
@@ -979,7 +979,7 @@ impl BTreeNode {
             ])
         } else {
             // pos == key_count: the child here is the rightmost child in header.
-            let header = BTreePageHeaderV3::parse(page, is_p1)?;
+            let header = BTreePageHeader::parse(page, is_p1)?;
             header.rightmost_child.ok_or_else(|| {
                 HematiteError::StorageError(
                     "Internal page missing rightmost child during in-place insert".to_string(),
@@ -1002,7 +1002,7 @@ impl BTreeNode {
         // After insertion, the cell that was at `pos` is now at `pos + 1`.
         // Its left-child pointer still holds `left_child` but should be
         // `new_child` (the right half of the split).
-        let new_header = BTreePageHeaderV3::parse(page, is_p1)?;
+        let new_header = BTreePageHeader::parse(page, is_p1)?;
         if (pos + 1) < new_header.cell_count as usize {
             // Overwrite the first 4 bytes of the shifted cell.
             let shifted_offset = cell_pointer_from_header(page, &new_header, pos + 1)? as usize;
@@ -1451,7 +1451,7 @@ impl BTreeNode {
     }
 
     /// The raw page and its already-parsed header.
-    fn raw_page_and_header(&self) -> Result<(&Page, &BTreePageHeaderV3)> {
+    fn raw_page_and_header(&self) -> Result<(&Page, &BTreePageHeader)> {
         let page = self.raw_page.as_ref().ok_or_else(|| {
             HematiteError::CorruptedData("Missing raw page for lazy node".to_string())
         })?;
@@ -1491,7 +1491,7 @@ impl BTreeNode {
 /// BUG-02 fix: called from from_shared_page and try_remove_cell_in_place.
 fn compute_cell_ranges_exact(
     page: &Page,
-    header: &BTreePageHeaderV3,
+    header: &BTreePageHeader,
     cell_offsets: &[u16],
 ) -> Result<Vec<(usize, usize)>> {
     // Sort (offset, original_index) pairs once so both the duplicate check and
@@ -1643,7 +1643,7 @@ fn leaf_cell_ranges(cell: &[u8]) -> Result<((usize, usize), (usize, usize))> {
 /// per-comparison work is now visible rather than left to the optimiser.
 struct LazyKeyReader<'a> {
     page: &'a Page,
-    header: &'a BTreePageHeaderV3,
+    header: &'a BTreePageHeader,
     /// Where a cell's key length sits, relative to the cell: interior cells put a
     /// child pointer first.
     len_offset: usize,
@@ -1714,7 +1714,7 @@ fn parse_internal_cell(cell: &[u8]) -> Result<(PageId, BTreeKey)> {
     ))
 }
 
-fn cell_pointer_from_header(page: &Page, header: &BTreePageHeaderV3, index: usize) -> Result<u16> {
+fn cell_pointer_from_header(page: &Page, header: &BTreePageHeader, index: usize) -> Result<u16> {
     if index >= header.cell_count as usize {
         return Err(HematiteError::StorageError(format!(
             "Cell index {} out of bounds for {} cells",

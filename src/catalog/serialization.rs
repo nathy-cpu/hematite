@@ -1,10 +1,10 @@
 //! Relational row and index-key encoding.
 //!
-//! The formats themselves live in [`crate::catalog::record_v4`] and
-//! [`crate::catalog::index_key_v4`]; this module is the naming layer the rest of the
+//! The formats themselves live in [`crate::catalog::record_codec`] and
+//! [`crate::catalog::index_key_codec`]; this module is the naming layer the rest of the
 //! catalog calls through.
 
-use crate::catalog::{index_key_v4, record_v4, Value};
+use crate::catalog::{index_key_codec, record_codec, Value};
 use crate::error::{HematiteError, Result};
 
 use super::record::StoredRow;
@@ -27,15 +27,15 @@ fn significant_byte_width(value: u64) -> usize {
 
 impl RowCodec {
     pub fn encode_values(values: &[Value]) -> Result<Vec<u8>> {
-        Ok(record_v4::encode(values))
+        Ok(record_codec::encode(values))
     }
 
     pub fn encode_stored_row(row: &StoredRow) -> Result<Vec<u8>> {
-        Ok(record_v4::encode(&row.values))
+        Ok(record_codec::encode(&row.values))
     }
 
     pub fn decode_values(data: &[u8]) -> Result<Vec<Value>> {
-        record_v4::decode(data)
+        record_codec::decode(data)
     }
 
     /// The row id a table keyed by a single integer column stores a row under.
@@ -138,24 +138,24 @@ impl RowCodec {
     }
 
     /// Decodes only the fields at `indices`, in that order. See
-    /// [`record_v4::decode_fields`].
+    /// [`record_codec::decode_fields`].
     pub fn decode_row_fields(data: &[u8], indices: &[usize]) -> Result<Vec<Value>> {
-        record_v4::decode_fields(data, indices)
+        record_codec::decode_fields(data, indices)
     }
 
-    /// Appends the fields at `indices` to `out`. See [`record_v4::decode_fields_into`].
+    /// Appends the fields at `indices` to `out`. See [`record_codec::decode_fields_into`].
     pub fn decode_row_fields_into(
         data: &[u8],
         indices: &[usize],
         out: &mut Vec<Value>,
     ) -> Result<()> {
-        record_v4::decode_fields_into(data, indices, out)
+        record_codec::decode_fields_into(data, indices, out)
     }
 
     pub fn decode_stored_row(row_id: u64, data: &[u8]) -> Result<StoredRow> {
         Ok(StoredRow {
             row_id,
-            values: record_v4::decode(data)?,
+            values: record_codec::decode(data)?,
         })
     }
 }
@@ -164,22 +164,22 @@ pub struct IndexKeyCodec;
 
 impl IndexKeyCodec {
     pub fn encode_key(values: &[Value]) -> Result<Vec<u8>> {
-        Ok(index_key_v4::encode_key(values))
+        Ok(index_key_codec::encode_key(values))
     }
 
     pub fn encode_secondary_key(values: &[Value], row_id: u64) -> Result<Vec<u8>> {
-        Ok(index_key_v4::encode_secondary_key(values, row_id))
+        Ok(index_key_codec::encode_secondary_key(values, row_id))
     }
 
     /// The payload stored against a primary-key index entry.
     ///
     /// A varint, so a small row id costs one byte where it used to cost eight.
     pub fn encode_row_id_value(row_id: u64) -> Vec<u8> {
-        index_key_v4::encode_row_id_value(row_id)
+        index_key_codec::encode_row_id_value(row_id)
     }
 
     pub fn decode_row_id(value: &[u8]) -> Result<u64> {
-        index_key_v4::decode_row_id_value(value)
+        index_key_codec::decode_row_id_value(value)
     }
 
     /// Splits a secondary-index key into its value prefix and trailing row id.
@@ -187,7 +187,7 @@ impl IndexKeyCodec {
     /// Borrows the prefix — secondary entries carry no payload at all now, so this
     /// is the only way to recover the row id, and it runs on every entry of a scan.
     pub fn split_secondary_key(key: &[u8]) -> Result<(&[u8], u64)> {
-        index_key_v4::split_secondary_key(key)
+        index_key_codec::split_secondary_key(key)
     }
 }
 

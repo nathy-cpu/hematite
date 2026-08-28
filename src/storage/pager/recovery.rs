@@ -20,18 +20,6 @@ use std::sync::Arc;
 use crate::storage::USABLE_PAGE_SIZE;
 
 impl Pager {
-    fn legacy_checksum_store_path(db_path: &Path) -> PathBuf {
-        let mut file_name = db_path
-            .file_name()
-            .map(OsString::from)
-            .unwrap_or_else(|| OsString::from("hematite.db"));
-        file_name.push(".pager_checksums");
-        match db_path.parent() {
-            Some(parent) => parent.join(file_name),
-            None => PathBuf::from(file_name),
-        }
-    }
-
     pub(super) fn journal_path(db_path: &Path) -> PathBuf {
         let mut file_name = db_path
             .file_name()
@@ -103,20 +91,6 @@ impl Pager {
         if let Some(page) = page {
             if let Some(bytes) = metadata_page::read_pager_metadata(&page.data)? {
                 return self.apply_persisted_state(&bytes);
-            }
-        }
-
-        if let Some(db_path) = &self.database_identity {
-            let sidecar_path = Self::legacy_checksum_store_path(db_path);
-            match fs::metadata(&sidecar_path) {
-                Ok(_) => {
-                    return Err(crate::error::HematiteError::StorageError(format!(
-                        "Legacy pager checksum sidecar '{}' is unsupported",
-                        sidecar_path.display()
-                    )));
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                Err(err) => return Err(err.into()),
             }
         }
 

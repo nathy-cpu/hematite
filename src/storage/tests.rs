@@ -165,8 +165,8 @@ mod wal_tests {
         // The recorded offset must point at the *second* (later) commit's
         // frame, not the first -- i.e. "latest wins" for offsets, matching
         // the existing "latest wins" semantics for cached page data.
-        let frame_size = crate::storage::wal::V3_WAL_FRAME_PREFIX_SIZE as u64 + PAGE_SIZE as u64;
-        let first_frame_offset = crate::storage::wal::V3_WAL_HEADER_SIZE as u64;
+        let frame_size = crate::storage::wal::WAL_FRAME_PREFIX_SIZE as u64 + PAGE_SIZE as u64;
+        let first_frame_offset = crate::storage::wal::WAL_HEADER_SIZE as u64;
         let second_frame_offset = first_frame_offset + frame_size;
         assert!(
             offset >= second_frame_offset,
@@ -224,8 +224,8 @@ mod wal_tests {
         // An in-bounds offset that doesn't actually point at `page_id`'s frame
         // (here, the metadata frame's offset) must be reported as corruption,
         // not silently returned as if it were the requested page's data.
-        let frame_size = crate::storage::wal::V3_WAL_FRAME_PREFIX_SIZE as u64 + PAGE_SIZE as u64;
-        let metadata_frame_offset = crate::storage::wal::V3_WAL_HEADER_SIZE as u64 + frame_size;
+        let frame_size = crate::storage::wal::WAL_FRAME_PREFIX_SIZE as u64 + PAGE_SIZE as u64;
+        let metadata_frame_offset = crate::storage::wal::WAL_HEADER_SIZE as u64 + frame_size;
         let mut mismatched_state =
             VisibleWalState::from_database_state(file_len_for_next_page_id(8), Vec::new());
         mismatched_state.wal_path = Some(wal_path);
@@ -265,14 +265,6 @@ mod pager_tests {
     /// sidecar file. Current checksums are XXH64 (`storage::checksum`); this
     /// deliberately does not track them, because the file it builds is meant to look
     /// like one written by an older version.
-    fn legacy_fnv_checksum(data: &[u8]) -> u32 {
-        let mut hash: u32 = 0x811C9DC5;
-        for byte in data {
-            hash ^= u32::from(*byte);
-            hash = hash.wrapping_mul(0x01000193);
-        }
-        hash
-    }
 
     #[test]
     fn test_pager_write_is_buffered_until_flush() -> crate::error::Result<()> {
@@ -1130,51 +1122,15 @@ mod pager_tests {
     }
 
     #[test]
-    fn test_pager_open_rejects_legacy_checksum_sidecar() -> crate::error::Result<()> {
-        let test_db = TestDbFile::new("_test_pager_legacy_sidecar_metadata_rejected");
-        let mut pager = Pager::new(test_db.path(), 8)?;
-        let page_id = pager.allocate_page()?;
-        let mut page = Page::new(page_id);
-        page.data[0] = 42;
-        let checksum = legacy_fnv_checksum(&page.data);
-        pager.write_page(page)?;
-        pager.flush()?;
-        drop(pager);
-
-        let mut db_file = std::fs::OpenOptions::new()
-            .write(true)
-            .open(test_db.path())?;
-        db_file.seek(SeekFrom::Start(
-            STORAGE_METADATA_PAGE_ID as u64 * PAGE_SIZE as u64,
-        ))?;
-        db_file.write_all(&vec![0; PAGE_SIZE])?;
-        db_file.sync_all()?;
-
-        let checksum_path = std::path::PathBuf::from(format!("{}.pager_checksums", test_db.path()));
-        std::fs::write(
-            &checksum_path,
-            format!(
-                "version=1\njournal_mode=wal\nfree_count=0\nchecksum_count=1\nchecksum|{}|{}",
-                page_id, checksum
-            ),
-        )?;
-
-        let err = Pager::new(test_db.path(), 8).unwrap_err();
-        assert!(err.to_string().contains("Legacy pager checksum sidecar"));
-        assert!(checksum_path.exists());
-        Ok(())
-    }
-
-    #[test]
-    fn test_pager_open_rejects_legacy_reserved_metadata_layout() -> crate::error::Result<()> {
+    fn test_pager_open_rejects_metadata_page_without_magic() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_pager_legacy_reserved_metadata_layout");
         let pager = Pager::new(test_db.path(), 8)?;
         drop(pager);
 
-        let payload = b"version=1\ntable_count=0";
-        let mut legacy_page = vec![0; PAGE_SIZE];
-        legacy_page[0..4].copy_from_slice(&(payload.len() as u32).to_le_bytes());
-        legacy_page[4..4 + payload.len()].copy_from_slice(payload);
+        let payload = b"not a metadata page";
+        let mut unmagicked_page = vec![0; PAGE_SIZE];
+        unmagicked_page[0..4].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+        unmagicked_page[4..4 + payload.len()].copy_from_slice(payload);
 
         let mut db_file = std::fs::OpenOptions::new()
             .write(true)
@@ -1182,13 +1138,13 @@ mod pager_tests {
         db_file.seek(SeekFrom::Start(
             STORAGE_METADATA_PAGE_ID as u64 * PAGE_SIZE as u64,
         ))?;
-        db_file.write_all(&legacy_page)?;
+        db_file.write_all(&unmagicked_page)?;
         db_file.sync_all()?;
 
         let err = Pager::new(test_db.path(), 8).unwrap_err();
         assert!(err
             .to_string()
-            .contains("Legacy reserved metadata layout is unsupported"));
+            .contains("does not carry the expected magic"));
         Ok(())
     }
 
@@ -3385,7 +3341,7 @@ mod cursor_tests {
 // Row serialization used to be tested here, reaching up into `catalog` from a
 // storage test module. Those two tests were written against the old format's
 // four-byte length prefix, which no longer exists, and everything they covered is
-// now covered where the format lives: `catalog::record_v4` round-trips every value
+// now covered where the format lives: `catalog::record_codec` round-trips every value
 // type and rejects truncation at every length, and `catalog::serialization` tests
 // the facade.
 
@@ -3447,31 +3403,31 @@ mod metadata_page_tests {
     }
 
     #[test]
-    fn metadata_page_rejects_legacy_catalog_payload() {
-        let payload = b"version=1\ntable_count=0";
-        let mut legacy_page = vec![0; PAGE_SIZE];
-        legacy_page[0..4].copy_from_slice(&(payload.len() as u32).to_le_bytes());
-        legacy_page[4..4 + payload.len()].copy_from_slice(payload);
+    fn metadata_page_rejects_a_page_without_magic() {
+        let payload = b"not a metadata page";
+        let mut unmagicked_page = vec![0; PAGE_SIZE];
+        unmagicked_page[0..4].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+        unmagicked_page[4..4 + payload.len()].copy_from_slice(payload);
 
-        let err = write_pager_metadata(&legacy_page, b"pager=yes").unwrap_err();
+        let err = write_pager_metadata(&unmagicked_page, b"pager=yes").unwrap_err();
         assert!(err
             .to_string()
-            .contains("Legacy reserved metadata layout is unsupported"));
+            .contains("does not carry the expected magic"));
     }
 
     #[test]
-    fn metadata_page_rejects_btree_root_bytes_as_legacy_metadata() {
+    fn metadata_page_rejects_btree_root_bytes() {
         let mut page = vec![0; PAGE_SIZE];
         page[0..4].copy_from_slice(b"BTRE");
 
         let err = read_catalog_metadata(&page).unwrap_err();
         assert!(err
             .to_string()
-            .contains("Legacy reserved metadata layout is unsupported"));
+            .contains("does not carry the expected magic"));
         let err = read_pager_metadata(&page).unwrap_err();
         assert!(err
             .to_string()
-            .contains("Legacy reserved metadata layout is unsupported"));
+            .contains("does not carry the expected magic"));
     }
 }
 
@@ -3588,7 +3544,7 @@ mod journal_codec_tests {
         let error = EncodedRollbackJournal::decode(&encoded).expect_err("corruption should fail");
         assert!(error
             .to_string()
-            .contains("v3 rollback journal record checksum mismatch"));
+            .contains("rollback journal record checksum mismatch"));
     }
 
     #[test]
@@ -3613,7 +3569,7 @@ mod journal_codec_tests {
         let error = journal.encode().expect_err("duplicate pages should fail");
         assert!(error
             .to_string()
-            .contains("v3 rollback journal contains duplicate page 4"));
+            .contains("rollback journal contains duplicate page 4"));
     }
 
     #[test]
