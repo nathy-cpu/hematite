@@ -51,7 +51,6 @@ mod wal_tests {
     };
     use crate::storage::{JournalMode, PAGE_SIZE, STORAGE_METADATA_PAGE_ID};
     use crate::test_utils::TestDbFile;
-    use std::collections::HashMap;
     use std::fs;
     use std::sync::Arc;
 
@@ -252,7 +251,6 @@ mod pager_tests {
         STORAGE_METADATA_PAGE_ID,
     };
     use crate::test_utils::TestDbFile;
-    use std::collections::HashMap;
 
     use std::fs;
 

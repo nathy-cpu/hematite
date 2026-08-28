@@ -451,9 +451,8 @@ impl Pager {
         let Some(path) = self.journal_path.clone() else {
             return Ok(());
         };
-        let Some((original_file_len, original_free_pages)) = self
-            .active_rollback_transaction()
-            .map(|transaction| {
+        let Some((original_file_len, original_free_pages)) =
+            self.active_rollback_transaction().map(|transaction| {
                 (
                     transaction.original_file_len,
                     transaction.original_free_pages.clone(),

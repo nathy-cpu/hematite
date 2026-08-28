@@ -245,13 +245,13 @@ mod mod_tests {
         let entries = 900u32;
         let (trees, root_page_id) = build_dense_byte_tree(entries)?;
 
-        let mut check = |trees: &ByteTreeStore, label: &str| -> Result<()> {
+        let check = |trees: &ByteTreeStore, label: &str| -> Result<()> {
             let page_ids = trees.collect_page_ids(root_page_id)?;
             let shared = trees.shared_storage();
             let mut checked = 0usize;
             for page_id in page_ids {
                 let page = {
-                    let mut pager = shared.write().unwrap();
+                    let pager = shared.write().unwrap();
                     pager.read_page_shared(page_id)?
                 };
                 let Ok(node) = crate::btree::node::BTreeNode::from_shared_page(page) else {
@@ -264,7 +264,10 @@ mod mod_tests {
                 );
                 checked += 1;
             }
-            assert!(checked > 1, "{label}: expected several pages, saw {checked}");
+            assert!(
+                checked > 1,
+                "{label}: expected several pages, saw {checked}"
+            );
             Ok(())
         };
 
@@ -281,7 +284,10 @@ mod mod_tests {
         // Refill with differently sized values, so some reuse freeblocks and some
         // do not.
         for key in (0..entries).step_by(3) {
-            tree.insert(&key.to_be_bytes(), &vec![key as u8; 1 + (key % 11) as usize])?;
+            tree.insert(
+                &key.to_be_bytes(),
+                &vec![key as u8; 1 + (key % 11) as usize],
+            )?;
         }
         check(&trees, "after refill")?;
         Ok(())

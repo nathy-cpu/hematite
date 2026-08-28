@@ -1,5 +1,6 @@
 //! Query planning and optimization
 
+use crate::catalog::TableMetadataMap;
 use crate::catalog::{Schema, Table, Value};
 use crate::error::Result;
 use crate::parser::ast::*;
@@ -10,7 +11,6 @@ use crate::query::predicate::extract_literal_equalities;
 use crate::query::rewrite::rewrite_select;
 use crate::query::validation::validate_statement;
 use crate::HematiteError;
-use crate::catalog::TableMetadataMap;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]

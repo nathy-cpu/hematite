@@ -2704,11 +2704,20 @@ mod connection_tests {
 
         // The key names the row id, so changing the key moves the row.
         conn.execute("UPDATE t SET id = 7 WHERE id = 1;")?;
-        assert!(conn.execute("SELECT a FROM t WHERE id = 1;")?.rows().is_empty());
-        assert_eq!(conn.execute("SELECT a FROM t WHERE id = 7;")?.rows().len(), 1);
+        assert!(conn
+            .execute("SELECT a FROM t WHERE id = 1;")?
+            .rows()
+            .is_empty());
+        assert_eq!(
+            conn.execute("SELECT a FROM t WHERE id = 7;")?.rows().len(),
+            1
+        );
 
         conn.execute("DELETE FROM t WHERE id = 2;")?;
-        assert!(conn.execute("SELECT a FROM t WHERE id = 2;")?.rows().is_empty());
+        assert!(conn
+            .execute("SELECT a FROM t WHERE id = 2;")?
+            .rows()
+            .is_empty());
         assert_eq!(conn.execute("SELECT id FROM t;")?.rows().len(), 2);
 
         // Survives a reopen: the rows have to be findable by key with nothing but
@@ -2716,7 +2725,10 @@ mod connection_tests {
         conn.close()?;
         let mut reopened = Connection::new(db.path())?;
         assert_eq!(
-            reopened.execute("SELECT a FROM t WHERE id = 7;")?.rows().len(),
+            reopened
+                .execute("SELECT a FROM t WHERE id = 7;")?
+                .rows()
+                .len(),
             1
         );
         reopened.close()?;
@@ -2736,10 +2748,20 @@ mod connection_tests {
         let db = TestDbFile::new("_test_negative_pk");
         let mut conn = Connection::new(db.path())?;
         conn.execute("CREATE TABLE t (id INT PRIMARY KEY, a INT);")?;
-        conn.execute("INSERT INTO t (id, a) VALUES (5, 50), (-3, 30), (1, 10), (-100, 99), (0, 0);")?;
+        conn.execute(
+            "INSERT INTO t (id, a) VALUES (5, 50), (-3, 30), (1, 10), (-100, 99), (0, 0);",
+        )?;
 
-        assert_eq!(conn.execute("SELECT a FROM t WHERE id = -3;")?.rows().len(), 1);
-        assert_eq!(conn.execute("SELECT a FROM t WHERE id = -100;")?.rows().len(), 1);
+        assert_eq!(
+            conn.execute("SELECT a FROM t WHERE id = -3;")?.rows().len(),
+            1
+        );
+        assert_eq!(
+            conn.execute("SELECT a FROM t WHERE id = -100;")?
+                .rows()
+                .len(),
+            1
+        );
 
         // No ORDER BY: this is the order the table itself is in.
         let scanned: Vec<i32> = conn
@@ -3339,7 +3361,10 @@ mod connection_tests {
 
         let excluded =
             conn.execute("SELECT id FROM test WHERE id NOT IN (1, 3) ORDER BY id ASC;")?;
-        assert_eq!(excluded.rows(), vec![vec![crate::catalog::Value::Integer(2)]]);
+        assert_eq!(
+            excluded.rows(),
+            vec![vec![crate::catalog::Value::Integer(2)]]
+        );
 
         conn.close()?;
         Ok(())
@@ -3879,7 +3904,10 @@ mod connection_tests {
 
         let not_like =
             conn.execute("SELECT id FROM test WHERE name NOT LIKE 'Al%' ORDER BY id ASC;")?;
-        assert_eq!(not_like.rows(), vec![vec![crate::catalog::Value::Integer(3)]]);
+        assert_eq!(
+            not_like.rows(),
+            vec![vec![crate::catalog::Value::Integer(3)]]
+        );
 
         conn.close()?;
         Ok(())
@@ -4046,7 +4074,10 @@ mod connection_tests {
 
         conn.execute("UPDATE test SET score = CAST(label AS INT) % 3 WHERE id = 1;")?;
         let updated = conn.execute("SELECT score FROM test WHERE id = 1;")?;
-        assert_eq!(updated.rows(), vec![vec![crate::catalog::Value::Integer(1)]]);
+        assert_eq!(
+            updated.rows(),
+            vec![vec![crate::catalog::Value::Integer(1)]]
+        );
 
         let bad_cast = conn.execute("SELECT CAST(label AS INT) FROM test WHERE id = 2;");
         assert!(bad_cast.is_err());
@@ -4338,7 +4369,10 @@ mod connection_tests {
         assert_eq!(result.rows(), vec![vec![crate::catalog::Value::Integer(3)]]);
 
         let filtered = conn.execute("SELECT COUNT(*) FROM test WHERE name IS NOT NULL;")?;
-        assert_eq!(filtered.rows(), vec![vec![crate::catalog::Value::Integer(2)]]);
+        assert_eq!(
+            filtered.rows(),
+            vec![vec![crate::catalog::Value::Integer(2)]]
+        );
 
         conn.close()?;
         Ok(())
@@ -4507,7 +4541,10 @@ mod connection_tests {
 
         let implicit =
             conn.execute("SELECT COUNT(*) AS total_rows FROM test HAVING SUM(score) > 10;")?;
-        assert_eq!(implicit.rows(), vec![vec![crate::catalog::Value::Integer(3)]]);
+        assert_eq!(
+            implicit.rows(),
+            vec![vec![crate::catalog::Value::Integer(3)]]
+        );
 
         conn.close()?;
         Ok(())
@@ -5433,12 +5470,17 @@ mod result_tests {
 
     #[test]
     fn test_executed_statement_helpers() -> Result<()> {
-        let query = ExecutedStatement::from_query_result(QueryResult::new(0, vec!["value".to_string()], vec![vec![Value::Integer(7)]]));
+        let query = ExecutedStatement::from_query_result(QueryResult::new(
+            0,
+            vec!["value".to_string()],
+            vec![vec![Value::Integer(7)]],
+        ));
         assert!(matches!(query, ExecutedStatement::Query(_)));
         assert_eq!(query.as_query().unwrap().get_row(0).unwrap().get_int(0)?, 7);
         assert!(query.as_statement().is_none());
 
-        let statement = ExecutedStatement::from_query_result(QueryResult::new(2, Vec::new(), Vec::new()));
+        let statement =
+            ExecutedStatement::from_query_result(QueryResult::new(2, Vec::new(), Vec::new()));
         assert!(matches!(statement, ExecutedStatement::Statement(_)));
         assert_eq!(statement.as_statement().unwrap().affected_rows, 2);
         assert!(statement.as_query().is_none());
@@ -5447,7 +5489,11 @@ mod result_tests {
 
     #[test]
     fn test_executed_statement_render_ascii() -> Result<()> {
-        let query = ExecutedStatement::from_query_result(QueryResult::new(0, vec!["value".to_string()], vec![vec![Value::Integer(7)]]));
+        let query = ExecutedStatement::from_query_result(QueryResult::new(
+            0,
+            vec!["value".to_string()],
+            vec![vec![Value::Integer(7)]],
+        ));
         assert_eq!(
             query.render_ascii(),
             "\
@@ -5459,7 +5505,8 @@ mod result_tests {
 1 row(s)"
         );
 
-        let statement = ExecutedStatement::from_query_result(QueryResult::new(2, Vec::new(), Vec::new()));
+        let statement =
+            ExecutedStatement::from_query_result(QueryResult::new(2, Vec::new(), Vec::new()));
         assert_eq!(statement.render_ascii(), "Ok (2)");
         Ok(())
     }
@@ -5693,7 +5740,10 @@ mod direct_projection_tests {
         let (mut conn, _db) = seeded("_test_direct_projection_repeat")?;
         let result = conn.execute("SELECT a, a FROM t;")?;
         assert_eq!(result.rows().len(), 3);
-        assert_eq!(result.rows()[0], vec![Value::Integer(10), Value::Integer(10)]);
+        assert_eq!(
+            result.rows()[0],
+            vec![Value::Integer(10), Value::Integer(10)]
+        );
         Ok(())
     }
 

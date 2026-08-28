@@ -382,17 +382,7 @@ mod tests {
     /// would make every small key eight bytes of body.
     #[test]
     fn rowid_keys_round_trip_and_stay_compact() {
-        for key in [
-            i64::MIN,
-            -70_000,
-            -256,
-            -1,
-            0,
-            1,
-            255,
-            70_000,
-            i64::MAX,
-        ] {
+        for key in [i64::MIN, -70_000, -256, -1, 0, 1, 255, 70_000, i64::MAX] {
             let encoded = RowCodec::encode_row_id_key(key as u64);
             assert_eq!(
                 RowCodec::decode_row_id_key(&encoded).expect("decode") as i64,
@@ -427,5 +417,4 @@ mod tests {
         assert!(RowCodec::rowid_for_primary_key(&Value::Text("7".into())).is_none());
         assert!(RowCodec::rowid_for_primary_key(&Value::Null).is_none());
     }
-
 }

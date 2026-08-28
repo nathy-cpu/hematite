@@ -351,7 +351,9 @@ impl Catalog {
     }
 
     pub fn add_column(&mut self, table_id: TableId, column: Column) -> Result<()> {
-        self.run_schema_mutation(|catalog| Arc::make_mut(&mut catalog.schema).add_column(table_id, column))
+        self.run_schema_mutation(|catalog| {
+            Arc::make_mut(&mut catalog.schema).add_column(table_id, column)
+        })
     }
 
     pub fn rename_column(
@@ -366,7 +368,9 @@ impl Catalog {
     }
 
     pub fn drop_column(&mut self, table_id: TableId, column_name: &str) -> Result<usize> {
-        self.run_schema_mutation(|catalog| Arc::make_mut(&mut catalog.schema).drop_column(table_id, column_name))
+        self.run_schema_mutation(|catalog| {
+            Arc::make_mut(&mut catalog.schema).drop_column(table_id, column_name)
+        })
     }
 
     pub fn set_column_default(
@@ -376,8 +380,11 @@ impl Catalog {
         default_value: Option<crate::catalog::Value>,
     ) -> Result<()> {
         self.run_schema_mutation(|catalog| {
-            Arc::make_mut(&mut catalog.schema)
-                .set_column_default(table_id, column_name, default_value)
+            Arc::make_mut(&mut catalog.schema).set_column_default(
+                table_id,
+                column_name,
+                default_value,
+            )
         })
     }
 
@@ -388,8 +395,7 @@ impl Catalog {
         nullable: bool,
     ) -> Result<()> {
         self.run_schema_mutation(|catalog| {
-            Arc::make_mut(&mut catalog.schema)
-                .set_column_nullable(table_id, column_name, nullable)
+            Arc::make_mut(&mut catalog.schema).set_column_nullable(table_id, column_name, nullable)
         })
     }
 
@@ -408,7 +414,9 @@ impl Catalog {
         table_id: TableId,
         constraint: ForeignKeyConstraint,
     ) -> Result<()> {
-        self.run_schema_mutation(|catalog| Arc::make_mut(&mut catalog.schema).add_foreign_key(table_id, constraint))
+        self.run_schema_mutation(|catalog| {
+            Arc::make_mut(&mut catalog.schema).add_foreign_key(table_id, constraint)
+        })
     }
 
     pub fn list_tables(&self) -> Result<Vec<(TableId, String)>> {
@@ -421,8 +429,7 @@ impl Catalog {
         constraint_name: &str,
     ) -> Result<NamedConstraintKind> {
         self.run_schema_mutation(|catalog| {
-            Arc::make_mut(&mut catalog.schema)
-                .drop_named_constraint(table_id, constraint_name)
+            Arc::make_mut(&mut catalog.schema).drop_named_constraint(table_id, constraint_name)
         })
     }
 

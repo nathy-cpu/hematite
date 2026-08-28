@@ -170,7 +170,10 @@ impl FileManager {
         // Unzeroed: `read_exact_at` fills the whole buffer or returns an error, so
         // the zeros were overwritten without ever being read. Zeroing a 4 KiB page
         // is about 4 100 instructions, and it happened on every page read.
-        self.read_page_with_buf(page_id, crate::storage::types::page_pool::take_for_overwrite())
+        self.read_page_with_buf(
+            page_id,
+            crate::storage::types::page_pool::take_for_overwrite(),
+        )
     }
 
     /// Read a page from disk into a caller-supplied buffer, reusing its allocation.

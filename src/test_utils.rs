@@ -35,12 +35,8 @@ impl TestDbFile {
     ///
     /// Cleanup has to know about all of them, or every test run leaves another set
     /// behind in the repository root.
-    const SIDECAR_FILE_SUFFIXES: [&'static str; 4] = [
-        ".wal",
-        ".journal",
-        ".rollback.lock",
-        ".wal.write.lock",
-    ];
+    const SIDECAR_FILE_SUFFIXES: [&'static str; 4] =
+        [".wal", ".journal", ".rollback.lock", ".wal.write.lock"];
 
     const SIDECAR_DIR_SUFFIXES: [&'static str; 1] = [".wal.readers"];
 

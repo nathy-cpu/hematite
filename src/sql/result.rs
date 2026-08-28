@@ -160,7 +160,10 @@ impl ResultSet {
         if width == 0 {
             return Vec::new();
         }
-        self.values.chunks_exact(width).map(<[Value]>::to_vec).collect()
+        self.values
+            .chunks_exact(width)
+            .map(<[Value]>::to_vec)
+            .collect()
     }
 }
 

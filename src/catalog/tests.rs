@@ -1708,7 +1708,8 @@ mod catalog_new_tests {
         let row = vec![Value::Integer(4), Value::Integer(40)];
         assert_eq!(engine.insert_table_row(&table, row.clone())?, 4);
 
-        let duplicate = engine.insert_table_row(&table, vec![Value::Integer(4), Value::Integer(99)]);
+        let duplicate =
+            engine.insert_table_row(&table, vec![Value::Integer(4), Value::Integer(99)]);
         assert!(
             duplicate
                 .as_ref()

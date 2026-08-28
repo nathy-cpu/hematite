@@ -115,8 +115,8 @@ use crate::query::lowering::raise_literal_value;
 use crate::query::metadata as query_metadata;
 use crate::query::validation::{source_column_names, validate_statement};
 use crate::query::{
-    Catalog, ExecutionContext, JournalMode, QueryCatalogSnapshot, QueryExecutor,
-    QueryPlanner, QueryResult, Schema, Value,
+    Catalog, ExecutionContext, JournalMode, QueryCatalogSnapshot, QueryExecutor, QueryPlanner,
+    QueryResult, Schema, Value,
 };
 use crate::sql::result::ExecutedStatement;
 use crate::sql::script::{split_script_tokens, ScriptIter};
@@ -897,7 +897,8 @@ impl Connection {
             other => other,
         };
         let (schema, table_row_counts) = self.read_planning_state()?;
-        let planner = QueryPlanner::with_shared_schema(schema).with_table_row_counts(table_row_counts);
+        let planner =
+            QueryPlanner::with_shared_schema(schema).with_table_row_counts(table_row_counts);
         let plan = planner.plan(statement)?;
         Ok(QueryResult::new(
             0,
@@ -1110,8 +1111,8 @@ impl Connection {
     ) -> Result<(Arc<Schema>, Box<dyn QueryExecutor>)> {
         let (schema, table_row_counts) = self.read_planning_state()?;
         let statement = Self::normalize_statement(statement, &schema)?;
-        let planner =
-            QueryPlanner::with_shared_schema(Arc::clone(&schema)).with_table_row_counts(table_row_counts);
+        let planner = QueryPlanner::with_shared_schema(Arc::clone(&schema))
+            .with_table_row_counts(table_row_counts);
         let plan = planner.plan(statement)?;
         Ok((schema, plan.into_executor()))
     }
@@ -1123,7 +1124,6 @@ impl Connection {
             catalog_guard.with_engine(|engine| Ok(engine.shared_table_metadata()))?;
         Ok((schema, table_row_counts))
     }
-
 
     pub fn close(&mut self) -> Result<()> {
         if self.transaction.is_some() {

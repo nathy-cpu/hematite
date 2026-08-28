@@ -239,8 +239,7 @@ impl BTreeNode {
         // already parsed rather than a fresh parse of the same bytes.
         let free_in_content = pf_total_free_space_with_header(page, header)?
             .saturating_sub(header.writable_gap_size());
-        let content_span =
-            USABLE_PAGE_SIZE.saturating_sub(header.cell_content_start as usize);
+        let content_span = USABLE_PAGE_SIZE.saturating_sub(header.cell_content_start as usize);
         let cell_body_bytes = content_span.saturating_sub(free_in_content);
 
         Ok(header_size + self.key_count * 2 + cell_body_bytes)

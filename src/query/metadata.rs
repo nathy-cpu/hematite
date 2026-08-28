@@ -34,7 +34,9 @@ pub(crate) fn describe_table(catalog: &Catalog, table_name: &str) -> Result<Quer
         })
         .collect();
 
-    Ok(QueryResult::new(0, vec![
+    Ok(QueryResult::new(
+        0,
+        vec![
             "column".to_string(),
             "type".to_string(),
             "nullable".to_string(),
@@ -44,17 +46,23 @@ pub(crate) fn describe_table(catalog: &Catalog, table_name: &str) -> Result<Quer
             "auto_increment".to_string(),
             "constraints".to_string(),
             "indexes".to_string(),
-        ], rows))
+        ],
+        rows,
+    ))
 }
 
 pub(crate) fn show_tables(catalog: &Catalog) -> Result<QueryResult> {
     let mut tables = catalog.list_tables()?;
     tables.sort_by(|left, right| left.1.cmp(&right.1));
 
-    Ok(QueryResult::new(0, vec!["table_name".to_string()], tables
+    Ok(QueryResult::new(
+        0,
+        vec!["table_name".to_string()],
+        tables
             .into_iter()
             .map(|(_, name)| vec![Value::Text(name)])
-            .collect()))
+            .collect(),
+    ))
 }
 
 pub(crate) fn show_indexes(catalog: &Catalog, table_name: Option<&str>) -> Result<QueryResult> {
@@ -85,12 +93,16 @@ pub(crate) fn show_indexes(catalog: &Catalog, table_name: Option<&str>) -> Resul
         }
     }
 
-    Ok(QueryResult::new(0, vec![
+    Ok(QueryResult::new(
+        0,
+        vec![
             "table_name".to_string(),
             "index_name".to_string(),
             "unique".to_string(),
             "columns".to_string(),
-        ], rows))
+        ],
+        rows,
+    ))
 }
 
 pub(crate) fn show_create_table(catalog: &Catalog, table_name: &str) -> Result<QueryResult> {

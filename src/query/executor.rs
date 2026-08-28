@@ -2560,11 +2560,9 @@ impl QueryExecutor for InsertExecutor {
                     ExecutionProgram::Select {
                         statement,
                         access_path,
-                    } => {
-                        SelectExecutor::new(statement, access_path)
-                            .execute(ctx)?
-                            .into_row_vecs()
-                    }
+                    } => SelectExecutor::new(statement, access_path)
+                        .execute(ctx)?
+                        .into_row_vecs(),
                     _ => {
                         return Err(HematiteError::InternalError(
                             "Expected SELECT execution program for INSERT source".to_string(),
@@ -3341,8 +3339,11 @@ impl QueryExecutor for AlterExecutor {
             }
             AlterOperation::RenameColumn { old_name, new_name } => {
                 let table = catalog_table(ctx, &self.statement.table)?;
-                Arc::make_mut(&mut ctx.catalog)
-                    .rename_column(table.id, old_name, new_name.clone())?;
+                Arc::make_mut(&mut ctx.catalog).rename_column(
+                    table.id,
+                    old_name,
+                    new_name.clone(),
+                )?;
             }
             AlterOperation::AddColumn(column_def) => {
                 let table = catalog_table(ctx, &self.statement.table)?;
@@ -3509,8 +3510,7 @@ impl QueryExecutor for AlterExecutor {
             }
             AlterOperation::AlterColumnDropDefault { column_name } => {
                 let table = catalog_table(ctx, &self.statement.table)?;
-                Arc::make_mut(&mut ctx.catalog)
-                    .set_column_default(table.id, column_name, None)?;
+                Arc::make_mut(&mut ctx.catalog).set_column_default(table.id, column_name, None)?;
             }
             AlterOperation::AlterColumnSetNotNull { column_name } => {
                 let table = catalog_table(ctx, &self.statement.table)?;
@@ -3536,13 +3536,15 @@ impl QueryExecutor for AlterExecutor {
                         column_name
                     )));
                 }
-                Arc::make_mut(&mut ctx.catalog)
-                    .set_column_nullable(table.id, column_name, false)?;
+                Arc::make_mut(&mut ctx.catalog).set_column_nullable(
+                    table.id,
+                    column_name,
+                    false,
+                )?;
             }
             AlterOperation::AlterColumnDropNotNull { column_name } => {
                 let table = catalog_table(ctx, &self.statement.table)?;
-                Arc::make_mut(&mut ctx.catalog)
-                    .set_column_nullable(table.id, column_name, true)?;
+                Arc::make_mut(&mut ctx.catalog).set_column_nullable(table.id, column_name, true)?;
             }
         }
 

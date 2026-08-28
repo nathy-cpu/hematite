@@ -789,7 +789,6 @@ mod tests {
         );
     }
 
-    use super::*;
     use proptest::prelude::*;
 
     /// `Value` compares floats with `==`, so NaN never equals itself and this

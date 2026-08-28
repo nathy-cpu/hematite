@@ -262,10 +262,7 @@ pub(crate) fn total_free_space(page: &Page, is_page_one: bool) -> Result<usize> 
 ///
 /// Parsing it is a page-kind match and four field reads, and the callers that hold
 /// one are the hot ones — `serialized_size_on_page` runs on every delete.
-pub(crate) fn total_free_space_with_header(
-    page: &Page,
-    header: &BTreePageHeader,
-) -> Result<usize> {
+pub(crate) fn total_free_space_with_header(page: &Page, header: &BTreePageHeader) -> Result<usize> {
     let gap = header.writable_gap_size();
     let fragments = header.fragmented_free_bytes as usize;
 

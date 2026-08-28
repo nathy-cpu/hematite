@@ -954,10 +954,7 @@ impl WalFrame {
     /// `writev` rather than two `write` calls each. The prefix has to be
     /// materialised somewhere regardless, since the checksum covers the page image
     /// and the header salts.
-    pub(crate) fn encode_prefix(
-        &self,
-        header: &WalHeader,
-    ) -> Result<[u8; WAL_FRAME_PREFIX_SIZE]> {
+    pub(crate) fn encode_prefix(&self, header: &WalHeader) -> Result<[u8; WAL_FRAME_PREFIX_SIZE]> {
         if self.data.len() != PAGE_SIZE {
             return Err(HematiteError::StorageError(format!(
                 "WAL frame for page {} has invalid image size {}",

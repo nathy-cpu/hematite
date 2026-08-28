@@ -658,7 +658,6 @@ not available yet.",
         runtime_metadata::apply_insert(self, table_name, new_root_page_id, Some(row_id + 1));
     }
 
-
     pub(crate) fn record_row_delete(
         &mut self,
         table_name: &str,
@@ -689,11 +688,7 @@ not available yet.",
     }
 
     /// See [`table_store::insert_new_stored_row`].
-    pub fn insert_new_row_with_rowid(
-        &mut self,
-        table_name: &str,
-        row: StoredRow,
-    ) -> Result<()> {
+    pub fn insert_new_row_with_rowid(&mut self, table_name: &str, row: StoredRow) -> Result<()> {
         self.run_atomically(|engine| table_store::insert_new_stored_row(engine, table_name, row))
     }
 

@@ -102,7 +102,8 @@ impl<'a> Rows<'a> {
         if self.width == 0 {
             return None;
         }
-        self.values.get(index * self.width..(index + 1) * self.width)
+        self.values
+            .get(index * self.width..(index + 1) * self.width)
     }
 
     pub fn first(&self) -> Option<&'a [Value]> {
@@ -161,7 +162,10 @@ impl std::fmt::Debug for Rows<'_> {
 impl PartialEq<Vec<Vec<Value>>> for Rows<'_> {
     fn eq(&self, other: &Vec<Vec<Value>>) -> bool {
         self.len() == other.len()
-            && self.iter().zip(other).all(|(left, right)| left == right.as_slice())
+            && self
+                .iter()
+                .zip(other)
+                .all(|(left, right)| left == right.as_slice())
     }
 }
 

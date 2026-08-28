@@ -48,7 +48,8 @@ mod executor_tests {
             "users",
             vec![Value::Integer(3), Value::Text("Charlie".to_string())],
         )?;
-        let mut ctx = ExecutionContext::for_mutation(std::sync::Arc::new(catalog.clone()), &mut storage);
+        let mut ctx =
+            ExecutionContext::for_mutation(std::sync::Arc::new(catalog.clone()), &mut storage);
 
         let statement = SelectStatement {
             with_clause: Vec::new(),
@@ -154,7 +155,8 @@ mod executor_tests {
             },
         )?;
 
-        let mut ctx = ExecutionContext::for_read(std::sync::Arc::new(catalog.clone()), &mut storage);
+        let mut ctx =
+            ExecutionContext::for_read(std::sync::Arc::new(catalog.clone()), &mut storage);
         let statement = SelectStatement {
             with_clause: Vec::new(),
             distinct: false,
@@ -247,7 +249,8 @@ mod executor_tests {
             },
         )?;
 
-        let mut ctx = ExecutionContext::for_read(std::sync::Arc::new(catalog.clone()), &mut storage);
+        let mut ctx =
+            ExecutionContext::for_read(std::sync::Arc::new(catalog.clone()), &mut storage);
         let statement = SelectStatement {
             with_clause: Vec::new(),
             distinct: false,
@@ -311,7 +314,8 @@ mod executor_tests {
             vec![Value::Integer(2), Value::Text("Bob".to_string())],
         )?;
 
-        let mut ctx = ExecutionContext::for_read(std::sync::Arc::new(catalog.clone()), &mut storage);
+        let mut ctx =
+            ExecutionContext::for_read(std::sync::Arc::new(catalog.clone()), &mut storage);
         let statement = SelectStatement {
             with_clause: Vec::new(),
             distinct: false,
@@ -369,7 +373,8 @@ mod executor_tests {
         let primary_key_root_page_id = storage.create_empty_btree()?;
         catalog.set_table_root_page(table_id, root_page_id)?;
         catalog.set_table_primary_key_root_page(table_id, primary_key_root_page_id)?;
-        let mut ctx = ExecutionContext::for_mutation(std::sync::Arc::new(catalog.clone()), &mut storage);
+        let mut ctx =
+            ExecutionContext::for_mutation(std::sync::Arc::new(catalog.clone()), &mut storage);
 
         let statement = InsertStatement {
             table: "users".to_string(),
@@ -440,7 +445,8 @@ mod executor_tests {
             },
         )?;
 
-        let mut ctx = ExecutionContext::for_mutation(std::sync::Arc::new(catalog.clone()), &mut storage);
+        let mut ctx =
+            ExecutionContext::for_mutation(std::sync::Arc::new(catalog.clone()), &mut storage);
         let statement = DeleteStatement {
             table: "users".to_string(),
             target_binding: None,
@@ -520,7 +526,8 @@ mod executor_tests {
             },
         )?;
 
-        let mut ctx = ExecutionContext::for_mutation(std::sync::Arc::new(catalog.clone()), &mut storage);
+        let mut ctx =
+            ExecutionContext::for_mutation(std::sync::Arc::new(catalog.clone()), &mut storage);
         let statement = UpdateStatement {
             table: "users".to_string(),
             target_binding: None,
@@ -601,7 +608,8 @@ mod executor_tests {
             },
         )?;
 
-        let mut ctx = ExecutionContext::for_mutation(std::sync::Arc::new(catalog.clone()), &mut storage);
+        let mut ctx =
+            ExecutionContext::for_mutation(std::sync::Arc::new(catalog.clone()), &mut storage);
         let statement = UpdateStatement {
             table: "pairs".to_string(),
             target_binding: None,
@@ -688,7 +696,8 @@ mod executor_tests {
             },
         )?;
 
-        let mut ctx = ExecutionContext::for_mutation(std::sync::Arc::new(catalog.clone()), &mut storage);
+        let mut ctx =
+            ExecutionContext::for_mutation(std::sync::Arc::new(catalog.clone()), &mut storage);
         let statement = InsertStatement {
             table: "pairs".to_string(),
             columns: vec!["id".to_string(), "a".to_string(), "b".to_string()],
@@ -729,7 +738,8 @@ mod executor_tests {
         let catalog = Schema::new();
         let db = TestDbFile::new("_test_create_executor");
         let mut storage = CatalogEngine::new(db.path())?;
-        let mut ctx = ExecutionContext::for_mutation(std::sync::Arc::new(catalog.clone()), &mut storage);
+        let mut ctx =
+            ExecutionContext::for_mutation(std::sync::Arc::new(catalog.clone()), &mut storage);
 
         let statement = CreateStatement {
             table: "test_table".to_string(),
@@ -775,7 +785,8 @@ mod executor_tests {
 
         let db = TestDbFile::new("_test_create_executor_constraints");
         let mut storage = CatalogEngine::new(db.path())?;
-        let mut ctx = ExecutionContext::for_mutation(std::sync::Arc::new(catalog.clone()), &mut storage);
+        let mut ctx =
+            ExecutionContext::for_mutation(std::sync::Arc::new(catalog.clone()), &mut storage);
 
         let statement = CreateStatement {
             table: "children".to_string(),
@@ -860,7 +871,8 @@ mod executor_tests {
         let pk_root = storage.create_empty_btree()?;
         catalog.set_table_storage_roots(table_id, table_root, pk_root)?;
 
-        let mut ctx = ExecutionContext::for_mutation(std::sync::Arc::new(catalog.clone()), &mut storage);
+        let mut ctx =
+            ExecutionContext::for_mutation(std::sync::Arc::new(catalog.clone()), &mut storage);
         let statement = AlterStatement {
             table: "users".to_string(),
             operation: AlterOperation::RenameColumn {
@@ -1631,7 +1643,6 @@ mod planner_tests {
         Ok(())
     }
 
-
     /// Builds the runtime-metadata map a planner reads row counts from.
     ///
     /// The planner takes the engine's own map now rather than a transcribed
@@ -1754,7 +1765,8 @@ mod planner_tests {
         ];
         catalog.create_table("users".to_string(), columns)?;
 
-        let planner = QueryPlanner::new(catalog).with_table_row_counts(row_counts(&[("users", 10_000)]));
+        let planner =
+            QueryPlanner::new(catalog).with_table_row_counts(row_counts(&[("users", 10_000)]));
 
         let full_scan = planner.plan(Statement::Select(SelectStatement {
             with_clause: Vec::new(),
@@ -2001,8 +2013,8 @@ mod planner_tests {
         ];
         catalog.create_table("users".to_string(), columns)?;
 
-        let planner = QueryPlanner::new(catalog)
-            .with_table_row_counts(row_counts(&[("users", 12)]));
+        let planner =
+            QueryPlanner::new(catalog).with_table_row_counts(row_counts(&[("users", 12)]));
 
         let statement = SelectStatement {
             with_clause: Vec::new(),
