@@ -108,9 +108,10 @@ Unlike standard SQLite, which merges the main database header and the first tabl
 | :--- | :--- | :--- |
 | 100 bytes reserved | Magic `HMD1` | Slotted Pages |
 
-* **Page 0 (`DB_HEADER_PAGE_ID`)**: The first 100 bytes are reserved. A 20-byte database header is written at the start, containing: magic code `HMTD` (4 bytes), format version `2` (4 bytes), schema B-tree root page ID (4 bytes), next table ID (4 bytes), and header checksum (4 bytes). All header integers are little-endian. The remaining 80 bytes are zero padding. Page size is a compile-time constant (`4096`), not stored in the header.
-* **Page 1 (`STORAGE_METADATA_PAGE_ID`)**: A dedicated metadata container starting with the container magic `HMD1`. It stores pager state (journal mode, free pages, per-page checksums) and catalog runtime metadata (table row counts, next rowid).
+* **Page 0 (`DB_HEADER_PAGE_ID`)**: The first 100 bytes are reserved. A 20-byte database header is written at the start, containing: magic code `HMTD` (4 bytes), format version `1` (4 bytes), schema B-tree root page ID (4 bytes), next table ID (4 bytes), and header checksum (4 bytes). All header integers are little-endian. The remaining 80 bytes are zero padding. Page size is a compile-time constant (`4096`), not stored in the header.
+* **Page 1 (`STORAGE_METADATA_PAGE_ID`)**: A dedicated metadata container starting with the container magic `HMD1`. It stores pager state (journal mode, free pages) and catalog runtime metadata (table row counts, next rowid).
 * **Page 2 and onwards (`FIRST_ALLOCATABLE_PAGE_ID`)**: Usable physical pages. These are allocated for clustered table B-trees, secondary index B-trees, or overflow page chains.
+* **Every page's last 4 bytes** (`PAGE_TRAILER_SIZE`) belong to the pager, which stamps a checksum of that page's own contents there. Nothing above the pager writes into them, so a page has 4092 usable bytes. A checksum stored on the page it describes has no ceiling on how many pages it can cover.
 
 ---
 

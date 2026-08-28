@@ -3,13 +3,12 @@
 //! Reached through [`crate::catalog::serialization::RowCodec`], which is the name the
 //! rest of the catalog calls.
 //!
-//! # Why it replaced the old format
+//! # Why the width is per value
 //!
-//! The old encoding spent a fixed width on every value regardless of magnitude: a
-//! one-byte tag plus four bytes for any `Integer`, plus an eight-byte record header.
-//! A row of ten small integers cost 58 bytes to hold about ten bytes of information,
-//! and measured end to end (`docs/bench-baseline.md`) a five-integer row occupied 99
-//! bytes of database file — 87.7 after this change.
+//! Spending a fixed width on every value regardless of magnitude — a one-byte tag
+//! plus four bytes for any `Integer`, plus a fixed record header — costs 58 bytes to
+//! hold the ten bytes of information in a row of ten small integers. The serial type
+//! carries the width, so a small value pays for a small value.
 //!
 //! # Layout
 //!

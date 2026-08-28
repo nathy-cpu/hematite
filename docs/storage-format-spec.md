@@ -1,8 +1,10 @@
-# Hematite Storage Format Specification v1
+# Hematite Storage Format Specification
 
-This document defines the physical on-disk format for Hematite v1 database files, rollback journals, and write-ahead logs (WAL).
+This document defines the physical on-disk format for Hematite database files, rollback journals, and write-ahead logs (WAL). Every format carries version `1`.
 
 Hematite uses a page-based storage engine with a fixed page size of **4096 bytes** (`PAGE_SIZE`), utilizing slotted-page allocations and clustered B+ Trees.
+
+The last **4 bytes** of every page (`PAGE_TRAILER_SIZE`) belong to the pager, which stamps a checksum of the page's own contents there on the way out. Nothing above the pager may write into them, so the space a page has for its own use is **4092 bytes** (`USABLE_PAGE_SIZE`).
 
 ---
 
@@ -23,10 +25,10 @@ All scalar integers in the database header are stored in **little-endian** byte 
 | Offset | Size (Bytes) | Type | Field | Description / Value |
 | --- | --- | --- | --- | --- |
 | `0` | `4` | `[u8; 4]` | Magic | ASCII `HMTD`. Identifies the file as a Hematite database. |
-| `4` | `4` | `u32` | Version | Database format version. Current value: `1`. |
+| `4` | `4` | `u32` | Version | Database format version. Current value: `1`. A file carrying anything else is refused at open. |
 | `8` | `4` | `u32` | Schema Root Page | Root page ID of the schema catalog B-Tree. |
 | `12` | `4` | `u32` | Next Table ID | Incremental counter to allocate unique table IDs. |
-| `16` | `4` | `u32` | Header Checksum | Checksum (`DefaultHasher`) computed over bytes `0..16`. |
+| `16` | `4` | `u32` | Header Checksum | XXH64 (low 32 bits) over bytes `0..16`. |
 | `20` | `80` | `[u8; 80]` | Reserved | Zero padding. Reserved for future header fields. |
 
 > **Note**: Page size is not stored in the header — it is a compile-time constant (`PAGE_SIZE = 4096`).
@@ -35,7 +37,7 @@ All scalar integers in the database header are stored in **little-endian** byte 
 
 Page 1 is a dedicated metadata container starting with the container magic `HMD1` (`METADATA_PAGE_MAGIC`). It stores two variable-length sections:
 
-1. **Pager Metadata** (magic `HPM1`): Persists journal mode, free page list, and per-page checksums.
+1. **Pager Metadata** (magic `HPM1`): Persists the journal mode and the free page list. Per-page checksums are *not* here — each page carries its own in its trailer, which has no ceiling on the number of pages it can describe.
 2. **Catalog Metadata**: Persists runtime table metadata (row counts, next rowid, root page IDs).
 
 ---
@@ -102,9 +104,11 @@ Stores a key-value pair:
 | Key Length (2 bytes, BE) | Value Length (2 bytes, BE) | Key Bytes | Value Bytes |
 | --- | --- | --- | --- |
 
-* Key length: `u16` big-endian. Maximum `MAX_KEY_SIZE = 256` bytes.
-* Value length: `u16` big-endian. Maximum `MAX_VALUE_SIZE = 1024` bytes.
-* Total cell header overhead: **4 bytes**.
+* Key length: `u16` big-endian.
+* Value length: `u16` big-endian.
+* Total cell header overhead: **4 bytes** (`LEAF_CELL_HEADER_SIZE`).
+
+A page holds as many cells as its bytes allow; there is no cell-count cap that binds before the bytes do.
 
 ### Interior Cell Layout
 
@@ -114,8 +118,8 @@ Stores a separator key with a left child pointer:
 | --- | --- | --- |
 
 * Left child: `u32` big-endian page ID.
-* Key length: `u16` big-endian. Maximum `MAX_KEY_SIZE = 256` bytes.
-* Total cell header overhead: **6 bytes**.
+* Key length: `u16` big-endian.
+* Total cell header overhead: **6 bytes** (`INTERNAL_CELL_HEADER_SIZE`).
 
 ---
 
@@ -168,13 +172,15 @@ Each overflow page has an 8-byte header followed by payload bytes:
 
 ### Rollback Journal Format
 
-A rollback journal (file extension `.jrnl`) enables "undo" recovery. It uses the `HTJ3` binary format.
+A rollback journal (file extension `.journal`) enables "undo" recovery.
 
-#### Rollback Journal Header (36 bytes)
+A committed transaction empties its journal rather than deleting it: an empty file means "nothing to recover", and the file and its open handle are reused by the next transaction. A non-empty file that does not parse is corruption, and is an error.
+
+#### Rollback Journal Header (40 bytes)
 
 | Offset | Size (Bytes) | Type | Field | Description |
 |---|---|---|---|---|
-| `0` | `4` | `[u8; 4]` | Magic | ASCII `HTJ3` |
+| `0` | `4` | `[u8; 4]` | Magic | ASCII `HTJ1` |
 | `4` | `4` | `u32` | Version | Journal format version. Current: `1`. |
 | `8` | `1` | `u8` | State | `1` = Active, `2` = Committed |
 | `9` | `2` | `u16` | Page Size | Database page size (`4096`). Big-endian. |
@@ -183,24 +189,28 @@ A rollback journal (file extension `.jrnl`) enables "undo" recovery. It uses the
 | `16` | `4` | `u32` | Sector Size Hint | Sector alignment hint. |
 | `20` | `4` | `u32` | Checksum Seed | Seed for page record checksums. |
 | `24` | `4` | `u32` | Free Page Count | Count of free pages serialized after the header. |
-| `28` | `4` | `u32` | Checksum Count | Count of page checksums serialized after free pages. |
+| `28` | `4` | `u32` | Checksum Count | Always `0`: page checksums live in page trailers. The field is kept so the header layout is fixed. |
 | `32` | `4` | `u32` | Record Count | Number of page records following the metadata sections. |
+| `36` | `4` | `u32` | Intent Count | Number of commit-intent entries following the page records. |
 
 All multi-byte integers in the journal header are big-endian.
 
 #### Journal Body Layout
 
-After the 36-byte header, the journal body contains three sections in order:
+After the 40-byte header, the journal body contains four sections in order:
 
 1. **Free page list**: Variable-length encoded list of `free_page_count` page IDs.
-2. **Page checksums**: Variable-length encoded list of `checksum_count` `(page_id, checksum)` pairs.
+2. **Page checksums**: Empty; `checksum_count` is always `0`.
 3. **Page records**: Each record is an 8-byte prefix (`page_id: u32` + `checksum: u32`) followed by `PAGE_SIZE` bytes of original page content.
+4. **Commit intents**: `intent_count` entries of `(page_id: u32, checksum: u32)`, naming what each page the commit touches must contain if the commit reached the disk.
+
+The commit intents are what keep a rollback commit to two fsyncs. Recovery finding an active journal does not mean the transaction was abandoned: if every page listed already holds its post-commit checksum, the commit landed and the journal is discarded. Comparing against the *post*-commit image rather than asking "did this page change" is what makes it sound — a page whose new contents equal its old contents is indistinguishable by the latter test, and a torn page matches neither image, so it is correctly treated as a partial commit.
 
 ---
 
 ### Write-Ahead Log (WAL) Format
 
-A WAL file (file extension `.wal`) enables "redo" recovery and SWMR concurrency. It uses the `HTW3` binary format.
+A WAL file (file extension `.wal`) enables "redo" recovery and single-writer / multi-reader concurrency within one process.
 
 | WAL Header (24 bytes) | WAL Frame 1 (28-byte prefix + 4096-byte payload) | WAL Frame 2 ... |
 |---|---|---|
@@ -209,7 +219,7 @@ A WAL file (file extension `.wal`) enables "redo" recovery and SWMR concurrency.
 
 | Offset | Size (Bytes) | Type | Field | Description |
 |---|---|---|---|---|
-| `0` | `4` | `[u8; 4]` | Magic | ASCII `HTW3` |
+| `0` | `4` | `[u8; 4]` | Magic | ASCII `HTW1` |
 | `4` | `4` | `u32` | Version | WAL format version. Current: `1`. |
 | `8` | `2` | `u16` | Page Size | Database page size (`4096`). |
 | `10` | `2` | `u16` | Reserved | Must be `0`. |

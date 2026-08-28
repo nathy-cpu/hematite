@@ -4032,8 +4032,8 @@ mod work_performed_tests {
         for _ in 0..50 {
             let page_id = pager.allocate_page().expect("allocate");
             // Allocating alone does not dirty the cache, and a transaction that
-            // never dirties a page cannot commit — see the note on the pager's
-            // WriterLocked state in `docs/bench-baseline.md`.
+            // never dirties a page cannot commit: the pager stays in
+            // `WriterLocked` and refuses the transition.
             pager.write_page(Page::new(page_id)).expect("initialise");
             page_ids.push(page_id);
         }
