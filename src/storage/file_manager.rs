@@ -52,8 +52,8 @@ pub struct FileManager {
     /// The database file's length, as this manager last left it.
     ///
     /// The pager is the only writer of this file, so its length is always something
-    /// this process just did. Reading it back from the OS is a `statx`, and
-    /// `deallocate_page` used to issue one per freed page.
+    /// this process just did. Reading it back from the OS is a `statx` — one per
+    /// freed page if `deallocate_page` had to ask.
     file_len: u64,
     free_list: FreeList,
     /// Shared with the `Pager` that owns this backend, so both halves of the

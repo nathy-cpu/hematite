@@ -248,9 +248,9 @@ impl BTreeNode {
 
     /// The same number, measured one cell at a time.
     ///
-    /// What `serialized_size_on_page` used to do. It survives as the reference for
-    /// the differential test, which is the only thing that can show the cheap
-    /// derivation still agrees with the page.
+    /// The slow, obvious version of [`Self::serialized_size_on_page`], and the
+    /// reference its differential test checks against — the only thing that can
+    /// show the cheap derivation still agrees with the page.
     #[cfg(test)]
     pub(crate) fn serialized_size_by_measuring_cells(&self) -> Result<usize> {
         if self.is_decoded {
@@ -273,9 +273,9 @@ impl BTreeNode {
 
     /// Whether this node's decoded contents fit in a page.
     ///
-    /// Test-only now. `can_merge_with` used to reach it by building the merged node;
-    /// it answers from byte counts instead, and this survives as the slow, obvious
-    /// reference implementation that the differential merge test checks against.
+    /// The slow, obvious reference the differential merge test checks against.
+    /// `can_merge_with` answers the same question from byte counts, without
+    /// building the merged node.
     #[cfg(test)]
     pub fn will_fit_in_page(&self) -> bool {
         self.estimate_serialized_size() + page_header_offset(self.page_id) <= USABLE_PAGE_SIZE
@@ -340,12 +340,12 @@ impl BTreeNode {
         node.raw_page = Some(page.clone());
         node.is_decoded = false;
         node.header = Some(header);
-        // Whole-page structural validation used to run here, on every page loaded,
-        // including pages a cursor merely navigates past — ~28-30 % of a batched
-        // insert. It stood in for `key_view`/`value_view`, which swallowed per-cell
-        // decode errors with `.ok()`; those propagate now, so a cell that is read is
-        // checked at the read. The whole-page form is [`BTreeNode::verify`], for
-        // callers that want the page examined rather than used.
+        // No whole-page structural validation here. Doing it on every page loaded,
+        // including pages a cursor merely navigates past, is 28-30 % of a batched
+        // insert. The accessors propagate per-cell decode errors instead, so a cell
+        // that is read is checked at the read; [`BTreeNode::verify`] is the
+        // whole-page form, for callers that want the page examined rather than
+        // used.
         Ok(node)
     }
 
@@ -453,11 +453,10 @@ impl BTreeNode {
 
         // Straight to the key: read its own length and slice.
         //
-        // This used to compute the whole cell's range first -- which reads both the key
-        // and value lengths and adds them -- and then re-parse the cell to find the key
-        // inside it, reading both lengths a second time. A key needs neither the value
-        // length nor the total size. Binary search calls this once per comparison, so
-        // it ran about eight times per page per descent: 7.7 % of the insert path.
+        // A key needs neither the value length nor the cell's total size, so neither
+        // is computed. Binary search calls this once per comparison -- about eight
+        // times per page per descent -- and doing it through the whole cell range
+        // reads both lengths twice, which is 7.7 % of the insert path.
         let (page, header) = self.raw_page_and_header()?;
         let cell = cell_pointer_from_header(page, header, target_index)? as usize;
         let len_at = match self.node_type {
@@ -1335,10 +1334,10 @@ impl BTreeNode {
 
     /// Whether two leaves fit in one page.
     ///
-    /// This used to clone both nodes, decode the clones — materialising every key and
-    /// value into owned `Vec`s — and concatenate them, purely to measure the result.
-    /// `merge_leaf` then called it a second time, so a single rebalance decision cost
-    /// four node clones and four full decodes.
+    /// Answered from byte counts. Building the merged node to measure it would clone
+    /// and decode both — materialising every key and value into owned `Vec`s — and
+    /// `merge_leaf` asks again, so one rebalance decision would cost four node clones
+    /// and four full decodes.
     pub fn can_merge_with(&self, other: &BTreeNode) -> bool {
         if self.node_type != other.node_type || self.node_type != NodeType::Leaf {
             return false;
@@ -1407,9 +1406,8 @@ impl BTreeNode {
                 "Can only merge internal nodes".to_string(),
             ));
         }
-        // BUG-06 fix: removed redundant can_merge_internal_with_separator check.
-        // The caller already checked eligibility; repeating it here clones and
-        // decodes both nodes a second time for no benefit.
+        // Eligibility is the caller's to check. Repeating it here would clone and
+        // decode both nodes a second time for no benefit.
         self.keys.push_back(separator_key);
         self.keys.append(&mut other.keys);
         self.children.append(&mut other.children);
@@ -1419,9 +1417,9 @@ impl BTreeNode {
     }
 
     pub fn is_underflow(&self) -> bool {
-        // BUG-07 fix: base underflow on page-space utilisation instead of the
-        // MAX_KEYS constant, which is higher than the realistic per-page key
-        // capacity and would trigger rebalancing on almost every delete.
+        // Underflow is page-space utilisation, not a key count: `MAX_KEYS` is well
+        // above what a page physically holds, so counting keys would call almost
+        // every delete an underflow.
         let used = self.serialized_size_on_page().unwrap_or(USABLE_PAGE_SIZE);
         let capacity = USABLE_PAGE_SIZE - page_header_offset(self.page_id);
         // Underflow when the node occupies less than 25 % of its available space.
@@ -1433,17 +1431,15 @@ impl BTreeNode {
     /// O(1): `compute_cell_size` reads the cell's own `key_len`/`value_len` at its
     /// offset, so a single range needs neither the other cells nor an allocation.
     ///
-    /// This used to build — and cache — the exact ranges of *every* cell on the page,
-    /// which meant three `Vec` allocations, a sort and an overlap sweep to answer a
-    /// question about one cell. `from_shared_page` ran the same pass eagerly on every
-    /// page it loaded, and together they were ~28-30 % of a batched insert. The
-    /// whole-page pass was doing two jobs; only the structural half of it needed the
-    /// whole page, and that half now lives in [`verify`](Self::verify).
+    /// Building the exact ranges of *every* cell to answer a question about one
+    /// would mean three `Vec` allocations, a sort and an overlap sweep — and running
+    /// that eagerly per page load costs 28-30 % of a batched insert. Only the
+    /// structural half of such a pass needs the whole page, and that half is
+    /// [`verify`](Self::verify).
     fn cell_range_for_index(&self, index: usize) -> Result<(usize, usize)> {
-        // BUG-01 fix: the parameter is always a cell *index*, never a byte
-        // offset.  The previous dual-interpretation (index if < len, else
-        // treated as offset) would silently return the wrong cell when the
-        // cell count exceeded a cell's byte offset value.
+        // The parameter is a cell *index*, never a byte offset. Accepting either
+        // would silently return the wrong cell once the cell count reached a
+        // plausible offset value.
         let (page, header) = self.raw_page_and_header()?;
         let start = cell_pointer_from_header(page, header, index)? as usize;
         let size = compute_cell_size(page, header, start)?;
@@ -1465,13 +1461,12 @@ impl BTreeNode {
     /// coincide, that every cell's declared size is readable, and that no two cells
     /// overlap.
     ///
-    /// This ran on every page load, including pages a cursor merely navigated past.
-    /// It was defence-in-depth for `BTreeCursor::key_view`/`value_view`, which used to
-    /// swallow per-cell decode errors with `.ok()` and report corruption as "no
-    /// entry" — so the eager pass was the only thing that surfaced it. Those
-    /// accessors now propagate, which means a cell that is actually read is checked
-    /// where it is read, and this is left for callers that want the whole page
-    /// examined: `validate_integrity` and debug assertions.
+    /// Not run on every page load. Doing so would check pages a cursor merely
+    /// navigates past, as defence-in-depth for accessors that might swallow a
+    /// per-cell decode error and report corruption as "no entry" — those propagate
+    /// instead, so a cell that is read is checked where it is read. This is for
+    /// callers that want the whole page examined: `validate_integrity` and debug
+    /// assertions.
     pub fn verify(&self) -> Result<()> {
         let (page, header) = self.raw_page_and_header()?;
         let mut offsets = Vec::with_capacity(self.key_count);
@@ -1488,7 +1483,6 @@ impl BTreeNode {
 /// end from PAGE_SIZE.  This prevents the last cell's range from including
 /// trailing freeblock/fragment bytes, which would mask corruption.
 ///
-/// BUG-02 fix: called from from_shared_page and try_remove_cell_in_place.
 fn compute_cell_ranges_exact(
     page: &Page,
     header: &BTreePageHeader,

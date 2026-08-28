@@ -9,9 +9,9 @@ pub struct ResultSet {
     pub columns: Vec<String>,
     /// Every row's values end to end, `columns.len()` of them per row.
     ///
-    /// A row used to own its own `Vec<Value>`, which made one allocation per row
-    /// returned; `malloc` and `free` for it were 24 % of a full scan. A [`Row`] is
-    /// a view into this buffer now.
+    /// Giving each row its own `Vec<Value>` means one allocation per row returned,
+    /// and `malloc` and `free` for it are 24 % of a full scan. A [`Row`] is a view
+    /// into this buffer instead.
     values: Vec<Value>,
     column_index: HashMap<String, usize>,
 }
@@ -166,8 +166,8 @@ impl ResultSet {
 
 /// One row of a [`ResultSet`], borrowed from its buffer.
 ///
-/// A row used to own a `Vec<Value>` of its own. That was the single allocation a
-/// scanned row made, and it was 24 % of a full scan's instructions.
+/// Borrowed rather than owning a `Vec<Value>`: that would be the single allocation
+/// a scanned row makes, and 24 % of a full scan's instructions.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Row<'a> {
     pub values: &'a [Value],

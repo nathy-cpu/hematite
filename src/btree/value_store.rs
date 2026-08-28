@@ -59,8 +59,8 @@ pub const MIN_LOCAL_PAYLOAD: usize = 32;
 
 /// How many bytes of `total_payload_len` live in the leaf cell.
 ///
-/// Either all of it, or almost none: there is no longer a surplus calculation, since
-/// the point is to keep leaves dense rather than overflow pages full.
+/// Either all of it, or almost none — no surplus calculation, because the point is
+/// to keep leaves dense rather than overflow pages full.
 pub fn local_payload_size(total_payload_len: usize) -> usize {
     if total_payload_len <= MAX_LOCAL_PAYLOAD {
         total_payload_len

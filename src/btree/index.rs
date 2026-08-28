@@ -442,10 +442,9 @@ impl BTreeIndex {
 
                 let deleted_value = self.delete_recursive(pager, child_page_id, key)?;
 
-                // BUG-04/03 fix: only write back the internal page when it was
-                // actually modified (rebalancing changed the node), and read the
-                // existing page instead of creating a blank one (Page::new would
-                // zero the DB header bytes on page 0).
+                // Written back only when rebalancing actually changed it, and
+                // into the existing page rather than a blank one: `Page::new`
+                // would zero the database header bytes on page 0.
                 let mut node_modified = false;
                 if deleted_value.is_some() && self.is_child_underflow(pager, child_page_id)? {
                     // Now it has to be decoded: rebalancing edits the separators and
@@ -530,10 +529,9 @@ impl BTreeIndex {
             }
         }
 
-        // BUG-05 fix: track whether the merge actually happened and try the
-        // other sibling before giving up. Both merge functions return Ok(false)
-        // when can_merge is false — previously we ignored that and returned Ok(())
-        // leaving the underflowing child in the tree.
+        // Both merge functions answer `false` when the two nodes do not fit, so
+        // the result has to be checked and the other sibling tried; ignoring it
+        // leaves the underflowing child in the tree.
         let mut merged = false;
         if child_index > 0 {
             merged = self.merge_with_left_sibling(pager, parent, child_index)?;
@@ -749,8 +747,8 @@ impl BTreeIndex {
         Ok(true)
     }
 
-    // BUG-05/10 fix: returns bool indicating whether the merge was performed.
-    // BUG-10 fix: deallocates the absorbed child page after a successful merge.
+    /// Returns whether the merge happened. The absorbed child page is deallocated
+    /// when it did.
     fn merge_with_left_sibling(
         &mut self,
         pager: &mut Pager,
@@ -812,8 +810,8 @@ impl BTreeIndex {
         Ok(true)
     }
 
-    // BUG-05/10 fix: returns bool indicating whether the merge was performed.
-    // BUG-10 fix: deallocates the absorbed right sibling page after a successful merge.
+    /// Returns whether the merge happened. The absorbed right sibling is
+    /// deallocated when it did.
     fn merge_with_right_sibling(
         &mut self,
         pager: &mut Pager,

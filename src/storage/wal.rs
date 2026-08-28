@@ -1097,12 +1097,10 @@ impl WalFile {
     /// Appends `frames`, writing a fresh header first if the WAL is new.
     ///
     /// Reads the header through the same handle it appends with, and returns it so
-    /// the caller does not need its own copy. This used to take a header the caller
-    /// had loaded by path, then reopen the file and re-read the header purely to
-    /// check the two matched — a comparison that could not fail, because both sets
-    /// of bytes came from the same file. That cost every commit an extra `openat`,
-    /// `fstat`, read, decode and `close`, measured at 3 of the 44 syscalls a
-    /// single-row commit issued.
+    /// the caller does not need its own copy. Taking a header the caller loaded by
+    /// path and re-reading it here to check the two match is a comparison that
+    /// cannot fail — both sets of bytes come from the same file — and costs every
+    /// commit an extra `openat`, `fstat`, read, decode and `close`.
     ///
     /// The header is genuinely needed, not just validated: frame checksums are
     /// salted from it. It is only needed once.

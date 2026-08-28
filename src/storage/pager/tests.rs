@@ -11,9 +11,8 @@ mod cache_tests {
         // `capacity * PAGE_SIZE` bytes of resident memory upfront regardless of how
         // many pages a workload ever touches.
         //
-        // The pool used to live on `PageCache`; it is now the thread-local one behind
-        // `Page`, which recycles on drop. The property is unchanged: constructing a
-        // cache must not populate it.
+        // The pool is the thread-local one behind `Page`, which recycles on drop.
+        // The property under test is that constructing a cache does not populate it.
         clear_page_pool();
         let _cache = PageCache::new(50_000);
         assert_eq!(
@@ -271,9 +270,8 @@ mod fault_tests {
         let mut updated = pager.read_page(page_id)?;
         updated.data[0] = 2;
 
-        // Cold, so the write below has to spill to reach the injected failure. It
-        // used to be cold by accident: rollback mode reset the cache at the start of
-        // every transaction.
+        // Cold, so the write below has to spill to reach the injected failure; a
+        // warm cache would serve it from memory.
         pager.evict_all_cached_pages()?;
         pager.inject_io_failure_after(0);
         let err = pager.write_page(updated).unwrap_err();

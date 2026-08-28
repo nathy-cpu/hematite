@@ -142,10 +142,9 @@ impl Pager {
         } else {
             self.commit_rollback_transaction()?;
         }
-        // BUG-08 fix: only remove the journal file in rollback mode.  In WAL
-        // mode there is no rollback journal; the unconditional call could
-        // silently delete a stale-but-valid rollback journal left from a prior
-        // mode switch, destroying crash-recovery evidence.
+        // Rollback mode only. In WAL mode there is no rollback journal of ours to
+        // retire, and retiring one unconditionally would destroy a valid journal
+        // left behind by a mode switch — which is crash-recovery evidence.
         if self.journal_mode == JournalMode::Rollback {
             #[cfg(test)]
             let keep = self.keep_journal_after_commit;

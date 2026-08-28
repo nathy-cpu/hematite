@@ -3338,12 +3338,10 @@ mod cursor_tests {
     }
 }
 
-// Row serialization used to be tested here, reaching up into `catalog` from a
-// storage test module. Those two tests were written against the old format's
-// four-byte length prefix, which no longer exists, and everything they covered is
-// now covered where the format lives: `catalog::record_codec` round-trips every value
-// type and rejects truncation at every length, and `catalog::serialization` tests
-// the facade.
+// Row serialization is tested where the format lives, not here: reaching up into
+// `catalog` from a storage test module crosses a layer boundary for no benefit.
+// `catalog::record_codec` round-trips every value type and rejects truncation at
+// every length, and `catalog::serialization` covers the facade.
 
 mod file_manager_tests {
     use crate::storage::file_manager::FileManager;
@@ -3722,12 +3720,12 @@ mod work_performed_tests {
         );
     }
 
-    /// Taking a snapshot used to cost a `statx`.
+    /// Taking a snapshot must not cost a `statx`.
     ///
-    /// `ByteTree::run_atomically` takes one pager snapshot per row it writes, and
-    /// each one recorded the database file's length by asking the operating system
-    /// for it — a number the pager had just computed itself, since it is the only
-    /// writer of that file. Under `strace`, 200 single-row transactions issued
+    /// `ByteTree::run_atomically` takes one pager snapshot per row it writes, and a
+    /// snapshot records the database file's length. Asking the operating system for
+    /// it is a syscall for a number the pager just computed itself, since it is the
+    /// only writer of that file — 200 single-row transactions would issue
     /// 12 031 `statx` calls, more than any other syscall including `fsync`, and more
     /// than 60 per transaction.
     ///
@@ -3766,12 +3764,12 @@ mod work_performed_tests {
     /// rather than mutating them while a handle is out, so the handle stays valid
     /// and nothing is copied.
     ///
-    /// It used to make three copies beyond the journal's: it cloned the cached page
-    /// it was only reading from, cloned the finished journal record so the
-    /// in-memory list and the journal writer could each hold one, and copied the
-    /// whole page again for every savepoint that had not yet captured it. None of
-    /// them showed up in an allocation profile, because the page-buffer pool hands
-    /// the same recycled buffers back — they were pure memcpy, and a savepoint is
+    /// Three further copies are easy to add and hard to notice: cloning the cached
+    /// page it only reads from, cloning the finished journal record so the in-memory
+    /// list and the journal writer can each hold one, and copying the whole page
+    /// again for every savepoint that has not yet captured it. None would show up in
+    /// an allocation profile, because the page-buffer pool hands the same recycled
+    /// buffers back — they are pure memcpy, and a savepoint is
     /// taken per row.
     #[test]
     fn preserving_a_page_image_copies_it_once_for_the_journal() {
@@ -3859,12 +3857,11 @@ mod work_performed_tests {
     ///
     /// Rollback mode has no WAL to version reads, so a transaction that starts
     /// after someone else committed has to drop every cached page. Telling their
-    /// commit from ours is the whole problem, and the answer used to be a
-    /// fingerprint of the persisted metadata page as last read from disk. But that
-    /// page is shared with the catalog, whose section carries row counts, so our own
-    /// commits changed it too: the fingerprint never matched and the cache was
-    /// emptied at the start of every single transaction — 205 resets over 205
-    /// one-row transactions, and seven of the nine page reads each of those cost.
+    /// commit from ours is the whole problem. A fingerprint of the persisted
+    /// metadata page as last read from disk cannot answer it: that page is shared
+    /// with the catalog, whose section carries row counts, so our own commits change
+    /// it and every transaction looks foreign — 205 resets over 205 one-row
+    /// transactions, and seven of the nine page reads each of those cost.
     ///
     /// The cached copy of that page is the better witness. A commit writes it
     /// through the cache, so bytes on disk that differ from it are bytes we did not
@@ -3946,10 +3943,10 @@ mod work_performed_tests {
     /// The same in WAL mode, which answers the question a different way.
     ///
     /// Rollback mode compares the persisted state page against its cached copy.
-    /// WAL mode has a cheaper witness — the WAL file's own stamp — and used to
-    /// read, verify, parse and apply that 4 KiB page *before* consulting it. The
-    /// stamp is asked first now, so a read scope that finds the WAL unmoved
-    /// touches the file for nothing at all.
+    /// WAL mode has a cheaper witness — the WAL file's own stamp — and asks it
+    /// first, so a read scope that finds the WAL unmoved touches the file for
+    /// nothing at all. Reading, verifying and parsing that 4 KiB page before
+    /// consulting the stamp would make the answer cost more than the question.
     #[test]
     fn opening_a_wal_read_scope_reads_no_pages() {
         let db = TestDbFile::new("_test_wal_read_scope_no_reads");
@@ -4445,9 +4442,10 @@ mod crash_recovery_ordering_tests {
     /// A commit that finished, then a crash before the journal was removed, must not
     /// be rolled back.
     ///
-    /// This is the durability property the third fsync used to buy. The journal is
-    /// still on disk, full of pre-images, and marked active — the exact shape
-    /// recovery treats as "roll this back". What stops it is the commit intent: every
+    /// This is the durability property a third fsync would otherwise buy. The
+    /// journal is still on disk, full of pre-images, and marked active — the exact
+    /// shape recovery treats as "roll this back". What stops it is the commit
+    /// intent: every
     /// page listed already holds the contents the commit meant to write, so recovery
     /// concludes the commit landed and discards the journal instead of replaying it.
     ///
@@ -4566,9 +4564,9 @@ mod wal_autocheckpoint_tests {
 /// Salts separate one WAL generation from the next.
 ///
 /// Every frame carries the header's pair, and a mismatch means the frame predates
-/// this generation. They used to be the fixed constants 0x48454D41 and 0x54495445 —
-/// "HEMA" and "TITE" — so every comparison against them was tautological and the
-/// guard could never fire.
+/// this generation. They have to be random per generation: fixed constants would
+/// make every comparison against them tautological and the guard could never
+/// fire.
 mod wal_salt_tests {
     use crate::storage::wal::WalHeader;
 
@@ -4643,9 +4641,9 @@ mod savepoint_sharing_tests {
     }
 
     /// A page the transaction created after the savepoint has no pre-image, so
-    /// rolling back has to drop it rather than restore anything. Rollback used to
-    /// reset the whole cache, which handled this bluntly; it now undoes only what
-    /// changed, so created pages are tracked explicitly.
+    /// rolling back has to drop it rather than restore anything. Restoring undoes
+    /// only what changed rather than resetting the whole cache, so this case has to
+    /// be handled deliberately.
     #[test]
     fn rolling_back_drops_pages_created_after_the_savepoint() {
         let db = TestDbFile::new("_test_savepoint_created_pages");
@@ -4771,16 +4769,16 @@ mod savepoint_sharing_tests {
 
 /// Coordination between handles is in memory, so it leaves nothing on disk.
 ///
-/// It used to leave four things: `.rollback.lock`, `.wal.write.lock`, a
-/// `.wal.readers/` directory, and a lock file inside it per live read transaction.
-/// Between them they cost about eight syscalls per commit to support cross-process
+/// Doing it with `flock` sidecars would leave four: `.rollback.lock`,
+/// `.wal.write.lock`, a `.wal.readers/` directory, and a lock file inside it per
+/// live read transaction — about eight syscalls per commit to support cross-process
 /// access the engine does not offer.
 mod no_lock_sidecar_tests {
     use crate::storage::{JournalMode, Page, Pager};
     use crate::test_utils::TestDbFile;
 
-    /// Every path that used to create a lock file: a rollback write, a rollback
-    /// read, a WAL write, and a WAL read.
+    /// Every path that would take a lock: a rollback write, a rollback read, a WAL
+    /// write, and a WAL read.
     fn exercise_every_lock_path(path: &str) {
         let mut pager = Pager::new(path, 8).expect("open");
         let page_id = pager.allocate_page().expect("allocate");

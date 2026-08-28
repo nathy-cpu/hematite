@@ -176,9 +176,8 @@ mod tests {
         let root_page_id = engine.create_empty_btree()?;
         let mut tree = engine.open_tree(root_page_id)?;
 
-        // Supply enough bytes to force a split. A fixed count of tiny rows used to
-        // split only because `MAX_KEYS` capped a page at 99 cells; splits are driven
-        // by bytes now.
+        // Supply enough bytes to force a split. Splits are driven by bytes, not a
+        // cell cap, so a fixed count of tiny rows would not split.
         let filler = vec![0xAB; 900];
         for i in 0..20u32 {
             tree.insert(&i.to_be_bytes(), &filler)?;

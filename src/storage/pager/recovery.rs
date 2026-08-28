@@ -122,10 +122,8 @@ impl Pager {
             && self.latest_wal_file_stamp == self.current_wal_file_stamp()?
         {
             // The WAL has not moved, so nothing has been committed and the state
-            // page cannot have changed either. Asked first because it is the
-            // cheaper question: this used to read and verify that 4 KiB page and
-            // *then* check the stamp, which is the same page-per-read-scope cost
-            // rollback mode was paying.
+            // page cannot have changed either. Asked before the page is read
+            // because it is the cheaper question, and it decides.
             return Ok(());
         }
 
@@ -145,19 +143,18 @@ impl Pager {
             // observe anything another writer committed, and the only safe answer to
             // "did someone else change the file" is to drop every cached page.
             //
-            // The question is how to tell someone else's commit from our own. This
-            // used to keep a separate fingerprint of the metadata page as last read
-            // from disk — but that page is shared with the catalog, whose section
-            // carries row counts, so *our* commits changed it too. The fingerprint
-            // never matched and the cache was reset at the start of every single
-            // transaction: 205 resets over 205 one-row transactions, and 7 of the 9
-            // page reads each of those cost.
+            // The question is how to tell someone else's commit from our own, and
+            // the cached copy of that page answers it with no separate bookkeeping:
+            // a commit writes it through the cache, so the cached copy is exactly
+            // what we last put on disk, and bytes there that differ from it are
+            // bytes we did not write.
             //
-            // The cached copy of the page is the better witness, and it needs no
-            // separate bookkeeping: a commit writes it through the cache, so it is
-            // exactly what we last put on disk. Bytes still on disk that differ from
-            // it are bytes we did not write. Content only -- the trailer holds a
-            // checksum the pager stamps on the way out and never mirrors in memory.
+            // A separate fingerprint of the page as last *read* would not work: the
+            // page is shared with the catalog, whose section carries row counts, so
+            // our own commits change it and every transaction would look foreign.
+            //
+            // Content only -- the trailer holds a checksum the pager stamps on the
+            // way out and never mirrors in memory.
             let unchanged = {
                 let cache = self.cache_read()?;
                 match (metadata_page.as_ref(), cache.peek(STORAGE_METADATA_PAGE_ID)) {
@@ -334,16 +331,14 @@ impl Pager {
     }
 
     pub(super) fn snapshot_original_page(&mut self, page_id: PageId) -> Result<()> {
-        // Two independent questions, and they used to be conflated. The rollback
-        // journal needs one pre-image per page per *transaction*; a savepoint needs
-        // one per page per *savepoint*. The `journaled_pages` check answered only the
-        // first and returned early, so a page written before a savepoint and again
-        // after it never reached the capture loop below — which is why savepoints
-        // also had to eagerly copy every dirty page when they were created.
+        // Two independent questions, kept apart. The rollback journal needs one
+        // pre-image per page per *transaction*; a savepoint needs one per page per
+        // *savepoint*. Answering only the first and returning early would miss a
+        // page written before a savepoint and again after it, and a savepoint would
+        // then have to eagerly copy every dirty page at the moment it is taken.
         //
-        // Only the journal half is rollback-specific. This used to return immediately
-        // in WAL mode, which left WAL with no undo log and forced its snapshots to
-        // copy every dirty page per row instead.
+        // Only the journal half is rollback-specific. WAL mode has savepoints too,
+        // and they need the same undo log.
         let needs_journal_record = self.journal_mode != JournalMode::Wal
             && self
                 .active_rollback_transaction()
@@ -435,9 +430,8 @@ impl Pager {
         self.journal_needs_sync = true;
         self.append_rollback_journal_record(&record)?;
 
-        // Appended first, then handed over. The record used to be cloned so that the
-        // in-memory list could take one copy and the journal writer another -- a
-        // second 4 KiB copy of a page that was already copied once above.
+        // Appended first, then handed over, so the record is written once and moved
+        // rather than copied for each of the two.
         //
         // This also puts the two in a safer order. The file is sized from this
         // vector's length by `sync_rollback_journal_from_transaction`, so a failed
@@ -515,10 +509,9 @@ impl Pager {
         };
         file.sync_all()?;
         crate::storage::stats::PagerStats::bump(&self.stats.fsyncs);
-        // BUG-09 fix: only clear need_sync on pages that are already journaled.
-        // Pages dirtied after this journal sync started have not had their
-        // original images captured yet; clearing need_sync on them would allow
-        // them to spill to the main file without journal coverage.
+        // Only pages that are already journalled. A page dirtied after this sync
+        // started has no pre-image on disk yet, and clearing its `need_sync` would
+        // let it spill to the main file with no journal coverage.
         let dirty_ids = self.cache_mut()?.dirty_page_ids();
         for page_id in dirty_ids {
             let is_journaled = self

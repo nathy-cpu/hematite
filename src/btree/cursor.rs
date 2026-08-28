@@ -102,11 +102,11 @@ impl BTreeCursor {
 
     /// The current entry's key bytes, or `None` if the cursor is not on an entry.
     ///
-    /// `Err` means the cell itself is corrupt. This used to be `.ok()`, which turned a
-    /// `CorruptedData` decode failure into `None` — indistinguishable from "the cursor
-    /// is past the end", so corruption read as absence. Whole-page validation on every
-    /// page load existed to compensate, at ~28-30 % of a batched insert; propagating
-    /// here is what let that go.
+    /// `Err` means the cell itself is corrupt, and is propagated rather than
+    /// flattened to `None`: `None` means "the cursor is past the end", so swallowing
+    /// a decode failure would make corruption read as absence. Compensating for that
+    /// with whole-page validation on every page load costs 28-30 % of a batched
+    /// insert; propagating here is what makes it unnecessary.
     pub(crate) fn key_view(&self) -> Result<Option<&[u8]>> {
         if !self.is_valid() {
             return Ok(None);

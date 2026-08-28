@@ -240,12 +240,11 @@ struct PagerSavepoint {
     /// capture time was 5.9 pages per deleted row, 120 MB of memcpy over 5 000
     /// deletes.
     ///
-    /// Captured lazily by `snapshot_original_page`.
-    /// The savepoint used to *also* hold shared images of every page already dirty
-    /// when it was taken, because the capture below was skipped for any page the
-    /// transaction had already journalled, leaving a hole. Separating the journal's
-    /// per-transaction dedup from this per-savepoint one closed the hole and made
-    /// taking a savepoint O(1) rather than O(dirty pages) — it ran per row.
+    /// Captured lazily by `snapshot_original_page`, which keeps the journal's
+    /// per-transaction dedup separate from this per-savepoint one. Conflating them
+    /// skips the capture for any page the transaction has already journalled, and
+    /// the savepoint then has to eagerly hold an image of every page dirty when it
+    /// was taken — O(dirty pages) per savepoint, and a savepoint is taken per row.
     page_images: Vec<Arc<Page>>,
     captured_page_ids: PageSet,
 }
@@ -318,9 +317,9 @@ pub struct Pager {
     /// How many frames the WAL file holds, when known.
     ///
     /// Autocheckpointing needs this on every commit to decide whether the WAL has
-    /// grown past its threshold, and used to get it by stat'ing the WAL by path --
-    /// one `statx` per commit for a number the pager itself determines, since it is
-    /// the only writer. `None` means "ask the filesystem once, then remember".
+    /// grown past its threshold. Stat'ing the WAL by path would be one `statx` per
+    /// commit for a number the pager itself determines, since it is the only
+    /// writer. `None` means "ask the filesystem once, then remember".
     ///
     /// A stale value can only make the threshold fire a commit early or late, which
     /// for a heuristic is not a correctness question.

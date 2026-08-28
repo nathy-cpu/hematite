@@ -15,12 +15,11 @@ pub const PAGE_SIZE: usize = 4096;
 
 /// Bytes at the end of every page reserved for the pager.
 ///
-/// Holds the page's own checksum. It used to live in a map serialised into a single
-/// metadata page, and when that map outgrew the page the encoder silently wrote no
-/// checksums at all — measured at 685 pages, so per-page integrity was off in any
-/// database over about 2.8 MB. A checksum stored on the page it describes has no such
-/// ceiling, needs no map to clone per savepoint, and needs no re-serialisation per
-/// transaction.
+/// Holds the page's own checksum. Keeping those in a map serialised into a single
+/// metadata page puts a ceiling on the database: past about 685 pages the map no
+/// longer fits and integrity silently switches itself off. A checksum stored on the
+/// page it describes has no ceiling, no map to clone per savepoint, and nothing to
+/// re-serialise per transaction.
 pub const PAGE_TRAILER_SIZE: usize = 4;
 
 /// Bytes of a page that content may use. Nothing above the pager may write past this.

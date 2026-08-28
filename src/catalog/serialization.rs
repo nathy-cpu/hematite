@@ -173,7 +173,7 @@ impl IndexKeyCodec {
 
     /// The payload stored against a primary-key index entry.
     ///
-    /// A varint, so a small row id costs one byte where it used to cost eight.
+    /// A varint, so a small row id costs one byte rather than a fixed eight.
     pub fn encode_row_id_value(row_id: u64) -> Vec<u8> {
         index_key_codec::encode_row_id_value(row_id)
     }
@@ -250,14 +250,13 @@ mod tests {
         Ok(())
     }
 
-    /// Row-id keys sort by their *signed* value, which is a deliberate change.
+    /// Row-id keys sort by their *signed* value.
     ///
-    /// They used to sort unsigned, and for ids handed out by a counter the two
-    /// agree — a counter never reaches the top half of the range. They stopped
-    /// agreeing when a table's primary key became its row id, because a SQL
-    /// integer key can be negative. Under the old encoding those keys landed
-    /// above every positive one; `u64::MAX` read as a row id is `-1`, and it now
-    /// sorts where `-1` belongs.
+    /// For ids handed out by a counter, signed and unsigned order agree — a
+    /// counter never reaches the top half of the range. They part company when a
+    /// table's primary key *is* its row id, because a SQL integer key can be
+    /// negative: `u64::MAX` read as a row id is `-1`, and it has to sort where
+    /// `-1` belongs rather than above every positive key.
     #[test]
     fn row_id_keys_sort_by_signed_value() {
         let ascending: Vec<u64> = vec![

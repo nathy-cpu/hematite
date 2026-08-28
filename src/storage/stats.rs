@@ -9,10 +9,10 @@
 //! line up with which build ran first reads exactly like a real regression — it did,
 //! once, and cost an hour to disprove.
 //!
-//! Counters do not drift. "This commit issues two fsyncs where it used to issue
-//! four" and "this transaction writes each dirty page exactly once" are facts about
-//! work performed, they hold on any machine under any load, and they can be asserted
-//! in an ordinary `#[test]` that runs in CI without a benchmark harness.
+//! Counters do not drift. "This commit issues exactly two fsyncs" and "this
+//! transaction writes each dirty page exactly once" are facts about work performed,
+//! they hold on any machine under any load, and they can be asserted in an ordinary
+//! `#[test]` that runs in CI without a benchmark harness.
 //!
 //! That is the point: the expensive operations in a storage engine are syscalls and
 //! page copies, and those are all countable. Time is the derived quantity, and the
@@ -56,10 +56,11 @@ pub struct PagerStats {
     pub checkpoints: AtomicU64,
     /// Page trailers verified on read, each an xxHash64 over 4 KiB.
     ///
-    /// Every page read used to pay one. The read at the start of a read scope --
-    /// twice per statement, on a page that has almost always not changed -- made
-    /// that 11 % of a point-lookup workload. It compares the bytes against the
-    /// cached copy first now, and only a page that differs is verified.
+    /// Verifying every page read would put an xxHash64 over 4 KiB on the read at
+    /// the start of every read scope -- twice per statement, on a page that has
+    /// almost always not changed, and 11 % of a point-lookup workload. That read
+    /// compares against the cached copy first, and only a page that differs is
+    /// verified.
     pub trailer_verifications: AtomicU64,
     /// Cells moved between two leaf pages to rebalance after a delete.
     ///
@@ -72,19 +73,17 @@ pub struct PagerStats {
     /// or for the rollback journal.
     ///
     /// One per savepoint that needs the page, plus one for the journal, is the
-    /// floor. `snapshot_original_page` used to make two more on top of that — a
-    /// clone of the cached page it was only reading, and a clone of the journal
-    /// record so the in-memory list and the journal writer could each have one.
-    /// A savepoint is taken per row, so those two came to 79 MB of memcpy over a
-    /// 20 000-row insert.
+    /// floor, and `snapshot_original_page` is written to hit it. A savepoint is
+    /// taken per row, so a spare copy on that path is worth tens of megabytes of
+    /// memcpy over a bulk insert — which is why it is counted.
     pub undo_page_copies: AtomicU64,
     /// Times the database file's length was asked of the operating system.
     ///
     /// The pager already knows how long its file is -- it is the only writer, and
     /// every path that changes the length goes through it. Asking the OS is a
-    /// `statx` per call, and this counter exists because that call used to sit
-    /// inside `deallocate_page`, so a transaction that freed pages paid one syscall
-    /// per page to re-learn a number it had just computed.
+    /// `statx`, so this is counted to keep it off the hot paths: a stat inside
+    /// `deallocate_page`, say, costs a syscall per freed page to re-learn a number
+    /// the pager had just computed.
     pub file_stats: AtomicU64,
 }
 

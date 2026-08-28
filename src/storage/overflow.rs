@@ -236,10 +236,9 @@ pub fn collect_overflow_page_ids(
 
 /// Reads a spilled payload, visiting each overflow page once.
 ///
-/// This used to walk the chain twice — `collect_overflow_page_ids` to learn the page
-/// ids, then again to read the payload out of each — and memoise the id list to take
-/// the edge off. Appending as it walks halves the page reads on a cold chain and
-/// makes the memo pointless, so it is gone.
+/// Appends as it walks. Learning the page ids in one pass and reading the payload
+/// in another doubles the page reads on a cold chain, which no amount of memoising
+/// the id list makes back.
 pub(crate) fn read_overflow_chain(
     storage: &Pager,
     first_page: Option<PageId>,

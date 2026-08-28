@@ -10,10 +10,9 @@ pub struct QueryResult {
     pub columns: Vec<String>,
     /// Every row's values end to end, `columns.len()` of them per row.
     ///
-    /// A row used to be its own `Vec<Value>`, which meant one allocation per row
-    /// returned — 24 % of a full scan's instructions went to `malloc` and `free`
-    /// for it, and a scan allocated exactly 1.02 blocks per row. Rows are slices
-    /// of one buffer now; see [`QueryResult::rows`].
+    /// Giving each row its own `Vec<Value>` means one allocation per row returned,
+    /// which is 24 % of a full scan's instructions in `malloc` and `free`. Rows are
+    /// slices of this buffer instead; see [`QueryResult::rows`].
     values: Vec<Value>,
 }
 
@@ -182,9 +181,9 @@ impl PartialEq for Rows<'_> {
 pub struct ExecutionContext<'a> {
     /// Shared with the connection that built this context, not copied from it.
     ///
-    /// A `Schema` owns a `Table` per table and a `Column` per column, and this
-    /// used to deep clone one per statement — 28 allocations on a one-table point
-    /// lookup, on top of the copy the planner already took.
+    /// A `Schema` owns a `Table` per table and a `Column` per column, so deep
+    /// cloning one per statement is 28 allocations on a one-table point lookup —
+    /// on top of whatever the planner takes.
     pub catalog: Arc<Schema>,
     pub engine: &'a mut CatalogEngine,
 }

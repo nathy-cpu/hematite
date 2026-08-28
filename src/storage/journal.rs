@@ -205,16 +205,15 @@ pub(crate) struct JournalFile {
     file: File,
     /// Offset the next append lands at.
     ///
-    /// Tracked so every write can be positional. Updating the record count in the
-    /// header used to cost a seek back, a four-byte write, and a seek forward
+    /// Tracked so every write can be positional. Without it, updating the record
+    /// count in the header costs a seek back, a four-byte write and a seek forward
     /// again — three syscalls to change one field, once per journalled page.
     len: u64,
     /// Reused buffer for framing a record before it is written.
     ///
     /// A record is an 8-byte prefix followed by a whole page, and it has to reach
-    /// the file as one write. Building it used to allocate a fresh `Vec` per record
-    /// and copy the page into it, on top of the copy that produced the record in the
-    /// first place.
+    /// the file as one write. Framing it here rather than into a fresh `Vec` keeps
+    /// that from being an allocation and a second copy of the page per record.
     scratch: Vec<u8>,
     /// Shared with the pager, so journal traffic lands in the same counter set as
     /// database-file traffic. `journal_bytes` was declared from the start and never
@@ -394,9 +393,9 @@ pub(crate) fn write_journal_record_count(file: &mut JournalFile, record_count: u
 /// Appends the commit intent: what every page the commit touches must contain if
 /// the commit reached the disk.
 ///
-/// This is what lets the third fsync go. Previously a commit had to write a
-/// "committed" flag into the journal header and sync it, purely so recovery could
-/// tell a completed commit from an abandoned one — a whole fsync spent on one byte.
+/// This is what keeps a commit to two fsyncs. The alternative is a "committed"
+/// flag written into the journal header and synced, purely so recovery can tell a
+/// completed commit from an abandoned one — a whole fsync spent on one byte.
 ///
 /// With the intent recorded, recovery answers the same question by reading: if every
 /// listed page already holds its post-commit checksum, the commit's writes reached
@@ -645,9 +644,9 @@ fn validate_record_set(records: &[JournalFileRecord]) -> Result<()> {
 }
 
 fn record_checksum(page_number: PageId, checksum_seed: u32, page_bytes: &[u8]) -> u32 {
-    // Feeding the record header through the hash seed instead of concatenating it
-    // with the page image removes the 4104-byte scratch `Vec` this used to build
-    // for every journaled page.
+    // The record header goes through the hash seed rather than being concatenated
+    // with the page image, which would need a 4104-byte scratch `Vec` for every
+    // journalled page.
     let mut header = [0u8; 8];
     header[0..4].copy_from_slice(&page_number.to_be_bytes());
     header[4..8].copy_from_slice(&checksum_seed.to_be_bytes());

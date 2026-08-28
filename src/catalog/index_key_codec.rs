@@ -233,10 +233,9 @@ pub(crate) fn encode_value(out: &mut Vec<u8>, value: &Value) {
 /// negative sorts earlier. The tag still puts every negative before every
 /// non-negative, so the two schemes never have to compare against each other.
 ///
-/// This replaced a fixed eight bytes per integer, which was the one measured
-/// regression the rewrite introduced: index keys grew because a single order now has
-/// to span `i64::MIN..=u64::MAX`. A small integer costs three bytes here rather than
-/// nine, and zero costs two.
+/// Width-tagged rather than a fixed eight bytes per integer. A single order has to
+/// span `i64::MIN..=u64::MAX`, and paying for that range on every key would make a
+/// small integer nine bytes; here it costs three, and zero costs two.
 fn encode_integer(out: &mut Vec<u8>, bits: u64, negative: bool) {
     if negative {
         out.push(TAG_NEGATIVE_INT);
@@ -379,8 +378,8 @@ mod tests {
 
     #[test]
     fn text_orders_lexicographically() {
-        // The case the old little-endian length prefix got wrong: "b" has a shorter
-        // length prefix than "ab", so it used to sort first.
+        // The case a little-endian length prefix gets wrong: "b" has a shorter
+        // length prefix than "ab", so it would sort first.
         assert_ordered(&[
             Value::Text(String::new()),
             Value::Text("a".to_string()),
@@ -405,9 +404,8 @@ mod tests {
 
     /// Small integers should not cost what large ones do.
     ///
-    /// The fixed eight-byte body was the one measured regression the rewrite
-    /// introduced: index keys grew because a single order has to span
-    /// `i64::MIN..=u64::MAX`.
+    /// A single order has to span `i64::MIN..=u64::MAX`, and a fixed-width body
+    /// wide enough for that would make every key pay for the largest one.
     #[test]
     fn integer_keys_cost_only_the_bytes_they_need() {
         // tag + length + digits
@@ -424,7 +422,8 @@ mod tests {
         assert_eq!(key(Value::BigInt(i64::MAX)).len(), 10);
         assert_eq!(key(Value::UBigInt(u64::MAX)).len(), 10);
 
-        // A typical indexed integer column, against the nine bytes it used to take.
+        // A typical indexed integer column, against the nine a fixed-width body
+        // would take.
         assert!(key(Value::Integer(42)).len() < 9);
     }
 

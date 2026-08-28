@@ -1,19 +1,16 @@
 //! Coordination between database handles in this process.
 //!
-//! This used to be cross-process coordination built from four `flock` sidecars: a
-//! `.rollback.lock`, a `.wal.write.lock`, a `.wal.readers/` directory and one lock
-//! file per live read transaction. It cost roughly eight syscalls per commit —
-//! four `flock`s, an `unlink`, and the `openat`/`close` pairs to reach them — and
-//! bought a guarantee the engine does not offer: Hematite is single-writer /
-//! multi-reader **within one process**, and two processes opening the same database
-//! was never supported. Paying for cross-process exclusion while not supporting
-//! cross-process use is the worst of both.
+//! In-process, deliberately. Hematite is single-writer / multi-reader **within one
+//! process**; two processes opening the same database is not supported. Building
+//! this out of `flock` sidecars — a `.rollback.lock`, a `.wal.write.lock`, a
+//! `.wal.readers/` directory and a lock file per live read transaction — costs
+//! roughly eight syscalls per commit and buys cross-process exclusion the engine
+//! does not otherwise offer, which is the worst of both.
 //!
-//! What replaces it is the same state held in memory, shared between handles on the
-//! same database through a process-wide registry keyed by path. Waiting uses a
-//! `Condvar`, so a blocked writer wakes the moment the lock frees rather than
-//! sleeping through a backoff schedule; the five-second ceiling before giving up is
-//! unchanged, and so is the error it produces.
+//! The state lives in memory instead, shared between handles on the same database
+//! through a process-wide registry keyed by path. Waiting uses a `Condvar`, so a
+//! blocked writer wakes the moment the lock frees rather than sleeping through a
+//! backoff schedule, and gives up after five seconds.
 //!
 //! The locks themselves are unchanged in meaning:
 //!

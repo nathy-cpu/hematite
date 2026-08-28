@@ -427,10 +427,9 @@ not available yet.",
         let transaction_active = self.transaction_active()?;
 
         if transaction_active {
-            // The metadata pre-image lives in the snapshot on this path. It used to be
-            // cloned a second time above, unconditionally, and then dropped unread —
-            // a whole `HashMap<String, TableRuntimeMetadata>` per row, since
-            // `run_atomically` wraps every single-row insert and delete.
+            // The metadata pre-image lives in the snapshot on this path, so nothing
+            // is cloned above: `run_atomically` wraps every single-row insert and
+            // delete, and a second copy would be one per row, dropped unread.
             let snapshot = self.snapshot()?;
             match operation(self) {
                 // Released, not dropped — see `Pager::release_savepoint`.

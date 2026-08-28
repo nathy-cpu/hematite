@@ -129,8 +129,8 @@ impl BTreeManager {
         // `verify` covers the whole-page structure — duplicate cell pointers and
         // overlapping cells — which `validate_cell_layouts` does not: it parses each
         // cell in isolation and so cannot see two of them claiming the same bytes.
-        // `from_shared_page` used to run this implicitly on every page in the
-        // database; here it runs on the pages an integrity check actually walks.
+        // Run here, on the pages an integrity check walks, rather than implicitly
+        // on every page the engine loads.
         node.verify()?;
         node.validate_cell_layouts()?;
 
@@ -320,12 +320,11 @@ fn collect_tree_space_stats_recursive(
                         collect_overflow_page_ids(pager, Some(layout.overflow_first_page))?;
                     stats.overflow_used_bytes += layout.overflow_len();
                     for overflow_page_id in overflow_page_ids {
-                        // One hash insert decides both duplicate cases. This used to
-                        // scan `stats.overflow_page_ids` linearly inside the loop that
-                        // fills it, making the whole walk quadratic in the number of
-                        // overflow pages. Recording them in `visited` also catches an
-                        // overflow page id colliding with a tree page id, which the
-                        // separate checks could not.
+                        // One hash insert decides both duplicate cases. Scanning
+                        // `stats.overflow_page_ids` inside the loop that fills it
+                        // would make the walk quadratic in the number of overflow
+                        // pages, and separate checks could not catch an overflow
+                        // page id colliding with a tree page id.
                         if !visited.insert(overflow_page_id) {
                             return Err(crate::error::HematiteError::CorruptedData(format!(
                                 "Duplicate overflow page {} encountered while collecting tree space stats",

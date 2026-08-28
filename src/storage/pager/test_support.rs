@@ -28,12 +28,9 @@ impl Pager {
     /// Empties the page cache, leaving the pager as a freshly opened one would be.
     ///
     /// Fault-injection tests need the operation under test to actually reach the
-    /// disk, and several of them used to get that by accident: rollback mode reset
-    /// the cache at the start of every transaction, because the fingerprint it
-    /// compared covered the whole shared metadata page — including the catalog's
-    /// section, which its own commits changed. With the cache surviving a commit,
-    /// a small tree operation can now be served entirely from memory and never
-    /// reach the injected failure. Those tests ask for a cold cache here instead.
+    /// disk. The cache survives a commit, so a small tree operation is served
+    /// entirely from memory and never meets an injected failure — those tests ask
+    /// for a cold cache here rather than relying on one.
     pub(crate) fn evict_all_cached_pages(&mut self) -> Result<()> {
         self.cache_mut()?.reset();
         Ok(())

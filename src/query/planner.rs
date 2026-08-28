@@ -18,10 +18,9 @@ pub struct QueryPlanner {
     catalog: Arc<Schema>,
     /// The engine's own table metadata, borrowed rather than transcribed.
     ///
-    /// This used to be a `HashMap<String, usize>` built fresh for every statement,
-    /// cloning a `String` key per table to record a number the engine already had.
-    /// Building and hashing it was 7.5 % of a point-lookup workload — more than
-    /// anything it went on to decide.
+    /// Building a `HashMap<String, usize>` for this instead would clone a `String`
+    /// key per table to record a number the engine already has, and cost 7.5 % of a
+    /// point-lookup workload — more than anything it goes on to decide.
     table_row_counts: Option<Arc<TableMetadataMap>>,
 }
 
@@ -32,8 +31,8 @@ impl QueryPlanner {
 
     /// Plans against a schema the caller already holds a handle to.
     ///
-    /// The connection has one per statement and used to hand over a deep copy:
-    /// a `Table` per table and a `Column` per column, 56 allocations on a
+    /// The connection has one per statement, and handing over a deep copy would be
+    /// a `Table` per table and a `Column` per column — 56 allocations on a
     /// one-table point lookup.
     pub fn with_shared_schema(catalog: Arc<Schema>) -> Self {
         Self {

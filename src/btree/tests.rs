@@ -27,9 +27,8 @@ mod mod_tests {
         let root_page_id = trees.create_tree()?;
         let mut tree = trees.open_tree(root_page_id)?;
         // Large enough values that a handful of rows overflow a page. Inserting a
-        // fixed count of tiny rows used to work only because `MAX_KEYS` forced a split
-        // at 99 cells; splits are driven by bytes now, so the fixture has to supply
-        // the bytes rather than rely on the cell cap.
+        // splits are driven by bytes, not a cell cap, so the fixture has to supply
+        // the bytes.
         let filler = vec![0xAB; 900];
         for i in 0..20u32 {
             tree.insert(&i.to_be_bytes(), &filler)?;
@@ -674,8 +673,7 @@ mod mod_tests {
 
         trees.begin_transaction()?;
         // Cold, so the operation below has to reach the disk and meet the injected
-        // failure. It used to be cold by accident: rollback mode reset the page
-        // cache at the start of every transaction.
+        // failure, which a warm cache would let it skip entirely.
         trees
             .shared_storage()
             .write()
@@ -775,8 +773,7 @@ mod mod_tests {
         trees.begin_transaction()?;
 
         // Cold, so the operation below has to reach the disk and meet the injected
-        // failure. It used to be cold by accident: rollback mode reset the page
-        // cache at the start of every transaction.
+        // failure, which a warm cache would let it skip entirely.
         trees
             .shared_storage()
             .write()
@@ -2185,8 +2182,8 @@ mod tree_tests {
 
         // Two cell pointers claiming the same bytes is a whole-page property: no
         // single cell looks wrong on its own, so only a pass that compares cells
-        // against each other can see it. That pass used to run on every page load;
-        // it is `verify` now, called by `validate_tree`.
+        // against each other can see it. That pass is `verify`, called by
+        // `validate_tree` rather than on every page load.
         let err = lazy.verify().unwrap_err();
         assert!(matches!(err, crate::error::HematiteError::CorruptedData(_)));
         assert!(!lazy.is_decoded);
@@ -2291,10 +2288,9 @@ mod tree_tests {
 
     /// Duplicate cell pointers are caught by the integrity check.
     ///
-    /// This used to assert that `get`/`seek`/`first` each returned `CorruptedData`,
-    /// because `from_shared_page` structurally validated every page it loaded — a
-    /// pass worth ~28-30 % of a batched insert. It is `verify` now, called from
-    /// `validate_tree`.
+    /// By `verify`, called from `validate_tree` — not by `from_shared_page`, which
+    /// would structurally validate every page the engine loads at a cost of 28-30 %
+    /// of a batched insert.
     ///
     /// It is deliberately *not* called from `open_tree`: that runs once per inserted
     /// row, and putting a whole-page pass there measured 5.7 % of the insert path,

@@ -912,11 +912,11 @@ impl SelectExecutor {
 
     /// Resolves every `SelectItem::Column` in the projection to a row index.
     ///
-    /// The answer is the same for every row of a query, but it used to be
-    /// recomputed inside the row loop: a `split_once('.')` through the UTF-8 char
-    /// searcher plus a SipHash lookup in `column_lookup`, per projected column per
-    /// row. On `SELECT id, a` over a five-column table that measured **18 % of the
-    /// scan's instructions** — more than the record decode it was feeding.
+    /// Resolved once. The answer is the same for every row of a query, and
+    /// recomputing it inside the row loop is a `split_once('.')` through the UTF-8
+    /// char searcher plus a SipHash lookup in `column_lookup`, per projected column
+    /// per row — on `SELECT id, a` over a five-column table, **18 % of the scan's
+    /// instructions**, more than the record decode it feeds.
     ///
     /// Entries are `None` for items that are not plain column references, and for
     /// references that resolve to nothing; the positions line up with
@@ -924,8 +924,7 @@ impl SelectExecutor {
     ///
     /// Resolution can fail on an ambiguous reference, which is why callers only run
     /// this when they have at least one row to project: raising it eagerly would
-    /// make `SELECT ambiguous FROM empty` start erroring where it used to return
-    /// nothing.
+    /// make `SELECT ambiguous FROM empty` an error rather than an empty result.
     fn resolve_projection_columns(&self, sources: &[ResolvedSource]) -> Result<Vec<Option<usize>>> {
         self.statement
             .columns
@@ -3666,9 +3665,9 @@ fn catalog_table(ctx: &ExecutionContext<'_>, table_name: &str) -> Result<Table> 
 
 /// The engine's own table metadata, shared rather than transcribed.
 ///
-/// This used to build a `HashMap<String, usize>` per statement, cloning a key per
-/// table to record a row count the engine already had. The planner reads the
-/// counts straight out of the map now.
+/// The planner reads the counts straight out of the map. Building a
+/// `HashMap<String, usize>` per statement would clone a key per table to record a
+/// row count the engine already has.
 fn current_table_row_counts(
     engine: &crate::catalog::CatalogEngine,
 ) -> Arc<crate::catalog::TableMetadataMap> {

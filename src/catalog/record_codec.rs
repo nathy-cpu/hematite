@@ -299,9 +299,9 @@ fn decimal_body_len(decimal: &DecimalValue) -> usize {
 
 /// A serial type after classification: what the value is, and how wide its body is.
 ///
-/// Reading a field used to decide this twice — once to learn the body length while
-/// walking the header, and again to build the value. Classifying once and passing
-/// the result along turns two chains of range comparisons per field into one match.
+/// Classified once and passed along. Deciding it separately for the header walk
+/// and again for building the value would be two chains of range comparisons per
+/// field where one match does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Serial {
     Null,

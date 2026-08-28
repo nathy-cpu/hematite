@@ -14,10 +14,6 @@ pub(crate) struct FullSnapshot {
     pub(crate) file_manager: FileManagerSnapshot,
     /// Images of the pages that were dirty when the snapshot was taken.
     ///
-    /// This used to be a clone of the entire [`PageCache`], which is both far
-    /// more than restoring needs and impossible to keep once the cache becomes
-    /// a fixed frame arena rather than a `HashMap` — an arena cannot be cloned.
-    ///
     /// Only dirty pages differ from what durable storage holds, so only they
     /// need saving. A clean cached page is byte-identical to the file (or to the
     /// WAL frame the current snapshot resolves to) and can simply be re-read, so
@@ -210,10 +206,10 @@ impl Pager {
     }
 
     pub(crate) fn snapshot(&mut self) -> Result<PagerSnapshot> {
-        // Both modes take the cheap path now. WAL used to fall through to `Full`,
-        // which copies a handle to every dirty page — per row, since `run_atomically`
-        // snapshots per row. That made WAL inserts 21 % more expensive than rollback
-        // for no reason other than the undo log being rollback-only.
+        // Both modes take the cheap path. Falling through to `Full` copies a handle
+        // to every dirty page, and `run_atomically` snapshots per row, so a mode
+        // that did would pay that per row -- which is what made WAL inserts 21 %
+        // more expensive than rollback when the undo log was rollback-only.
         if self.transaction.is_some() {
             return Ok(PagerSnapshot::PagerSavepoint {
                 id: self.create_savepoint()?,

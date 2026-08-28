@@ -171,9 +171,9 @@ pub(crate) fn read_rows_with_ids(
     engine: &mut CatalogEngine,
     table_name: &str,
 ) -> Result<Vec<StoredRow>> {
-    // Collects the stream. This used to build a `TableCursor` — which already decodes
-    // every row into a `Vec` — and then walk it cloning each row into a second `Vec`,
-    // so every caller paid for the whole table twice.
+    // Collects the stream directly. Going through a `TableCursor` would decode
+    // every row into a `Vec` and then clone each one into a second, so every caller
+    // would pay for the whole table twice.
     let mut rows = Vec::new();
     visit_rows(engine, table_name, |row| {
         rows.push(row);
@@ -270,10 +270,9 @@ pub(crate) fn lookup_row_by_rowid(
 
 /// Writes a row under a caller-chosen id, refusing to displace one already there.
 ///
-/// For a table whose primary key is its row id. Writing over a colliding row is
-/// exactly the failure a primary-key index used to prevent, and the tree can say
-/// whether it happened without a separate probe — see
-/// [`ByteTree::insert_new_with_mutation`].
+/// For a table whose primary key is its row id, where there is no index to refuse
+/// a second entry for the same key. The tree can say whether it displaced anything
+/// without a separate probe — see [`ByteTree::insert_new_with_mutation`].
 ///
 /// [`ByteTree::insert_new_with_mutation`]: crate::btree::ByteTree::insert_new_with_mutation
 pub(crate) fn insert_new_stored_row(

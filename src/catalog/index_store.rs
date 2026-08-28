@@ -392,12 +392,12 @@ pub(crate) fn open_secondary_index_cursor(
 pub(crate) fn validate_table_indexes(engine: &mut CatalogEngine, table: &Table) -> Result<()> {
     let rows = table_store::read_rows_with_ids(engine, &table.name)?;
 
-    // Opened once. This used to sit inside the loop, so validating a table re-opened
-    // its index tree — and built the label `String` that names it — once per row.
+    // Opened once, outside the loop: opening it per row would also rebuild the
+    // label that names it in an error, once per row.
     //
     // Guarded on there being rows because opening is also what *requires* the index
-    // to exist: a table with no rows previously never entered the loop, so a missing
-    // index root went unchallenged, and some callers rely on that.
+    // to exist, and a table with no rows is allowed not to have one — some callers
+    // rely on that.
     if table.has_rowid_alias() {
         // There is no index to check against. The invariant is that every row sits
         // under the row id its key names — the same one `register_primary_key_row`
@@ -612,9 +612,9 @@ pub(crate) fn require_index_root_page(root_page_id: u32, label: IndexLabel<'_>) 
 
 /// Names an index for an error message, without building the message.
 ///
-/// Every call that opens an index tree passes one of these to say what to call
-/// the tree if it turns out not to be there. They used to be `&format!(...)`,
-/// which allocated and formatted the sentence on every call — once per row on the
+/// Every call that opens an index tree passes one of these to say what to call the
+/// tree if it turns out not to be there. Passing `&format!(...)` instead would
+/// allocate and format the sentence on every call — once per row on the
 /// primary-key path — for an error that fires only on a corrupt catalog.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum IndexLabel<'a> {
