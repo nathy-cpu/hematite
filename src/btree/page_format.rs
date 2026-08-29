@@ -351,8 +351,9 @@ pub(crate) fn insert_cell(
     // We always need 2 bytes for the new cell pointer in the pointer array.
     let pointer_space_needed = 2;
 
-    // Check total free space first (gap + freeblocks + fragments).
-    let total_free = total_free_space(page, is_page_one)?;
+    // Check total free space first (gap + freeblocks + fragments). Answered from the
+    // header already in hand: `total_free_space` would re-read it from the page bytes.
+    let total_free = total_free_space_with_header(page, &header)?;
     if total_free < cell_len + pointer_space_needed {
         return Err(HematiteError::StorageError(
             "b-tree page has insufficient total space for new cell".to_string(),
@@ -361,8 +362,7 @@ pub(crate) fn insert_cell(
 
     // Ensure the gap has room for the new pointer entry (2 bytes).
     if header.writable_gap_size() < pointer_space_needed {
-        defragment_page(page, is_page_one)?;
-        header = BTreePageHeader::parse(page, is_page_one)?;
+        header = defragment_page(page, is_page_one)?;
     }
 
     // Try allocating from freeblocks first.
@@ -375,8 +375,7 @@ pub(crate) fn insert_cell(
         // Fall back to the gap. If the gap is too small for cell + pointer, defragment.
         let required_in_gap = cell_len + pointer_space_needed;
         if header.writable_gap_size() < required_in_gap {
-            defragment_page(page, is_page_one)?;
-            header = BTreePageHeader::parse(page, is_page_one)?;
+            header = defragment_page(page, is_page_one)?;
         }
         if header.writable_gap_size() < cell_len + pointer_space_needed {
             return Err(HematiteError::StorageError(
@@ -447,11 +446,12 @@ pub(crate) fn remove_cell(page: &mut Page, is_page_one: bool, index: usize) -> R
     // - tiny freed regions become fragments (tracked in fragmented_free_bytes)
     // - if the freed region is exactly at the current cell_content_start, advance it
     // - otherwise, insert the freed region into the freeblock chain
-    if cell_size < MIN_FREEBLOCK_SIZE {
+    let fragmented_free_bytes = if cell_size < MIN_FREEBLOCK_SIZE {
         let frag_byte = header.header_offset + OFFSET_FRAGMENTED_FREE_BYTES;
         let old_frags = page.data[frag_byte] as usize;
         let new_frags = (old_frags + cell_size).min(255);
         page.data[frag_byte] = new_frags as u8;
+        new_frags as u8
     } else if cell_offset == header.cell_content_start as usize {
         // advance cell_content_start past the freed region
         let new_start = cell_offset + cell_size;
@@ -460,15 +460,18 @@ pub(crate) fn remove_cell(page: &mut Page, is_page_one: bool, index: usize) -> R
             header.header_offset + OFFSET_CELL_CONTENT_START,
             new_start as u16,
         );
+        header.fragmented_free_bytes
     } else {
         // normal-sized freed region not at the head of the content area:
         // add it to the freeblock chain so it can be reused later.
         add_to_freeblock_chain(&mut page.data, header.header_offset, cell_offset, cell_size);
-    }
+        header.fragmented_free_bytes
+    };
 
-    // Trigger defragmentation only if fragmentation is excessive (>60 bytes).
-    let updated_header = BTreePageHeader::parse(page, is_page_one)?;
-    if updated_header.fragmented_free_bytes > 60 {
+    // Trigger defragmentation only if fragmentation is excessive (>60 bytes). The count
+    // is the one this function just wrote, rather than a re-parse of the whole header to
+    // read a single byte back out of the page.
+    if fragmented_free_bytes > 60 {
         defragment_page(page, is_page_one)?;
     }
 
@@ -551,7 +554,12 @@ pub(crate) fn compute_cell_size(
 
 /// Defragment a page by repacking all cells tightly from the end of the page.
 /// Clears the freeblock chain and fragment count.
-pub(crate) fn defragment_page(page: &mut Page, is_page_one: bool) -> Result<()> {
+///
+/// Returns the header the page is left with. Every caller needs it — repacking moves
+/// the content boundary and empties the freeblock chain — and the function has just
+/// written all three changed fields, so handing them back saves the caller re-reading
+/// bytes it could have been told about.
+pub(crate) fn defragment_page(page: &mut Page, is_page_one: bool) -> Result<BTreePageHeader> {
     let header = BTreePageHeader::parse(page, is_page_one)?;
     let cell_count = header.cell_count as usize;
     let pointer_start = header.pointer_area_start();
@@ -592,7 +600,13 @@ pub(crate) fn defragment_page(page: &mut Page, is_page_one: bool) -> Result<()> 
         0,
     );
     page.data[header.header_offset + OFFSET_FRAGMENTED_FREE_BYTES] = 0;
-    Ok(())
+
+    Ok(BTreePageHeader {
+        first_freeblock: 0,
+        cell_content_start: content_start as u16,
+        fragmented_free_bytes: 0,
+        ..header
+    })
 }
 
 fn header_offset(is_page_one: bool) -> usize {

@@ -829,7 +829,9 @@ impl Pager {
         updated_visible_state.apply_committed_delta(
             next_sequence,
             file_len_for_next_page_id(wal_next_page_id),
-            wal_free_pages.clone(),
+            // Unshared here: the committed state owns its free list, and a commit is
+            // rare enough that the copy does not matter the way a per-row one would.
+            wal_free_pages.as_ref().clone(),
             frames,
             &frame_offsets,
         )?;
@@ -861,5 +863,5 @@ pub(super) fn page_is_live_at_savepoint_for_restore(
 }
 
 fn page_is_live_at_savepoint(page_id: PageId, savepoint: &super::PagerSavepoint) -> bool {
-    page_id < savepoint.next_page_id && !savepoint.free_page_set.contains(&page_id)
+    page_id < savepoint.next_page_id && !savepoint.free_state.contains(page_id)
 }

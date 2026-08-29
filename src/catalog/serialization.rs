@@ -4,6 +4,7 @@
 //! [`crate::catalog::index_key_codec`]; this module is the naming layer the rest of the
 //! catalog calls through.
 
+use crate::catalog::record_codec::ProjectionPlan;
 use crate::catalog::{index_key_codec, record_codec, Value};
 use crate::error::{HematiteError, Result};
 
@@ -150,6 +151,21 @@ impl RowCodec {
         out: &mut Vec<Value>,
     ) -> Result<()> {
         record_codec::decode_fields_into(data, indices, out)
+    }
+
+    /// A reusable field layout for one projection. See [`record_codec::ProjectionPlan`].
+    pub(crate) fn projection_plan(indices: &[usize]) -> ProjectionPlan {
+        ProjectionPlan::new(indices)
+    }
+
+    /// Appends the projected fields to `out`, reusing `plan`'s layout where the row
+    /// shape allows. See [`record_codec::decode_fields_into_planned`].
+    pub(crate) fn decode_row_fields_into_planned(
+        data: &[u8],
+        plan: &mut ProjectionPlan,
+        out: &mut Vec<Value>,
+    ) -> Result<()> {
+        record_codec::decode_fields_into_planned(data, plan, out)
     }
 
     pub fn decode_stored_row(row_id: u64, data: &[u8]) -> Result<StoredRow> {

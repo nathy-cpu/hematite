@@ -201,7 +201,7 @@ pub(crate) struct RollbackTransaction {
     original_file_len: u64,
     original_free_pages: Vec<PageId>,
     rollback_next_page_id: PageId,
-    rollback_free_list: FreeList,
+    rollback_free_list: Arc<FreeList>,
     /// Pages this transaction allocated but has not yet written.
     ///
     /// Shared rather than copied: a savepoint is taken per row, each one recorded a
@@ -216,6 +216,37 @@ pub(crate) struct RollbackTransaction {
     next_savepoint_id: u64,
 }
 
+/// The free-page state a savepoint returns to.
+///
+/// Shared, never copied. A savepoint is taken per row, and each one used to record the
+/// whole free list — a `to_vec` plus a set built from it — which is O(free list) per
+/// row, and a `DELETE` grows that list as it runs. Under `Arc` a capture is a refcount
+/// bump and the copy happens on the next free-list change instead, which is orders of
+/// magnitude rarer than row mutation: a page is freed only when a node empties. This is
+/// the same trade `rollback_uninitialized_pages` makes, for the same reason.
+///
+/// The shape differs by mode only because the two transactions track free pages
+/// differently — rollback keeps a [`FreeList`], WAL keeps a vector and a set. Both are
+/// restored by handing the shared value back.
+#[derive(Debug, Clone)]
+enum SavepointFreeState {
+    Rollback(Arc<FreeList>),
+    Wal {
+        pages: Arc<Vec<PageId>>,
+        set: Arc<PageSet>,
+    },
+}
+
+impl SavepointFreeState {
+    /// Whether `page_id` was free when the savepoint was taken.
+    fn contains(&self, page_id: PageId) -> bool {
+        match self {
+            Self::Rollback(list) => list.contains(page_id),
+            Self::Wal { set, .. } => set.contains(&page_id),
+        }
+    }
+}
+
 /// A savepoint's undo state. Shared by both journal modes: what it takes to return to
 /// a mark is the same question either way, and only how a *commit* becomes durable
 /// differs between them.
@@ -224,8 +255,7 @@ struct PagerSavepoint {
     id: u64,
     file_manager: FileManagerSnapshot,
     next_page_id: PageId,
-    free_pages: Vec<PageId>,
-    free_page_set: PageSet,
+    free_state: SavepointFreeState,
     /// Rollback mode only; empty for WAL, which has no uninitialised-page concept.
     uninitialized_pages: Arc<PageSet>,
     /// Pre-images of the pages modified since the savepoint was taken — the undo log.
@@ -252,8 +282,8 @@ struct PagerSavepoint {
 #[derive(Debug, Clone)]
 pub(crate) struct WalTransaction {
     wal_next_page_id: PageId,
-    wal_free_pages: Vec<PageId>,
-    wal_free_page_set: PageSet,
+    wal_free_pages: Arc<Vec<PageId>>,
+    wal_free_page_set: Arc<PageSet>,
     savepoints: Vec<PagerSavepoint>,
     next_savepoint_id: u64,
 }
@@ -277,18 +307,18 @@ struct WalFileStamp {
 }
 
 fn compact_transaction_free_pages(transaction: &mut WalTransaction) {
-    transaction.wal_free_pages.sort_unstable();
-    transaction.wal_free_pages.dedup();
-    transaction.wal_free_page_set.clear();
-    transaction
-        .wal_free_page_set
-        .extend(transaction.wal_free_pages.iter().copied());
-    while let Some(&last_page_id) = transaction.wal_free_pages.last() {
+    let pages = Arc::make_mut(&mut transaction.wal_free_pages);
+    let set = Arc::make_mut(&mut transaction.wal_free_page_set);
+    pages.sort_unstable();
+    pages.dedup();
+    set.clear();
+    set.extend(pages.iter().copied());
+    while let Some(&last_page_id) = pages.last() {
         if last_page_id + 1 != transaction.wal_next_page_id {
             break;
         }
-        transaction.wal_free_pages.pop();
-        transaction.wal_free_page_set.remove(&last_page_id);
+        pages.pop();
+        set.remove(&last_page_id);
         transaction.wal_next_page_id = transaction.wal_next_page_id.saturating_sub(1);
     }
 }

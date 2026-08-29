@@ -546,6 +546,50 @@ impl<'a> RecordRef<'a> {
         Ok(self.to_values_and_body_end()?.0)
     }
 
+    /// Reads one field straight into an owned [`Value`].
+    ///
+    /// [`value_at`](Self::value_at) followed by [`ValueRef::to_value`] matches on the
+    /// serial type twice and builds a borrowed value in between that is destructured
+    /// immediately. A projecting scan wants the owned value and nothing else, so this
+    /// does the one match the other two share — worth its own arm list because decode
+    /// is the largest single cost in a scanned row.
+    ///
+    /// The two must agree, which `an_owned_read_matches_a_borrowed_one` checks over
+    /// every variant. A missing arm is a compile error either way; what that test is
+    /// for is the two drifting apart on what an arm *means*.
+    #[inline]
+    fn owned_value_at(&self, serial: Serial, range: std::ops::Range<usize>) -> Result<Value> {
+        let body = self
+            .body
+            .get(range)
+            .ok_or_else(|| corrupt("Record body is truncated"))?;
+
+        Ok(match serial {
+            Serial::Null => Value::Null,
+            Serial::Boolean(b) => Value::Boolean(b),
+            Serial::FloatZero => Value::Float(0.0),
+            Serial::Float32 => Value::Float32(f32::from_bits(u32::from_be_bytes(
+                body.try_into()
+                    .expect("Serial::body_len guarantees 4 bytes"),
+            ))),
+            Serial::Float64 => Value::Float(f64::from_bits(u64::from_be_bytes(
+                body.try_into()
+                    .expect("Serial::body_len guarantees 8 bytes"),
+            ))),
+            Serial::Integer(_) => Value::Integer(read_signed(body) as i32),
+            Serial::BigInt(_) => Value::BigInt(read_signed(body)),
+            Serial::UInteger(_) => Value::UInteger(read_unsigned(body) as u32),
+            Serial::UBigInt(_) => Value::UBigInt(read_unsigned(body)),
+            Serial::Text(_) => Value::Text(
+                std::str::from_utf8(body)
+                    .map_err(|_| corrupt("Invalid UTF-8 in text value"))?
+                    .to_string(),
+            ),
+            Serial::Blob(_) => Value::Blob(body.to_vec()),
+            Serial::Decimal(_) => Value::Decimal(decode_decimal_body(body)?),
+        })
+    }
+
     #[inline]
     fn value_at(&self, serial: Serial, range: std::ops::Range<usize>) -> Result<ValueRef<'a>> {
         let body = self
@@ -633,6 +677,112 @@ impl<'a> Iterator for RecordIter<'a> {
 /// say it does. A caller decoding a whole record hands over exactly one record's
 /// bytes, so anything left over is corruption — most likely a cell whose length
 /// disagrees with its contents.
+/// Where each projected field sits in a record, reused across rows of one shape.
+///
+/// A scan decodes thousands of records whose serial-type headers are identical byte
+/// for byte — same columns, same widths — and re-derived every body offset for each
+/// one. Classifying those codes and walking the header was the larger half of what a
+/// scanned row spent on decode. This keeps the layout the last row produced and reuses
+/// it while the header still matches.
+///
+/// Reuse is gated on a comparison of the serial types, not on an assumption about the
+/// table. A row shaped differently from its neighbours — a `NULL` where they hold an
+/// integer, an integer wide enough to need another byte — misses and rebuilds.
+/// Correctness never depends on rows being uniform; only speed does.
+///
+/// The plan owns the indices it projects, so it cannot be applied to a projection it
+/// was not built for. That is the whole reason the indices are not a parameter of
+/// [`decode_fields_into_planned`]: a cached layout and a mismatched index list would
+/// silently return the wrong columns.
+pub(crate) struct ProjectionPlan {
+    /// The fields wanted, in the order the caller wants them.
+    indices: Vec<usize>,
+    /// The serial types `fields` was derived from, owned so it outlives the record.
+    types: Vec<u8>,
+    /// One entry per wanted index, in projection order.
+    fields: Vec<(Serial, std::ops::Range<usize>)>,
+    /// Whether `types` describes anything. A record of no fields has an empty header,
+    /// which is a legitimate layout rather than "nothing cached yet".
+    primed: bool,
+}
+
+impl ProjectionPlan {
+    pub(crate) fn new(indices: &[usize]) -> Self {
+        Self {
+            indices: indices.to_vec(),
+            types: Vec::new(),
+            fields: Vec::new(),
+            primed: false,
+        }
+    }
+
+    /// Points the plan at `record`, rebuilding the layout if the shape changed.
+    fn sync(&mut self, record: &RecordRef<'_>) -> Result<()> {
+        if self.primed && self.types == record.types {
+            return Ok(());
+        }
+
+        let Self {
+            indices,
+            types,
+            fields,
+            primed,
+        } = self;
+
+        // Unprimed before the walk, so a layout left over from an earlier shape cannot
+        // survive a failure here and then be reused against a record it does not
+        // describe.
+        *primed = false;
+        fields.clear();
+
+        // Stop at the last field anyone asked for. A `SELECT id, a` over five columns
+        // has no reason to walk the last three serial types; only the fields that are
+        // read need locating, and `value_at` bounds-checks each against the body, so a
+        // field that is read is still checked.
+        //
+        // The cost of stopping is the whole-record check that the serial types account
+        // for exactly the body length. That check covers fields nobody reads, which is
+        // the same trade the B-tree makes for cell ranges: verify what is used, and
+        // leave whole-object structure to the integrity check.
+        let Some(&last_wanted) = indices.iter().max() else {
+            types.clear();
+            *primed = true;
+            return Ok(());
+        };
+
+        fields.resize(indices.len(), (Serial::Null, 0..0));
+        let mut filled = 0usize;
+
+        for (position, entry) in record.types().enumerate() {
+            let (code, range) = entry?;
+            // Slots are filled as the single header walk reaches them, so the fields
+            // can be asked for in any order — or twice — and still land where the
+            // caller wants them.
+            for (slot, wanted) in indices.iter().enumerate() {
+                if *wanted == position {
+                    fields[slot] = (code, range.clone());
+                    filled += 1;
+                }
+            }
+            if position == last_wanted {
+                break;
+            }
+        }
+
+        if filled != indices.len() {
+            fields.clear();
+            return Err(corrupt(format!(
+                "Record has no field at index {last_wanted}"
+            )));
+        }
+
+        types.clear();
+        types.extend_from_slice(record.types);
+        *primed = true;
+        Ok(())
+    }
+}
+
 /// Decodes only `indices`, in the order given.
 ///
 /// A scan that selects two of five columns still decoded all five and then threw
@@ -652,53 +802,50 @@ pub(crate) fn decode_fields(bytes: &[u8], indices: &[usize]) -> Result<Vec<Value
 
 /// Appends the wanted fields to `out`, in `indices` order.
 ///
-/// The scan path, which lays every row into one buffer rather than giving each its
-/// own vector. A row's own vector was the single allocation a scanned row made, and
-/// `malloc` and `free` for it were 24 % of a full scan's instructions.
+/// The one-shot form, for a caller decoding a single record. It builds a
+/// [`ProjectionPlan`] and throws it away, so a caller decoding many records of one
+/// shape — a scan — should hold the plan and call
+/// [`decode_fields_into_planned`] instead.
 pub(crate) fn decode_fields_into(
     bytes: &[u8],
     indices: &[usize],
     out: &mut Vec<Value>,
 ) -> Result<()> {
-    let record = RecordRef::new(bytes)?;
+    decode_fields_into_planned(bytes, &mut ProjectionPlan::new(indices), out)
+}
 
-    // Stop at the last field anyone asked for. A `SELECT id, a` over five columns has
-    // no reason to walk the last three serial types; only the fields that are read
-    // need locating, and `value_at` bounds-checks each against the body, so a field
-    // that is read is still checked.
-    //
-    // The cost of stopping is the whole-record check that the serial types account for
-    // exactly the body length. That check covers fields nobody reads, which is the same
-    // trade the B-tree makes for cell ranges: verify what is used, and leave
-    // whole-object structure to the integrity check.
-    let Some(&last_wanted) = indices.iter().max() else {
+/// Appends the projected fields to `out`, in the plan's order.
+///
+/// The scan path, which lays every row into one buffer rather than giving each its
+/// own vector. A row's own vector was the single allocation a scanned row made, and
+/// `malloc` and `free` for it were 24 % of a full scan's instructions.
+pub(crate) fn decode_fields_into_planned(
+    bytes: &[u8],
+    plan: &mut ProjectionPlan,
+    out: &mut Vec<Value>,
+) -> Result<()> {
+    if plan.indices.is_empty() {
         return Ok(());
-    };
-
-    // Slots are reserved up front and written as the single header walk reaches
-    // them, so the fields can be found in any order but land in the caller's.
-    let base = out.len();
-    out.resize(base + indices.len(), Value::Null);
-    let mut filled = 0usize;
-
-    for (position, entry) in record.types().enumerate() {
-        let (code, range) = entry?;
-        for (slot, wanted) in indices.iter().enumerate() {
-            if *wanted == position {
-                out[base + slot] = record.value_at(code, range.clone())?.to_value()?;
-                filled += 1;
-            }
-        }
-        if position == last_wanted {
-            break;
-        }
     }
 
-    if filled != indices.len() {
-        out.truncate(base);
-        return Err(corrupt(format!(
-            "Record has no field at index {last_wanted}"
-        )));
+    let record = RecordRef::new(bytes)?;
+    plan.sync(&record)?;
+
+    // Pushed, rather than written into slots reserved with `Null`: `Value` is forty
+    // bytes and has a destructor, so pre-filling would write every field twice and run
+    // drop glue on each placeholder it overwrote.
+    let base = out.len();
+    out.reserve(plan.fields.len());
+    for (serial, range) in &plan.fields {
+        match record.owned_value_at(*serial, range.clone()) {
+            Ok(value) => out.push(value),
+            Err(err) => {
+                // `out` holds whole rows laid end to end, so a half-decoded one would
+                // shift every column of every row after it.
+                out.truncate(base);
+                return Err(err);
+            }
+        }
     }
     Ok(())
 }
@@ -753,6 +900,142 @@ mod tests {
         let bytes = encode(&[Value::Integer(1), Value::Integer(2)]);
         assert!(decode_fields(&bytes, &[2]).is_err());
         assert!(decode_fields(&bytes, &[0, 5]).is_err());
+    }
+
+    /// The owned and borrowed reads of a field must not drift apart.
+    ///
+    /// `owned_value_at` exists to skip building a `ValueRef` only to destructure it, so
+    /// it repeats the arm list rather than sharing one. This is what keeps the copy
+    /// honest.
+    #[test]
+    fn an_owned_read_matches_a_borrowed_one() {
+        let values = vec![
+            Value::Null,
+            Value::Boolean(true),
+            Value::Boolean(false),
+            Value::Integer(0),
+            Value::Integer(-70_000),
+            Value::BigInt(i64::MIN),
+            Value::UInteger(u32::MAX),
+            Value::UBigInt(u64::MAX),
+            Value::Float(0.0),
+            Value::Float(-0.0),
+            Value::Float(1.5),
+            Value::Float32(-2.25),
+            Value::Text(String::new()),
+            Value::Text("multi byte \u{e9}\u{4e16}".to_string()),
+            Value::Blob(vec![]),
+            Value::Blob(vec![0, 1, 255]),
+            Value::Decimal(DecimalValue::zero()),
+        ];
+        let bytes = encode(&values);
+        let record = RecordRef::new(&bytes).expect("record");
+
+        for (position, entry) in record.types().enumerate() {
+            let (serial, range) = entry.expect("serial type");
+            let borrowed = record
+                .value_at(serial, range.clone())
+                .expect("borrowed")
+                .to_value()
+                .expect("to_value");
+            let owned = record.owned_value_at(serial, range).expect("owned");
+            assert_eq!(borrowed, owned, "field {position}");
+            assert_eq!(owned, values[position], "field {position}");
+        }
+    }
+
+    /// The plan is only allowed to skip its header walk when the shape really matches.
+    ///
+    /// Every other test here decodes through the one-shot form, which builds a fresh
+    /// plan per record and so never exercises reuse at all. This drives rows of
+    /// deliberately varying shape through one plan — differing widths, a `NULL` where
+    /// its neighbours hold an integer, text of differing lengths — and checks each
+    /// against a decode that shares nothing with the one before it.
+    #[test]
+    fn a_reused_plan_follows_a_change_of_shape() {
+        let rows = vec![
+            vec![
+                Value::Integer(1),
+                Value::Text("a".to_string()),
+                Value::Integer(2),
+            ],
+            // Same shape as the first: this is the row that must hit the cache.
+            vec![
+                Value::Integer(3),
+                Value::Text("b".to_string()),
+                Value::Integer(4),
+            ],
+            // Wider integers, so every body offset after the first field moves.
+            vec![
+                Value::Integer(70_000),
+                Value::Text("cc".to_string()),
+                Value::Integer(80_000),
+            ],
+            // A null where the others hold an integer: a zero-width body.
+            vec![
+                Value::Null,
+                Value::Text("ddd".to_string()),
+                Value::Integer(5),
+            ],
+            // A different variant at the same position.
+            vec![
+                Value::BigInt(-9_000_000_000),
+                Value::Text(String::new()),
+                Value::Integer(6),
+            ],
+            // Back to the very first shape, after several misses.
+            vec![
+                Value::Integer(7),
+                Value::Text("e".to_string()),
+                Value::Integer(8),
+            ],
+        ];
+
+        for indices in [vec![0usize], vec![2, 0], vec![1], vec![0, 1, 2], vec![2, 2]] {
+            let mut plan = ProjectionPlan::new(&indices);
+            let mut got = Vec::new();
+            for row in &rows {
+                decode_fields_into_planned(&encode(row), &mut plan, &mut got)
+                    .expect("planned decode");
+            }
+
+            let want: Vec<Value> = rows
+                .iter()
+                .flat_map(|row| indices.iter().map(|i| row[*i].clone()))
+                .collect();
+            assert_eq!(got, want, "indices {indices:?}");
+        }
+    }
+
+    /// A record the plan cannot describe must not leave it describing that record.
+    ///
+    /// The failure this guards against is a poisoned cache: the plan marks itself
+    /// unprimed before rebuilding, so a walk that errors part way cannot leave a
+    /// half-built layout behind for the next row to be decoded through.
+    #[test]
+    fn a_failed_rebuild_does_not_poison_the_plan() {
+        let wanted = [1usize];
+        let mut plan = ProjectionPlan::new(&wanted);
+        let mut out = Vec::new();
+
+        let good = encode(&[Value::Integer(1), Value::Integer(2)]);
+        decode_fields_into_planned(&good, &mut plan, &mut out).expect("first");
+        assert_eq!(out, vec![Value::Integer(2)]);
+
+        // One field, so index 1 does not exist.
+        let short = encode(&[Value::Integer(9)]);
+        assert!(decode_fields_into_planned(&short, &mut plan, &mut out).is_err());
+        // The failed row appended nothing.
+        assert_eq!(out, vec![Value::Integer(2)]);
+
+        // A row of the original shape still decodes, and one of a new shape does too.
+        decode_fields_into_planned(&good, &mut plan, &mut out).expect("after failure");
+        let wider = encode(&[Value::Integer(1), Value::Integer(70_000)]);
+        decode_fields_into_planned(&wider, &mut plan, &mut out).expect("wider");
+        assert_eq!(
+            out,
+            vec![Value::Integer(2), Value::Integer(2), Value::Integer(70_000)]
+        );
     }
 
     /// A field that is read is still bounds-checked against the body.

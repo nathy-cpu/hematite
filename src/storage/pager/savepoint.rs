@@ -76,13 +76,9 @@ impl Pager {
                 id: transaction.next_savepoint_id,
                 file_manager,
                 next_page_id: transaction.rollback_next_page_id,
-                free_pages: transaction.rollback_free_list.as_slice().to_vec(),
-                free_page_set: transaction
-                    .rollback_free_list
-                    .as_slice()
-                    .iter()
-                    .copied()
-                    .collect(),
+                free_state: super::SavepointFreeState::Rollback(Arc::clone(
+                    &transaction.rollback_free_list,
+                )),
                 uninitialized_pages: Arc::clone(&transaction.rollback_uninitialized_pages),
                 page_images: Vec::new(),
                 captured_page_ids: crate::storage::page_hash::PageSet::default(),
@@ -91,8 +87,10 @@ impl Pager {
                 id: transaction.next_savepoint_id,
                 file_manager,
                 next_page_id: transaction.wal_next_page_id,
-                free_pages: transaction.wal_free_pages.clone(),
-                free_page_set: transaction.wal_free_page_set.clone(),
+                free_state: super::SavepointFreeState::Wal {
+                    pages: Arc::clone(&transaction.wal_free_pages),
+                    set: Arc::clone(&transaction.wal_free_page_set),
+                },
                 uninitialized_pages: Arc::default(),
                 page_images: Vec::new(),
                 captured_page_ids: crate::storage::page_hash::PageSet::default(),
@@ -175,19 +173,21 @@ impl Pager {
         match &mut self.transaction {
             Some(super::PagerTransaction::Rollback(transaction)) => {
                 transaction.rollback_next_page_id = savepoint.next_page_id;
-                transaction
-                    .rollback_free_list
-                    .replace(savepoint.free_pages.clone());
+                // Handing the shared list back, rather than rebuilding one from a
+                // recorded vector: `replace` re-derived the position map every time.
+                if let super::SavepointFreeState::Rollback(free_list) = &savepoint.free_state {
+                    transaction.rollback_free_list = Arc::clone(free_list);
+                }
                 transaction.rollback_uninitialized_pages =
                     Arc::clone(&savepoint.uninitialized_pages);
                 transaction.savepoints.truncate(position + 1);
             }
             Some(super::PagerTransaction::Wal(transaction)) => {
                 transaction.wal_next_page_id = savepoint.next_page_id;
-                transaction.wal_free_pages.clone_from(&savepoint.free_pages);
-                transaction
-                    .wal_free_page_set
-                    .clone_from(&savepoint.free_page_set);
+                if let super::SavepointFreeState::Wal { pages, set } = &savepoint.free_state {
+                    transaction.wal_free_pages = Arc::clone(pages);
+                    transaction.wal_free_page_set = Arc::clone(set);
+                }
                 transaction.savepoints.truncate(position + 1);
             }
             None => {

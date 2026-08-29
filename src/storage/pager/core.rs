@@ -29,8 +29,8 @@ fn stash_transaction(
             *rollback_scratch = Some(r);
         }
         Some(PagerTransaction::Wal(mut w)) => {
-            w.wal_free_pages.clear();
-            w.wal_free_page_set.clear();
+            Arc::make_mut(&mut w.wal_free_pages).clear();
+            Arc::make_mut(&mut w.wal_free_page_set).clear();
             *wal_scratch = Some(w);
         }
         None => {}
@@ -65,7 +65,7 @@ impl Pager {
                             original_file_len: 0,
                             original_free_pages: Vec::new(),
                             rollback_next_page_id: 0,
-                            rollback_free_list: crate::storage::free_list::FreeList::new(),
+                            rollback_free_list: Arc::default(),
                             rollback_uninitialized_pages: Arc::default(),
                             journaled_pages: PageSet::default(),
                             page_records: Vec::new(),
@@ -78,7 +78,7 @@ impl Pager {
                     .original_free_pages
                     .extend_from_slice(self.file_manager.free_pages());
                 rollback.rollback_next_page_id = self.file_manager.next_page_id();
-                rollback.rollback_free_list = rollback_free_list;
+                rollback.rollback_free_list = Arc::new(rollback_free_list);
                 Arc::make_mut(&mut rollback.rollback_uninitialized_pages).clear();
                 rollback.journaled_pages.clear();
                 rollback.page_records.clear();
@@ -88,13 +88,9 @@ impl Pager {
                     id: 0,
                     file_manager: self.file_manager.snapshot()?,
                     next_page_id: rollback.rollback_next_page_id,
-                    free_pages: rollback.rollback_free_list.as_slice().to_vec(),
-                    free_page_set: rollback
-                        .rollback_free_list
-                        .as_slice()
-                        .iter()
-                        .copied()
-                        .collect(),
+                    free_state: super::SavepointFreeState::Rollback(Arc::clone(
+                        &rollback.rollback_free_list,
+                    )),
                     uninitialized_pages: Arc::clone(&rollback.rollback_uninitialized_pages),
                     page_images: Vec::new(),
                     captured_page_ids: PageSet::default(),
@@ -107,17 +103,16 @@ impl Pager {
                 // Reuse a pre-allocated WalTransaction when available.
                 let mut wal = self.wal_scratch.take().unwrap_or_else(|| WalTransaction {
                     wal_next_page_id: 0,
-                    wal_free_pages: Vec::new(),
-                    wal_free_page_set: PageSet::default(),
+                    wal_free_pages: Arc::default(),
+                    wal_free_page_set: Arc::default(),
                     savepoints: Vec::new(),
                     next_savepoint_id: 1,
                 });
                 wal.savepoints.clear();
                 wal.next_savepoint_id = 1;
                 wal.wal_next_page_id = visible_state.visible_next_page_id();
-                wal.wal_free_pages.clone_from(&visible_state.free_pages);
-                wal.wal_free_page_set
-                    .clone_from(&visible_state.free_page_set);
+                Arc::make_mut(&mut wal.wal_free_pages).clone_from(&visible_state.free_pages);
+                Arc::make_mut(&mut wal.wal_free_page_set).clone_from(&visible_state.free_page_set);
                 PagerTransaction::Wal(wal)
             }
         });

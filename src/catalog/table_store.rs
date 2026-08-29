@@ -234,8 +234,11 @@ pub(crate) fn read_table_columns(
         return Ok(values);
     }
     let width = indices.len();
+    // Built once for the whole scan: every row of a table normally shares one serial-type
+    // header, so the field offsets the first row produces answer for the rest.
+    let mut plan = RowCodec::projection_plan(indices);
     engine.visit_tree_values_while(root_page_id, |value| {
-        RowCodec::decode_row_fields_into(value, indices, &mut values)?;
+        RowCodec::decode_row_fields_into_planned(value, &mut plan, &mut values)?;
         Ok(max_rows.is_none_or(|cap| values.len() / width < cap))
     })?;
     Ok(values)

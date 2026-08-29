@@ -161,8 +161,9 @@ pub struct SelectExecutor {
 #[derive(Debug, Clone)]
 struct ResolvedSource {
     name: String,
+    /// Column names in order. Resolution scans these rather than probing a map — see
+    /// [`ResolvedSource::column_index`].
     columns: Vec<String>,
-    column_lookup: HashMap<String, usize>,
     column_types: Vec<DataType>,
     column_collations: Vec<Option<String>>,
     alias: Option<String>,
@@ -178,15 +179,9 @@ impl ResolvedSource {
         alias: Option<String>,
         offset: usize,
     ) -> Self {
-        let column_lookup = columns
-            .iter()
-            .enumerate()
-            .map(|(index, column)| (column.clone(), index))
-            .collect();
         Self {
             name,
             columns,
-            column_lookup,
             column_types,
             column_collations,
             alias,
@@ -196,6 +191,21 @@ impl ResolvedSource {
 
     fn width(&self) -> usize {
         self.columns.len()
+    }
+
+    /// The position of `column_name` among this source's columns.
+    ///
+    /// A scan, not a map. The map this replaced was built per statement — a cloned
+    /// `String` key per column, a `HashMap` allocation, and a SipHash per insert — to
+    /// answer a handful of probes: resolution runs once per statement, not per row
+    /// (see `resolve_projection_columns`), and a projection names far fewer columns
+    /// than a table has. Paying O(columns) of allocation to make O(projected columns)
+    /// probes constant-time is the wrong way round, and comparing short names usually
+    /// fails on the first byte where hashing one never costs less than the whole key.
+    fn column_index(&self, column_name: &str) -> Option<usize> {
+        self.columns
+            .iter()
+            .position(|candidate| candidate == column_name)
     }
 }
 
@@ -399,7 +409,7 @@ impl SelectExecutor {
                 }
             }
 
-            if let Some(&index) = source.column_lookup.get(column_name) {
+            if let Some(index) = source.column_index(column_name) {
                 if first_match.replace(source.offset + index).is_some() {
                     ambiguous = true;
                     break;
@@ -914,9 +924,9 @@ impl SelectExecutor {
     ///
     /// Resolved once. The answer is the same for every row of a query, and
     /// recomputing it inside the row loop is a `split_once('.')` through the UTF-8
-    /// char searcher plus a SipHash lookup in `column_lookup`, per projected column
-    /// per row — on `SELECT id, a` over a five-column table, **18 % of the scan's
-    /// instructions**, more than the record decode it feeds.
+    /// char searcher plus a name lookup per projected column per row — on
+    /// `SELECT id, a` over a five-column table, **18 % of the scan's instructions**,
+    /// more than the record decode it feeds.
     ///
     /// Entries are `None` for items that are not plain column references, and for
     /// references that resolve to nothing; the positions line up with
