@@ -18,7 +18,7 @@ pub(crate) fn describe_table(catalog: &Catalog, table_name: &str) -> Result<Quer
         .map(|(column_index, column)| {
             let metadata = &column_metadata[column_index];
             vec![
-                Value::Text(column.name.clone()),
+                Value::Text(column.name.to_string()),
                 Value::Text(column.data_type.name().to_string()),
                 Value::Boolean(column.nullable),
                 match &column.default_value {
@@ -162,7 +162,7 @@ fn build_table_column_metadata(table: &Table) -> Vec<TableColumnMetadata> {
                     .find(|check| check.name.as_deref() == Some(constraint.name.as_str()))
                 {
                     for (column_index, column) in table.columns.iter().enumerate() {
-                        if check.expression_sql.contains(&column.name) {
+                        if check.expression_sql.contains(&*column.name) {
                             constraints[column_index].push(format!("CHECK {}", constraint.name));
                         }
                     }

@@ -816,7 +816,7 @@ impl Pager {
                 }
             })?
         } else {
-            std::collections::HashMap::new()
+            crate::storage::page_hash::PageMap::default()
         };
         let mut updated_visible_state = if let Some(state) = &self.latest_wal_state {
             state.as_ref().clone()

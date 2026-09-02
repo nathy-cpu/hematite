@@ -161,19 +161,31 @@ pub struct SelectExecutor {
 #[derive(Debug, Clone)]
 struct ResolvedSource {
     name: String,
-    /// Column names in order. Resolution scans these rather than probing a map — see
+    /// Column names in order, shared with the schema rather than copied out of it.
+    ///
+    /// Resolution scans these rather than probing a map — see
     /// [`ResolvedSource::column_index`].
-    columns: Vec<String>,
+    columns: Vec<Arc<str>>,
     column_types: Vec<DataType>,
     column_collations: Vec<Option<String>>,
     alias: Option<String>,
     offset: usize,
 }
 
+/// Shares a set of owned column names.
+///
+/// A materialised CTE or derived table names its own output, so those names are owned
+/// `String`s rather than a schema's. They still have to reach a `ResolvedSource` as
+/// shared handles, which costs one allocation per column on those paths — not on the
+/// base-table path, which is the one a point lookup takes.
+fn shared_names(names: &[String]) -> Vec<Arc<str>> {
+    names.iter().map(|name| Arc::from(name.as_str())).collect()
+}
+
 impl ResolvedSource {
     fn new(
         name: String,
-        columns: Vec<String>,
+        columns: Vec<Arc<str>>,
         column_types: Vec<DataType>,
         column_collations: Vec<Option<String>>,
         alias: Option<String>,
@@ -205,7 +217,7 @@ impl ResolvedSource {
     fn column_index(&self, column_name: &str) -> Option<usize> {
         self.columns
             .iter()
-            .position(|candidate| candidate == column_name)
+            .position(|candidate| &**candidate == column_name)
     }
 }
 
@@ -384,7 +396,7 @@ impl SelectExecutor {
         &self,
         query: &SelectStatement,
         ctx: &ExecutionContext,
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<Arc<str>>> {
         projected_column_names(query, &ctx.catalog)
     }
 
@@ -985,7 +997,8 @@ impl SelectExecutor {
                 SelectItem::Wildcard => {
                     for source in sources {
                         for column in &source.columns {
-                            columns.push(column.clone());
+                            // The result's column names are owned: they leave the engine.
+                            columns.push(column.to_string());
                         }
                     }
                 }
@@ -1158,7 +1171,7 @@ impl SelectExecutor {
             return Ok(NamedSource {
                 source: ResolvedSource::new(
                     table_name.to_string(),
-                    result.columns.clone(),
+                    shared_names(&result.columns),
                     vec![DataType::Text; result.columns.len()],
                     vec![None; result.columns.len()],
                     alias,
@@ -1266,7 +1279,7 @@ impl SelectExecutor {
                 Ok((
                     vec![ResolvedSource::new(
                         alias.clone(),
-                        result.columns.clone(),
+                        shared_names(&result.columns),
                         vec![DataType::Text; result.columns.len()],
                         vec![None; result.columns.len()],
                         None,
@@ -1609,7 +1622,7 @@ impl SelectExecutor {
             TableReference::Table(table_name, _)
                 if self.statement.lookup_cte(table_name).is_none() =>
             {
-                ctx.catalog.get_table_by_name(table_name).cloned()
+                ctx.catalog.shared_table_by_name(table_name).cloned()
             }
             _ => None,
         };
@@ -2156,7 +2169,7 @@ impl SelectExecutor {
             .map(|&index| table.columns.get(index))
             .collect::<Option<Vec<_>>>()?
             .into_iter()
-            .map(|column| equalities.get(column.name.as_str()).cloned())
+            .map(|column| equalities.get(&*column.name).cloned())
             .collect()
     }
 
@@ -2173,7 +2186,7 @@ impl SelectExecutor {
             .map(|&column_index| table.columns.get(column_index))
             .collect::<Option<Vec<_>>>()?
             .into_iter()
-            .map(|column| equalities.get(column.name.as_str()).cloned())
+            .map(|column| equalities.get(&*column.name).cloned())
             .collect()
     }
 

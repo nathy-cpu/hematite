@@ -569,7 +569,11 @@ impl Catalog {
                     self.engine
                         .update_database_header(|h| h.schema_root_page = new_id)?;
                 }
-                for table in Arc::make_mut(&mut self.schema).tables_mut().values_mut() {
+                for table in Arc::make_mut(&mut self.schema)
+                    .tables_mut()
+                    .values_mut()
+                    .map(Arc::make_mut)
+                {
                     if table.root_page_id == old_id {
                         table.root_page_id = new_id;
                         if let Some(metadata) =

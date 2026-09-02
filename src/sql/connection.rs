@@ -511,7 +511,7 @@ impl Connection {
         let alias_map = Self::where_alias_map(select);
         let source_columns = source_column_names(select, schema)?
             .into_iter()
-            .collect::<HashSet<_>>();
+            .collect::<crate::catalog::name_hash::NameSet<_>>();
 
         if let Some(where_clause) = &mut select.where_clause {
             for condition in &mut where_clause.conditions {
@@ -671,13 +671,13 @@ impl Connection {
     fn rewrite_where_aliases_in_expression(
         expr: &mut Expression,
         aliases: &HashMap<String, Expression>,
-        source_columns: &HashSet<String>,
+        source_columns: &crate::catalog::name_hash::NameSet<Arc<str>>,
         active_aliases: &mut HashSet<String>,
     ) -> Result<()> {
         match expr {
             Expression::Column(name) => {
                 if SelectStatement::split_column_reference(name).0.is_some()
-                    || source_columns.contains(name)
+                    || source_columns.contains(name.as_str())
                 {
                     return Ok(());
                 }

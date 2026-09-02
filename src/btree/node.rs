@@ -566,8 +566,6 @@ impl BTreeNode {
             NodeType::Leaf => PageKind::LeafTable,
             NodeType::Internal => PageKind::InteriorTable,
         };
-        initialize_page_bytes(page, kind)?;
-
         let header_offset = page_header_offset(page.id);
         let header_size = match self.node_type {
             NodeType::Leaf => LEAF_HEADER_SIZE,
@@ -600,6 +598,17 @@ impl BTreeNode {
                 total_size
             )));
         }
+
+        // Everything below is written over: the header, the whole cell-pointer array,
+        // and the whole cell region. Only the free space between the pointers and the
+        // first cell has to be cleared, so that it never carries bytes from a row that
+        // was deleted.
+        write_node_header_clearing_gap(
+            page,
+            kind,
+            pointer_area_start + self.keys.len() * 2,
+            USABLE_PAGE_SIZE - total_cell_bytes,
+        )?;
 
         // Fill cells directly into the page buffer from the end backwards to avoid
         // allocating per-cell Vec<u8>. For each cell, compute its length and write
@@ -1537,6 +1546,52 @@ fn page_header_offset(page_id: PageId) -> usize {
 
 fn is_page_one(page_id: PageId) -> bool {
     page_id == 0
+}
+
+/// Writes a fresh node header, clearing only the space the caller will not write over.
+///
+/// [`initialize_page_bytes`] zeroes the whole 4 KiB page, and [`BTreeNode::to_page`]
+/// then overwrites the header, every cell pointer and every cell — so all but the gap
+/// between the pointer array and the first cell was zeroed for nothing. That `memset`
+/// was 3.7 % of a delete, because a full-table delete rebalances on most rows and each
+/// rebalance writes its node back.
+///
+/// The gap is still cleared. It is free space, and the format finds it through the
+/// header rather than by looking at the bytes, but leaving it would put the contents of
+/// deleted rows into the free space of a page that gets written to disk.
+fn write_node_header_clearing_gap(
+    page: &mut Page,
+    kind: PageKind,
+    pointer_area_end: usize,
+    content_start: usize,
+) -> Result<()> {
+    let header_offset = page_header_offset(page.id);
+    let header_size = match kind {
+        PageKind::LeafTable => LEAF_HEADER_SIZE,
+        PageKind::InteriorTable => INTERIOR_HEADER_SIZE,
+        _ => {
+            return Err(HematiteError::StorageError(format!(
+                "Unsupported B-tree page kind {:?}",
+                kind
+            )))
+        }
+    };
+
+    page.data[pointer_area_end..content_start].fill(0);
+    // The trailer is rewritten on the way to disk, but it was cleared here before and
+    // an in-memory page that still carried the old one would be a change nobody asked
+    // for.
+    page.data[USABLE_PAGE_SIZE..].fill(0);
+
+    page.data[header_offset] = kind as u8;
+    write_u16_be(&mut page.data, header_offset + 1, 0);
+    write_u16_be(&mut page.data, header_offset + 3, 0);
+    write_u16_be(&mut page.data, header_offset + 5, USABLE_PAGE_SIZE as u16);
+    page.data[header_offset + 7] = 0;
+    if header_size == INTERIOR_HEADER_SIZE {
+        write_u32_be(&mut page.data, header_offset + 8, 0);
+    }
+    Ok(())
 }
 
 fn initialize_page_bytes(page: &mut Page, kind: PageKind) -> Result<()> {

@@ -481,7 +481,7 @@ impl QueryPlanner {
         if table
             .primary_key_columns
             .iter()
-            .all(|&index| equalities.contains_key(table.columns[index].name.as_str()))
+            .all(|&index| equalities.contains_key(&*table.columns[index].name))
         {
             let first_pk = table
                 .primary_key_columns
@@ -503,9 +503,11 @@ impl QueryPlanner {
         }
 
         for index in &table.secondary_indexes {
-            if index.column_indices.iter().all(|&column_index| {
-                equalities.contains_key(table.columns[column_index].name.as_str())
-            }) {
+            if index
+                .column_indices
+                .iter()
+                .all(|&column_index| equalities.contains_key(&*table.columns[column_index].name))
+            {
                 let column = table.columns.get(index.column_indices[0]).ok_or_else(|| {
                     HematiteError::InternalError(format!(
                         "Index '{}' references an invalid column on table '{}'",

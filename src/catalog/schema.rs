@@ -2,16 +2,17 @@
 
 use super::column::Column;
 use super::ids::{IdMap, TableId};
+use super::name_hash::NameMap;
 use super::object::NamedConstraintKind;
 use super::table::{CheckConstraint, ForeignKeyConstraint, SecondaryIndex, Table};
 use crate::error::HematiteError;
 use crate::Result;
-use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct Schema {
-    tables: IdMap<TableId, Table>,
-    table_names: HashMap<String, TableId>,
+    tables: IdMap<TableId, Arc<Table>>,
+    table_names: NameMap<String, TableId>,
     next_table_id: u32,
     next_column_id: u32,
 }
@@ -20,7 +21,7 @@ impl Schema {
     pub fn new() -> Self {
         Self {
             tables: IdMap::default(),
-            table_names: HashMap::new(),
+            table_names: NameMap::default(),
             next_table_id: 1,
             next_column_id: 1,
         }
@@ -54,7 +55,7 @@ impl Schema {
 
         let table = Table::new(table_id, name.clone(), columns, root_page_id)?;
 
-        self.tables.insert(table_id, table);
+        self.tables.insert(table_id, Arc::new(table));
         self.table_names.insert(name, table_id);
 
         Ok(table_id)
@@ -91,27 +92,37 @@ impl Schema {
         let mut table = Table::new(table_id, name.clone(), columns, table_root_page_id)?;
         table.primary_key_index_root_page_id = primary_key_root_page_id;
 
-        self.tables.insert(table_id, table);
+        self.tables.insert(table_id, Arc::new(table));
         self.table_names.insert(name, table_id);
 
         Ok(table_id)
     }
 
     pub fn get_table(&self, table_id: TableId) -> Option<&Table> {
-        self.tables.get(&table_id)
+        self.tables.get(&table_id).map(|table| &**table)
     }
 
     pub fn get_table_by_name(&self, name: &str) -> Option<&Table> {
+        self.shared_table_by_name(name).map(|table| &**table)
+    }
+
+    /// The same table as a shared handle.
+    ///
+    /// For callers that need it to outlive the borrow on the schema. Cloning the
+    /// `Table` to escape that borrow copied every column — name, character set,
+    /// collation and default — per statement, which a `SELECT` did on its way to
+    /// reading one row.
+    pub(crate) fn shared_table_by_name(&self, name: &str) -> Option<&Arc<Table>> {
         self.table_names
             .get(name)
             .and_then(|&id| self.tables.get(&id))
     }
 
-    pub(crate) fn tables(&self) -> &IdMap<TableId, Table> {
+    pub(crate) fn tables(&self) -> &IdMap<TableId, Arc<Table>> {
         &self.tables
     }
 
-    pub(crate) fn tables_mut(&mut self) -> &mut IdMap<TableId, Table> {
+    pub(crate) fn tables_mut(&mut self) -> &mut IdMap<TableId, Arc<Table>> {
         &mut self.tables
     }
 
@@ -139,6 +150,7 @@ impl Schema {
         let table = self
             .tables
             .get_mut(&table_id)
+            .map(Arc::make_mut)
             .ok_or_else(|| HematiteError::StorageError("Table not found".to_string()))?;
         let old_name = std::mem::replace(&mut table.name, new_name.clone());
         self.table_names.remove(&old_name);
@@ -150,6 +162,7 @@ impl Schema {
         let table = self
             .tables
             .get_mut(&table_id)
+            .map(Arc::make_mut)
             .ok_or_else(|| HematiteError::StorageError("Table not found".to_string()))?;
         table.add_secondary_index(index)
     }
@@ -158,6 +171,7 @@ impl Schema {
         let table = self
             .tables
             .get_mut(&table_id)
+            .map(Arc::make_mut)
             .ok_or_else(|| HematiteError::StorageError("Table not found".to_string()))?;
         self.next_column_id = self
             .next_column_id
@@ -180,10 +194,11 @@ impl Schema {
         let table = self
             .tables
             .get_mut(&table_id)
+            .map(Arc::make_mut)
             .ok_or_else(|| HematiteError::StorageError("Table not found".to_string()))?;
         table.rename_column(old_name, new_name.clone())?;
 
-        for other_table in self.tables.values_mut() {
+        for other_table in self.tables.values_mut().map(Arc::make_mut) {
             other_table.rewrite_inbound_referenced_column(&table_name, old_name, &new_name);
         }
 
@@ -215,6 +230,7 @@ impl Schema {
         let table = self
             .tables
             .get_mut(&table_id)
+            .map(Arc::make_mut)
             .ok_or_else(|| HematiteError::StorageError("Table not found".to_string()))?;
         table.drop_column(column_name)
     }
@@ -228,6 +244,7 @@ impl Schema {
         let table = self
             .tables
             .get_mut(&table_id)
+            .map(Arc::make_mut)
             .ok_or_else(|| HematiteError::StorageError("Table not found".to_string()))?;
         table.set_column_default(column_name, default_value)
     }
@@ -241,6 +258,7 @@ impl Schema {
         let table = self
             .tables
             .get_mut(&table_id)
+            .map(Arc::make_mut)
             .ok_or_else(|| HematiteError::StorageError("Table not found".to_string()))?;
         table.set_column_nullable(column_name, nullable)
     }
@@ -253,6 +271,7 @@ impl Schema {
         let table = self
             .tables
             .get_mut(&table_id)
+            .map(Arc::make_mut)
             .ok_or_else(|| HematiteError::StorageError("Table not found".to_string()))?;
         table.add_check_constraint(constraint)
     }
@@ -265,6 +284,7 @@ impl Schema {
         let table = self
             .tables
             .get_mut(&table_id)
+            .map(Arc::make_mut)
             .ok_or_else(|| HematiteError::StorageError("Table not found".to_string()))?;
         table.add_foreign_key(constraint)
     }
@@ -273,6 +293,7 @@ impl Schema {
         let table = self
             .tables
             .get_mut(&table_id)
+            .map(Arc::make_mut)
             .ok_or_else(|| HematiteError::StorageError("Table not found".to_string()))?;
         let _ = table.drop_secondary_index(index_name)?;
         Ok(())
@@ -286,6 +307,7 @@ impl Schema {
         let table = self
             .tables
             .get_mut(&table_id)
+            .map(Arc::make_mut)
             .ok_or_else(|| HematiteError::StorageError("Table not found".to_string()))?;
         table.drop_named_constraint(constraint_name)
     }
@@ -298,6 +320,7 @@ impl Schema {
         let table = self
             .tables
             .get_mut(&table_id)
+            .map(Arc::make_mut)
             .ok_or_else(|| HematiteError::StorageError("Table not found".to_string()))?;
         table.primary_key_index_root_page_id = root_page_id;
         Ok(())
@@ -312,6 +335,7 @@ impl Schema {
         let table = self
             .tables
             .get_mut(&table_id)
+            .map(Arc::make_mut)
             .ok_or_else(|| HematiteError::StorageError("Table not found".to_string()))?;
         table.root_page_id = table_root_page_id;
         table.primary_key_index_root_page_id = primary_key_root_page_id;
@@ -421,7 +445,7 @@ impl Schema {
 
         let mut schema = Self {
             tables: IdMap::default(),
-            table_names: HashMap::new(),
+            table_names: NameMap::default(),
             next_table_id,
             next_column_id,
         };
@@ -433,7 +457,7 @@ impl Schema {
             let id = table.id;
 
             schema.table_names.insert(name, id);
-            schema.tables.insert(id, table);
+            schema.tables.insert(id, Arc::new(table));
         }
 
         Ok(schema)
@@ -443,6 +467,7 @@ impl Schema {
         let table = self
             .tables
             .get_mut(&table_id)
+            .map(Arc::make_mut)
             .ok_or_else(|| HematiteError::StorageError("Table not found".to_string()))?;
 
         table.root_page_id = root_page_id;
@@ -471,7 +496,7 @@ impl Schema {
         }
 
         self.table_names.insert(table.name.clone(), table.id);
-        self.tables.insert(table.id, table);
+        self.tables.insert(table.id, Arc::new(table));
         Ok(())
     }
 }

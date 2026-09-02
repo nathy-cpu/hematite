@@ -4572,15 +4572,15 @@ mod connection_tests {
             let table = schema.get_table_by_name("users").unwrap();
 
             assert_eq!(table.columns.len(), 3);
-            assert_eq!(table.columns[0].name, "id");
+            assert_eq!(&*table.columns[0].name, "id");
             assert_eq!(table.columns[0].data_type, DataType::Int);
             assert!(table.columns[0].primary_key);
 
-            assert_eq!(table.columns[1].name, "name");
+            assert_eq!(&*table.columns[1].name, "name");
             assert_eq!(table.columns[1].data_type, DataType::Text);
             assert!(!table.columns[1].nullable);
 
-            assert_eq!(table.columns[2].name, "active");
+            assert_eq!(&*table.columns[2].name, "active");
             assert_eq!(table.columns[2].data_type, DataType::Boolean);
             assert_eq!(
                 table.columns[2].default_value,

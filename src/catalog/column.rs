@@ -3,11 +3,19 @@
 use super::types::{DataType, DecimalValue, Value};
 use super::ColumnId;
 use crate::error::HematiteError;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct Column {
     pub id: ColumnId,
-    pub name: String,
+    /// Shared, not owned.
+    ///
+    /// Every statement that names a source used to clone this — validation into a
+    /// `SourceBinding`, execution into a `ResolvedSource` — so a `SELECT` over a
+    /// five-column table allocated ten strings before it read a row. Under `Arc` those
+    /// clones are refcount bumps, and because nothing is derived from the set of names
+    /// there is no cache to keep in step with a schema change.
+    pub name: Arc<str>,
     pub data_type: DataType,
     pub character_set: Option<String>,
     pub collation: Option<String>,
@@ -18,10 +26,10 @@ pub struct Column {
 }
 
 impl Column {
-    pub fn new(id: ColumnId, name: String, data_type: DataType) -> Self {
+    pub fn new(id: ColumnId, name: impl Into<Arc<str>>, data_type: DataType) -> Self {
         Self {
             id,
-            name,
+            name: name.into(),
             data_type,
             character_set: None,
             collation: None,
@@ -210,7 +218,7 @@ impl Column {
 
         Ok(Self {
             id,
-            name,
+            name: name.into(),
             data_type,
             character_set,
             collation,

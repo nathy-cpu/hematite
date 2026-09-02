@@ -103,7 +103,7 @@
 use crate::error::{HematiteError, Result};
 use crate::storage::checksum;
 use crate::storage::metadata_page;
-use crate::storage::page_hash::PageSet;
+use crate::storage::page_hash::{PageMap, PageSet};
 use crate::storage::pager::JournalMode;
 use crate::storage::pager_metadata::PersistedPagerState;
 use crate::storage::{
@@ -148,7 +148,7 @@ struct WalCacheEntry {
 #[derive(Debug, Clone)]
 pub(crate) struct WalPageCache {
     capacity: usize,
-    entries: HashMap<PageId, WalCacheEntry>,
+    entries: PageMap<WalCacheEntry>,
     next_generation: u64,
 }
 
@@ -156,7 +156,7 @@ impl WalPageCache {
     pub fn new(capacity: usize) -> Self {
         Self {
             capacity: capacity.max(1),
-            entries: HashMap::with_capacity(capacity),
+            entries: PageMap::with_capacity_and_hasher(capacity, Default::default()),
             next_generation: 0,
         }
     }
@@ -328,7 +328,7 @@ pub struct VisibleWalState {
     pub free_page_set: PageSet,
     /// Byte offset into the WAL file for each overridden page.
     /// Used to read page data on-demand instead of storing full images.
-    pub(crate) page_override_offsets: HashMap<PageId, u64>,
+    pub(crate) page_override_offsets: PageMap<u64>,
     /// Bounded LRU cache of recently-accessed WAL page images.
     pub(crate) page_cache: WalPageCache,
     /// Path to the WAL file for on-demand reads on cache miss.
@@ -343,7 +343,7 @@ impl VisibleWalState {
             file_len,
             free_pages,
             free_page_set,
-            page_override_offsets: HashMap::new(),
+            page_override_offsets: PageMap::default(),
             page_cache: WalPageCache::new(WAL_PAGE_CACHE_CAPACITY),
             wal_path: None,
         }
@@ -365,7 +365,7 @@ impl VisibleWalState {
         file_len: u64,
         free_pages: Vec<PageId>,
         frames: Vec<WalFrame>,
-        frame_offsets: &HashMap<PageId, u64>,
+        frame_offsets: &PageMap<u64>,
     ) -> Result<()> {
         if sequence <= self.visible_sequence {
             return Err(HematiteError::StorageError(
@@ -510,7 +510,7 @@ pub(crate) fn append_committed_frames_to_path<P: AsRef<Path>>(
     free_pages: &[PageId],
     base_metadata_page: &[u8],
     frames: &[WalFrame],
-) -> Result<HashMap<PageId, u64>> {
+) -> Result<PageMap<u64>> {
     let frame_batch = synthesize_committed_frames(
         commit_sequence,
         database_page_count,
@@ -586,7 +586,7 @@ pub(crate) fn load_visible_state_from_path_with_base<P: AsRef<Path>>(
 
     // Compute checksums from the in-memory data (still needed for correctness)
     // but only store page IDs as override markers.
-    let mut page_override_offsets = HashMap::new();
+    let mut page_override_offsets = PageMap::default();
     let mut page_cache = WalPageCache::new(WAL_PAGE_CACHE_CAPACITY);
 
     for (page_id, bytes) in &page_overrides_btree {

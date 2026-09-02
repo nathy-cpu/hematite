@@ -2101,6 +2101,58 @@ mod tree_tests {
         assert_eq!(internal_node.children.len(), 0);
     }
 
+    /// `to_page` must leave the same bytes whatever the page held before.
+    ///
+    /// It stopped zeroing the whole page and now clears only the gap between the cell
+    /// pointers and the first cell, on the argument that everything else is written
+    /// over. This is that argument, checked: write the same node onto a page full of
+    /// `0xAA` and onto a fresh one, and the results have to be identical — byte for
+    /// byte, including the free space, so no part of a deleted row survives in it.
+    #[test]
+    fn to_page_leaves_no_trace_of_a_pages_previous_contents() -> Result<()> {
+        let page_id = 7;
+
+        // Sized so the node leaves a real gap rather than filling the page.
+        let mut node = BTreeNode::new_leaf(page_id);
+        for i in 0..12u8 {
+            node.keys.push_back(BTreeKey::new(vec![i, i + 1, i + 2]));
+            node.values.push_back(BTreeValue::new(vec![i; 20]));
+        }
+
+        let mut fresh = Page::new(page_id);
+        BTreeNode::to_page(&node, &mut fresh)?;
+
+        let mut dirty = Page::new(page_id);
+        dirty.data.fill(0xAA);
+        BTreeNode::to_page(&node, &mut dirty)?;
+
+        assert_eq!(
+            fresh.data, dirty.data,
+            "a page's previous contents showed through"
+        );
+        assert!(
+            !dirty.data.windows(8).any(|w| w == [0xAA; 8]),
+            "a run of the old contents survived in the free space"
+        );
+
+        // And an interior node, which has the wider header and a rightmost child.
+        let mut internal = BTreeNode::new_internal(page_id);
+        for i in 0..8u8 {
+            internal.keys.push_back(BTreeKey::new(vec![i, i + 1]));
+            internal.children.push_back(u32::from(i) + 100);
+        }
+        internal.children.push_back(200);
+
+        let mut fresh = Page::new(page_id);
+        BTreeNode::to_page(&internal, &mut fresh)?;
+        let mut dirty = Page::new(page_id);
+        dirty.data.fill(0xAA);
+        BTreeNode::to_page(&internal, &mut dirty)?;
+        assert_eq!(fresh.data, dirty.data, "interior node leaked old contents");
+
+        Ok(())
+    }
+
     #[test]
     fn test_btree_node_serialization() -> Result<()> {
         let page_id = 1;

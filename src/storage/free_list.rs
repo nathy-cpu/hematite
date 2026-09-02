@@ -21,13 +21,19 @@
 
 #[cfg(test)]
 use crate::error::Result;
+use crate::storage::page_hash::PageMap;
 use crate::storage::PageId;
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Default)]
 pub struct FreeList {
     pages: Vec<PageId>,
-    positions: HashMap<PageId, usize>,
+    /// Where each free page sits in `pages`, so membership and removal are not a scan.
+    ///
+    /// Keyed with [`PageMap`] rather than the default hasher: a savepoint holds a
+    /// shared handle to the free list and answers `page_is_live_at_savepoint` from
+    /// this map on every page the write path captures, which put SipHash over four
+    /// bytes at 1.9 % of a delete.
+    positions: PageMap<usize>,
 }
 
 impl FreeList {
@@ -37,7 +43,7 @@ impl FreeList {
     pub fn new() -> Self {
         Self {
             pages: Vec::new(),
-            positions: HashMap::new(),
+            positions: PageMap::default(),
         }
     }
 
@@ -118,7 +124,7 @@ impl FreeList {
         }
 
         let mut pages = Vec::with_capacity(records.len());
-        let mut positions = HashMap::with_capacity(records.len());
+        let mut positions = PageMap::with_capacity_and_hasher(records.len(), Default::default());
         for record in records {
             let payload = record.strip_prefix("freelist|").ok_or_else(|| {
                 crate::error::HematiteError::StorageError(

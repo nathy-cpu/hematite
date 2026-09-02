@@ -144,7 +144,7 @@ mod tests {
         let column = Column::new(ColumnId::new(1), "id".to_string(), DataType::Int);
 
         assert_eq!(column.id.as_u32(), 1);
-        assert_eq!(column.name, "id");
+        assert_eq!(&*column.name, "id");
         assert_eq!(column.data_type, DataType::Int);
         assert!(column.nullable);
         assert!(!column.primary_key);
@@ -935,7 +935,7 @@ mod tests {
 
         let id_column = table.get_column_by_name("id");
         assert!(id_column.is_some());
-        assert_eq!(id_column.unwrap().name, "id");
+        assert_eq!(&*id_column.unwrap().name, "id");
 
         let name_column = table.get_column_by_name("name");
         assert!(name_column.is_some());

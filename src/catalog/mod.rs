@@ -19,6 +19,7 @@ pub mod ids;
 pub(crate) mod index_key_codec;
 pub(crate) mod index_store;
 pub(crate) mod integrity;
+pub(crate) mod name_hash;
 pub mod object;
 pub mod record;
 /// How a row's values become the bytes stored in a B-tree cell.

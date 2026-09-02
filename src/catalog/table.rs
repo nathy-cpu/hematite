@@ -2,18 +2,21 @@
 
 use super::column::Column;
 use super::ids::TableId;
+use super::name_hash::NameMap;
 use super::types::{DataType, Value};
 use crate::catalog::object::{NamedConstraint, NamedConstraintKind};
 use crate::HematiteError;
 use crate::Result;
-use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct Table {
     pub id: TableId,
     pub name: String,
     pub columns: Vec<Column>,
-    pub column_indices: HashMap<String, usize>,
+    /// Derived from `columns`; kept in step by the methods that change them, so it
+    /// is not something outside the crate should be able to desynchronise.
+    pub(crate) column_indices: NameMap<Arc<str>, usize>,
     pub primary_key_columns: Vec<usize>,
     pub secondary_indexes: Vec<SecondaryIndex>,
     pub check_constraints: Vec<CheckConstraint>,
@@ -140,7 +143,7 @@ impl Table {
         mut columns: Vec<Column>,
         root_page_id: u32,
     ) -> Result<Self> {
-        let mut column_indices = HashMap::new();
+        let mut column_indices = NameMap::default();
         let mut primary_key_columns = Vec::new();
 
         for column in &mut columns {
@@ -378,7 +381,7 @@ impl Table {
     }
 
     pub fn rename_column(&mut self, old_name: &str, new_name: String) -> Result<()> {
-        if self.column_indices.contains_key(&new_name) {
+        if self.column_indices.contains_key(new_name.as_str()) {
             return Err(HematiteError::StorageError(format!(
                 "Column '{}' already exists in table '{}'",
                 new_name, self.name
@@ -392,9 +395,10 @@ impl Table {
             ))
         })?;
 
-        self.columns[index].name = new_name.clone();
+        let new_name: Arc<str> = Arc::from(new_name.as_str());
+        self.columns[index].name = Arc::clone(&new_name);
         self.column_indices.remove(old_name);
-        self.column_indices.insert(new_name.clone(), index);
+        self.column_indices.insert(Arc::clone(&new_name), index);
         self.rewrite_check_constraints(old_name, &new_name)?;
         Ok(())
     }

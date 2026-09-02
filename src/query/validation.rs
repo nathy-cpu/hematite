@@ -2,12 +2,16 @@ use crate::catalog::{Schema, Table};
 use crate::error::{HematiteError, Result};
 use crate::parser::ast::*;
 use crate::parser::{LiteralValue, SqlTypeName};
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 struct SourceBinding {
     source_name: String,
     alias: Option<String>,
-    columns: Vec<String>,
+    /// Shared with the schema rather than copied out of it. Validation builds one of
+    /// these per source per statement and throws it away, and cloning a name per column
+    /// to do that was the largest single allocator cost in a point lookup.
+    columns: Vec<Arc<str>>,
     has_hidden_rowid: bool,
 }
 
@@ -1063,7 +1067,7 @@ fn collect_source_bindings(
 pub(crate) fn source_column_names(
     select: &SelectStatement,
     catalog: &Schema,
-) -> Result<Vec<String>> {
+) -> Result<Vec<Arc<str>>> {
     Ok(collect_source_bindings(select, catalog, &select.from)?
         .into_iter()
         .flat_map(|binding| binding.columns)
@@ -1131,14 +1135,14 @@ fn collect_source_bindings_into(
 fn cte_projected_column_names(
     cte: &CommonTableExpression,
     catalog: &Schema,
-) -> Result<Vec<String>> {
+) -> Result<Vec<Arc<str>>> {
     projected_column_names(&cte.query, catalog)
 }
 
 pub(crate) fn projected_column_names(
     select: &SelectStatement,
     catalog: &Schema,
-) -> Result<Vec<String>> {
+) -> Result<Vec<Arc<str>>> {
     let mut names = Vec::with_capacity(select.columns.len());
     for (index, item) in select.columns.iter().enumerate() {
         if let Some(alias) = select
@@ -1146,7 +1150,7 @@ pub(crate) fn projected_column_names(
             .get(index)
             .and_then(|alias| alias.clone())
         {
-            names.push(alias);
+            names.push(Arc::from(alias.as_str()));
             continue;
         }
 
@@ -1157,12 +1161,12 @@ pub(crate) fn projected_column_names(
             SelectItem::Column(name) => {
                 validate_column_reference(select, name, catalog, &select.from)?;
                 if let Some(name) = SelectStatement::default_output_name(item, index) {
-                    names.push(name);
+                    names.push(Arc::from(name.as_str()));
                 }
             }
             SelectItem::CountAll | SelectItem::Aggregate { .. } => {
                 if let Some(name) = SelectStatement::default_output_name(item, index) {
-                    names.push(name);
+                    names.push(Arc::from(name.as_str()));
                 }
             }
             SelectItem::Expression(_) => {
@@ -1237,7 +1241,10 @@ fn collect_matching_source_names(
     let mut matched_tables = Vec::new();
 
     for binding in candidate_bindings {
-        if binding.columns.iter().any(|column| column == column_name)
+        if binding
+            .columns
+            .iter()
+            .any(|column| &**column == column_name)
             || (binding.has_hidden_rowid && SelectStatement::is_hidden_rowid(column_name))
         {
             matched_tables.push(binding.source_name.clone());

@@ -459,6 +459,8 @@ impl ValueRef<'_> {
 /// A record borrowed in place, with no decoding done up front.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RecordRef<'a> {
+    /// The whole header: the length varint and every serial type after it.
+    header: &'a [u8],
     /// Serial types only — `header_len` itself is already consumed.
     types: &'a [u8],
     body: &'a [u8],
@@ -480,9 +482,15 @@ impl<'a> RecordRef<'a> {
         }
 
         Ok(Self {
+            header: &bytes[..header_len],
             types: &bytes[prefix_len..header_len],
             body: &bytes[header_len..],
         })
+    }
+
+    /// The header bytes, which are what a [`ProjectionPlan`] matches on.
+    fn header(&self) -> &'a [u8] {
+        self.header
     }
 
     /// Walks the serial types, yielding each code with the body range it covers.
@@ -559,8 +567,21 @@ impl<'a> RecordRef<'a> {
     /// for is the two drifting apart on what an arm *means*.
     #[inline]
     fn owned_value_at(&self, serial: Serial, range: std::ops::Range<usize>) -> Result<Value> {
-        let body = self
-            .body
+        Self::value_from_body(self.body, serial, range)
+    }
+
+    /// Reads one field out of a record's bodies.
+    ///
+    /// Takes the bodies rather than `self`, because the planned decode path matches a
+    /// cached header and never builds a `RecordRef` at all — it holds the bodies and
+    /// the field layout, which is all this needs.
+    #[inline]
+    fn value_from_body(
+        bodies: &[u8],
+        serial: Serial,
+        range: std::ops::Range<usize>,
+    ) -> Result<Value> {
+        let body = bodies
             .get(range)
             .ok_or_else(|| corrupt("Record body is truncated"))?;
 
@@ -697,8 +718,14 @@ impl<'a> Iterator for RecordIter<'a> {
 pub(crate) struct ProjectionPlan {
     /// The fields wanted, in the order the caller wants them.
     indices: Vec<usize>,
-    /// The serial types `fields` was derived from, owned so it outlives the record.
-    types: Vec<u8>,
+    /// The whole record header the layout was derived from — the length varint and
+    /// every serial type — owned so it outlives the record.
+    ///
+    /// The prefix rather than the serial types alone, because it also settles where the
+    /// bodies start. Matching it means `RecordRef::new` has nothing left to work out:
+    /// the header length is known, so its varint read and bounds checks are the same
+    /// answer as last row's.
+    header: Vec<u8>,
     /// One entry per wanted index, in projection order.
     fields: Vec<(Serial, std::ops::Range<usize>)>,
     /// Whether `types` describes anything. A record of no fields has an empty header,
@@ -710,21 +737,30 @@ impl ProjectionPlan {
     pub(crate) fn new(indices: &[usize]) -> Self {
         Self {
             indices: indices.to_vec(),
-            types: Vec::new(),
+            header: Vec::new(),
             fields: Vec::new(),
             primed: false,
         }
     }
 
-    /// Points the plan at `record`, rebuilding the layout if the shape changed.
-    fn sync(&mut self, record: &RecordRef<'_>) -> Result<()> {
-        if self.primed && self.types == record.types {
-            return Ok(());
+    /// The body of `bytes`, if its header is the one the layout was built from.
+    ///
+    /// One comparison answers both questions a hit needs: that the field offsets still
+    /// apply, and where the bodies begin.
+    #[inline]
+    fn body_if_unchanged<'a>(&self, bytes: &'a [u8]) -> Option<&'a [u8]> {
+        if !self.primed || bytes.len() < self.header.len() {
+            return None;
         }
+        let (prefix, body) = bytes.split_at(self.header.len());
+        (prefix == self.header).then_some(body)
+    }
 
+    /// Rebuilds the layout from `record`.
+    fn rebuild(&mut self, record: &RecordRef<'_>) -> Result<()> {
         let Self {
             indices,
-            types,
+            header,
             fields,
             primed,
         } = self;
@@ -745,7 +781,7 @@ impl ProjectionPlan {
         // the same trade the B-tree makes for cell ranges: verify what is used, and
         // leave whole-object structure to the integrity check.
         let Some(&last_wanted) = indices.iter().max() else {
-            types.clear();
+            header.clear();
             *primed = true;
             return Ok(());
         };
@@ -776,8 +812,8 @@ impl ProjectionPlan {
             )));
         }
 
-        types.clear();
-        types.extend_from_slice(record.types);
+        header.clear();
+        header.extend_from_slice(record.header());
         *primed = true;
         Ok(())
     }
@@ -828,8 +864,17 @@ pub(crate) fn decode_fields_into_planned(
         return Ok(());
     }
 
-    let record = RecordRef::new(bytes)?;
-    plan.sync(&record)?;
+    // A row whose header matches the last one needs no `RecordRef` at all: the field
+    // layout still holds, and the header length that says where the bodies start is the
+    // same one already matched. Only a row of a new shape pays for parsing it.
+    let bodies = match plan.body_if_unchanged(bytes) {
+        Some(bodies) => bodies,
+        None => {
+            let record = RecordRef::new(bytes)?;
+            plan.rebuild(&record)?;
+            record.body
+        }
+    };
 
     // Pushed, rather than written into slots reserved with `Null`: `Value` is forty
     // bytes and has a destructor, so pre-filling would write every field twice and run
@@ -837,7 +882,7 @@ pub(crate) fn decode_fields_into_planned(
     let base = out.len();
     out.reserve(plan.fields.len());
     for (serial, range) in &plan.fields {
-        match record.owned_value_at(*serial, range.clone()) {
+        match RecordRef::value_from_body(bodies, *serial, range.clone()) {
             Ok(value) => out.push(value),
             Err(err) => {
                 // `out` holds whole rows laid end to end, so a half-decoded one would
