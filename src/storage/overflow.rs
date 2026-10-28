@@ -1,7 +1,17 @@
 //! Overflow page chains for large payloads.
 //!
-//! This is the live overflow API used by the tree/value-store layer. The public helper shape stays
-//! the same, but the on-page bytes now use the v3 overflow page format.
+//! The overflow API used by the tree/value-store layer. Each chain page is laid out as:
+//!
+//! ```text
+//! 0       page kind, `PageKind::Overflow` (0x20)
+//! 1..4    zero
+//! 4..8    next page id (u32 BE); 0 ends the chain
+//! 8..     payload chunk, up to OVERFLOW_PAYLOAD_CAPACITY (4084) bytes, ending at
+//!         USABLE_PAGE_SIZE so the pager's trailer is left alone
+//! ```
+//!
+//! A chunk's length is not stored: readers derive it from the total payload length,
+//! which the caller supplies.
 
 use crate::error::{HematiteError, Result};
 use crate::storage::format::PageKind;

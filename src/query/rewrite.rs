@@ -8,7 +8,8 @@ use crate::parser::ast::*;
 
 /// Applies all safe AST rewrites to a SELECT statement.
 pub(crate) fn rewrite_select(select: &mut SelectStatement) {
-    // Order matters: some passes enable others.
+    // Nested queries first, then this level's own passes. The two passes are
+    // independent of each other.
     for cte in &mut select.with_clause {
         rewrite_select(&mut cte.query);
     }

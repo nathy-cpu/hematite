@@ -1016,36 +1016,36 @@ mod planner_tests {
     use crate::parser::{LiteralValue, SqlTypeName};
     use crate::query::planner::*;
 
-    fn expect_select_node(plan: &QueryPlan) -> &SelectPlanNode {
-        match &plan.node {
+    fn expect_select_node(plan: &QueryPlan) -> SelectPlanNode {
+        match plan.node() {
             PlanNode::Select(node) => node,
             other => panic!("expected select plan node, got {:?}", other),
         }
     }
 
-    fn expect_delete_node(plan: &QueryPlan) -> &DeletePlanNode {
-        match &plan.node {
+    fn expect_delete_node(plan: &QueryPlan) -> DeletePlanNode {
+        match plan.node() {
             PlanNode::Delete(node) => node,
             other => panic!("expected delete plan node, got {:?}", other),
         }
     }
 
-    fn expect_update_node(plan: &QueryPlan) -> &UpdatePlanNode {
-        match &plan.node {
+    fn expect_update_node(plan: &QueryPlan) -> UpdatePlanNode {
+        match plan.node() {
             PlanNode::Update(node) => node,
             other => panic!("expected update plan node, got {:?}", other),
         }
     }
 
-    fn expect_insert_node(plan: &QueryPlan) -> &InsertPlanNode {
-        match &plan.node {
+    fn expect_insert_node(plan: &QueryPlan) -> InsertPlanNode {
+        match plan.node() {
             PlanNode::Insert(node) => node,
             other => panic!("expected insert plan node, got {:?}", other),
         }
     }
 
-    fn expect_create_node(plan: &QueryPlan) -> &CreatePlanNode {
-        match &plan.node {
+    fn expect_create_node(plan: &QueryPlan) -> CreatePlanNode {
+        match plan.node() {
             PlanNode::Create(node) => node,
             other => panic!("expected create plan node, got {:?}", other),
         }
@@ -1645,7 +1645,7 @@ mod planner_tests {
 
     /// Builds the runtime-metadata map a planner reads row counts from.
     ///
-    /// The planner takes the engine's own map now rather than a transcribed
+    /// The planner reads the engine's own map rather than a transcribed
     /// `HashMap<String, usize>`, so a test that wants to pose "this table has N
     /// rows" has to say it in those terms.
     fn row_counts(entries: &[(&str, u64)]) -> std::sync::Arc<crate::catalog::TableMetadataMap> {

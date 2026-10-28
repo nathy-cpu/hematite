@@ -2,12 +2,12 @@
 //!
 //! # Why these exist
 //!
-//! Wall-clock benchmarks cannot police this rewrite. On the machine it is being
-//! developed on, the *same unchanged code* measured 76 ms and 97 ms for the same
-//! benchmark twenty minutes apart, and 1.55 ms against 3.97 ms for another. A change
-//! worth 10 % is invisible under that much drift, and worse, drift that happens to
-//! line up with which build ran first reads exactly like a real regression — it did,
-//! once, and cost an hour to disprove.
+//! Wall-clock benchmarks cannot police the storage layer's performance. On the
+//! development machine the *same unchanged code* measured 76 ms and 97 ms for the
+//! same benchmark twenty minutes apart, and 1.55 ms against 3.97 ms for another. A
+//! change worth 10 % is invisible under that much drift, and worse, drift that
+//! happens to line up with which build ran first reads exactly like a real
+//! regression, and costs hours to disprove.
 //!
 //! Counters do not drift. "This commit issues exactly two fsyncs" and "this
 //! transaction writes each dirty page exactly once" are facts about work performed,
@@ -44,15 +44,19 @@ pub struct PagerStats {
     pub pool_hits: AtomicU64,
     /// Page requests that had to fault a page in.
     pub pool_misses: AtomicU64,
-    /// Pages dropped from the pool to make room.
+    /// Pages dropped from the pool to make room. Never a dirty or pinned page: when
+    /// only those remain, the pool grows past its capacity instead.
     pub evictions: AtomicU64,
-    /// Dirty pages written out mid-transaction because the pool filled up.
+    /// Dirty pages written to the database file mid-transaction because the pool
+    /// filled up (`spill_pages`). Rollback mode only, and only pages whose original
+    /// image is already synced to the journal.
     pub spills: AtomicU64,
     /// Bytes appended to the rollback journal.
     pub journal_bytes: AtomicU64,
     /// Frames appended to the WAL.
     pub wal_frames: AtomicU64,
-    /// Completed WAL checkpoints.
+    /// Completed WAL checkpoints: frames copied back to the database file and the
+    /// WAL deleted. Removing a WAL that holds no committed state is not counted.
     pub checkpoints: AtomicU64,
     /// Page trailers verified on read, each an xxHash64 over 4 KiB.
     ///

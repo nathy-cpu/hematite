@@ -206,7 +206,7 @@ mod wal_tests {
         };
         fs::write(&wal_path, wal.encode()?)?;
 
-        // Sentinel offset (0) should still work via the legacy full-file scan.
+        // Sentinel offset (0) should still work via the full-file scan fallback.
         let mut sentinel_state =
             VisibleWalState::from_database_state(file_len_for_next_page_id(8), Vec::new());
         sentinel_state.wal_path = Some(wal_path.clone());
@@ -258,11 +258,6 @@ mod pager_tests {
 
     use std::sync::{Arc, Barrier, RwLock};
     use std::thread;
-
-    /// The retired FNV-1a checksum, kept only to fabricate a plausible *legacy*
-    /// sidecar file. Current checksums are XXH64 (`storage::checksum`); this
-    /// deliberately does not track them, because the file it builds is meant to look
-    /// like one written by an older version.
 
     #[test]
     fn test_pager_write_is_buffered_until_flush() -> crate::error::Result<()> {
@@ -721,9 +716,9 @@ mod pager_tests {
     /// A committed transaction empties its journal rather than deleting it, and
     /// an empty journal means "nothing to recover".
     ///
-    /// Deleting it cost an `unlink` at every commit and an `openat` plus a
+    /// Deleting it would cost an `unlink` at every commit and an `openat` plus a
     /// truncating `open` at the next `BEGIN` — three syscalls per transaction to
-    /// arrive back at a file this pager already had open, and `unlink` was the
+    /// arrive back at a file this pager already had open, and `unlink` is the
     /// most expensive of the three.
     #[test]
     fn a_committed_transaction_empties_its_journal_and_keeps_it() -> crate::error::Result<()> {
@@ -765,7 +760,8 @@ mod pager_tests {
     }
 
     /// An empty journal is ignored; a non-empty one that does not parse is still
-    /// an error. Retiring a journal must not have turned corruption into silence.
+    /// an error. Treating an empty journal as retired must not turn corruption into
+    /// silence.
     #[test]
     fn an_empty_journal_is_ignored_but_a_corrupt_one_is_not() -> crate::error::Result<()> {
         let test_db = TestDbFile::new("_test_empty_journal_ignored");
@@ -2411,9 +2407,9 @@ mod mod_tests {
         }
 
         let reopened = crate::catalog::CatalogEngine::new(test_db.path())?;
-        // Caught by the page's own trailer now, at read time, before the checksum map
-        // is consulted at all. The map could only cover a database small enough for it
-        // to fit one metadata page; the trailer has no such ceiling.
+        // Caught by the page's own trailer, at read time. A checksum map could only
+        // cover a database small enough for it to fit one metadata page; the trailer
+        // has no such ceiling.
         let err = reopened.read_page(corrupted_page_id).unwrap_err();
         let message = err.to_string();
         assert!(
@@ -2452,7 +2448,7 @@ mod mod_tests {
 
         let mut reopened = crate::catalog::CatalogEngine::new(test_db.path())?;
         // As above: the trailer catches this while `validate_integrity` is reading the
-        // page, so the error names the trailer rather than the map.
+        // page, so the error names the trailer.
         let err = reopened.validate_integrity().unwrap_err();
         let message = err.to_string();
         assert!(
@@ -3666,20 +3662,19 @@ mod wal_codec_tests {
 
 /// Assertions about *work performed*, not time taken.
 ///
-/// These exist because wall-clock benchmarking cannot police this rewrite. On the
-/// development machine the same unchanged code measured 76 ms and 97 ms for one
+/// These exist because wall-clock benchmarking cannot police the storage layer. On
+/// the development machine the same unchanged code measured 76 ms and 97 ms for one
 /// benchmark twenty minutes apart, and 1.55 ms against 3.97 ms for another. A 10 %
 /// change is invisible under that, and drift that happens to correlate with which
 /// build ran first is indistinguishable from a real regression.
 ///
 /// Syscall and page-write counts have none of that problem: they are identical on
 /// every machine under any load, they run in CI without a benchmark harness, and
-/// they fail loudly when a refactor quietly adds an fsync back.
+/// they fail loudly when a refactor quietly adds an fsync.
 ///
-/// Several of these lock in behaviour that is *known to be bad* — four fsyncs per
-/// rollback commit, for instance. That is deliberate. They are the before-picture
-/// the storage rewrite is measured against, and the phase that improves a number is
-/// expected to update the assertion in the same commit.
+/// Each pins an exact number rather than a ceiling, so a change that improves one
+/// has to update the assertion in the same commit, and the number in the test is
+/// always the number the engine does.
 mod work_performed_tests {
     use crate::storage::{JournalMode, Page, Pager};
     use crate::test_utils::TestDbFile;
@@ -3710,8 +3705,8 @@ mod work_performed_tests {
         // rollback journal — one sync to make the undo information durable before the
         // database is touched, one to make the new contents durable.
         //
-        // It was four. One went with the redundant pre-`flush` journal sync; the
-        // other with the commit marker, which the journal's commit intent replaced.
+        // A journal sync before `flush` staged its page, or a synced commit marker
+        // in place of the commit intent, would each make it three.
         assert_eq!(
             work.fsyncs, 2,
             "rollback commit fsync count changed: {work:?}"
@@ -3727,8 +3722,8 @@ mod work_performed_tests {
     /// 12 031 `statx` calls, more than any other syscall including `fsync`, and more
     /// than 60 per transaction.
     ///
-    /// The length is now maintained in memory by the paths that change it, and the
-    /// OS is asked only at open and during recovery.
+    /// The length is maintained in memory by the paths that change it, and the OS is
+    /// asked only at open and during recovery.
     #[test]
     fn taking_a_snapshot_does_not_stat_the_file() {
         let db = TestDbFile::new("_test_work_snapshot_statx");
@@ -3901,12 +3896,12 @@ mod work_performed_tests {
 
     /// Opening a read scope does not hash a page it already has.
     ///
-    /// Every read scope re-reads the persisted state page to find out whether
-    /// another process has committed, and every page read verified its trailer:
-    /// an xxHash64 over 4 KiB, twice per statement, on a page that had not
-    /// changed. It was 11 % of a point-lookup workload.
+    /// In rollback mode every read scope re-reads the persisted state page to find
+    /// out whether another handle has committed. Verifying that read's trailer would
+    /// be an xxHash64 over 4 KiB, twice per statement, on a page that has almost
+    /// always not changed; it measured 11 % of a point-lookup workload.
     ///
-    /// The bytes are compared against the cached copy first now. A page that
+    /// So the bytes are compared against the cached copy first. A page that
     /// matches one this pager itself wrote is not being trusted, it is being
     /// recognised, so there is nothing to verify — or to parse, or to apply.
     #[test]
@@ -4158,6 +4153,71 @@ mod work_performed_tests {
             "a small rolled-back transaction spilled: {work:?}"
         );
     }
+
+    /// Reading more distinct pages than the cache holds evicts clean pages, one per
+    /// page read past capacity.
+    #[test]
+    fn reading_past_capacity_counts_evictions() {
+        let db = TestDbFile::new("_test_work_evictions");
+        let mut pager = Pager::new(db.path(), 8).expect("open");
+        let mut page_ids = Vec::new();
+        pager.begin_transaction().expect("begin");
+        for fill in 0..32u8 {
+            let page_id = pager.allocate_page().expect("allocate");
+            let mut page = Page::new(page_id);
+            page.data[0] = fill;
+            pager.write_page(page).expect("write");
+            page_ids.push(page_id);
+        }
+        pager.commit_transaction().expect("commit");
+        drop(pager);
+
+        let pager = Pager::new(db.path(), 8).expect("reopen");
+        let before = pager.stats();
+        for &page_id in &page_ids {
+            pager.read_page(page_id).expect("read");
+        }
+        let work = pager.stats().since(&before);
+        assert!(work.evictions >= 24, "32 reads through 8 slots: {work:?}");
+    }
+
+    /// A rollback-mode transaction larger than the cache writes journalled pages
+    /// through to the database file before it commits.
+    #[test]
+    fn a_transaction_larger_than_the_cache_counts_spills() {
+        let db = TestDbFile::new("_test_work_spills");
+        let mut pager = Pager::new(db.path(), 8).expect("open");
+        let before = pager.stats();
+        pager.begin_transaction().expect("begin");
+        for fill in 0..64u8 {
+            let page_id = pager.allocate_page().expect("allocate");
+            let mut page = Page::new(page_id);
+            page.data[0] = fill;
+            pager.write_page(page).expect("write");
+        }
+        pager.rollback_transaction().expect("rollback");
+        let work = pager.stats().since(&before);
+        assert!(work.spills > 0, "64 dirty pages through 8 slots: {work:?}");
+    }
+
+    #[test]
+    fn a_wal_checkpoint_is_counted() {
+        let db = TestDbFile::new("_test_work_checkpoints");
+        let mut pager = Pager::new(db.path(), 64).expect("open");
+        let page_id = pager.allocate_page().expect("allocate");
+        pager.set_journal_mode(JournalMode::Wal).expect("wal");
+        let _ = commit_one_page(&mut pager, page_id, 1);
+
+        let before = pager.stats();
+        pager.checkpoint_wal().expect("checkpoint");
+        let work = pager.stats().since(&before);
+        assert_eq!(work.checkpoints, 1, "{work:?}");
+
+        // Nothing left to copy back: removing an empty WAL is not a checkpoint.
+        let before = pager.stats();
+        pager.checkpoint_wal().expect("second checkpoint");
+        assert_eq!(pager.stats().since(&before).checkpoints, 0);
+    }
 }
 
 /// Crash recovery, including the write-ahead ordering a rollback commit depends on.
@@ -4179,7 +4239,8 @@ mod work_performed_tests {
 /// does — and then demand that recovery still works. It fails when the sync is moved
 /// after the page writes.
 ///
-/// The database file has no equivalent yet, so only journal ordering is covered.
+/// `FileManager` does the same for the database file, so the later tests also cover a
+/// power loss that drops unsynced database writes, and one that drops both.
 mod crash_recovery_ordering_tests {
     use crate::storage::{Page, Pager};
     use crate::test_utils::TestDbFile;
@@ -4437,7 +4498,7 @@ mod crash_recovery_ordering_tests {
         );
     }
 
-    /// A commit that finished, then a crash before the journal was removed, must not
+    /// A commit that finished, then a crash before the journal was retired, must not
     /// be rolled back.
     ///
     /// This is the durability property a third fsync would otherwise buy. The
@@ -4506,13 +4567,174 @@ mod crash_recovery_ordering_tests {
         assert_eq!(pager.read_page(first).expect("read first").data[0], 0xA1);
         assert_eq!(pager.read_page(second).expect("read second").data[0], 0xA2);
     }
+
+    // A process can die between appending a journal record and updating the header
+    // count that covers it, and a power loss can keep either write without the other.
+    // The database file is written only after the journal is synced, so whatever is
+    // not intact was never needed — but recovery has to open the database, not refuse
+    // the journal. Each test below leaves a real journal from a commit that failed on
+    // its first database write, then reshapes it on disk into one of those states.
+
+    const RECORD_COUNT_OFFSET: usize = 32;
+    const INTENT_COUNT_OFFSET: usize = 36;
+    const RECORD_SIZE: usize = 8 + crate::storage::PAGE_SIZE;
+
+    fn journal_path(db: &TestDbFile) -> std::path::PathBuf {
+        std::path::PathBuf::from(format!("{}.journal", db.path()))
+    }
+
+    fn set_u32_be(bytes: &mut [u8], offset: usize, value: u32) {
+        bytes[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
+    }
+
+    /// Where the first record starts: after the header and the free list.
+    fn records_offset(journal: &[u8]) -> usize {
+        let free_pages = u32::from_be_bytes(journal[24..28].try_into().unwrap()) as usize;
+        40 + 4 * free_pages
+    }
+
+    /// Two committed pages, then a transaction rewriting both whose commit fails on
+    /// its first database write, leaving a synced journal and an untouched database.
+    fn crashed_two_page_transaction(db: &TestDbFile) -> (u32, u32) {
+        let mut pager = Pager::new(db.path(), 64).expect("open");
+        let first = pager.allocate_page().expect("allocate");
+        let second = pager.allocate_page().expect("allocate");
+        commit_fill(&mut pager, first, 0xA1);
+        commit_fill(&mut pager, second, 0xA2);
+
+        pager.begin_transaction().expect("begin");
+        for (page_id, fill) in [(first, 0xB1), (second, 0xB2)] {
+            let mut page = Page::new(page_id);
+            page.data.fill(fill);
+            pager.write_page(page).expect("write");
+        }
+        pager.inject_io_failure_after(0);
+        assert!(
+            pager.commit_transaction().is_err(),
+            "failure did not surface"
+        );
+        (first, second)
+    }
+
+    /// A record appended, then the process gone before the header count covering it
+    /// was rewritten: the body runs past what the header describes.
+    #[test]
+    fn a_record_beyond_the_header_count_does_not_block_recovery() {
+        let db = TestDbFile::new("_test_journal_record_beyond_count");
+        let (first, second) = crashed_two_page_transaction(&db);
+
+        let mut journal = std::fs::read(journal_path(&db)).expect("read journal");
+        set_u32_be(&mut journal, RECORD_COUNT_OFFSET, 1);
+        set_u32_be(&mut journal, INTENT_COUNT_OFFSET, 0);
+        std::fs::write(journal_path(&db), &journal).expect("rewrite journal");
+
+        let pager = Pager::new(db.path(), 64).expect("reopen with a long journal body");
+        assert_eq!(pager.read_page(first).expect("read").data[0], 0xA1);
+        assert_eq!(pager.read_page(second).expect("read").data[0], 0xA2);
+    }
+
+    /// The count rewrite survived a power loss and the record it counts did not: the
+    /// header describes more than the body holds.
+    #[test]
+    fn a_header_count_beyond_the_records_does_not_block_recovery() {
+        let db = TestDbFile::new("_test_journal_count_beyond_records");
+        let (first, second) = crashed_two_page_transaction(&db);
+
+        let mut journal = std::fs::read(journal_path(&db)).expect("read journal");
+        let end_of_records = records_offset(&journal) + 2 * RECORD_SIZE;
+        journal.truncate(end_of_records - RECORD_SIZE / 2);
+        set_u32_be(&mut journal, INTENT_COUNT_OFFSET, 0);
+        std::fs::write(journal_path(&db), &journal).expect("rewrite journal");
+
+        let pager = Pager::new(db.path(), 64).expect("reopen with a short journal body");
+        assert_eq!(pager.read_page(first).expect("read").data[0], 0xA1);
+        assert_eq!(pager.read_page(second).expect("read").data[0], 0xA2);
+    }
+
+    /// Intents counted in the header but cut short: the commit never synced them, so
+    /// it never started writing, and recovery must roll back rather than refuse.
+    #[test]
+    fn torn_commit_intents_roll_back_instead_of_failing() {
+        let db = TestDbFile::new("_test_journal_torn_intents");
+        let (first, second) = crashed_two_page_transaction(&db);
+
+        let mut journal = std::fs::read(journal_path(&db)).expect("read journal");
+        let intent_count = u32::from_be_bytes(journal[36..40].try_into().unwrap());
+        assert!(intent_count > 0, "the failed commit declared no intents");
+        journal.truncate(journal.len() - 3);
+        std::fs::write(journal_path(&db), &journal).expect("rewrite journal");
+
+        let pager = Pager::new(db.path(), 64).expect("reopen with torn intents");
+        assert_eq!(pager.read_page(first).expect("read").data[0], 0xA1);
+        assert_eq!(pager.read_page(second).expect("read").data[0], 0xA2);
+    }
+
+    /// A record left over from an earlier journal must not verify under this one.
+    ///
+    /// Retiring a journal truncates it without an fsync, so after a power loss the
+    /// last transaction's records can sit where the current one's should be. That
+    /// transaction committed; restoring its pre-images would undo it. Here the current
+    /// journal's header counts one record and the bytes at that offset belong to the
+    /// committed transaction before it. Under a seed shared by every journal the record
+    /// verifies and the committed page reverts.
+    #[test]
+    fn a_record_left_by_an_earlier_journal_is_not_restored() {
+        let db = TestDbFile::new("_test_journal_stale_record");
+        let (page_id, stale_journal) = {
+            let mut pager = Pager::new(db.path(), 64).expect("open");
+            let page_id = pager.allocate_page().expect("allocate");
+            commit_fill(&mut pager, page_id, 0x11);
+
+            pager.keep_journal_after_commit();
+            commit_fill(&mut pager, page_id, 0x22);
+            let stale_journal = std::fs::read(journal_path(&db)).expect("read journal");
+            (page_id, stale_journal)
+        };
+        // Reopening discards that journal: its intents show the commit landed.
+        drop(Pager::new(db.path(), 64).expect("reopen"));
+
+        let other = {
+            let mut pager = Pager::new(db.path(), 64).expect("open");
+            let other = pager.allocate_page().expect("allocate");
+            commit_fill(&mut pager, other, 0x33);
+            pager.begin_transaction().expect("begin");
+            let mut page = Page::new(other);
+            page.data.fill(0x44);
+            pager.write_page(page).expect("write");
+            pager.inject_io_failure_after(0);
+            assert!(
+                pager.commit_transaction().is_err(),
+                "failure did not surface"
+            );
+            other
+        };
+
+        // The current header, counting one record and no intents, over the stale
+        // record from the committed transaction.
+        let current = std::fs::read(journal_path(&db)).expect("read journal");
+        let mut crashed = current[..records_offset(&current)].to_vec();
+        set_u32_be(&mut crashed, RECORD_COUNT_OFFSET, 1);
+        set_u32_be(&mut crashed, INTENT_COUNT_OFFSET, 0);
+        let stale_start = records_offset(&stale_journal);
+        crashed.extend_from_slice(&stale_journal[stale_start..stale_start + RECORD_SIZE]);
+        std::fs::write(journal_path(&db), &crashed).expect("rewrite journal");
+
+        let pager = Pager::new(db.path(), 64).expect("reopen");
+        assert_eq!(
+            pager.read_page(page_id).expect("read").data[0],
+            0x22,
+            "a committed page was rolled back to a stale pre-image"
+        );
+        assert_eq!(pager.read_page(other).expect("read").data[0], 0x33);
+    }
 }
 
 /// The WAL has to stop growing on its own.
 ///
-/// Nothing called `checkpoint_wal` unless the embedding application did, so a
-/// long-running writer grew the file without bound — and every reader whose snapshot
-/// went stale re-read and re-decoded the whole thing to rebuild its page index.
+/// Without an automatic checkpoint, nothing calls `checkpoint_wal` unless the
+/// embedding application does, so a long-running writer would grow the file without
+/// bound — and every reader whose snapshot went stale would re-read and re-decode the
+/// whole thing to rebuild its page index.
 mod wal_autocheckpoint_tests {
     use crate::storage::{JournalMode, Page, Pager};
     use crate::test_utils::TestDbFile;
@@ -4579,14 +4801,14 @@ mod wal_salt_tests {
              cannot distinguish them"
         );
 
-        // The retired constants, in case someone reintroduces them as a default.
+        // "HEMA" and "TITE": the fixed pair a non-random default would reach for.
         assert_ne!((first.salt_1, first.salt_2), (0x48454D41, 0x54495445));
     }
 }
 
-/// Savepoints keep shared handles to the dirty pages rather than copying them,
-/// because `run_atomically` takes one per row and copying every already-dirty page
-/// each time is quadratic across a transaction.
+/// Savepoints keep shared handles to page pre-images rather than copying them,
+/// because `run_atomically` takes one per row and copying pages at every savepoint
+/// is quadratic across a transaction.
 ///
 /// Sharing is only safe because a later write copies the page into a fresh buffer
 /// instead of mutating the one the savepoint holds — the outstanding `Arc` is what
@@ -4597,10 +4819,8 @@ mod savepoint_sharing_tests {
 
     /// WAL mode has to roll back to a savepoint too.
     ///
-    /// It could not until the undo log stopped being rollback-specific: WAL
-    /// transactions had no savepoints, so `snapshot` fell back to copying every dirty
-    /// page. Nothing in the suite covered this — when WAL restore was briefly a silent
-    /// no-op, every existing test still passed.
+    /// The undo log is shared by both modes, and nothing else in the suite exercises
+    /// the WAL side of it: with WAL restore a silent no-op, every other test passes.
     #[test]
     fn wal_mode_rolls_back_to_a_savepoint() {
         let db = TestDbFile::new("_test_savepoint_wal_restore");
@@ -4679,7 +4899,7 @@ mod savepoint_sharing_tests {
         pager.rollback_transaction().expect("rollback");
     }
 
-    /// The case removing the eager dirty-page copy could have broken: a page dirtied
+    /// The case lazy pre-image capture has to get right: a page dirtied
     /// *before* the savepoint and never written again. Its contents live only in the
     /// cache, so an undo that resets the cache would lose them.
     #[test]
@@ -4842,11 +5062,11 @@ mod no_lock_sidecar_tests {
     }
 }
 
-/// A rollback savepoint holds a shared handle to every page that was dirty when it was
-/// taken, and `run_atomically` takes one per row. If they are not released on success
-/// they accumulate for the length of the transaction: memory grows linearly in rows,
-/// and — because the handles are shared — the page cache can never reclaim a buffer,
-/// so every page write allocates a fresh zeroed 4 KiB one.
+/// A rollback savepoint holds shared handles to the pre-images it has captured, and
+/// `run_atomically` takes one per row. If they are not released on success they
+/// accumulate for the length of the transaction: memory grows linearly in rows, and —
+/// because the handles are shared — displaced pages' buffers never return to the
+/// pool, so page writes allocate fresh zeroed 4 KiB ones.
 mod savepoint_release_tests {
     use crate::catalog::CatalogEngine;
     use crate::test_utils::TestDbFile;
@@ -4876,8 +5096,8 @@ mod savepoint_release_tests {
 
     /// The property is that the count does not grow with rows, not that it is zero:
     /// one savepoint stays outstanding for the statement in progress, which is
-    /// bounded. Before releasing on success it was two per row — 401 held after 200
-    /// rows, which is what this fails with if the release in `CatalogEngine::
+    /// bounded. Without the release on success it is two per row — 401 held after
+    /// 200 rows, which is what this fails with if the release in `CatalogEngine::
     /// run_atomically` is removed.
     ///
     /// It does *not* cover the matching release in `ByteTreeStore::run_atomically`:
@@ -4901,7 +5121,8 @@ mod savepoint_release_tests {
     }
 }
 
-/// Diagnostic: at what size does per-page integrity checking silently switch off?
+/// Diagnostic: does per-page integrity checking ever silently switch off as the
+/// database grows? A checksum map held in one metadata page would, at 685 pages.
 /// `cargo test --release checksum_cliff -- --ignored --nocapture`
 mod checksum_cliff_probe {
     use crate::storage::{JournalMode, Page, Pager};
@@ -4983,7 +5204,7 @@ mod page_trailer_tests {
         );
     }
 
-    /// The case the central map could not cover past 685 pages: a byte flipped on
+    /// The case a central checksum map could not cover past 685 pages: a byte flipped on
     /// disk, in a page nothing has cached.
     #[test]
     fn a_flipped_byte_on_disk_fails_its_trailer() {

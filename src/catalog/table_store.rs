@@ -151,8 +151,8 @@ where
 /// Streams a table's row ids without decoding any records.
 ///
 /// The row id is the tree key, so answering "which rows are there" never needs to
-/// look at a row's value at all. Callers that went through [`visit_rows`] for this
-/// decoded every column of every row and then discarded all of them.
+/// look at a row's value at all. Going through [`visit_rows`] for this would decode
+/// every column of every row and then discard all of them.
 pub(crate) fn visit_row_ids<F>(
     engine: &mut CatalogEngine,
     table_name: &str,

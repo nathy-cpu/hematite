@@ -739,6 +739,35 @@ mod connection_tests {
         Ok(())
     }
 
+    /// Savepoints nest: releasing one releases every savepoint created after it, and
+    /// their changes stay in the transaction rather than becoming undoable on their own.
+    #[test]
+    fn releasing_a_savepoint_releases_the_ones_inside_it() -> Result<()> {
+        let db = TestDbFile::new("_test_release_savepoint_nested");
+        let mut conn = Connection::new(db.path())?;
+
+        conn.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);")?;
+        conn.execute("BEGIN;")?;
+        conn.execute("SAVEPOINT outer_sp;")?;
+        conn.execute("INSERT INTO users (id, name) VALUES (1, 'a');")?;
+        conn.execute("SAVEPOINT inner_sp;")?;
+        conn.execute("INSERT INTO users (id, name) VALUES (2, 'b');")?;
+        conn.execute("RELEASE SAVEPOINT outer_sp;")?;
+
+        let err = conn
+            .execute("ROLLBACK TO SAVEPOINT inner_sp;")
+            .expect_err("inner_sp was released with outer_sp");
+        assert!(err.to_string().contains("does not exist"), "{err}");
+
+        // A savepoint name is free again once released.
+        conn.execute("SAVEPOINT inner_sp;")?;
+        conn.execute("COMMIT;")?;
+        assert_eq!(count_rows(&mut conn, "users")?, 2);
+
+        conn.close()?;
+        Ok(())
+    }
+
     #[test]
     fn test_alter_table_add_and_drop_constraints() -> Result<()> {
         let db = TestDbFile::new("_test_alter_table_add_and_drop_constraints");
@@ -2626,17 +2655,6 @@ mod connection_tests {
         Ok(())
     }
 
-    /// A connection opened before another one changed the schema still sees the
-    /// change.
-    ///
-    /// `refresh_from_storage` runs before every statement and exists for exactly
-    /// this. It rebuilds the schema by re-reading the header page, re-reading the
-    /// runtime metadata and deserialising every `Table` and `Column` out of the
-    /// stored blob, and it now skips all of that when the storage layer's
-    /// durable-state token says nothing has been committed since. The token has to
-    /// move for another process's commit too, and it is the read scope opened just
-    /// above the check that notices one — this test is what holds that ordering in
-    /// place. Nothing else in the suite reads a second connection's DDL.
     /// A table keyed by a single integer column stores its rows under that key and
     /// keeps no separate index for it.
     ///
@@ -2672,8 +2690,8 @@ mod connection_tests {
         Ok(())
     }
 
-    /// Everything a primary key has to do, on a table that no longer has an index
-    /// for it: find a row, refuse a duplicate, move a row when the key changes, and
+    /// Everything a primary key has to do, on a table that keeps no index for it:
+    /// find a row, refuse a duplicate, move a row when the key changes, and
     /// remove it.
     #[test]
     fn an_aliased_primary_key_behaves_like_a_primary_key() -> Result<()> {
@@ -2782,6 +2800,17 @@ mod connection_tests {
         Ok(())
     }
 
+    /// A connection opened before another one changed the schema still sees the
+    /// change.
+    ///
+    /// `refresh_from_storage` runs before every statement outside a transaction and
+    /// exists for exactly this. It rebuilds the schema by re-reading the header page,
+    /// re-reading the runtime metadata and deserialising every `Table` and `Column`
+    /// out of the stored blob, and it skips all of that when the storage layer's
+    /// durable-state token says nothing has been committed since. The token has to
+    /// move for another connection's commit too, and it is the read scope opened
+    /// just above the check that notices one — this test is what holds that ordering
+    /// in place. Nothing else in the suite reads a second connection's DDL.
     #[test]
     fn a_connection_sees_a_table_another_one_created() -> Result<()> {
         let db = TestDbFile::new("_test_connection_sees_foreign_ddl");
@@ -5129,10 +5158,10 @@ mod interface_tests {
         // Create table
         db.execute("CREATE TABLE test (id INT PRIMARY KEY, name TEXT);")?;
 
-        // Prepare statement with actual values instead of placeholders for this simplified implementation
+        // No placeholders: a statement with nothing to bind executes as-is.
+        // `test_hematite_prepare_with_parameters` covers binding.
         let mut stmt = db.prepare("INSERT INTO test (id, name) VALUES (1, 'test');")?;
 
-        // Note: This is a simplified implementation - real prepared statements would support parameters
         let result = stmt.execute(&mut db.connection)?;
         assert_eq!(result.rows().len(), 0);
 
@@ -5294,6 +5323,87 @@ mod interface_tests {
         assert!(script_is_complete("SELECT 1;")?);
         assert!(!script_is_complete("SELECT 1; INSERT INTO logs (id")?);
         assert!(!script_is_complete("SELECT 1")?);
+        Ok(())
+    }
+
+    /// A semicolon inside a literal does not end a statement, and an unterminated
+    /// literal is a statement still being typed rather than an error — the REPL
+    /// propagates what this returns, so an `Err` here would end the session.
+    #[test]
+    fn test_script_is_complete_ignores_semicolons_inside_literals() -> Result<()> {
+        assert!(script_is_complete("SELECT 'a;b';")?);
+        assert!(script_is_complete("SELECT `odd;name` FROM t;")?);
+        assert!(script_is_complete(r"SELECT 'it\'s;done';")?);
+        assert!(script_is_complete("SELECT 'it''s;done';")?);
+        assert!(script_is_complete("INSERT INTO t (b) VALUES (X'AB;');")?);
+
+        assert!(!script_is_complete("SELECT 'a;b")?);
+        assert!(!script_is_complete("SELECT `a;b")?);
+        assert!(!script_is_complete("SELECT 'a'';")?);
+        Ok(())
+    }
+
+    /// The byte scanner must answer exactly what lexing would answer.
+    ///
+    /// It scans bytes instead of tokenizing the buffer, so the risk is that its idea
+    /// of where a literal ends drifts from the lexer's. This recomputes the answer
+    /// from a real token stream and compares, over every shape whose escapes differ
+    /// between the two.
+    #[test]
+    fn test_script_is_complete_agrees_with_the_lexer() -> Result<()> {
+        let corpus = [
+            "SELECT 1;",
+            "SELECT 1",
+            "SELECT 1;;",
+            "; SELECT 1;",
+            "SELECT 'a;b';",
+            "SELECT 'a;b'",
+            "SELECT 'it''s';",
+            r"SELECT 'it\'s';",
+            r"SELECT 'trailing\\';",
+            "SELECT `odd;name` FROM t;",
+            "SELECT `back``tick` FROM t;",
+            "INSERT INTO t (b) VALUES (X'DEADBEEF');",
+            "CREATE TABLE t (id INT PRIMARY KEY); INSERT INTO t (id) VALUES (1);",
+            "CREATE TABLE t (id INT PRIMARY KEY); INSERT INTO t (id) VALUES (1",
+            "UPDATE t SET a = 'x;y' WHERE id = 1;  ",
+            "SELECT '\u{e9}t\u{e9};';",
+        ];
+
+        for sql in corpus {
+            let tokens = crate::parser::tokenize_sql(sql).expect("corpus entry lexes");
+            let mut complete = false;
+            let mut pending = false;
+            for token in &tokens {
+                if token.kind == crate::parser::lexer::TokenKind::Semicolon {
+                    if pending {
+                        complete = true;
+                        pending = false;
+                    }
+                } else {
+                    pending = true;
+                }
+            }
+            let from_tokens = complete && !pending;
+            assert_eq!(
+                script_is_complete(sql)?,
+                from_tokens,
+                "scanner disagreed with the lexer on {sql:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Whitespace and empty statements are not statements.
+    #[test]
+    fn test_script_is_complete_ignores_empty_statements() -> Result<()> {
+        assert!(!script_is_complete("")?);
+        assert!(!script_is_complete("   \n  ")?);
+        assert!(!script_is_complete(";")?);
+        assert!(!script_is_complete(";;  ;")?);
+        assert!(script_is_complete("SELECT 1;;")?);
+        assert!(script_is_complete("SELECT 1;  \n ")?);
+        assert!(script_is_complete("; SELECT 1;")?);
         Ok(())
     }
 }
@@ -5537,8 +5647,8 @@ mod limit_pushdown_tests {
         // `half` is 0 for the first ten rows and 1 for the rest, deliberately *not*
         // interleaved: a short prefix of the table sees only one of its two values.
         // A cycling column cannot catch a broken DISTINCT guard, because the first
-        // few rows already cover every distinct value — which is exactly the trap an
-        // earlier version of this test fell into.
+        // few rows already cover every distinct value, so the test would pass with
+        // the guard removed.
         let values: Vec<String> = (1..=20)
             .map(|id| format!("({id},{},{})", id % 5, i32::from(id > 10)))
             .collect();
@@ -5822,6 +5932,110 @@ mod direct_projection_tests {
 
         let result = conn.execute("SELECT id FROM t LIMIT 1 OFFSET 1;")?;
         assert_eq!(result.rows(), vec![vec![Value::Integer(2)]]);
+        Ok(())
+    }
+}
+
+mod rowid_tests {
+    use crate::catalog::Value;
+    use crate::sql::Connection;
+    use crate::test_utils::TestDbFile;
+    use crate::Result;
+
+    /// A table keyed by text, so `rowid` is a hidden column rather than an alias for
+    /// the key. Row ids are assigned 1 and 2 in insertion order.
+    fn seeded(name: &str) -> Result<(Connection, TestDbFile)> {
+        let db = TestDbFile::new(name);
+        let mut conn = Connection::new(db.path())?;
+        conn.execute("CREATE TABLE u (name TEXT PRIMARY KEY, age INT);")?;
+        conn.execute("INSERT INTO u (name, age) VALUES ('x', 1), ('y', 2);")?;
+        Ok((conn, db))
+    }
+
+    /// The lookup satisfies `rowid = n` and nothing else, so the rest of `WHERE` still
+    /// has to be checked against the row it finds.
+    #[test]
+    fn a_rowid_lookup_applies_the_rest_of_the_where_clause() -> Result<()> {
+        let (mut conn, _db) = seeded("_test_rowid_lookup_filters")?;
+
+        let result = conn.execute("SELECT name FROM u WHERE rowid = 1 AND age = 99;")?;
+        assert!(result.rows().is_empty(), "age = 99 must still filter");
+
+        let result = conn.execute("SELECT name FROM u WHERE rowid = 1 AND age = 1;")?;
+        assert_eq!(result.rows(), vec![vec![Value::Text("x".to_string())]]);
+
+        let result = conn.execute("SELECT name FROM u WHERE ROWID = 2 AND name = 'y';")?;
+        assert_eq!(result.rows(), vec![vec![Value::Text("y".to_string())]]);
+        Ok(())
+    }
+
+    /// The same when `rowid` aliases an integer primary key.
+    #[test]
+    fn a_rowid_lookup_on_an_aliased_key_applies_the_rest_of_the_where_clause() -> Result<()> {
+        let db = TestDbFile::new("_test_rowid_alias_lookup_filters");
+        let mut conn = Connection::new(db.path())?;
+        conn.execute("CREATE TABLE t (id INT PRIMARY KEY, name TEXT);")?;
+        conn.execute("INSERT INTO t (id, name) VALUES (1, 'a'), (2, 'b');")?;
+
+        let result = conn.execute("SELECT id FROM t WHERE rowid = 1 AND name = 'zz';")?;
+        assert!(result.rows().is_empty());
+        Ok(())
+    }
+
+    /// A mutation's rows are evaluated against `WHERE` too, and their values do not
+    /// carry the row id, so naming it has to bind the row's own id in.
+    #[test]
+    fn update_and_delete_can_name_the_rowid() -> Result<()> {
+        let (mut conn, _db) = seeded("_test_rowid_mutations")?;
+
+        assert_eq!(
+            conn.execute("UPDATE u SET age = 5 WHERE rowid = 1;")?
+                .affected_rows,
+            1
+        );
+        // `name = 'y'` makes this a primary-key lookup; `rowid` is still checked.
+        assert_eq!(
+            conn.execute("DELETE FROM u WHERE name = 'y' AND rowid = 99;")?
+                .affected_rows,
+            0
+        );
+        assert_eq!(
+            conn.execute("DELETE FROM u WHERE name = 'y' AND rowid = 2;")?
+                .affected_rows,
+            1
+        );
+
+        let result = conn.execute("SELECT name, age FROM u;")?;
+        assert_eq!(
+            result.rows(),
+            vec![vec![Value::Text("x".to_string()), Value::Integer(5)]]
+        );
+        Ok(())
+    }
+
+    /// A real column named `rowid` is just a column, and the planner must not treat an
+    /// equality on it as a row-id lookup.
+    #[test]
+    fn a_real_rowid_column_shadows_the_hidden_one() -> Result<()> {
+        let db = TestDbFile::new("_test_rowid_real_column");
+        let mut conn = Connection::new(db.path())?;
+        conn.execute("CREATE TABLE r (k TEXT PRIMARY KEY, rowid INT);")?;
+        conn.execute("INSERT INTO r (k, rowid) VALUES ('a', 2), ('b', 1);")?;
+
+        let result = conn.execute("SELECT k FROM r WHERE rowid = 1;")?;
+        assert_eq!(result.rows(), vec![vec![Value::Text("b".to_string())]]);
+        Ok(())
+    }
+
+    /// A select-list column that does not resolve is an error. Skipping it left every
+    /// row one value short, so two one-column rows came back as one two-column row.
+    #[test]
+    fn an_unresolvable_projected_column_is_an_error_not_a_short_row() -> Result<()> {
+        let (mut conn, _db) = seeded("_test_rowid_projection")?;
+        let err = conn
+            .execute("SELECT rowid, name FROM u;")
+            .expect_err("rowid is not a readable column");
+        assert!(err.to_string().contains("rowid"), "unexpected error: {err}");
         Ok(())
     }
 }

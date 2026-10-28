@@ -1,13 +1,13 @@
 //! Query planning and optimization
 
 use crate::catalog::TableMetadataMap;
-use crate::catalog::{Schema, Table, Value};
+use crate::catalog::{Schema, Table};
 use crate::error::Result;
 use crate::parser::ast::*;
 use crate::query::logest::LogEst;
 use crate::query::optimizer::QueryOptimizer;
 pub use crate::query::plan::*;
-use crate::query::predicate::extract_literal_equalities;
+use crate::query::predicate::{extract_literal_equalities, rowid_lookup};
 use crate::query::rewrite::rewrite_select;
 use crate::query::validation::validate_statement;
 use crate::HematiteError;
@@ -48,13 +48,23 @@ impl QueryPlanner {
 
     pub fn plan(&self, statement: Statement) -> Result<QueryPlan> {
         validate_statement(&statement, &self.catalog)?;
+        self.plan_validated(statement)
+    }
 
+    /// Plans a statement the caller has already validated.
+    ///
+    /// The one caller is the correlated-subquery path, which plans the *same* subquery
+    /// once per row of the outer query, differing only in which literals were
+    /// substituted for outer column references. Validation looks at column references
+    /// and structure and never at a literal's value, so the first row's answer holds
+    /// for every row after it — and validation is half of what planning costs.
+    pub fn plan_validated(&self, statement: Statement) -> Result<QueryPlan> {
         let optimizer = QueryOptimizer::from_schema(&self.catalog);
         let optimized_stmt = optimizer.optimize_statement(statement)?;
 
-        // AST-level structural rewrites (BETWEEN→range, OR→IN, HAVING→WHERE,
-        // subquery ORDER BY removal). These normalise the tree before the
-        // planner enumerates access paths.
+        // AST-level structural rewrites (HAVING→WHERE promotion, ORDER BY removal
+        // in FROM-clause subqueries). These normalise the tree before the planner
+        // enumerates access paths.
         let optimized_stmt = match optimized_stmt {
             Statement::Select(mut select) => {
                 rewrite_select(&mut select);
@@ -107,14 +117,12 @@ impl QueryPlanner {
     fn plan_select(&self, statement: SelectStatement) -> Result<QueryPlan> {
         // Analyze the query to determine optimal execution strategy
         let analysis = self.analyze_select(&statement)?;
-        let node = self.build_select_plan_node(&statement, &analysis);
-        let access_path = node.access_path.clone();
+        let access_path = self.choose_access_path(&analysis);
 
         // Estimate cost (simplified cost model)
         let estimated_cost = self.estimate_select_cost(&analysis);
 
         Ok(QueryPlan {
-            node: PlanNode::Select(node),
             program: ExecutionProgram::Select {
                 statement,
                 access_path,
@@ -131,13 +139,8 @@ impl QueryPlanner {
             InsertSource::Select(_) => 1,
         };
         let estimated_cost = LogEst::from_count(row_count as u64);
-        let node = PlanNode::Insert(InsertPlanNode {
-            table_name: statement.table.clone(),
-            row_count,
-        });
 
         Ok(QueryPlan {
-            node,
             program: ExecutionProgram::Insert { statement },
             estimated_cost,
             select_analysis: None,
@@ -145,11 +148,7 @@ impl QueryPlanner {
     }
 
     fn plan_create(&self, statement: CreateStatement) -> Result<QueryPlan> {
-        let node = PlanNode::Create(CreatePlanNode {
-            table_name: statement.table.clone(),
-            column_count: statement.columns.len(),
-        });
-        Ok(self.simple_plan(node, ExecutionProgram::Create { statement }))
+        Ok(self.simple_plan(ExecutionProgram::Create { statement }))
     }
 
     fn plan_update(&self, statement: UpdateStatement) -> Result<QueryPlan> {
@@ -164,12 +163,6 @@ impl QueryPlanner {
             .map(|analysis| self.choose_access_path(analysis))
             .unwrap_or(SelectAccessPath::JoinScan);
         let assignment_count = statement.assignments.len();
-        let node = PlanNode::Update(UpdatePlanNode {
-            table_name: statement.table.clone(),
-            assignment_count,
-            has_filter: statement.where_clause.is_some(),
-            access_path: access_path.clone(),
-        });
         let estimated_cost = if matches!(access_path, SelectAccessPath::JoinScan) {
             self.catalog
                 .get_table_by_name(&statement.table)
@@ -186,7 +179,6 @@ impl QueryPlanner {
         };
 
         Ok(QueryPlan {
-            node,
             program: ExecutionProgram::Update {
                 statement,
                 access_path,
@@ -207,11 +199,6 @@ impl QueryPlanner {
             .as_ref()
             .map(|analysis| self.choose_access_path(analysis))
             .unwrap_or(SelectAccessPath::JoinScan);
-        let node = PlanNode::Delete(DeletePlanNode {
-            table_name: statement.table.clone(),
-            has_filter: statement.where_clause.is_some(),
-            access_path: access_path.clone(),
-        });
         let estimated_cost = if matches!(access_path, SelectAccessPath::JoinScan) {
             self.catalog
                 .get_table_by_name(&statement.table)
@@ -225,7 +212,6 @@ impl QueryPlanner {
         };
 
         Ok(QueryPlan {
-            node,
             program: ExecutionProgram::Delete {
                 statement,
                 access_path,
@@ -236,105 +222,26 @@ impl QueryPlanner {
     }
 
     fn plan_drop(&self, statement: DropStatement) -> Result<QueryPlan> {
-        let node = PlanNode::Drop(DropPlanNode {
-            table_name: statement.table.clone(),
-        });
-        Ok(self.simple_plan(node, ExecutionProgram::Drop { statement }))
+        Ok(self.simple_plan(ExecutionProgram::Drop { statement }))
     }
 
     fn plan_alter(&self, statement: AlterStatement) -> Result<QueryPlan> {
-        let node = PlanNode::Alter(AlterPlanNode {
-            table_name: statement.table.clone(),
-        });
-        Ok(self.simple_plan(node, ExecutionProgram::Alter { statement }))
+        Ok(self.simple_plan(ExecutionProgram::Alter { statement }))
     }
 
     fn plan_create_index(&self, statement: CreateIndexStatement) -> Result<QueryPlan> {
-        let node = PlanNode::CreateIndex(CreateIndexPlanNode {
-            table_name: statement.table.clone(),
-            index_name: statement.index_name.clone(),
-            column_count: statement.columns.len(),
-        });
-        Ok(self.simple_plan(node, ExecutionProgram::CreateIndex { statement }))
+        Ok(self.simple_plan(ExecutionProgram::CreateIndex { statement }))
     }
 
     fn plan_drop_index(&self, statement: DropIndexStatement) -> Result<QueryPlan> {
-        let node = PlanNode::DropIndex(DropIndexPlanNode {
-            table_name: statement.table.clone(),
-            index_name: statement.index_name.clone(),
-        });
-        Ok(self.simple_plan(node, ExecutionProgram::DropIndex { statement }))
+        Ok(self.simple_plan(ExecutionProgram::DropIndex { statement }))
     }
 
-    fn simple_plan(&self, node: PlanNode, program: ExecutionProgram) -> QueryPlan {
+    fn simple_plan(&self, program: ExecutionProgram) -> QueryPlan {
         QueryPlan {
-            node,
             program,
             estimated_cost: LogEst(0),
             select_analysis: None,
-        }
-    }
-
-    fn build_select_plan_node(
-        &self,
-        statement: &SelectStatement,
-        analysis: &SelectAnalysis,
-    ) -> SelectPlanNode {
-        let access_path = self.choose_access_path(analysis);
-
-        let projection = if statement
-            .columns
-            .iter()
-            .any(|item| matches!(item, SelectItem::Wildcard))
-        {
-            SelectProjection::Wildcard
-        } else if let Some(item) = statement.columns.first() {
-            match item {
-                SelectItem::CountAll => SelectProjection::CountAll,
-                SelectItem::Aggregate { function, column } => SelectProjection::Aggregate {
-                    function: *function,
-                    column: column.clone(),
-                },
-                SelectItem::Expression(_) => SelectProjection::Expressions(statement.columns.len()),
-                _ => SelectProjection::Columns(
-                    statement
-                        .columns
-                        .iter()
-                        .filter_map(|item| match item {
-                            SelectItem::Column(name) => {
-                                Some(SelectStatement::column_reference_name(name).to_string())
-                            }
-                            _ => None,
-                        })
-                        .collect(),
-                ),
-            }
-        } else {
-            SelectProjection::Columns(Vec::new())
-        };
-
-        SelectPlanNode {
-            table_name: analysis.table_name.clone(),
-            source_count: analysis.source_count,
-            access_path,
-            projection,
-            distinct: statement.distinct,
-            has_filter: statement.where_clause.is_some(),
-            order_by_columns: statement
-                .order_by
-                .iter()
-                .map(|item| item.column.clone())
-                .collect(),
-            limit: statement.limit,
-            offset: statement.offset,
-        }
-    }
-
-    fn extract_rowid_lookup_where(&self, where_clause: &Option<WhereClause>) -> Option<u64> {
-        let equalities = extract_literal_equalities(where_clause.as_ref()?)?;
-        match equalities.get("rowid") {
-            Some(Value::Integer(v)) if *v >= 0 => Some(*v as u64),
-            _ => None,
         }
     }
 
@@ -398,7 +305,9 @@ impl QueryPlanner {
             HematiteError::ParseError(format!("Table '{}' not found", table_name))
         })?;
 
-        let rowid_lookup = self.extract_rowid_lookup_where(where_clause);
+        let rowid_lookup = where_clause
+            .as_ref()
+            .and_then(|where_clause| rowid_lookup(where_clause, table));
 
         // Analyze WHERE clause for index usage opportunities
         let usable_indexes = self.analyze_where_clause(where_clause, table)?;
@@ -522,9 +431,9 @@ impl QueryPlanner {
                         LogEst(0)
                             - LogEst::from_count(self.estimate_table_rows(table).max(1) as u64)
                     } else if index.column_indices.len() > 1 {
-                        LogEst(-17) // ~0.02
+                        LogEst(-56) // ~0.02
                     } else {
-                        LogEst(-10) // ~0.1
+                        LogEst(-33) // ~0.1
                     },
                 });
             }
@@ -794,7 +703,7 @@ impl QueryPlanner {
                 let rows = LogEst::from_count(analysis.estimated_rows as u64);
                 let sel = self
                     .secondary_index_selectivity(analysis, index_name)
-                    .unwrap_or(LogEst(-10));
+                    .unwrap_or(LogEst(-33)); // ~0.1, as for a single-column index
                 let result = rows + sel;
                 if result.0 < 0 {
                     LogEst(0)

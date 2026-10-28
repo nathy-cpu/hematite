@@ -1,151 +1,119 @@
 # Query Execution Walkthrough
 
-This document traces the complete lifecycle of a SQL query inside the Hematite database engine. By following a single query from raw text to physical data retrieval, you will see how the different architectural layers interact.
+This document traces one SQL query through the Hematite engine, from raw text to the rows it returns, naming the function that does each step so you can follow along in the code.
 
-We will trace the execution of this query:
+We will trace this query:
+
 ```sql
 SELECT name, age FROM users WHERE age > 18 ORDER BY age;
+```
+
+against a table with no index on `age`:
+
+```sql
+CREATE TABLE users (id INT PRIMARY KEY, name TEXT, age INT);
 ```
 
 ---
 
 ## 1. Subsystem Execution Path
 
-The query travels down the following layer pipeline:
-
 ```mermaid
 flowchart TD
-    SQL["Client SQL Casing & Lexing"]
-    Parser["Parser: Hand-written AST construction"]
-    Validator["Validation: Schema lookup & Type checking"]
-    Optimizer["Optimizer: Logical rewrite & fold"]
-    Planner["Planner: Volcano physical plan compilation"]
-    Executor["Executor: Pull-based iterator execution"]
-    Catalog["Catalog: Binary record deserialization"]
-    BTree["B-Tree: Leaf page cursor scan"]
-    Pager["Pager: Memory buffer page cache"]
+    SQL["SQL text"]
+    Lexer["Lexer: span tokens"]
+    Parser["Parser: arena Ast"]
+    Bridge["Bridge: owned Statement"]
+    Validator["Validation: names & bindings"]
+    Optimizer["Optimizer: constant folding"]
+    Rewrite["Rewrite: structural normalisation"]
+    Planner["Planner: access path & cost"]
+    Executor["Executor: materialise, filter, sort, project"]
+    Catalog["Catalog: record decode"]
+    BTree["B-Tree: leaf walk"]
+    Pager["Pager: page cache"]
 
-    SQL --> Parser
-    Parser --> Validator
-    Validator --> Optimizer
-    Optimizer --> Planner
-    Planner --> Executor
-    Executor --> Catalog
-    Catalog --> BTree
-    BTree --> Pager
+    SQL --> Lexer --> Parser --> Bridge --> Validator --> Optimizer --> Rewrite --> Planner --> Executor
+    Executor --> Catalog --> BTree --> Pager
 ```
+
+`Connection::execute` (`src/sql/connection.rs`) drives the whole thing: it parses, and `execute_statement` hands the statement to `QueryPlanner::plan`, builds an executor from the plan and runs it.
 
 ---
 
 ## 2. Phase 1: Lexing & Parsing (`src/parser`)
 
-Before the query can be executed, it must be translated from a raw string of text into a structured data representation that the compiler can understand.
+1. **Lexer (`lexer.rs`)** turns the text into tokens:
+   `SELECT`, `name`, `,`, `age`, `FROM`, `users`, `WHERE`, `age`, `>`, `18`, `ORDER`, `BY`, `age`, `;`.
+   A token is a `TokenKind` plus a byte range into the input. It owns no text, so it is `Copy` and 12 bytes.
+2. **Parser (`parser.rs`)** is hand-written recursive descent, one method per grammar rule and one per precedence level. It builds the statement into an arena (`arena.rs`): flat buffers addressed by `u32` ids, with names stored as byte ranges into the SQL itself, so a node is small and `Copy` and the tree costs a handful of allocations rather than one per node.
+   * **Keyword casing**: keywords are matched case-sensitively, so `select` lexes as an identifier. The parser notices an identifier where a keyword belongs and rejects the query with `Keyword 'select' must be capitalized as 'SELECT'`.
+3. **Bridge (`bridge.rs`)**: the query layer still reads the owned tree in `ast.rs`, so `parse_sql_statement` materialises one from the arena with `Ast::to_owned_statement`. The bridge is transitional; it goes once the query layer reads the arena directly.
 
-1. **Lexer (`lexer.rs`)**:
-   * Tokenizes the raw SQL string into a stream of tokens:
-     `SELECT`, `name`, `,`, `age`, `FROM`, `users`, `WHERE`, `age`, `>`, `18`, `ORDER`, `BY`, `age`, `;`.
-   * **Strict Casing Rule**: The lexer requires SQL keywords to be in uppercase. If it encounters `select` instead of `SELECT`, it will reject the query.
-2. **Parser (`parser.rs`)**:
-   * Consumes the token stream and builds a logical AST (Abstract Syntax Tree). Since Hematite's parser is a hand-written recursive-descent parser, it walks the syntax structures directly.
-   * The resulting AST variant is `Statement::Select` which contains a `SelectStatement` struct structured like this:
+The owned statement for our query is `Statement::Select(SelectStatement { .. })`:
 
 ```text
 SelectStatement
-├── columns: [SelectItem::Column("name"), SelectItem::Column("age")]
-├── from: TableReference::Table("users")
-├── where_clause: Some(WhereClause {
-│     conditions: [
-│       Expression::Comparison {
-│         left: Expression::Column("age"),
-│         operator: ComparisonOperator::GreaterThan,
-│         right: Expression::Literal(LiteralValue::Integer(18))
-│       }
-│     ]
-│   })
-└── order_by: [OrderByExpr { expr: Expression::Column("age"), asc: true }]
+├── columns:        [SelectItem::Column("name"), SelectItem::Column("age")]
+├── column_aliases: [None, None]
+├── from:           TableReference::Table("users", None)
+├── where_clause:   Some(WhereClause {
+│                     conditions: [
+│                       Expression::Comparison {
+│                         left:     Expression::Column("age"),
+│                         operator: ComparisonOperator::GreaterThan,
+│                         right:    Expression::Literal(LiteralValue::Integer(18)),
+│                       }
+│                     ]
+│                   })
+└── order_by:       [OrderByItem { column: "age", direction: SortDirection::Asc }]
 ```
 
----
-
-## 3. Phase 2: Schema Validation (`src/query/validation.rs`)
-
-At this stage, the AST contains only strings (e.g. `"users"`, `"name"`). The database doesn't know if these tables or columns actually exist, or if the query makes sense semantically.
-
-The **Validator** queries the relational **Catalog** to check:
-1. **Table Existence**: Does a table named `"users"` exist in the database catalog?
-2. **Column Binding**: Do columns named `"name"` and `"age"` exist inside the `"users"` table?
-3. **Type Checking**:
-   * Resolves the types of the columns from the schema definition (e.g., `name` is `TEXT`, `age` is `INT32`).
-   * Verifies that the comparison operator `>` is compatible with the types of the operands:
-     `Expression::Column("age")` (integer) `>` `LiteralValue::Integer(18)` (integer) $\to$ **Valid**.
+(`with_clause`, `group_by`, `having_clause`, `limit`, `offset` and `set_operation` are empty.)
 
 ---
 
-## 4. Phase 3: Logical Optimization (`src/query/optimizer.rs`)
+## 3. Phase 2: Validation (`src/query/validation.rs`)
 
-The **Query Optimizer** performs logical modifications on the validated AST to simplify expressions and prune redundant logic.
-* **Constant Folding**: If our query had been `WHERE age > 10 + 8`, the optimizer would fold the binary arithmetic expression `10 + 8` into the single literal `18` to save CPU cycles at runtime.
-* **Logical Identities**: Simplifies clauses (e.g. `WHERE age > 18 AND TRUE` becomes `WHERE age > 18`).
+The tree holds only names. `validate_statement`, called first thing in `QueryPlanner::plan`, checks them against the schema:
 
-In our query, the optimizer verifies that no further constant folding is needed and passes the AST to the Planner.
+1. **Table existence**: is there a table `users`?
+2. **Column binding**: do `name` and `age` resolve to exactly one source, without ambiguity?
+3. **Clause placement**: aggregates, `GROUP BY` and `HAVING` are where SQL allows them.
 
----
-
-## 5. Phase 4: Physical Planning (`src/query/planner.rs`)
-
-The **Planner** translates the logical optimized AST into a tree of **Physical Operators** (a query plan) that can be executed. It resolves the access path: should it scan a secondary index on `age` or scan the main table B-Tree?
-
-Assuming `users` has no index on `age`, the planner compiles the logical query into a **Volcano Iterator Plan**:
-
-```text
-       [ProjectionExecutor]  (emits only "name", "age")
-               │
-          [SortExecutor]     (buffers and sorts rows by "age")
-               │
-         [FilterExecutor]    (keeps rows where age > 18)
-               │
-       [TableScanExecutor]   (reads raw rows from B-Tree page cursor)
-```
+Validation does not type-check operands. `age > 18` is not checked for compatible types here; values are compared and coerced when the executor evaluates them.
 
 ---
 
-## 6. Phase 5: Query Execution (`src/query/executor.rs`)
+## 4. Phase 3: Optimization and Rewrites (`src/query/optimizer.rs`, `rewrite.rs`)
 
-Hematite executes the compiled plan using the **Volcano Iterator Model**. Control flows from the top operator downward via pull-based `next()` calls, and data rows flow upward.
+`QueryOptimizer` folds constants: had the query said `WHERE age > 10 + 8`, the operand `10 + 8` would become the literal `18`. It works on expression *operands*, not on a condition's own top level: `WHERE age > 18 AND TRUE` stays as written, and `WHERE 1 = 1` is not folded away. The module doc lists every rule.
 
-Here is the step-by-step loop execution:
+`rewrite_select` then normalises structure: it promotes `HAVING` terms that depend only on `GROUP BY` expressions or constants into `WHERE`, and drops `ORDER BY` from subqueries in `FROM`. Neither applies to our query.
 
-### Step A: Pulling the First Row
-1. The client connection calls `next()` on the top-level executor, the **ProjectionExecutor**.
-2. **ProjectionExecutor** needs a row, so it calls `next()` on its child, the **SortExecutor**.
-3. **SortExecutor** must deliver the smallest row sorted by `age`. To sort, it needs to see *all* matching rows first. Therefore, the SortExecutor enters a loop calling `next()` on its child, the **FilterExecutor**, repeatedly until the FilterExecutor returns `None`.
+---
 
-### Step B: Filtering and Scanning
-4. **FilterExecutor** calls `next()` on the **TableScanExecutor**.
-5. **TableScanExecutor** queries the **B-Tree Cursor** (`src/btree/cursor.rs`), which is currently positioned at the start of the `users` B-Tree.
-6. The B-Tree Cursor reads the current page number (starting at the B-Tree root page ID, and descending to the first leaf page). It requests the **Pager** (`src/storage/pager.rs`) to fetch these pages.
-7. The Pager checks its in-memory cache (the buffer pool). If the page is not cached, it directs the **FileManager** to read the 4096-byte page block from the disk file and load it into memory.
-8. The B-Tree Cursor reads the leaf page's **Slotted Page Cell pointers** to locate the exact offset of the first record cell on the page. It extracts the raw cell bytes:
-   `[Key Length: 2 bytes] [Value Length: 2 bytes] [Key: Row ID] [Value: Packed Columns]`
-9. The cursor returns these raw record bytes to the **TableScanExecutor**.
+## 5. Phase 4: Planning (`src/query/planner.rs`)
 
-### Step C: Record Deserialization
-10. The **TableScanExecutor** passes the raw record bytes to the **Catalog Decoder** (`src/catalog/serialization.rs`).
-11. The Decoder reads the table's schema definition and unpacks the binary byte array back into a logical `Row` struct containing typed `Value` variants:
-    `Row { columns: [Value::Integer(1), Value::Text("Alice"), Value::Integer(20)] }` (representing `rowid = 1`, `name = "Alice"`, `age = 20`).
-12. **TableScanExecutor** yields this `Row` up to the **FilterExecutor**.
+The planner chooses an access path for each source and estimates a cost in `LogEst` (a logarithmic estimate, after SQLite's). The candidates are `RowIdLookup`, `PrimaryKeyLookup`, `SecondaryIndexLookup` and `FullTableScan`; an equality on a primary key or an indexed column makes a lookup possible.
 
-### Step D: Evaluating the Predicate
-13. **FilterExecutor** evaluates the condition `age > 18` against the row:
-    `20 > 18` $\to$ **True**.
-14. The FilterExecutor yields the row up to the **SortExecutor**.
-15. This process (Steps 4–14) repeats for all records in the table. If a row fails the filter (e.g. `age = 15`), the FilterExecutor silently discards it and calls `next()` on the TableScanExecutor again.
+`age > 18` is a range on an unindexed column, so the plan is a `FullTableScan`. The result is a `QueryPlan` wrapping an `ExecutionProgram` — the optimised statement plus that access path. There is no tree of physical operators: the executor interprets the statement directly.
 
-### Step E: Sorting and Emitting
-16. Once the TableScanExecutor is exhausted and the FilterExecutor returns `None`, the **SortExecutor** has gathered all qualifying rows in memory.
-17. The SortExecutor sorts the rows in-memory by the `age` column using the sorting rules defined in `src/query/executor.rs`.
-18. The SortExecutor returns the first sorted row (e.g. `age = 19`) to the **ProjectionExecutor**.
-19. **ProjectionExecutor** extracts only the requested fields (`name` and `age`) and discards the other fields (like `rowid`).
-20. The ProjectionExecutor returns the projected row to the client connection:
-    `QueryResultRow { name: "Bob", age: 19 }`
-21. When the client calls `next()` again, the ProjectionExecutor immediately pulls the next pre-sorted row from the SortExecutor, bypassing the scan and filter stages since they have already completed.
+`EXPLAIN SELECT …` stops here and returns two rows, the plan's `PlanNode` description and its `estimated_cost`.
+
+---
+
+## 6. Phase 5: Execution (`src/query/executor.rs`)
+
+`build_executor` turns the program into a `SelectExecutor`, and `SelectExecutor::execute` runs it. Execution **materialises rather than pipelines**: each step takes a `Vec` of rows and produces the next one. `execute_body` runs these steps in order:
+
+1. **Fast path check.** `try_direct_projection` answers a plain `SELECT a, b FROM t` by decoding only the projected columns. Our query has a `WHERE` and an `ORDER BY`, so it does not qualify.
+2. **Read the source.** `materialize_filtered_rows` reads the table by its access path. For a full scan that is `CatalogEngine::read_from_table`, which walks the table B-tree's leaves in row-id order (`src/btree`, through the pager's page cache in `src/storage`), decodes each record with `src/catalog/record_codec.rs`, and returns every row as a `Vec<Value>`.
+3. **Filter.** `filter_source_rows` evaluates `age > 18` against each row and keeps the ones that pass.
+4. **Sort.** The query has an `ORDER BY` and no grouping, so the filtered rows are sorted by `age` before projection.
+5. **Project.** `project_row` keeps `name` and `age` from each row.
+6. **Window.** `apply_select_window` applies `DISTINCT`, `OFFSET` and `LIMIT`, none of which are present here.
+
+The result is a `QueryResult` (`src/query/runtime.rs`): column names plus every row's values laid end to end in one buffer. `Hematite::query` wraps it in a `ResultSet`, whose `Row`s borrow from that buffer.
+
+Had the query asked `WHERE id = 7`, or `WHERE age = 30` with an index on `age`, the planner would have chosen a lookup and step 2 would have descended the B-tree once instead of scanning it.

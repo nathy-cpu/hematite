@@ -118,7 +118,7 @@ impl Pager {
         // bytes or fails, so this does not need zeroing first.
         let buf = crate::storage::types::take_page_buffer_for_overwrite();
         // `read_page_with_buf` verifies the page against the checksum in its own
-        // trailer, so there is no map to consult here.
+        // trailer, which is the only integrity check this read needs.
         let page = Arc::new(self.file_manager.read_page_with_buf(page_id, buf)?);
         self.cache_write()?
             .put_shared_with_view(page.clone(), view_token);
@@ -145,9 +145,9 @@ impl Pager {
             cache.put(page);
             cache.mark_dirty(page_id);
             if rollback_transaction_active {
-                // New pages do not have a pre-transaction image, so they are not journaled by
-                // snapshot_original_page. Mark them as spill-eligible once the journal sync
-                // barrier has been satisfied.
+                // New pages do not have a pre-transaction image, so snapshot_original_page
+                // does not journal them; marking every written page journaled here makes
+                // those spill-eligible too, once the journal sync barrier has been satisfied.
                 cache.mark_journaled(page_id);
                 if journal_needs_sync {
                     cache.mark_need_sync(page_id);
@@ -201,6 +201,7 @@ impl Pager {
                     self.enter_error_state();
                     return Err(e);
                 }
+                crate::storage::stats::PagerStats::bump(&self.stats.spills);
             }
             self.cache_mut()?.clear_dirty(page_id);
             // After clearing dirty, the page becomes a clean cache entry that
@@ -236,8 +237,11 @@ impl Pager {
             ));
         }
 
-        // Before staging: the metadata page carries the checksum map, so the map has
-        // to describe what is about to be written rather than what was there before.
+        // Staged first. Staging writes the free-page state into the metadata page,
+        // which journals that page's pre-image and dirties it; both have to happen
+        // before the commit intent is declared, so the intent covers the page's final
+        // bytes, and before the journal sync, so its pre-image is durable before the
+        // page is overwritten.
         self.stage_persisted_state_page()?;
         if self.active_rollback_transaction().is_some() {
             if declare_commit_intent {

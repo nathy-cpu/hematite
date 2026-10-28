@@ -15,16 +15,16 @@
 //! internal tables that are queried just like normal user tables).
 //!
 //! ### Schema Serialization
-//! In Hematite, all catalog definitions are serialized into bytes and stored within the **Schema B-Tree**
-//! rooted at the Page ID specified in the database header (on Page 0). When the database is opened, the catalog
-//! coordinator traverses this B-Tree, reads the serialized metadata rows, and reconstructs the active in-memory
-//! schema representation (`Schema` registry).
+//! In Hematite, the whole `Schema` is serialized into one blob, stored under the key `__schema__` in the
+//! **Schema B-Tree** rooted at the Page ID specified in the database header (on Page 0). When the database is
+//! opened, the catalog reads that blob and reconstructs the active in-memory schema representation (`Schema`
+//! registry); see `schema_store`.
 //!
 //! ### Transactional DDL (Data Definition Language)
 //! Altering a database structure (creating/dropping tables, altering columns, adding indexes) must be transactional:
 //! 1. **Begin**: When a transaction starts, the catalog captures a **Snapshot** of the in-memory schema state.
-//! 2. **Mutate**: Structural changes update both the in-memory registry and write new serialized rows to the
-//!    durable schema B-Tree.
+//! 2. **Mutate**: Structural changes update the in-memory registry and rewrite the serialized schema blob in
+//!    the durable schema B-Tree.
 //! 3. **Commit**: The transaction finishes, making the new schema pointer in the database header durable.
 //! 4. **Rollback**: If the transaction aborts, the catalog discards the in-flight schema mutations and reinstates
 //!    the saved snapshot, restoring both in-memory schema structures and the underlying storage engines to the
@@ -49,7 +49,7 @@
 //!    |    * Performs constraint validations.    |
 //!    +--------------------+---------------------+
 //!                         |
-//!                Write Catalog Records
+//!                Write Schema Blob
 //!                         |
 //!                         v
 //!    +--------------------+---------------------+
@@ -72,7 +72,7 @@
 //!    CREATE TABLE users (id INT, name TEXT)
 //!         v
 //!   Active Schema modified in-memory (Schema V2)
-//!   Metadata rows written to Schema B-Tree
+//!   Schema blob rewritten in Schema B-Tree
 //!         |
 //!   +-----+-----+
 //!   |           |
@@ -116,23 +116,23 @@ pub struct Catalog {
     pub(crate) engine: CatalogEngine,
     /// Shared, so handing it to the planner costs a refcount bump.
     ///
-    /// Every statement takes a copy of the whole schema to plan against, and a
-    /// `Schema` owns a `Table` per table and a `Column` per column: 56 allocations
-    /// per point lookup on a one-table fixture, 18.7 % of that workload. DDL is the
-    /// only thing that writes it, and `Arc::make_mut` copies once there instead.
+    /// Every statement plans against the whole schema. A deep copy of it per
+    /// statement — a `Table` per table, a `Column` per column — measured 56
+    /// allocations per point lookup on a one-table fixture, 18.7 % of that workload.
+    /// DDL is the only thing that writes it, and `Arc::make_mut` copies once there
+    /// instead.
     pub(crate) schema: Arc<Schema>,
     pub(crate) schema_root: u32,
     pub(crate) schema_dirty: bool,
     /// The storage layer's durable-state token as of the last successful
     /// [`Catalog::refresh_from_storage`].
     ///
-    /// `refresh_from_storage` runs on every statement, and rebuilt the schema by
+    /// `refresh_from_storage` runs on every statement. Rebuilding the schema there —
     /// reading the header page, re-reading the runtime metadata, and deserialising
-    /// every `Table` and `Column` out of the stored schema blob — on a point-lookup
-    /// workload that was 19 of the 261 allocations each query cost, all of it
-    /// re-deriving something that had not changed. If the token still matches, no
-    /// commit has landed since, from this process or another, and the schema in
-    /// hand is current.
+    /// every `Table` and `Column` out of the stored schema blob — measured 19 of the
+    /// 261 allocations a point lookup cost, all of it re-deriving something that had
+    /// not changed. If the token still matches, no commit has landed since, from this
+    /// process or another, and the schema in hand is current.
     loaded_state_token: Option<u64>,
 }
 
@@ -649,7 +649,7 @@ impl Catalog {
     /// Installs a schema the caller already holds a handle to.
     ///
     /// A DDL statement's executor works on its own copy and hands it back; that
-    /// copy is an `Arc` now, so installing it moves a pointer.
+    /// copy is an `Arc`, so installing it is a refcount bump.
     pub fn replace_shared_schema(&mut self, schema: Arc<Schema>) -> Result<()> {
         self.run_atomically(|catalog| {
             catalog.schema = Arc::clone(&schema);

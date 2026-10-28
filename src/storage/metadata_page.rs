@@ -1,3 +1,16 @@
+//! The container on reserved page 1, shared by the pager and the catalog.
+//!
+//! ```text
+//! 0..4    magic `HMD1`
+//! 4..8    version (u32 LE, 1)
+//! 8..12   pager section length (u32 LE)
+//! 12..16  catalog section length (u32 LE)
+//! 16..    pager section, then catalog section; must end by USABLE_PAGE_SIZE
+//! ```
+//!
+//! Each owner rewrites the whole page but carries the other's section across
+//! unchanged. A page whose usable bytes are all zero holds neither section.
+
 use crate::error::{HematiteError, Result};
 use crate::storage::{PAGE_SIZE, USABLE_PAGE_SIZE};
 
@@ -40,7 +53,7 @@ fn parse_sections(page: &[u8]) -> Result<MetadataSections<'_>> {
     }
 
     // Content only: the pager stamps a checksum into the trailer of every page it
-    // writes, so a metadata page that holds nothing yet is no longer all zeros.
+    // writes, so a metadata page that holds nothing yet still has a non-zero trailer.
     if page[..USABLE_PAGE_SIZE].iter().all(|&byte| byte == 0) {
         return Ok(MetadataSections {
             pager: None,

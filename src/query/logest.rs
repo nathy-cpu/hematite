@@ -5,7 +5,8 @@
 //!
 //! Key identities:
 //!   - Multiplying quantities  → add LogEst values
-//!   - Adding quantities       → `logest_add(a, b)` ≈ log2(2^a + 2^b)
+//!   - Adding quantities       → `a.add(b)` (`LogEst::add`) ≈ log2(2^a + 2^b);
+//!     the `+` operator multiplies
 //!   - Converting back         → `to_u64()`
 
 /// Compact logarithmic cost/cardinality estimate (SQLite-style).
@@ -44,7 +45,7 @@ impl LogEst {
             y += shift as i16 * 10;
             x >>= shift;
         }
-        LogEst(FRAC[(x & 7) as usize] + y)
+        LogEst(FRAC[(x & 7) as usize] + y - 10)
     }
 
     /// Approximate `log2(2^self + 2^other)`.
@@ -68,25 +69,32 @@ impl LogEst {
     /// Convert back to an approximate integer.
     ///
     /// Faithful port of `sqlite3LogEstToInt(x)`.
+    /// A negative `LogEst` is a fraction of one, which rounds down to zero.
     pub fn to_u64(self) -> u64 {
         let x = self.0;
-        if x < 10 {
-            return if x < 0 { 0 } else { 1 };
+        if x < 0 {
+            return 0;
         }
+        // `x = 10 * e + r`, and `(r' + 8) / 8` approximates `2^(r / 10)`, so the value
+        // is `(r' + 8) * 2^(e - 3)`.
         let mut n = (x % 10) as u64;
-        let shift = (x / 10) as u32;
+        let e = (x / 10) as u32;
         if n >= 5 {
             n -= 2;
         } else if n >= 1 {
             n -= 1;
         }
-        if shift >= 64 {
-            return u64::MAX;
+        if e > 60 {
+            return i64::MAX as u64;
         }
-        (n + 8) << shift
+        if e >= 3 {
+            (n + 8) << (e - 3)
+        } else {
+            (n + 8) >> (3 - e)
+        }
     }
 
-    /// Convert from `f64` cost (for migration compatibility).
+    /// Convert from an `f64` cost, rounded to a count; zero or less is `LogEst(0)`.
     pub fn from_f64(v: f64) -> Self {
         if v <= 0.0 {
             return LogEst(0);
@@ -94,7 +102,7 @@ impl LogEst {
         Self::from_count(v.round().max(1.0) as u64)
     }
 
-    /// Convert to `f64` (for migration compatibility).
+    /// Convert to `f64`, by way of the approximate integer from `to_u64`.
     pub fn to_f64(self) -> f64 {
         self.to_u64() as f64
     }
@@ -128,12 +136,39 @@ mod tests {
 
     #[test]
     fn test_basic_conversions() {
-        // These match SQLite's actual sqlite3LogEst() output.
+        // SQLite's sqlite3LogEst() output: 10 * log2(x), rounded down.
         assert_eq!(LogEst::from_count(1).0, 0);
-        assert_eq!(LogEst::from_count(2).0, 20);
-        assert_eq!(LogEst::from_count(4).0, 30);
-        assert_eq!(LogEst::from_count(8).0, 40);
-        assert_eq!(LogEst::from_count(1024).0, 110); // 2^10: y=40 + 7*10 shifts + FRAC[0]
+        assert_eq!(LogEst::from_count(2).0, 10);
+        assert_eq!(LogEst::from_count(4).0, 20);
+        assert_eq!(LogEst::from_count(8).0, 30);
+        assert_eq!(LogEst::from_count(10).0, 33);
+        assert_eq!(LogEst::from_count(100).0, 66);
+        assert_eq!(LogEst::from_count(1000).0, 99);
+        assert_eq!(LogEst::from_count(1024).0, 100);
+        assert_eq!(LogEst::from_count(1_000_000).0, 199);
+    }
+
+    #[test]
+    fn test_to_u64_inverts_from_count() {
+        // SQLite's sqlite3LogEstToInt() output.
+        assert_eq!(LogEst(0).to_u64(), 1);
+        assert_eq!(LogEst(10).to_u64(), 2);
+        assert_eq!(LogEst(30).to_u64(), 8);
+        assert_eq!(LogEst(33).to_u64(), 10);
+        assert_eq!(LogEst(66).to_u64(), 96);
+        assert_eq!(LogEst(100).to_u64(), 1024);
+        assert_eq!(LogEst(-10).to_u64(), 0);
+
+        // Exact on powers of two, and within the table's rounding otherwise.
+        for power in 0..40u32 {
+            let count = 1u64 << power;
+            assert_eq!(LogEst::from_count(count).to_u64(), count);
+        }
+        for count in [3u64, 10, 100, 1000, 12_345, 1_000_000] {
+            let back = LogEst::from_count(count).to_u64() as f64;
+            let ratio = back / count as f64;
+            assert!((0.8..=1.1).contains(&ratio), "{count} -> {back}");
+        }
     }
 
     #[test]

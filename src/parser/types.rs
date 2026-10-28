@@ -3,7 +3,7 @@
 use std::cmp::Ordering;
 use std::fmt;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SqlTypeName {
     Int8,
     Int16,

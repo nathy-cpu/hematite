@@ -2,8 +2,8 @@
 //!
 //! These measure the primitives the rest of the engine is built on: a page-cache
 //! hit, a page write, allocation, and transaction boundaries. They run against the
-//! public `Pager` surface so they keep compiling across the storage rewrite, which
-//! is what makes a before/after comparison meaningful.
+//! public `Pager` surface rather than its internals, so they keep compiling while the
+//! pager's insides change, which is what makes a before/after comparison meaningful.
 
 use std::hint::black_box;
 
@@ -91,17 +91,16 @@ fn page_alloc_free(c: &mut Criterion) {
 /// One dirty page per transaction, measured across database sizes.
 ///
 /// The transaction does the same amount of user work at every size, so any growth
-/// across sizes is pure per-database-size overhead: today `BEGIN` writes the entire
-/// free list and checksum map into the journal, and `COMMIT` re-sorts and
-/// re-serialises both.
+/// across sizes is pure per-database-size overhead: `BEGIN` writes the entire free
+/// list into the journal header, and `COMMIT` re-encodes the persisted-state page,
+/// which carries the checksum map.
 ///
 /// A genuinely empty transaction would isolate that overhead better, but the pager
 /// rejects `begin_transaction` immediately followed by `commit_transaction` with
 /// "Illegal pager state transition from WriterLocked to WriterDbMod" — the state
 /// machine has no path for a writer that never dirtied a page. It is not reachable
 /// from SQL, because the connection layer skips the pager commit when nothing is
-/// pending, so this is an API sharp edge rather than a user-visible bug. The guard
-/// types in the rewrite remove the state machine and with it this case.
+/// pending, so this is an API sharp edge rather than a user-visible bug.
 fn single_page_txn(c: &mut Criterion) {
     let mut group = c.benchmark_group("single_page_txn");
     for pages in [64u32, 1024, 8192] {
@@ -140,13 +139,13 @@ fn bulk_txn(c: &mut Criterion) {
     });
 }
 
-/// Whole-page checksum cost, with the algorithm that was replaced kept alongside
-/// the one that replaced it. A 4 KiB page write pays this at least twice in
-/// rollback mode (page checksum plus journal record checksum), so it is a direct
-/// tax on every write.
+/// Whole-page checksum cost: the engine's XXH64 (`storage::checksum::hash32`)
+/// against byte-wise FNV-1a, the obvious simpler alternative. A 4 KiB page write
+/// pays this at least twice in rollback mode (page checksum plus journal record
+/// checksum), so it is a direct tax on every write.
 ///
-/// `fnv1a_bytewise` is the original: one multiply per byte, in four separate copies
-/// of the same loop. It is retained here purely so the swap has a number attached.
+/// `fnv1a_bytewise` does one multiply per byte. It is here so the choice of XXH64
+/// has a number attached; `storage::checksum` explains the rest of the choice.
 fn checksum_4k(c: &mut Criterion) {
     let page = vec![0x5Au8; PAGE_SIZE];
 

@@ -30,8 +30,8 @@ pub(crate) mod varint;
 
 /// Re-exported so `catalog` can checksum the database header with the same
 /// function everything else on disk uses. The layer matrix in `src/tests.rs` does
-/// not permit `catalog` to name `crate::storage` directly, and page 0 is still
-/// owned by `catalog`, so the route runs through here.
+/// not permit `catalog` to name `crate::storage` directly, and page 0 is owned by
+/// `catalog`, so the route runs through here.
 pub(crate) use crate::storage::checksum;
 pub use crate::storage::{JournalMode, PageId, PagerIntegrityReport};
 pub(crate) use bytes::ByteTreeStoreSnapshot;
@@ -43,17 +43,19 @@ pub use typed::{TypedTree, TypedTreeCursor, TypedTreeStore};
 /// Upper bound on cells per page — deliberately above what a page can physically
 /// hold, so that **bytes are what actually limit a page**, not this number.
 ///
-/// It was 100, and that was the binding constraint rather than page space: a leaf of
-/// five-small-int rows filled to 98 cells and split at 86 % full, when the bytes would
-/// have allowed ~113. Raising it took a table from 44.2 to 39.3 bytes per row, and the
-/// same fixture through SQL — where the primary-key index roughly doubles the file, and
-/// index cells are smaller so the cap bit harder — from 87.7 to 59.8.
+/// A cap of 100 binds before page space does: a leaf of five-small-int rows fills to
+/// 98 cells and splits at 86 % full, when the bytes allow ~113. Against that, 400
+/// takes a table from 44.2 to 39.3 bytes per row, and the same fixture through SQL —
+/// where the primary-key index roughly doubles the file, and index cells are smaller
+/// so the cap bites harder — from 87.7 to 59.8.
 ///
-/// The floor for a leaf cell is 2 bytes of pointer plus 4 of length prefix plus at
-/// least one key byte and an 11-byte stored-value header, so a 4088-byte page cannot
-/// hold more than ~227 cells. 400 is clear of that, which is the point: splitting is
-/// decided by `total_free_space`, and this only exists to bound the in-memory decoded
-/// vectors.
+/// A leaf cell costs 2 bytes of pointer, 4 of length prefix, its key, and its stored
+/// value, which is at least the 1-byte inline tag. A non-root leaf has 4 084 bytes
+/// past its header, so once key and stored value together reach 5 bytes (11 a cell)
+/// a page holds at most ~371 cells and bytes are what limit it. Only smaller cells —
+/// a key of 3 bytes or less with an empty value — can reach the cap first. Past that,
+/// splitting is decided by `total_free_space`, and this exists to bound the in-memory
+/// decoded vectors.
 pub const BTREE_ORDER: usize = 400;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

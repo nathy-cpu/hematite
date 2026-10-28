@@ -1,4 +1,5 @@
 use crate::storage::page_hash::PageMap;
+use crate::storage::stats::PagerStats;
 use crate::storage::{Page, PageId};
 use std::sync::Arc;
 
@@ -13,7 +14,7 @@ pub(crate) struct CachedPageMeta {
     /// Set while the entry's page is out on loan to `take_page_for_write_owned`.
     ///
     /// The placeholder left behind holds recycled bytes that no one may look at,
-    /// which the contract on that function has always said. This makes a violation
+    /// which is what the contract on that function says. This makes a violation
     /// fail an assertion in tests rather than quietly hand back another page's
     /// stale content.
     #[cfg(debug_assertions)]
@@ -30,19 +31,20 @@ struct CachedPageEntry {
     dirty_next: Option<PageId>,
 }
 
-/// Deliberately not `Clone`. Snapshots capture the dirty pages they need
-/// (see `savepoint.rs`); duplicating the whole cache copied far more than
-/// restoring requires, and the frame arena that replaces this cannot be
-/// cloned at all.
+/// Deliberately not `Clone`. Snapshots and savepoints hold shared handles to
+/// just the page images they need (see `savepoint.rs`); duplicating the whole
+/// cache would copy far more than restoring requires.
 #[derive(Debug)]
 pub(crate) struct PageCache {
     capacity: usize,
-    /// 4KB page data buffers recycled from evicted pages, reused instead of
-    /// freed/reallocated on the next page fault. Starts empty and grows
-    /// lazily with actual eviction/use -- `capacity` is only an upper bound
-    /// on cache occupancy, not the real working set, so pre-filling this to
-    /// `capacity` at construction would allocate `capacity * PAGE_SIZE`
-    /// bytes upfront regardless of how many pages a workload ever touches.
+    /// Resident pages by id. The LRU and dirty lists are threaded through the
+    /// entries' own `lru_*`/`dirty_*` links, so moving a page between positions
+    /// allocates nothing.
+    ///
+    /// Starts empty and grows with use. `capacity` bounds occupancy rather than
+    /// predicting the working set, so sizing anything to it up front would
+    /// allocate for pages a workload may never touch. Page buffers themselves are
+    /// recycled by the thread-local pool behind `Page`, not here.
     entries: PageMap<CachedPageEntry>,
     lru_head: Option<PageId>,
     lru_tail: Option<PageId>,
@@ -55,11 +57,21 @@ pub(crate) struct PageCache {
     /// a journal sync, turning spill-candidate lookup from O(n) to O(k)
     /// where k is the number of synced dirty pages.
     synced_head: Option<PageId>,
+    /// Where evictions are counted: the pager's own counters, so they reach
+    /// `Pager::stats` alongside the I/O they explain.
+    stats: Arc<PagerStats>,
 }
 
 impl PageCache {
+    /// A cache counting into stats of its own, for tests that drive one directly.
+    #[cfg(test)]
     pub(crate) fn new(capacity: usize) -> Self {
+        Self::with_stats(capacity, Arc::default())
+    }
+
+    pub(crate) fn with_stats(capacity: usize, stats: Arc<PagerStats>) -> Self {
         Self {
+            stats,
             capacity,
             entries: PageMap::default(),
             lru_head: None,
@@ -181,8 +193,8 @@ impl PageCache {
     /// Every page id the cache currently holds.
     ///
     /// For `restore_savepoint`, which has to drop pages that did not exist at the
-    /// mark. Recording them as they were written cost a hash insert per page per
-    /// live savepoint on the write path; deriving them here costs a scan on a
+    /// mark. Recording them as they were written would cost a hash insert per page
+    /// per live savepoint on the write path; deriving them here costs a scan on a
     /// path taken only when a savepoint is actually rolled back.
     pub(crate) fn resident_page_ids(&self) -> Vec<PageId> {
         self.entries.keys().copied().collect()
@@ -359,6 +371,7 @@ impl PageCache {
 
     fn evict_if_needed(&mut self, incoming_page_id: Option<PageId>) {
         if self.capacity == 0 {
+            PagerStats::add(&self.stats.evictions, self.entries.len() as u64);
             self.reset();
             return;
         }
@@ -386,6 +399,7 @@ impl PageCache {
             };
 
             self.remove(page_id);
+            PagerStats::bump(&self.stats.evictions);
         }
     }
 
@@ -485,8 +499,8 @@ impl PageCache {
     pub(crate) fn take_page_for_write_owned(&mut self, page_id: PageId) -> Page {
         self.ensure_entry(page_id);
         // Unzeroed: nothing may read this, which is what the contract above says,
-        // so the 4 KiB of zeroing was spent on bytes with no reader. It was 14 % of
-        // a delete workload.
+        // so zeroing would spend 4 KiB of writes on bytes with no reader. That
+        // zeroing measured 14 % of a delete workload.
         let placeholder = Arc::new(Page::new_for_overwrite(page_id));
         let entry = self.entries.get_mut(&page_id).expect("entry should exist");
         entry.meta.writeable = true;

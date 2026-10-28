@@ -7,8 +7,9 @@
 //!     PHASE=scan  SCANS=13 valgrind --tool=callgrind ... ./target/release/examples/wal_profile
 //!     PHASE=scan  SCANS=0  valgrind --tool=callgrind ... ./target/release/examples/wal_profile
 //!
-//! `PHASE=append` instead measures committing one row at a time, which is the WAL
-//! write path: frame append, header validation, and the visible-state publish.
+//! `PHASE=append` instead measures committing one row at a time, `SCANS * 100` of
+//! them on an empty table, which is the WAL write path: frame append, header
+//! validation, and the visible-state publish.
 
 use hematite::query::JournalMode;
 use hematite::Hematite;
@@ -17,7 +18,8 @@ const ROWS: usize = 20_000;
 
 fn main() {
     let path = ".scratch/wal_profile.db";
-    // Sidecars: `.wal`, the `.wal.readers/` lock directory, and two lock files.
+    // The pager's sidecars are `.wal` and `.journal`. Locking is in memory, so the
+    // lock names never exist and removing them is a no-op.
     let _ = std::fs::remove_dir_all(format!("{path}.wal.readers"));
     for suffix in ["", ".wal", ".wal.write.lock", ".rollback.lock", ".journal"] {
         let _ = std::fs::remove_file(format!("{path}{suffix}"));

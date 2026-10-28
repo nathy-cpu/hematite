@@ -48,6 +48,8 @@ fn main() -> hematite::Result<()> {
 ### Transactions and Savepoints
 
 ```rust
+use hematite::Hematite;
+
 fn transfer_funds(db: &mut Hematite, from: i32, to: i32, amount: f64) -> hematite::Result<()> {
     let mut tx = db.transaction()?;
 
@@ -74,15 +76,29 @@ fn transfer_funds(db: &mut Hematite, from: i32, to: i32, amount: f64) -> hematit
 ### Prepared Statements with Parameters
 
 ```rust
+use hematite::{Hematite, Value};
+
 fn find_user(db: &mut Hematite, user_id: i32) -> hematite::Result<()> {
     let mut stmt = db.prepare("SELECT name FROM users WHERE id = ?;")?;
-    
+
     // Bind parameters by index (starting at 1)
-    stmt.bind(1, hematite::Value::Integer(user_id))?;
-    
-    let result = db.execute_prepared(&mut stmt)?;
-    // ... process result
-    
+    stmt.bind(1, Value::Integer(user_id))?;
+
+    // A prepared SELECT runs against the connection and returns its rows
+    let result = stmt.query(&mut db.connection)?;
+    for row in result.rows().iter() {
+        println!("{:?}", row[0]); // each row is a `&[Value]`
+    }
+
+    Ok(())
+}
+
+fn rename_user(db: &mut Hematite, user_id: i32, name: &str) -> hematite::Result<()> {
+    let mut stmt = db.prepare("UPDATE users SET name = ? WHERE id = ?;")?;
+    stmt.bind_all(vec![Value::Text(name.to_string()), Value::Integer(user_id)])?;
+
+    // `execute_prepared` is for statements that return no rows
+    db.execute_prepared(&mut stmt)?;
     Ok(())
 }
 ```
@@ -131,12 +147,12 @@ println!("{}", results.render_ascii_table());
 ```
 
 ```text
-+------+------+---------+
-| id   | name | balance |
-+------+------+---------+
-| 1    | Ada  | 1000.50 |
-| 2    | Bob  | 250.75  |
-+------+------+---------+
++----+------+---------+
+| id | name | balance |
++----+------+---------+
+| 1  | Ada  | 1000.5  |
+| 2  | Bob  | 250.75  |
++----+------+---------+
 2 row(s)
 ```
 
@@ -151,6 +167,8 @@ Start the interactive REPL with a database file:
 ```bash
 cargo run --bin hematite_cli -- demo.db
 ```
+
+A statement runs once the input ends in a `;` outside a string literal, so it can span several lines; the prompt changes from `db >` to `... >` while one is unfinished. `.exit` or `.quit` at the `db >` prompt, or end of input, leaves the shell.
 
 ### One-off Commands
 
@@ -228,8 +246,8 @@ expect from an embedded database that are not supported yet.
 - **No generated columns**
 - **No full information-schema subsystem**
 
-None of the removed type keywords are reserved, so `date`, `char`, `enum`, and
-`binary` remain usable as ordinary column and table names.
+None of those type names are reserved words, so `date`, `char`, `enum`, and
+`binary` are usable as ordinary column and table names.
 
 ### Deployment Model
 
@@ -247,6 +265,8 @@ embedded-first design over chasing every feature found in larger database system
 - [SQL Dialect](docs/sql-dialect.md)
 - [Database Internals Glossary](docs/glossary.md)
 - [Query Execution Walkthrough](docs/query-walkthrough.md)
+- [Storage Format Specification](docs/storage-format-spec.md)
+- [Measuring Hematite](docs/performance.md)
 - [Contributing](CONTRIBUTING.md)
 
 ## Status

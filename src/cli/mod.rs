@@ -1,3 +1,9 @@
+//! Argument handling for `hematite_cli`.
+//!
+//! One argument opens the database interactively. More than one runs the rest as a
+//! single SQL script and exits; they are joined with spaces, so a shell that splits an
+//! unquoted statement into words still passes it through whole.
+
 pub(crate) enum CliMode {
     Usage,
     Interactive { db_path: String },

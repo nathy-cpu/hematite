@@ -1,18 +1,20 @@
 //! B-tree-owned representation of inline and overflow-backed values.
 //!
 //! B-tree leaf values are not stored directly as arbitrary bytes. They are wrapped in a small
-//! format that records:
-//! - the total logical payload length;
-//! - the portion stored locally in the leaf cell;
-//! - the first overflow page, if any.
-//!
-//! Layout:
+//! format, tagged by whether the value spills:
 //!
 //! ```text
-//! +------+----------------+----------------------+-------------------+
-//! | tag  | total_len (4)  | local payload bytes  | overflow page id  |
-//! +------+----------------+----------------------+-------------------+
+//! inline   (tag 0): +-----+---------------------------------------------------------------+
+//!                   | tag | payload bytes                                                 |
+//!                   +-----+---------------------------------------------------------------+
+//!
+//! overflow (tag 1): +-----+---------------+----------------------+---------------------+
+//!                   | tag | total_len (4) | overflow page id (4) | local payload bytes |
+//!                   +-----+---------------+----------------------+---------------------+
 //! ```
+//!
+//! Both integers are little-endian. Neither form stores the local payload length: it is
+//! the cell's own value length minus the header.
 //!
 //! This allows the generic tree layer to support large values internally without forcing higher
 //! layers to manage overflow pages themselves.
@@ -25,33 +27,33 @@ pub const STORED_VALUE_INLINE_TAG: u8 = 0;
 pub const STORED_VALUE_OVERFLOW_TAG: u8 = 1;
 /// Header bytes on an inline stored value: just the tag.
 ///
-/// It was 11 — tag, `total_len` u32, `local_len` u16, `overflow_first_page` u32 — on
-/// every value, including the empty ones that secondary-index entries store. For an
-/// inline value all four of those beyond the tag are recoverable: the payload length
-/// is the cell's own length prefix minus this header, `total_len` equals it, and
-/// there is no overflow page. Ten bytes per row and per index entry, for nothing.
+/// Spelling out `total_len`, a local length and an overflow page id on every value —
+/// including the empty ones that secondary-index entries store — would cost ten bytes
+/// per row and per index entry, for nothing: on an inline value all of them are
+/// recoverable. The payload length is the cell's own length prefix minus this header,
+/// `total_len` equals it, and there is no overflow page.
 pub const STORED_VALUE_INLINE_HEADER_SIZE: usize = 1;
 
 /// Header bytes on a spilled stored value: tag, total length, first overflow page.
 ///
-/// `local_len` is still recoverable from the cell length, so it is not stored.
+/// The local length is recoverable from the cell length, so it is not stored.
 pub const STORED_VALUE_OVERFLOW_HEADER_SIZE: usize = 9;
 
 /// Maximum bytes of payload stored locally in a leaf cell (SQLite-style formula).
-/// For 4096-byte pages: (4096 - 12) * 64 / 255 - 23 = 1001.
+/// For 4096-byte pages, 4092 of them usable: (4092 - 12) * 64 / 255 - 23 = 1001.
 pub const MAX_LOCAL_PAYLOAD: usize = (USABLE_PAGE_SIZE - 12) * 64 / 255 - 23;
 
 /// Bytes of a spilled payload kept in the leaf cell.
 ///
-/// Was 489, from SQLite's `btreePayloadToLocal`. That formula picks a local size
-/// that makes the *last overflow page* come out full, trading leaf space for
-/// overflow-page packing. It is the wrong trade here.
+/// Not SQLite's `btreePayloadToLocal`, which would keep 489 here. That formula picks a
+/// local size that makes the *last overflow page* come out full, trading leaf space
+/// for overflow-page packing. It is the wrong trade here.
 ///
 /// A leaf is where scans pay. At 489 bytes of every large value held locally, a leaf
 /// fits about eight such rows, so a scan that never looks at the large column still
-/// reads a page for every eight rows. At 32 it fits around a hundred. What the old
-/// formula saved was at most one partly-filled overflow page *per value*, on values
-/// that are already over a kilobyte.
+/// reads a page for every eight rows. At 32 it fits around a hundred. What SQLite's
+/// formula would save is at most one partly-filled overflow page *per value*, on
+/// values that are already over a kilobyte.
 ///
 /// 32 rather than 0 keeps a prefix in the cell, which is a place to answer things
 /// like `LIKE 'abc%'` without following the chain.
@@ -164,7 +166,7 @@ impl StoredValueLayout {
     /// [`decode`](Self::decode) is this plus a copy of the payload into an owned
     /// `Vec`. Readers that only look at the bytes do not need that copy, and on an
     /// inline value — the common case, since a row only spills past
-    /// [`MIN_LOCAL_PAYLOAD`] — the borrowed slice is the whole value.
+    /// [`MAX_LOCAL_PAYLOAD`] — the borrowed slice is the whole value.
     pub fn decode_borrowed(bytes: &[u8]) -> Result<(Self, &[u8])> {
         let Some(&tag) = bytes.first() else {
             return Err(HematiteError::CorruptedData(
@@ -174,8 +176,8 @@ impl StoredValueLayout {
 
         let (total_len, overflow_first_page, local_payload) = match tag {
             STORED_VALUE_INLINE_TAG => {
-                // Everything the old header spelled out is implied: the payload is the
-                // rest of the cell, and that is the whole value.
+                // Nothing but the tag is stored: the payload is the rest of the cell,
+                // and that is the whole value.
                 let local_payload = &bytes[STORED_VALUE_INLINE_HEADER_SIZE..];
                 (local_payload.len() as u32, INVALID_PAGE_ID, local_payload)
             }
@@ -261,7 +263,7 @@ pub fn materialize_stored_value(storage: &mut Pager, logical_value: &[u8]) -> Re
 /// [`hydrate_stored_value`] and pay for the chain walk and the owned buffer.
 ///
 /// This exists because scans dominate reads and almost never spill: hydrating an
-/// inline value allocated a `Vec` per row purely to hand back bytes that were
+/// inline value would allocate a `Vec` per row purely to hand back bytes that are
 /// already contiguous in the page. It also needs no pager lock, since there is no
 /// overflow chain to read.
 pub fn inline_payload(stored_value: &[u8]) -> Result<Option<&[u8]>> {

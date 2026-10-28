@@ -1,4 +1,20 @@
 //! Rollback-journal semantic types and binary codec.
+//!
+//! All integers are big-endian. The file is a 40-byte header, the original free
+//! list, the (always empty) original-checksum table, the page records, then the
+//! commit intents:
+//!
+//! ```text
+//! header   0..4 magic `HTJ1`        4..8 version (1)      8 state (1 active, 2 committed)
+//!          9..11 page size (4096)   11 zero               12..16 original page count
+//!          16..20 sector-size hint  20..24 checksum seed  24..28 free-page count
+//!          28..32 checksum count    32..36 record count   36..40 intent count
+//! free     4 bytes per page id
+//! records  page id (4), checksum (4), page image (4096)
+//! intents  page id (4), checksum the page must hold if the commit landed (4)
+//! ```
+//!
+//! A zero-length file is a retired journal and means "nothing to recover".
 
 use crate::error::{HematiteError, Result};
 use crate::storage::checksum;
@@ -94,6 +110,18 @@ pub(crate) struct EncodedRollbackJournal {
     pub(crate) commit_intents: Vec<(PageId, u32)>,
 }
 
+/// How a decode treats a journal whose body stops short of what its header says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Torn {
+    /// Any mismatch is an error. Right for a journal this process is writing, which
+    /// keeps its header in step with its body after every append.
+    Reject,
+    /// Keep the records up to the first one that is short or fails its checksum,
+    /// keep the commit intents only if every record before them is intact, and
+    /// ignore anything after that.
+    KeepIntactPrefix,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JournalState {
     Active = 1,
@@ -145,6 +173,30 @@ impl RollbackJournal {
         Ok(Self::from_encoded(EncodedRollbackJournal::decode(bytes)?))
     }
 
+    /// Decodes a journal left by a process that may have died mid-write, keeping
+    /// exactly what recovery can rely on.
+    ///
+    /// The pager writes the database file only after an fsync of the journal. So a
+    /// record that did not survive intact was appended after the last sync: neither
+    /// its page nor the page of any record after it has been written, and none of
+    /// them is needed to undo anything. Records are read up to the first one that is
+    /// short or fails its checksum, and whatever follows the last one kept — a record
+    /// whose count update never landed, a torn tail — is ignored.
+    ///
+    /// Commit intents are kept only if every record before them is intact. A commit
+    /// syncs its intents together with all of its records before writing anything,
+    /// so a damaged record means the commit never started writing; dropping the
+    /// intents makes recovery roll back, which is then right.
+    ///
+    /// The header and free list are still read strictly. They are written together
+    /// before any record, so a journal the database depends on has them intact, and
+    /// one that does not parse is treated as corruption rather than guessed at.
+    pub fn decode_after_crash(bytes: &[u8]) -> Result<Self> {
+        Ok(Self::from_encoded(
+            EncodedRollbackJournal::decode_after_crash(bytes)?,
+        ))
+    }
+
     #[cfg(test)]
     fn to_encoded(&self) -> EncodedRollbackJournal {
         EncodedRollbackJournal {
@@ -154,8 +206,8 @@ impl RollbackJournal {
                 ..JournalHeader::default()
             },
             original_free_pages: self.original_free_pages.clone(),
-            // Always empty: each page carries its own checksum in its trailer now.
-            // The wire field stays so the header layout is unchanged.
+            // Always empty: each page carries its own checksum in its trailer, so
+            // the journal has no per-page checksums to save.
             original_checksums: Vec::new(),
             records: self
                 .page_records
@@ -215,9 +267,16 @@ pub(crate) struct JournalFile {
     /// the file as one write. Framing it here rather than into a fresh `Vec` keeps
     /// that from being an allocation and a second copy of the page per record.
     scratch: Vec<u8>,
+    /// The seed this journal's records are checksummed with, as written in its header.
+    ///
+    /// Fresh per journal. Retiring a journal truncates it without an fsync, so after a
+    /// power loss the previous transaction's records can still sit at the offsets the
+    /// current one writes to. Under a shared seed they would verify, and recovery
+    /// would restore pre-images of a transaction that had already committed.
+    checksum_seed: u32,
     /// Shared with the pager, so journal traffic lands in the same counter set as
-    /// database-file traffic. `journal_bytes` was declared from the start and never
-    /// incremented, which made it a counter any test could assert on and always
+    /// database-file traffic. Every write through this handle adds to
+    /// `journal_bytes`; a counter nothing increments would let any assertion on it
     /// pass.
     stats: Arc<PagerStats>,
     /// Contents as of the last successful `sync_all`.
@@ -235,6 +294,7 @@ impl JournalFile {
             file,
             len: 0,
             scratch: Vec::new(),
+            checksum_seed: JournalHeader::default().checksum_seed,
             stats,
             #[cfg(test)]
             durable: Vec::new(),
@@ -261,11 +321,11 @@ impl JournalFile {
     ///
     /// An empty file means "no journal" to recovery, so this stands in for
     /// deleting it — and the file, and the open handle, survive to be reused by
-    /// the next transaction. Deleting it cost an `unlink` here and an `openat`
-    /// plus a truncating `open` at the next `BEGIN`, three syscalls per commit,
-    /// and `unlink` was the most expensive of them.
+    /// the next transaction. Deleting it would cost an `unlink` here and an
+    /// `openat` plus a truncating `open` at the next `BEGIN`, three syscalls per
+    /// commit, and `unlink` is the most expensive of them.
     ///
-    /// Unsynced, exactly as the `unlink` it replaces was. A crash before it
+    /// Unsynced, as an `unlink` would be. A crash before it
     /// reaches the disk leaves a journal that looks live, and the commit intents
     /// recorded in it are what tell recovery the commit had already landed.
     pub(crate) fn retire(&mut self) -> Result<()> {
@@ -318,6 +378,7 @@ pub(crate) fn initialize_journal_file(
     let header = JournalHeader {
         state: JournalFileState::Active,
         original_database_page_count: next_page_id_for_file_len(original_file_len),
+        checksum_seed: crate::storage::checksum::fresh_nonce() as u32,
         free_page_count: original_free_pages.len() as u32,
         checksum_count: original_checksums.len() as u32,
         record_count: 0,
@@ -337,8 +398,8 @@ pub(crate) fn initialize_journal_file(
     }
 
     let header_len = bytes.len() as u64;
-    // Reuse the handle from the last transaction when there is one. Reopening cost
-    // an `openat` per `BEGIN` to arrive at a file this pager already had open.
+    // Reuse the handle from the last transaction when there is one. Reopening would
+    // cost an `openat` per `BEGIN` to arrive at a file this pager already has open.
     let mut journal = match reuse {
         Some(mut journal) => {
             journal.retire()?;
@@ -354,6 +415,7 @@ pub(crate) fn initialize_journal_file(
             JournalFile::new(file, stats)
         }
     };
+    journal.checksum_seed = header.checksum_seed;
     journal.append(&bytes)?;
     Ok((journal, header_len))
 }
@@ -361,8 +423,8 @@ pub(crate) fn initialize_journal_file(
 /// Frames one page pre-image and appends it.
 ///
 /// The framing goes into the journal's own scratch buffer rather than a fresh
-/// `Vec`. Building a `JournalFileRecord` first cost a copy of the page to fill it
-/// and another to encode it, on top of the copy that produced `record` — three
+/// `Vec`. Building a `JournalFileRecord` first would cost a copy of the page to fill
+/// it and another to encode it, on top of the copy that produced `record` — three
 /// copies of 4 KiB to write one page, once per journalled page.
 pub(crate) fn append_journal_record(file: &mut JournalFile, record: &JournalRecord) -> Result<()> {
     if record.data.len() != PAGE_SIZE {
@@ -372,8 +434,7 @@ pub(crate) fn append_journal_record(file: &mut JournalFile, record: &JournalReco
             record.data.len()
         )));
     }
-    let seed = JournalHeader::default().checksum_seed;
-    let checksum = record_checksum(record.page_id, seed, &record.data);
+    let checksum = record_checksum(record.page_id, file.checksum_seed, &record.data);
 
     let mut scratch = std::mem::take(&mut file.scratch);
     scratch.clear();
@@ -481,7 +542,7 @@ impl JournalHeader {
 }
 
 impl JournalFileRecord {
-    /// Only the whole-journal encoder needs this now; the live append path frames
+    /// Only the whole-journal encoder needs this; the live append path frames
     /// records straight into the journal's scratch buffer.
     #[cfg(test)]
     pub(crate) fn encode(&self, checksum_seed: u32) -> Result<Vec<u8>> {
@@ -570,6 +631,16 @@ impl EncodedRollbackJournal {
     }
 
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self> {
+        Self::decode_as(bytes, Torn::Reject)
+    }
+
+    /// Decodes a journal a crash may have cut short. See
+    /// [`RollbackJournal::decode_after_crash`].
+    pub(crate) fn decode_after_crash(bytes: &[u8]) -> Result<Self> {
+        Self::decode_as(bytes, Torn::KeepIntactPrefix)
+    }
+
+    fn decode_as(bytes: &[u8], torn: Torn) -> Result<Self> {
         let header = JournalHeader::decode(bytes)?;
         let mut offset = JOURNAL_HEADER_SIZE;
 
@@ -596,24 +667,39 @@ impl EncodedRollbackJournal {
         }
 
         let mut records = Vec::with_capacity(header.record_count as usize);
+        let mut records_intact = true;
         for _ in 0..header.record_count {
-            let (record, used) = JournalFileRecord::decode(&bytes[offset..], header.checksum_seed)?;
-            records.push(record);
-            offset += used;
+            match JournalFileRecord::decode(&bytes[offset..], header.checksum_seed) {
+                Ok((record, used)) => {
+                    records.push(record);
+                    offset += used;
+                }
+                Err(_) if torn == Torn::KeepIntactPrefix => {
+                    records_intact = false;
+                    break;
+                }
+                Err(err) => return Err(err),
+            }
         }
 
         let mut commit_intents = Vec::with_capacity(header.intent_count as usize);
-        for _ in 0..header.intent_count {
-            if offset + JOURNAL_INTENT_SIZE > bytes.len() {
-                return Err(HematiteError::StorageError(
-                    "rollback journal commit intent is truncated".to_string(),
-                ));
+        if records_intact {
+            for _ in 0..header.intent_count {
+                if offset + JOURNAL_INTENT_SIZE > bytes.len() {
+                    if torn == Torn::KeepIntactPrefix {
+                        commit_intents.clear();
+                        break;
+                    }
+                    return Err(HematiteError::StorageError(
+                        "rollback journal commit intent is truncated".to_string(),
+                    ));
+                }
+                commit_intents.push((read_u32_be(bytes, offset), read_u32_be(bytes, offset + 4)));
+                offset += JOURNAL_INTENT_SIZE;
             }
-            commit_intents.push((read_u32_be(bytes, offset), read_u32_be(bytes, offset + 4)));
-            offset += JOURNAL_INTENT_SIZE;
         }
 
-        if offset != bytes.len() {
+        if torn == Torn::Reject && offset != bytes.len() {
             return Err(HematiteError::StorageError(
                 "rollback journal has trailing bytes".to_string(),
             ));

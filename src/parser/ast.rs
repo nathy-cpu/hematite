@@ -1,4 +1,10 @@
-//! Abstract syntax tree for SQL statements
+//! The owned statement tree the query layer reads.
+//!
+//! Every node owns its children — `Box`, `Vec`, `String` — so a statement outlives
+//! its SQL text and can be cloned and rewritten in place: prepared-statement
+//! binding, `query::rewrite` and the optimizer all mutate it. The parser does not
+//! build this form directly; it builds into [`arena::Ast`](crate::parser::arena::Ast)
+//! and `bridge.rs` materializes this tree from it after every parse.
 
 use crate::error::{HematiteError, Result};
 use crate::parser::types::{LiteralValue, SqlTypeName};
@@ -293,7 +299,7 @@ pub enum AggregateTarget {
     Column(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComparisonOperator {
     Equal,
     NotEqual,
@@ -303,7 +309,7 @@ pub enum ComparisonOperator {
     GreaterThanOrEqual,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogicalOperator {
     And,
     Or,
@@ -826,6 +832,128 @@ impl Expression {
             Expression::Column(_) | Expression::Literal(_) => {}
         }
         Ok(())
+    }
+
+    /// Whether any column reference outside a subquery satisfies `matches`.
+    ///
+    /// Subqueries are skipped because a column inside one resolves against the
+    /// subquery's own sources first, so it is not this expression's to answer for.
+    pub(crate) fn mentions_column<F>(&self, matches: &F) -> bool
+    where
+        F: Fn(&str) -> bool,
+    {
+        match self {
+            Expression::Column(name) => matches(name),
+            Expression::Literal(_)
+            | Expression::Parameter(_)
+            | Expression::ScalarSubquery(_)
+            | Expression::AggregateCall { .. }
+            | Expression::Exists { .. } => false,
+            Expression::Cast { expr, .. }
+            | Expression::UnaryMinus(expr)
+            | Expression::UnaryNot(expr)
+            | Expression::NullCheck { expr, .. }
+            | Expression::InSubquery { expr, .. } => expr.mentions_column(matches),
+            Expression::Case {
+                branches,
+                else_expr,
+            } => {
+                branches.iter().any(|branch| {
+                    branch.condition.mentions_column(matches)
+                        || branch.result.mentions_column(matches)
+                }) || else_expr
+                    .as_ref()
+                    .is_some_and(|expr| expr.mentions_column(matches))
+            }
+            Expression::ScalarFunctionCall { args, .. } => {
+                args.iter().any(|arg| arg.mentions_column(matches))
+            }
+            Expression::Binary { left, right, .. }
+            | Expression::Comparison { left, right, .. }
+            | Expression::Logical { left, right, .. } => {
+                left.mentions_column(matches) || right.mentions_column(matches)
+            }
+            Expression::InList { expr, values, .. } => {
+                expr.mentions_column(matches)
+                    || values.iter().any(|value| value.mentions_column(matches))
+            }
+            Expression::Between {
+                expr, lower, upper, ..
+            } => {
+                expr.mentions_column(matches)
+                    || lower.mentions_column(matches)
+                    || upper.mentions_column(matches)
+            }
+            Expression::Like { expr, pattern, .. } => {
+                expr.mentions_column(matches) || pattern.mentions_column(matches)
+            }
+        }
+    }
+
+    /// Replaces every column reference outside a subquery that `matches` accepts with
+    /// `value`, skipping subqueries for the reason [`Expression::mentions_column`]
+    /// gives.
+    pub(crate) fn bind_columns<F>(&mut self, matches: &F, value: &LiteralValue)
+    where
+        F: Fn(&str) -> bool,
+    {
+        match self {
+            Expression::Column(name) => {
+                if matches(name) {
+                    *self = Expression::Literal(value.clone());
+                }
+            }
+            Expression::Literal(_)
+            | Expression::Parameter(_)
+            | Expression::ScalarSubquery(_)
+            | Expression::AggregateCall { .. }
+            | Expression::Exists { .. } => {}
+            Expression::Cast { expr, .. }
+            | Expression::UnaryMinus(expr)
+            | Expression::UnaryNot(expr)
+            | Expression::NullCheck { expr, .. }
+            | Expression::InSubquery { expr, .. } => expr.bind_columns(matches, value),
+            Expression::Case {
+                branches,
+                else_expr,
+            } => {
+                for branch in branches {
+                    branch.condition.bind_columns(matches, value);
+                    branch.result.bind_columns(matches, value);
+                }
+                if let Some(else_expr) = else_expr {
+                    else_expr.bind_columns(matches, value);
+                }
+            }
+            Expression::ScalarFunctionCall { args, .. } => {
+                for arg in args {
+                    arg.bind_columns(matches, value);
+                }
+            }
+            Expression::Binary { left, right, .. }
+            | Expression::Comparison { left, right, .. }
+            | Expression::Logical { left, right, .. } => {
+                left.bind_columns(matches, value);
+                right.bind_columns(matches, value);
+            }
+            Expression::InList { expr, values, .. } => {
+                expr.bind_columns(matches, value);
+                for candidate in values {
+                    candidate.bind_columns(matches, value);
+                }
+            }
+            Expression::Between {
+                expr, lower, upper, ..
+            } => {
+                expr.bind_columns(matches, value);
+                lower.bind_columns(matches, value);
+                upper.bind_columns(matches, value);
+            }
+            Expression::Like { expr, pattern, .. } => {
+                expr.bind_columns(matches, value);
+                pattern.bind_columns(matches, value);
+            }
+        }
     }
 }
 
@@ -1376,7 +1504,7 @@ impl AggregateTarget {
 }
 
 impl ComparisonOperator {
-    fn to_sql(&self) -> &'static str {
+    fn to_sql(self) -> &'static str {
         match self {
             ComparisonOperator::Equal => "=",
             ComparisonOperator::NotEqual => "!=",
@@ -1389,7 +1517,7 @@ impl ComparisonOperator {
 }
 
 impl LogicalOperator {
-    fn to_sql(&self) -> &'static str {
+    fn to_sql(self) -> &'static str {
         match self {
             LogicalOperator::And => "AND",
             LogicalOperator::Or => "OR",
@@ -1398,7 +1526,7 @@ impl LogicalOperator {
 }
 
 impl ArithmeticOperator {
-    fn to_sql(&self) -> &'static str {
+    fn to_sql(self) -> &'static str {
         match self {
             ArithmeticOperator::Add => "+",
             ArithmeticOperator::Subtract => "-",

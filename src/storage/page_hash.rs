@@ -7,7 +7,7 @@
 //! generates itself, an attacker never chooses them, and the map is probed on every
 //! single buffer-pool lookup.
 //!
-//! This replaces it with Fibonacci hashing — one multiply by the 64-bit golden-ratio
+//! This module uses Fibonacci hashing instead — one multiply by the 64-bit golden-ratio
 //! constant, which spreads sequential ids across the whole word. That is two or
 //! three instructions against SipHash's dozens of rounds, and page ids are exactly
 //! the input it handles best: consecutive allocations land in unrelated buckets
@@ -54,15 +54,16 @@ impl Hasher for PageIdHasher {
     }
 }
 
-/// A `HashMap` keyed by page id.
+/// A `HashMap` keyed by page id: the buffer pool's entries, `FreeList::positions`,
+/// and the WAL's page-to-frame-offset map and page-image cache.
 pub(crate) type PageMap<V> = HashMap<u32, V, BuildHasherDefault<PageIdHasher>>;
 
 /// A `HashSet` of page ids.
 ///
-/// The pager keeps seven of these — journaled pages, captured pages, free-page
-/// sets — and several are rebuilt per row, because a rollback savepoint is taken per
-/// row. Under `RandomState` that made `HashMap<u32, ()>::insert` 2.9 % of a batched
-/// insert, all of it SipHash over four bytes.
+/// The storage layer keeps seven of these — journaled pages, captured pages,
+/// uninitialised pages, free-page sets — and several are built per row, because a
+/// savepoint is taken per row. Under `RandomState`, `HashMap<u32, ()>::insert`
+/// measured 2.9 % of a batched insert, all of it SipHash over four bytes.
 pub(crate) type PageSet = HashSet<u32, BuildHasherDefault<PageIdHasher>>;
 
 #[cfg(test)]

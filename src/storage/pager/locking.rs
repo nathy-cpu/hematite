@@ -12,7 +12,7 @@
 //! blocked writer wakes the moment the lock frees rather than sleeping through a
 //! backoff schedule, and gives up after five seconds.
 //!
-//! The locks themselves are unchanged in meaning:
+//! What each journal mode locks:
 //!
 //! - **Rollback mode** puts readers and the writer on the same lock, because
 //!   rollback journaling writes pages in place — a reader would see half a
@@ -29,9 +29,6 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 /// How long an acquisition waits before reporting the database as locked.
-///
-/// Unchanged from the `flock` implementation, which polled with an exponential
-/// backoff for the same five seconds.
 const LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Which in-process locks a pager is currently holding.
@@ -192,9 +189,7 @@ impl Pager {
     /// The coordination state for this pager, if it is backed by a file.
     ///
     /// An in-memory pager has no identity to share, and nothing to coordinate with,
-    /// so every lock operation on it succeeds without touching any state — which is
-    /// what the sidecar implementation did too, by returning early whenever the
-    /// database identity was absent.
+    /// so every lock operation on it succeeds without touching any state.
     pub(super) fn coordination(&mut self) -> Option<Arc<DbCoordination>> {
         if let Some(coordination) = &self.coordination {
             return Some(coordination.clone());
@@ -319,8 +314,8 @@ impl Pager {
         let Some(coordination) = self.coordination() else {
             return Ok(());
         };
-        // Re-registering replaces whatever this pager held, matching the sidecar
-        // version where a new lock file superseded the old one.
+        // Re-registering replaces whatever this pager held: a pager reads at one
+        // sequence at a time, so it holds at most one registration.
         if let Some(previous) = self.wal_reader_sequence.replace(sequence) {
             coordination.unregister_wal_reader(previous);
         }

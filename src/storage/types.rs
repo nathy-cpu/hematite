@@ -16,8 +16,8 @@ pub const PAGE_SIZE: usize = 4096;
 /// Bytes at the end of every page reserved for the pager.
 ///
 /// Holds the page's own checksum. Keeping those in a map serialised into a single
-/// metadata page puts a ceiling on the database: past about 685 pages the map no
-/// longer fits and integrity silently switches itself off. A checksum stored on the
+/// metadata page would put a ceiling on the database: past about 685 pages the map
+/// no longer fits and integrity checking silently stops. A checksum stored on the
 /// page it describes has no ceiling, no map to clone per savepoint, and nothing to
 /// re-serialise per transaction.
 pub const PAGE_TRAILER_SIZE: usize = 4;
@@ -47,21 +47,21 @@ pub const fn file_len_for_next_page_id(next_page_id: PageId) -> u64 {
 
 /// Recycled page-sized buffers.
 ///
-/// A page write allocated a fresh `vec![0u8; PAGE_SIZE]` and freed the one it
-/// displaced, so a batched insert made 40 690 `calloc`s. Almost all of that cost is
-/// the zeroing rather than the allocator: glibc's `memset` uses `rep stosb`, one
+/// Without it, a page write allocates a fresh `vec![0u8; PAGE_SIZE]` and frees the
+/// one it displaces: 40 690 `calloc`s over a batched insert. Almost all of that cost
+/// is the zeroing rather than the allocator: glibc's `memset` uses `rep stosb`, one
 /// instruction per byte, so a 4 KiB page costs ~4 100 instructions — 10 % of the
 /// insert path.
 ///
-/// Fixing it needs *both* halves, which is why two earlier attempts each measured
-/// nothing. Recycling alone still pays the zeroing. Skipping the zeroing alone still
-/// pays `calloc`, which zeroes anyway. Together, a page that is about to be
-/// overwritten costs neither.
+/// Avoiding it needs *both* halves; either alone measures as nothing. Recycling
+/// alone still pays the zeroing. Skipping the zeroing alone still pays `calloc`,
+/// which zeroes anyway. Together, a page that is about to be overwritten costs
+/// neither.
 ///
 /// Reclaiming happens in `Page::drop`, which is the moment the last owner goes away.
-/// Earlier attempts reclaimed in `PageCache::put_shared_with_view` and relied on
-/// `Arc::try_unwrap`, which always failed because a `BTreeNode` holds an `Arc<Page>`
-/// for the page it is mutating.
+/// Reclaiming in `PageCache::put_shared_with_view` through `Arc::try_unwrap` would
+/// never succeed, because a `BTreeNode` holds an `Arc<Page>` for the page it is
+/// mutating.
 ///
 /// Thread-local so the hot path takes no lock. Buffers do not migrate between
 /// threads: one thread's pool simply stays empty until it frees its own pages.
@@ -160,7 +160,7 @@ impl Page {
     /// Takes the buffer, leaving the page empty.
     ///
     /// `Page` owns a pooled buffer and has a `Drop`, so the field cannot be moved out
-    /// directly any more.
+    /// directly.
     pub(crate) fn take_data(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.data)
     }

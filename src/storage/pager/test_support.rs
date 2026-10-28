@@ -79,7 +79,7 @@ impl Pager {
     }
 
     /// Leaves the journal in place after a commit, standing in for a crash in the
-    /// window between the database fsync and the journal's removal.
+    /// window between the database fsync and the journal being retired (emptied).
     ///
     /// That window is where the commit intent has to do its work: the transaction is
     /// durable, but a journal full of pre-images is still sitting on disk, and

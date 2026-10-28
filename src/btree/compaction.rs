@@ -1,3 +1,14 @@
+//! Auto-vacuum: moving pages down into free slots so free space collects at the end of
+//! the file.
+//!
+//! `auto_vacuum` repeatedly relocates the highest allocated page into the lowest free
+//! page id, until no free page sits below it. Pages carry no back pointers, so moving
+//! one needs to know the single place that refers to it — a tree root, a parent's
+//! child slot, a leaf cell's overflow head, or an overflow predecessor's next pointer.
+//! `build_parent_map` records that for every page of every tree in one walk, and
+//! `relocate_page` keeps the map current by patching only the moved page's own
+//! outgoing edges, so the map is built once per call rather than once per move.
+
 use crate::btree::node::BTreeNode;
 use crate::btree::value_store::StoredValueLayout;
 use crate::btree::BTreeValue;

@@ -39,8 +39,13 @@
 //! | Page ID | Page Constant Name | Purpose | Layout Details |
 //! |---|---|---|---|
 //! | `0` | `DB_HEADER_PAGE_ID` | Database Header | The first 100 bytes are reserved; a 20-byte database header (magic `HMTD`, version, schema root page, next table ID, checksum) is written at the start. |
-//! | `1` | `STORAGE_METADATA_PAGE_ID`| Pager Metadata | Dedicated metadata page starting with container magic `HMD1`. Stores pager state (journal mode, free pages, checksums) and catalog metadata. |
+//! | `1` | `STORAGE_METADATA_PAGE_ID`| Pager Metadata | Dedicated metadata page starting with container magic `HMD1`. Holds the pager's `HPM1` record (journal mode and free-page list) and the catalog's section. |
 //! | `2+`| `FIRST_ALLOCATABLE_PAGE_ID`| User payload pages | Allocated for clustered B-Tree table leaf/interior pages, index B-Tree pages, or overflow page chains. |
+//!
+//! Every page, reserved or not, ends in a `PAGE_TRAILER_SIZE` (4-byte) trailer that
+//! belongs to the pager: a checksum of the first `USABLE_PAGE_SIZE` bytes, seeded with
+//! the page id, stamped by `FileManager::write_page` (and into each WAL frame at
+//! commit) and verified whenever a read's contents are going to be used.
 //!
 //! ---
 //!
@@ -49,70 +54,52 @@
 //! ### Page Buffer State Transitions
 //!
 //! ```text
-//!              +--------------------------------------+
-//!              |                Clean                 |
-//!              |         (Matches main file)          |
-//!              +--------+--------------------+--------+
-//!                       |                    ^
-//!                  Page Write             Checkpoint
-//!                       |                    |
-//!                       v                    |
-//!              +--------+--------------------+--------+
-//!              |                Dirty                 |
-//!              |          (In-memory only)            |
-//!              +--------+-----------------------------+
-//!                       |
-//!                 Commit / Evict
-//!                       |
-//!                       v
-//!              +--------+-----------------------------+
-//!              |              Journaled               |
-//!              |  (Written to WAL / Rollback Journal) |
-//!              +--------+-----------------------------+
-//!                       |
-//!                 Flush to Main DB
-//!                       v
-//!              +--------------------------------------+
-//!              |               Flushed                |
-//!              |       (Durable in main file)         |
-//!              +--------------------------------------+
+//!                  write_page
+//!     Clean  ------------------------------->  Dirty
+//!       ^                                        |
+//!       |  rollback mode: a spill or the commit  |
+//!       |  flush writes it to the file, after    |
+//!       |  its pre-image is journalled + synced  |
+//!       +----------------------------------------+
+//!       |  WAL mode: the commit appends it as a  |
+//!       |  frame; the file catches up at         |
+//!       |  checkpoint                            |
+//!       +----------------------------------------+
+//!
+//!     Dirty --rollback--> dropped from the cache
+//!     Dirty --savepoint restore--> its pre-image reinstated, or dropped
 //! ```
+//!
+//! Clean means the page matches what a fresh read would return: the file, or the
+//! WAL frame the current view resolves to. Clean, unpinned pages are the only
+//! eviction candidates; dirty pages leave the cache only by being written out or
+//! discarded.
 //!
 //! ### Pager Transaction Lifecycle State Machine
 //!
+//! The states are [`PagerState`]'s; `transition_state` rejects any edge not drawn here.
+//!
 //! ```text
-//!                      +----------------------+
-//!                      |      1. Idle         |
-//!                      +----------+-----------+
-//!                                 |
-//!                         Begin Transaction
-//!                                 |
-//!                                 v
-//!                      +----------+-----------+
-//!                      |      2. Read         |
-//!                      +----------+-----------+
-//!                                 |
-//!                             Page Write
-//!                                 |
-//!                                 v
-//!                      +----------+-----------+
-//!                      |      3. Write        |
-//!                      +----+-----------+-----+
-//!                           |           |
-//!                      Commit       Abort / Rollback
-//!                           |           |
-//!                           v           v
-//!             +-------------+--+     +--+-------------+
-//!             |  4. Committing |     |  5. Rollback   |
-//!             |  (Flush WAL /  |     |  (Replay undo  |
-//!             |   Journal)     |     |   or discard)  |
-//!             +-------------+--+     +--+-------------+
-//!                           |           |
-//!                           +-----+-----+
-//!                                 |
-//!                                 v
-//!                           Back to Idle
+//!        begin_read            end_read
+//!   Open -----------> Reader -----------> Open
+//!
+//!   Open --begin_transaction--> WriterLocked
+//!                                   |  first write_page
+//!                                   v
+//!                             WriterCacheMod
+//!                                   |  spill, or the rollback commit's flush,
+//!                                   v  writes the database file
+//!                              WriterDbMod
+//!                                   |  commit
+//!                                   v
+//!                             WriterFinished --> Open
+//!
+//!   any Writer* state --rollback--> Open
+//!   any state --I/O failure--> Error --rollback or reopen--> Open
 //! ```
+//!
+//! A WAL commit goes from `WriterCacheMod` straight to `WriterFinished`: it never
+//! writes the database file.
 //!
 //! ---
 //!
@@ -204,9 +191,9 @@ pub(crate) struct RollbackTransaction {
     rollback_free_list: Arc<FreeList>,
     /// Pages this transaction allocated but has not yet written.
     ///
-    /// Shared rather than copied: a savepoint is taken per row, each one recorded a
-    /// full copy of this set, and page allocation is two orders of magnitude rarer
-    /// than row insertion. Under `Arc`, taking a savepoint is a refcount bump and
+    /// Shared rather than copied: a savepoint is taken per row, recording a full copy
+    /// of this set in each would be a copy per row, and page allocation is two orders
+    /// of magnitude rarer than row insertion. Under `Arc`, taking a savepoint is a refcount bump and
     /// the copy happens on the next allocation instead — see `Arc::make_mut` at the
     /// three mutation sites.
     rollback_uninitialized_pages: Arc<PageSet>,
@@ -218,9 +205,9 @@ pub(crate) struct RollbackTransaction {
 
 /// The free-page state a savepoint returns to.
 ///
-/// Shared, never copied. A savepoint is taken per row, and each one used to record the
-/// whole free list — a `to_vec` plus a set built from it — which is O(free list) per
-/// row, and a `DELETE` grows that list as it runs. Under `Arc` a capture is a refcount
+/// Shared, never copied. A savepoint is taken per row, and recording the whole free
+/// list in each — a `to_vec` plus a set built from it — would be O(free list) per
+/// row, while a `DELETE` grows that list as it runs. Under `Arc` a capture is a refcount
 /// bump and the copy happens on the next free-list change instead, which is orders of
 /// magnitude rarer than row mutation: a page is freed only when a node empties. This is
 /// the same trade `rollback_uninitialized_pages` makes, for the same reason.
@@ -373,14 +360,14 @@ pub struct Pager {
     durable_state_token: u64,
     /// Reused buffer for reading the persisted state page back to compare it.
     ///
-    /// That read happens at the start of every read scope, twice per statement, and
-    /// allocating a fresh page-sized buffer for it made a 4 KiB `malloc` and a
-    /// 4 KiB zeroing part of the cost of every query.
+    /// In rollback mode that read happens at the start of every read scope, twice
+    /// per statement, and allocating a fresh page-sized buffer for it would make a
+    /// 4 KiB `malloc` and a 4 KiB zeroing part of the cost of every query.
     metadata_scratch: Option<Box<[u8]>>,
     #[cfg(test)]
     wal_visible_state_reload_count: usize,
     /// Leaves the journal on disk after a commit, standing in for a crash in the
-    /// window between the database fsync and the journal being removed.
+    /// window between the database fsync and the journal being retired.
     #[cfg(test)]
     keep_journal_after_commit: bool,
 }
@@ -405,10 +392,11 @@ impl Pager {
             .ok()
             .or_else(|| Some(path.as_ref().to_path_buf()));
         let stats = file_manager.stats();
+        let cache = PageCache::with_stats(cache_capacity, Arc::clone(&stats));
         let mut pager = Self {
             file_manager,
             stats,
-            cache: RwLock::new(PageCache::new(cache_capacity)),
+            cache: RwLock::new(cache),
             journal_mode: JournalMode::Rollback,
             journal_path,
             wal_path,
@@ -445,10 +433,11 @@ impl Pager {
     pub fn new_in_memory(cache_capacity: usize) -> Result<Self> {
         let file_manager = FileManager::new_in_memory()?;
         let stats = file_manager.stats();
+        let cache = PageCache::with_stats(cache_capacity, Arc::clone(&stats));
         Ok(Self {
             file_manager,
             stats,
-            cache: RwLock::new(PageCache::new(cache_capacity)),
+            cache: RwLock::new(cache),
             journal_mode: JournalMode::Rollback,
             journal_path: None,
             wal_path: None,
@@ -706,10 +695,6 @@ impl Pager {
         Ok(page)
     }
 
-    /// Zero-copy variant of `take_page_for_write` for callers that guarantee
-    /// this page will be committed via exactly one `write_page` call with no
-    /// other pager access to the same `page_id` in between. See
-    /// `PageCache::take_page_for_write_owned` for the exact contract.
     /// A token that changes whenever this pager's view of durable state does.
     ///
     /// Layers above cache things derived from the file — the catalog's schema and
@@ -737,6 +722,10 @@ impl Pager {
         crate::storage::stats::PagerStats::bump(&self.stats.leaf_rotations);
     }
 
+    /// Zero-copy variant of `take_page_for_write` for callers that guarantee
+    /// this page will be committed via exactly one `write_page` call with no
+    /// other pager access to the same `page_id` in between. See
+    /// `PageCache::take_page_for_write_owned` for the exact contract.
     pub(crate) fn take_page_for_write_owned(&mut self, page_id: PageId) -> Result<Page> {
         self.check_error_state()?;
         self.snapshot_original_page(page_id)?;
@@ -744,8 +733,8 @@ impl Pager {
         Ok(page)
     }
 
-    /// Build a fresh, zero-filled `Page` for `page_id` sourced from the
-    /// cache's recycled buffer pool instead of a raw heap allocation. Intended
+    /// Build a fresh, zero-filled `Page` for `page_id`, its buffer taken from the
+    /// thread-local page pool (`types::page_pool`) when one is free. Intended
     /// for callers that are about to populate a brand-new page (e.g. a
     /// b-tree split's new sibling) and will write it back via `write_page`,
     /// which performs its own snapshot/checksum bookkeeping.

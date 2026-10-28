@@ -6,7 +6,7 @@ use std::sync::Arc;
 /// The contents of a [`PagerSnapshot::Full`].
 ///
 /// Split out and boxed because the enum is only ever as small as its largest
-/// variant: inline, every snapshot cost a 424-byte move, including the
+/// variant: inline, every snapshot would cost a 424-byte move, including the
 /// `PagerSavepoint` case that carries nothing but an id — and one snapshot is
 /// taken per row by `run_atomically`. Boxed, the enum is two words.
 #[derive(Debug, Clone)]
@@ -20,8 +20,8 @@ pub(crate) struct FullSnapshot {
     /// copying it would buy nothing.
     ///
     /// These are shared rather than copied: taking a snapshot costs one refcount
-    /// bump per *dirty* page, where cloning the cache cost one per *cached* page
-    /// plus a deep copy of the recycled-buffer pool. Holding the `Arc` also pins
+    /// bump per *dirty* page, where cloning the cache would cost a page copy per
+    /// *cached* page. Holding the `Arc` also pins
     /// the page for the snapshot's lifetime, which is what stops a later write
     /// from mutating the image out from under it.
     pub(crate) dirty_pages: Vec<Arc<Page>>,
@@ -142,19 +142,20 @@ impl Pager {
             .restore_snapshot(savepoint.file_manager.clone())?;
 
         // Undo exactly what changed, rather than resetting the cache and rebuilding
-        // it. The reset was why the savepoint had to hold an image of every dirty
-        // page: it threw away pages that were dirty at the mark and never written
-        // again, and those exist nowhere on disk. Leaving them alone is both correct
-        // and free -- they still hold the contents the savepoint recorded.
-        // Pages that did not exist at the mark, derived rather than recorded: a
-        // resident page is one of them exactly when it fails the same liveness test
-        // the capture path applies. Recording them as they were written cost a hash
-        // insert per page per live savepoint on the write path, and there are four
-        // live savepoints per row.
+        // it. A reset would throw away pages that were dirty at the mark and never
+        // written again, which exist nowhere on disk, so the savepoint would have to
+        // hold an image of every dirty page. Leaving them alone is both correct and
+        // free -- they still hold the contents the savepoint recorded.
         //
-        // This drops a little more than the recorded set did — a cached page that
-        // sat in the savepoint's free list, say — and dropping those is harmless:
-        // they are free, so re-reading gives the version on disk.
+        // Pages that did not exist at the mark are derived rather than recorded: a
+        // resident page is one of them exactly when it fails the same liveness test
+        // the capture path applies. Recording them as they were written would cost a
+        // hash insert per page per live savepoint on the write path, and there are
+        // four live savepoints per row.
+        //
+        // Deriving drops a little more than a recorded set would — a cached page
+        // that sat in the savepoint's free list, say — and dropping those is
+        // harmless: they are free, so re-reading gives the version on disk.
         let resident = self.cache_read()?.resident_page_ids();
         for page_id in resident {
             if !super::recovery::page_is_live_at_savepoint_for_restore(page_id, &savepoint) {
@@ -174,7 +175,7 @@ impl Pager {
             Some(super::PagerTransaction::Rollback(transaction)) => {
                 transaction.rollback_next_page_id = savepoint.next_page_id;
                 // Handing the shared list back, rather than rebuilding one from a
-                // recorded vector: `replace` re-derived the position map every time.
+                // recorded vector: `replace` would re-derive the position map every time.
                 if let super::SavepointFreeState::Rollback(free_list) = &savepoint.free_state {
                     transaction.rollback_free_list = Arc::clone(free_list);
                 }
@@ -208,8 +209,8 @@ impl Pager {
     pub(crate) fn snapshot(&mut self) -> Result<PagerSnapshot> {
         // Both modes take the cheap path. Falling through to `Full` copies a handle
         // to every dirty page, and `run_atomically` snapshots per row, so a mode
-        // that did would pay that per row -- which is what made WAL inserts 21 %
-        // more expensive than rollback when the undo log was rollback-only.
+        // that did would pay that per row: WAL inserts on the `Full` path measured
+        // 21 % more expensive than rollback ones on savepoints.
         if self.transaction.is_some() {
             return Ok(PagerSnapshot::PagerSavepoint {
                 id: self.create_savepoint()?,
@@ -227,7 +228,7 @@ impl Pager {
     /// How many rollback savepoints are currently held.
     ///
     /// Exposed so a test can assert they do not accumulate: `run_atomically` takes one
-    /// per row, and each pins every page dirty at the time.
+    /// per row, and each pins the pre-images it has captured.
     #[cfg(test)]
     pub(crate) fn active_rollback_savepoint_count(&self) -> usize {
         self.active_rollback_transaction()
@@ -237,15 +238,14 @@ impl Pager {
 
     /// Discards a savepoint, keeping the work done since it was taken.
     ///
-    /// This is `RELEASE SAVEPOINT`. Without it `run_atomically` dropped only the
-    /// savepoint's *id* on success and left the savepoint itself in
-    /// `transaction.savepoints` until the transaction ended, so a 500-row batch
-    /// accumulated 500 of them. Each holds an `Arc` to every page that was dirty when
-    /// it was taken, which grows memory linearly in rows and — because those handles
-    /// are shared — stops the page cache from ever reclaiming a buffer:
-    /// `Arc::try_unwrap` on a displaced page always failed, so every page write
-    /// allocated a fresh zeroed 4 KiB buffer. That was 40 690 `calloc`s and 7.9 % of a
-    /// batched insert.
+    /// This is `RELEASE SAVEPOINT`. Without it, `run_atomically` could drop only the
+    /// savepoint's *id* on success, leaving the savepoint itself in
+    /// `transaction.savepoints` until the transaction ended, so a 500-row batch would
+    /// accumulate 500 of them. Each holds `Arc`s to the page images it captured,
+    /// which grows memory linearly in rows and — because those handles are shared —
+    /// keeps displaced pages' buffers from ever returning to the pool, so page writes
+    /// allocate fresh zeroed 4 KiB buffers: measured at 40 690 `calloc`s and 7.9 % of
+    /// a batched insert.
     ///
     /// Releasing truncates from this savepoint upward, matching SQL semantics: a
     /// release invalidates the savepoints taken after it too. `run_atomically` nests

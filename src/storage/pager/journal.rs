@@ -11,7 +11,7 @@ impl Pager {
 
     pub(super) fn commit_rollback_transaction(&mut self) -> Result<()> {
         // No journal sync here. `flush` stages the persisted-state page — which
-        // journals it — and only then syncs, so syncing first meant syncing twice:
+        // journals it — and only then syncs, so syncing first would mean syncing twice:
         // once for the records written during the transaction, and again for the
         // record staging added. One sync covers both, and it still lands before any
         // database page is written, which is the write-ahead rule this relies on.
@@ -23,8 +23,8 @@ impl Pager {
         // No commit-marker fsync. The journal carries a commit intent — every page
         // this transaction wrote, with the checksum it must hold — synced before any
         // database page was overwritten. Recovery reads the database and compares,
-        // so a durable "committed" flag is no longer what distinguishes a finished
-        // commit from an abandoned one.
+        // so it needs no durable "committed" flag to tell a finished commit from an
+        // abandoned one, and the commit stays at two fsyncs: journal, then database.
         self.transition_state(PagerState::WriterFinished)?;
         Ok(())
     }

@@ -16,7 +16,8 @@
 //! the page into three areas:
 //! 1. **Cell Pointer Array**: Starts at the front of the page and grows *forward*. Contains 2-byte offsets
 //!    pointing to the actual cells. The logical index in this array is stable, even if the cell is moved.
-//! 2. **Cell Content Area**: Starts at the end of the page and grows *backward*. Contains the raw cell payloads.
+//! 2. **Cell Content Area**: Starts at the end of the usable page (`USABLE_PAGE_SIZE`; the pager owns the trailer
+//!    past it) and grows *backward*. Contains the raw cell payloads.
 //! 3. **Unallocated Gap**: The empty space in the middle.
 //!
 //! ### Physical Layout of a Slotted Page
@@ -39,30 +40,36 @@
 //! ### Freeblocks and Fragmented Bytes
 //! When a cell is deleted:
 //! * Its slot pointer is removed.
-//! * Its space in the Cell Content Area is added to a linked list of **Freeblocks** (if it is $\ge 4$ bytes).
+//! * If the cell sat at the start of the Cell Content Area, the content start simply advances past it.
+//! * Otherwise its space is added to a linked list of **Freeblocks**, kept sorted by offset (if it is $\ge 4$ bytes).
 //!   The first 2 bytes of a freeblock store the offset to the next freeblock; the next 2 bytes store the block size.
 //! * If the deleted space is $< 4$ bytes, it is too small to form a freeblock. It is classified as **Fragmented Free Bytes**.
 //!
 //! ### Defragmentation (Compaction)
-//! If a cell allocation fails because the unallocated gap is too small, but the total free space (gap + freeblocks + fragments)
-//! is sufficient, the page is **defragmented**:
+//! If a cell allocation fails because neither a freeblock nor the unallocated gap is large enough, but the total free
+//! space (gap + freeblocks + fragments) is sufficient, the page is **defragmented**. A delete that pushes the fragment
+//! count past 60 bytes defragments too:
 //! 1. All active cells are read into memory.
 //! 2. The Cell Content Area is cleared, wiping out all freeblocks and fragments.
-//! 3. The cells are written back contiguously from the end of the page.
+//! 3. The cells are written back contiguously from the end of the usable page.
 //! 4. The unallocated gap becomes one large, unified contiguous region.
 //!
 //! ---
 //!
 //! ## 2. Hematite Slotted Page Header Layouts
 //!
-//! Hematite supports four B-Tree page types: Leaf/Interior Table pages, and Leaf/Interior Index pages.
-//! On Page 1 (the first physical page containing the B-Tree schema), the page header starts at offset 100
-//! (`DATABASE_HEADER_SIZE`), directly following the database file header.
+//! The header format accepts four B-Tree page kinds: Leaf/Interior Table and Leaf/Interior Index. `BTreeNode`
+//! reads and writes only the two Table kinds, for every tree — index trees included.
+//!
+//! On page 0, the page that holds the database file header, a B-Tree page header would start at offset 100
+//! (`DATABASE_HEADER_SIZE`), directly after the file header; that is what `is_page_one` selects. No tree is
+//! rooted there in practice — page 0 holds the database header and page 1 the storage metadata — so every
+//! B-Tree page in a database has its header at offset 0.
 //!
 //! ### Header Offset Calculation
 //!
 //! ```text
-//!              Page 1 (Schema Root)                  Page 2+ (Standard)
+//!              Page 0 (Database Header)              Every other page
 //!            +---------------------+               +---------------------+
 //!            |  Database Header    |               |  B-Tree Page Header |
 //!   Offset 0 |  (100 bytes)        |      Offset 0 |  (8 or 12 bytes)    |
@@ -79,7 +86,7 @@
 //! | `0` | `1` | `page_kind` | One of `0x02` (Interior Index), `0x05` (Interior Table), `0x0A` (Leaf Index), or `0x0D` (Leaf Table). |
 //! | `1` | `2` | `first_freeblock` | Offset to the first freeblock in the page. `0` if none. |
 //! | `3` | `2` | `cell_count` | Number of cells stored on the page. |
-//! | `5` | `2` | `cell_content_start`| Start of the cell content area. Grows backward; `PAGE_SIZE` if empty. |
+//! | `5` | `2` | `cell_content_start`| Start of the cell content area. Grows backward; `USABLE_PAGE_SIZE` if empty. |
 //! | `7` | `1` | `fragmented_free_bytes`| Wasted space in bytes that could not form freeblocks. |
 //! | `8` | `4` | `rightmost_child` | (Interior pages only) The page ID of the rightmost routing child. |
 //!

@@ -65,13 +65,10 @@ impl Pager {
             }
         }
 
-        // Walks every allocated page rather than the entries of a checksum map.
-        //
-        // The map was the coverage limit, not a helper: it is serialised into a single
-        // metadata page, and when it stopped fitting the encoder silently wrote no
-        // checksums at all — measured at 685 pages, so integrity checking was off in
-        // any database past about 2.8 MB. A page's checksum lives in its own trailer
-        // now, so coverage does not depend on a map fitting anywhere.
+        // Walks every allocated page, because each page's checksum lives in its own
+        // trailer and coverage does not depend on anything else fitting anywhere. A
+        // checksum map serialised into one metadata page would cap coverage: it stops
+        // fitting at 685 pages, about 2.8 MB.
         let mut checksummed_page_count = 0usize;
         let mut verified_checksum_pages = 0usize;
         for page_id in FIRST_ALLOCATABLE_PAGE_ID..max_page_id_exclusive {
@@ -105,9 +102,9 @@ impl Pager {
                     checksummed_page_count += 1;
                     verified_checksum_pages += 1;
                 }
-                // Either never written, or resident in the WAL: a frame carries the
-                // page image as it was in memory, where the trailer is still zero.
-                // Those are covered by the WAL's own per-frame checksums instead.
+                // Never stamped: file space extended without the page being written
+                // reads as zeros, and there is nothing to check it against. WAL frames
+                // are stamped at commit, so a WAL-resident page lands in `Valid`.
                 PageTrailerState::Unstamped => {}
                 PageTrailerState::Mismatch => {
                     return Err(crate::error::HematiteError::CorruptedData(format!(

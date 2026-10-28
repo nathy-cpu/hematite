@@ -1,6 +1,7 @@
-/*! # Write-Ahead Logging (WAL) and Redo Recovery
+//! # Write-Ahead Logging (WAL) and Redo Recovery
 //!
-//! Write-Ahead Logging (WAL) is the default journaling mechanism of Hematite. It ensures transactional
+//! Write-Ahead Logging (WAL) is one of Hematite's two journal modes; a new database starts in
+//! rollback mode and `Pager::set_journal_mode` switches it. WAL ensures transactional
 //! Durability (the D in ACID) and enables Single-Writer, Multiple-Reader (SWMR) concurrency by logging
 //! modifications out-of-place to a separate WAL file before checkpointing them back to the database.
 //!
@@ -26,16 +27,20 @@
 //!
 //! ### Checkpointing
 //! As transactions commit, the WAL file grows. To prevent the log from consuming too much disk space
-//! and slowing down startup recovery, a **Checkpoint** operation is performed periodically. Checkpointing:
-//! 1. Flushes modified page frames from the WAL back into their in-place offsets in the main database file.
-//! 2. Truncates or resets the WAL file.
+//! and slowing down startup recovery, a **Checkpoint** runs after any commit that leaves the WAL at
+//! 1000 frames or more (and no reader still needs an older snapshot), on an explicit
+//! `checkpoint_wal`, and on a switch back to rollback mode. Checkpointing:
+//! 1. Writes every page the visible WAL state overrides to its in-place offset in the main database
+//!    file, then fsyncs the file.
+//! 2. Deletes the WAL file; the next commit starts a new one with fresh salts.
+//! 3. Rewrites and fsyncs the persisted-state page with the checkpointed free list.
 //!
 //! ---
 //!
 //! ## 2. WAL File Layout & Specifications
 //!
 //! A Hematite WAL file consists of a 24-byte header followed by zero or more frames. Each frame contains a
-//! 28-byte frame prefix followed by a `PAGE_SIZE` (4096 bytes) page image.
+//! 28-byte frame prefix followed by a `PAGE_SIZE` (4096 bytes) page image. Every integer is big-endian.
 //!
 //! ### WAL File Physical Layout
 //!
@@ -50,25 +55,30 @@
 //!
 //! | Offset | Size (Bytes) | Field | Description / Value |
 //! |---|---|---|---|
-//! | `0` | `4` | Magic | Magic signature bytes `HTW3`. |
+//! | `0` | `4` | Magic | Magic signature bytes `HTW1`. |
 //! | `4` | `4` | Version | File format version. Fixed to `1`. |
 //! | `8` | `2` | Page Size | Database page size. Fixed to `4096`. |
 //! | `10`| `2` | Reserved | Zero-filled padding bytes. |
-//! | `12`| `4` | Checkpoint Seq | Monotonically increasing checkpoint sequence number. |
-//! | `16`| `4` | Salt 1 | Random salt used for validating frame checksums. |
-//! | `20`| `4` | Salt 2 | Random salt used for validating frame checksums. |
+//! | `12`| `4` | Checkpoint Seq | Written as `0` and never advanced; a checkpoint deletes the file instead. |
+//! | `16`| `4` | Salt 1 | Drawn fresh for each new WAL file; every frame must carry the same pair. |
+//! | `20`| `4` | Salt 2 | Drawn fresh for each new WAL file; every frame must carry the same pair. |
 //!
 //! ### WAL Frame Layout (28-byte prefix + 4096-byte payload)
 //!
 //! | Offset | Size (Bytes) | Field | Description / Value |
 //! |---|---|---|---|
-//! | `0` | `4` | Page ID | Logical page ID (1-based index in the database file). |
+//! | `0` | `4` | Page ID | Logical page id, 0-based (`page_id * PAGE_SIZE` is its offset in the database file). |
 //! | `4` | `4` | DB Page Count | Total page count of the database file after this frame's transaction commit. |
 //! | `8` | `8` | Commit Sequence | Monotonically increasing transaction commit ID. |
 //! | `16`| `4` | Salt 1 | Copy of Salt 1 from WAL header for frame verification. |
 //! | `20`| `4` | Salt 2 | Copy of Salt 2 from WAL header for frame verification. |
-//! | `24`| `4` | Checksum | CRC32 checksum computed over frame headers + page data. |
-//! | `28`| `4096`| Page Data | Raw page bytes. |
+//! | `24`| `4` | Checksum | High 32 bits of XXH64 over the page data, seeded with XXH64 of bytes `0..24`. |
+//! | `28`| `4096`| Page Data | Page image. Frames for pages the transaction wrote carry a stamped trailer; the synthesized metadata frame's trailer is zero. |
+//!
+//! A commit's frames share one commit sequence and end with a frame for the storage metadata page
+//! (page 1) carrying the committed free list; a run of frames without one is not a commit and is
+//! ignored. A partial frame at the tail is ignored too, but a complete frame whose salts or checksum
+//! do not match fails the whole load.
 //!
 //! ---
 //!
@@ -98,7 +108,6 @@
 //!            v                   v
 //!           Serve reconstructed page bytes
 //! ```
-//!*/
 
 use crate::error::{HematiteError, Result};
 use crate::storage::checksum;
@@ -256,28 +265,10 @@ impl Default for WalHeader {
 ///
 /// Salts exist so a frame left over from a previous WAL cannot be mistaken for a
 /// current one: every frame carries the header's pair, and a mismatch means the frame
-/// predates this generation. They were the fixed constants `0x48454D41` and
-/// `0x54495445` — "HEMA" and "TITE" — which made every check against them
-/// tautological, so the guard could never fire and a recycled file's stale frames
-/// passed validation.
-///
-/// `RandomState` is seeded by the OS per process, and mixing in the wall clock
-/// separates WAL generations created within one process. Neither is a cryptographic
-/// source and neither needs to be: the requirement is that two generations differ,
-/// not that an adversary cannot guess them.
+/// predates this generation. See [`crate::storage::checksum::fresh_nonce`] for why
+/// they must be fresh rather than fixed.
 fn fresh_salts() -> (u32, u32) {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let mut hasher = RandomState::new().build_hasher();
-    hasher.write_u64(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos() as u64)
-            .unwrap_or(0),
-    );
-    let mixed = hasher.finish();
+    let mixed = crate::storage::checksum::fresh_nonce();
     (mixed as u32, (mixed >> 32) as u32)
 }
 
@@ -544,9 +535,9 @@ pub(crate) fn load_visible_state_from_path_with_base<P: AsRef<Path>>(
     }
 
     let latest_sequence = wal.frames[committed_groups.last().unwrap()[0]].commit_sequence;
-    // We still need to read page data during loading for checksum computation
-    // and metadata page parsing. But we store only the page IDs as override
-    // markers, not the full page data.
+    // Loading reads every frame in full anyway: decoding verifies each frame's
+    // checksum, and the metadata frame has to be parsed. What the visible state
+    // keeps is each page's frame offset, plus a bounded cache of images.
     let (database_page_count, page_overrides_btree, frame_offsets) =
         visible_pages_from_committed_groups(&wal.frames, &committed_groups)?;
     let file_len = if database_page_count == 0 {
@@ -584,8 +575,8 @@ pub(crate) fn load_visible_state_from_path_with_base<P: AsRef<Path>>(
     let visible_next_page_id = next_page_id_for_file_len(file_len);
     let free_page_set = free_pages.iter().copied().collect::<PageSet>();
 
-    // Compute checksums from the in-memory data (still needed for correctness)
-    // but only store page IDs as override markers.
+    // Every visible page gets an override offset; the images already in hand seed
+    // the LRU cache, which keeps at most `WAL_PAGE_CACHE_CAPACITY` of them.
     let mut page_override_offsets = PageMap::default();
     let mut page_cache = WalPageCache::new(WAL_PAGE_CACHE_CAPACITY);
 
@@ -755,10 +746,9 @@ fn synthesize_committed_frames(
     if base_page.len() != PAGE_SIZE {
         base_page = vec![0; PAGE_SIZE];
     }
-    // No fallback for an oversized payload any more. It existed because the checksum
-    // map could outgrow the metadata page, and it silently dropped every checksum when
-    // it did. The payload is now free-page state only, which is bounded by the free
-    // list, so an overflow here is a real error rather than something to paper over.
+    // No fallback for an oversized payload. The payload is free-page state only, so
+    // an overflow here is a real error, and any fallback would have to drop state
+    // to make it fit.
     let metadata_page_bytes = metadata_page::write_pager_metadata(&base_page, &metadata_payload)?;
 
     let mut v3_frames = Vec::with_capacity(frames.len() + 1);
@@ -1087,11 +1077,13 @@ impl WalFile {
         Ok(Some(Self::decode(&bytes)?))
     }
 
-    /// Appends `frames` to the WAL file at `path`, returning the byte offset
-    /// at which the first frame was written. Since frames are fixed-size and
-    /// strictly appended, callers can derive every other frame's offset as
-    /// `start_offset + index * frame_size` without re-reading the file.
-    /// Appends `frames`, writing a fresh header first if the WAL is new.
+    /// Appends `frames` to the WAL file at `path`, writing a fresh header first if
+    /// the WAL is new, and syncs the file — the one fsync of a WAL commit.
+    ///
+    /// Returns the byte offset at which the first frame was written. Since frames
+    /// are fixed-size and strictly appended, callers can derive every other
+    /// frame's offset as `start_offset + index * frame_size` without re-reading
+    /// the file.
     ///
     /// Reads the header through the same handle it appends with, and returns it so
     /// the caller does not need its own copy. Taking a header the caller loaded by
@@ -1134,8 +1126,8 @@ impl WalFile {
         let start_offset = file.stream_position()?;
 
         // One `writev` for the whole batch instead of two `write`s per frame. A
-        // single-row commit appends about three frames, so this was six syscalls
-        // where one will do.
+        // single-row commit appends about three frames, so that would be six
+        // syscalls where one will do.
         let prefixes = frames
             .iter()
             .map(|frame| frame.encode_prefix(&header))

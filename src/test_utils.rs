@@ -31,10 +31,12 @@ impl TestDbFile {
         &self.path
     }
 
-    /// Every file the pager may create alongside the database.
+    /// Every file that may sit alongside a test database.
     ///
     /// Cleanup has to know about all of them, or every test run leaves another set
-    /// behind in the repository root.
+    /// behind in the repository root. The pager creates `.wal` and `.journal`; it
+    /// keeps its locks in memory (`storage::pager::locking`) and never creates the
+    /// lock files or the `.wal.readers` directory, so removing those is a no-op.
     const SIDECAR_FILE_SUFFIXES: [&'static str; 4] =
         [".wal", ".journal", ".rollback.lock", ".wal.write.lock"];
 

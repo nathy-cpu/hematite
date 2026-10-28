@@ -1,100 +1,38 @@
-//! # Volcano-Style Query Execution Engine (`executor`)
+//! Runs a planned statement against the catalog engine.
 //!
-//! The Query Executor drives planned query access paths, structuring operations into physical processing
-//! iterator pipelines (the Volcano model) and executing relational modifications on B-Tree cursors.
+//! `build_executor` turns an `ExecutionProgram` into one `QueryExecutor` per statement
+//! kind — `SelectExecutor`, `InsertExecutor`, `UpdateExecutor`, `DeleteExecutor` and the
+//! DDL executors — and each runs once against an `ExecutionContext`. Every executor
+//! validates its own statement against `ctx.catalog` before it does anything else.
 //!
-//! ---
+//! Execution materialises rather than pipelines: there are no per-row iterators, and
+//! each step of a SELECT takes a `Vec` of rows and hands on another. In
+//! `SelectExecutor::execute_body`, in order:
 //!
-//! ## 1. Core Database Execution Concepts
+//! 1. a set operation runs its left side as a SELECT of its own and its right side as a
+//!    subquery, and `apply_set_operation` combines them;
+//! 2. `try_direct_projection` answers a plain `SELECT a, b FROM t` by decoding only the
+//!    projected columns straight into the result buffer;
+//! 3. `materialize_filtered_rows` reads the source by its `SelectAccessPath` — rowid,
+//!    primary-key or secondary-index lookup, or a full scan that `scan_row_cap` may stop
+//!    early — or materialises joins, derived tables and CTEs, then applies `WHERE`;
+//! 4. `ORDER BY` sorts the source rows, unless the query groups or aggregates;
+//! 5. `execute_grouped` handles `GROUP BY`, aggregates and `HAVING` and sorts its own
+//!    output; otherwise each row is projected;
+//! 6. `DISTINCT`, then `OFFSET` and `LIMIT` (`apply_select_window`).
 //!
-//! ### The Volcano Model (Iterator Model)
-//! The Volcano model is the classical design pattern for database execution. Physical query operators are
-//! organized into a directed tree. Each operator implements a common iterator interface, providing a `next()` method:
-//! * **Laziness**: Calling `next()` on the root node (e.g., `Projection`) recursively pulls rows from child nodes
-//!   (e.g., `Filter`, which pulls from `TableScan`) on-demand.
-//! * **Memory Efficiency**: Rows are processed streaming style, one-by-one. This prevents having to load the
-//!   entire dataset into memory before applying operations.
+//! Joins are nested loops over two fully materialised sides; an inner or cross join
+//! puts the smaller side on the outside. There is no hash join.
 //!
-//! ### Query Operators
-//! 1. **Scans**:
-//!    * **Table Scan**: Traverses the entire clustered B-Tree table sequentially.
-//!    * **RowID Lookup**: Performs a direct point search on the clustered table B-Tree using a known primary key.
-//!    * **Index Scan**: Scans a secondary index B-Tree, extracts matching `rowid` keys, then queries the main
-//!      clustered table for payload rows.
-//! 2. **Filter & Projection**: Evaluates boolean predicates and filters rows; projects and computes target output columns.
-//! 3. **Hash Join**: Evaluates equijoins. It reads all rows from the build-side relation, constructs an in-memory
-//!    hash table based on the join keys, then streams the probe-side relation to locate join matches.
-//! 4. **Aggregate Functions**: Computes aggregates (e.g. `SUM`, `AVG`) over grouping sets, holding running
-//!    state accumulator values.
+//! INSERT and UPDATE coerce each new row to the column types, check its CHECK
+//! constraints and foreign keys (`validate_row_constraints`) and its uniqueness, and
+//! only then write it; `write_stored_row` maintains the primary-key and secondary
+//! indexes alongside the table. UPDATE and DELETE find their rows with
+//! `locate_mutation_rows`, and when the table is a foreign-key parent they apply its
+//! `ON UPDATE` / `ON DELETE` actions to the child rows before touching their own.
 //!
-//! ### Storage Layer Agnosticism
-//! The Executor operates exclusively on logical relational types (`Value`, `Row`) and interacts with storage
-//! through catalog cursors. It remains entirely decoupled from physical page formatting, slotted cell layout,
-//! buffer pools, or transaction logging. Leaking B-Tree page bytes or Pager metadata into this layer violates
-//! architectural isolation boundaries.
-//!
-//! ---
-//!
-//! ## 2. Volcano Pipeline Execution Flow
-//!
-//! Tracing a query: `SELECT age FROM users WHERE name = 'Alice';`
-//!
-//! ```text
-//!    [ProjectionExecutor]  <---+ 4. Extracts "age" column, yields to client.
-//!            |
-//!        next()
-//!            v
-//!      [FilterExecutor]    <---+ 3. Evaluates name == 'Alice', discards non-matches.
-//!            |
-//!        next()
-//!            v
-//!     [TableScanExecutor]  <---+ 1. Asks B-Tree Cursor for next raw record bytes.
-//!            |                  2. Deserializes record bytes into logical Row.
-//!            v
-//!       B-Tree Cursor
-//! ```
-//!
-//! ---
-//!
-//! ## 3. Query Access Path Resolution
-//!
-//! ```text
-//!                          Scan User Request
-//!                                  |
-//!                   Is there an index on search key?
-//!                    /                            \
-//!                Yes/                              \No
-//!                  v                                v
-//!        +---------+---------+            +---------+---------+
-//!        |    Index Scan     |            |    Table Scan     |
-//!        |  * Scan index tree|            |  * Sequence scan  |
-//!        |  * Get Row IDs    |            |    entire clustered|
-//!        +---------+---------+            |    B-Tree table.  |
-//!                  |                      +---------+---------+
-//!             Point Lookup                          |
-//!                  v                                |
-//!        +---------+---------+                      |
-//!        |   Clustered Table |                      |
-//!        |  * Fetch row bytes|                      |
-//!        +---------+---------+                      |
-//!                  \                                /
-//!                   \                              /
-//!                    v                            v
-//!                    Evaluate filters & Emit Rows
-//! ```
-//!
-//! ---
-//!
-//! ## 4. Execution Invariants
-//!
-//! 1. **Iterator State Isolation**: Operators must track all execution state (such as cursor locations, active
-//!    hash-table maps, and aggregate accumulators) within their own instantiated executor structures. Shared
-//!    execution state must not leak between concurrent connection queries.
-//! 2. **Autocommit Boundary Verification**: Insert, update, and delete mutations must perform type-checking
-//!    and constraint validations (e.g. check constraints, foreign keys) before updating the B-Tree cursor.
-//! 3. **Resource Lifecycle Integrity**: Cursors opened during scans must be closed/dropped promptly when the
-//!    pipeline completes or encounters an error, releasing pinned page frames in the Pager cache.
-//!
+//! Storage is reached only through `CatalogEngine` methods on `ctx.engine`, which
+//! trade in `Value`s and row ids; nothing here sees a page, a cell or the pager.
 
 use crate::catalog::column::collation_is_nocase;
 use crate::catalog::table::{
@@ -104,12 +42,15 @@ use crate::catalog::StoredRow;
 use crate::catalog::{Column, DataType, DecimalValue, Table, Value};
 use crate::error::{HematiteError, Result};
 use crate::parser::ast::*;
+use crate::parser::LiteralValue;
 use crate::query::lowering::{lower_literal_value, lower_type_name, raise_literal_value};
 use crate::query::plan::{ExecutionProgram, QueryPlan, SelectAccessPath};
-use crate::query::predicate::extract_literal_equalities;
+use crate::query::predicate::{extract_literal_equalities, names_hidden_rowid, rowid_lookup};
 pub use crate::query::runtime::{ExecutionContext, QueryExecutor, QueryResult};
 use crate::query::validation::{
-    projected_column_names, validate_column_reference, validate_statement,
+    projected_column_names, validate_alter, validate_column_reference, validate_create,
+    validate_create_index, validate_delete, validate_drop, validate_drop_index, validate_insert,
+    validate_select, validate_update,
 };
 use crate::query::QueryPlanner;
 use std::cmp::Ordering;
@@ -207,9 +148,9 @@ impl ResolvedSource {
 
     /// The position of `column_name` among this source's columns.
     ///
-    /// A scan, not a map. The map this replaced was built per statement — a cloned
-    /// `String` key per column, a `HashMap` allocation, and a SipHash per insert — to
-    /// answer a handful of probes: resolution runs once per statement, not per row
+    /// A scan, not a map. A map would be built per statement — a cloned `String` key
+    /// per column, a `HashMap` allocation, and a SipHash per insert — to answer a
+    /// handful of probes: resolution runs once per statement, not per row
     /// (see `resolve_projection_columns`), and a projection names far fewer columns
     /// than a table has. Paying O(columns) of allocation to make O(projected columns)
     /// probes constant-time is the wrong way round, and comparing short names usually
@@ -608,6 +549,7 @@ impl SelectExecutor {
         current_sources: Option<&[ResolvedSource]>,
         current_row: Option<&[Value]>,
     ) -> Result<QueryResult> {
+        let correlated = current_sources.is_some() && current_row.is_some();
         let effective_subquery = if let (Some(sources), Some(row)) = (current_sources, current_row)
         {
             self.bind_correlated_subquery(ctx, subquery, sources, row)?
@@ -620,7 +562,25 @@ impl SelectExecutor {
                     .clone()
                     .unwrap_or_else(|| Arc::new(crate::catalog::TableMetadataMap::default())),
             );
-        let plan = planner.plan(Statement::Select(effective_subquery))?;
+
+        // A correlated subquery is re-planned for every row of the outer query, and
+        // every one of those plans would validate the same shape: binding substitutes
+        // literals at the same positions each row, and validation reads column
+        // references and structure, never a literal's value. So the planner validates
+        // the first row's binding and takes the answer for the rest. The executor
+        // below still validates what it runs, every row, in `SelectExecutor::execute`.
+        let key = subquery as *const SelectStatement as usize;
+        let already_validated = correlated && ctx.validated_subqueries.contains(&key);
+        let statement = Statement::Select(effective_subquery);
+        let plan = if already_validated {
+            planner.plan_validated(statement)?
+        } else {
+            let plan = planner.plan(statement)?;
+            if correlated {
+                ctx.validated_subqueries.push(key);
+            }
+            plan
+        };
         match plan.program {
             ExecutionProgram::Select {
                 statement,
@@ -971,13 +931,20 @@ impl SelectExecutor {
         for (position, item) in self.statement.columns.iter().enumerate() {
             match item {
                 SelectItem::Wildcard => projected.extend(row.iter().cloned()),
-                SelectItem::Column(_) => {
-                    if let Some(index) = resolved_columns[position] {
-                        if index < row.len() {
-                            projected.push(row[index].clone());
-                        }
-                    }
-                }
+                SelectItem::Column(name) => match resolved_columns[position] {
+                    Some(index) if index < row.len() => projected.push(row[index].clone()),
+                    // Not a column of this row's sources. Evaluating it either finds it
+                    // in an outer scope or reports it missing; skipping it would leave
+                    // this row one value short, and every row after it misaligned in
+                    // the result buffer.
+                    _ => projected.push(self.evaluate_expression(
+                        ctx,
+                        cache,
+                        sources,
+                        &Expression::Column(name.clone()),
+                        row,
+                    )?),
+                },
                 SelectItem::Expression(expr) => {
                     projected.push(self.evaluate_expression(ctx, cache, sources, expr, row)?);
                 }
@@ -1991,9 +1958,9 @@ impl SelectExecutor {
             return Ok(vec![filtered_rows]);
         }
 
-        // Use a hash-map keyed by a 64-bit hash of the group key vector to
-        // avoid O(n^2) behavior when many groups are present. Collisions are
-        // resolved by comparing full keys within each bucket.
+        // Keyed by a 64-bit hash of the group key, so many groups do not cost
+        // O(n^2) key comparisons. Collisions are resolved by comparing full keys
+        // within a bucket.
         let mut keyed_groups_map: HashMap<u64, Vec<(Vec<Value>, Vec<Vec<Value>>)>> = HashMap::new();
         for row in filtered_rows {
             let key = self
@@ -2015,8 +1982,8 @@ impl SelectExecutor {
             }
         }
 
-        // Flatten buckets into result preserving first-seen group ordering as
-        // best-effort by iterating buckets and their entries.
+        // Groups come out in the `HashMap`'s iteration order, which is not the order
+        // they were first seen in; only `ORDER BY` makes grouped output deterministic.
         let mut result = Vec::new();
         for bucket in keyed_groups_map.into_values() {
             for (_key, rows) in bucket {
@@ -2102,19 +2069,24 @@ impl SelectExecutor {
         sources: &[ResolvedSource],
         all_rows: Vec<Vec<Value>>,
     ) -> Result<Vec<Vec<Value>>> {
-        let skip_filter = matches!(self.access_path, SelectAccessPath::RowIdLookup);
+        // A row-id lookup has to evaluate the rest of `WHERE` like any other path: the
+        // lookup satisfies `rowid = n`, not whatever else the clause says. The looked-up
+        // row's values do not carry its id, so that is bound in as a literal.
+        let rowid_conditions = match self.access_path {
+            SelectAccessPath::RowIdLookup => self.rowid_lookup_conditions(ctx)?,
+            _ => None,
+        };
+        let conditions = match (&rowid_conditions, &self.statement.where_clause) {
+            (Some(conditions), _) => Some(conditions.as_slice()),
+            (None, Some(where_clause)) => Some(where_clause.conditions.as_slice()),
+            (None, None) => None,
+        };
         let mut filtered_rows = Vec::with_capacity(all_rows.len());
 
         for row in all_rows {
-            let include = if skip_filter {
-                true
-            } else {
-                match &self.statement.where_clause {
-                    Some(where_clause) => {
-                        self.conditions_match(ctx, cache, sources, &where_clause.conditions, &row)?
-                    }
-                    None => true,
-                }
+            let include = match conditions {
+                Some(conditions) => self.conditions_match(ctx, cache, sources, conditions, &row)?,
+                None => true,
             };
 
             if include {
@@ -2123,6 +2095,22 @@ impl SelectExecutor {
         }
 
         Ok(filtered_rows)
+    }
+
+    /// `WHERE` with the looked-up row id bound in, for the row-id lookup path.
+    fn rowid_lookup_conditions(
+        &self,
+        ctx: &ExecutionContext<'_>,
+    ) -> Result<Option<Vec<Expression>>> {
+        let TableReference::Table(table_name, _) = &self.statement.from else {
+            return Ok(None);
+        };
+        let table = ctx.catalog.get_table_by_name(table_name).ok_or_else(|| {
+            HematiteError::ParseError(format!("Table '{}' does not exist", table_name))
+        })?;
+        Ok(self
+            .extract_rowid_lookup(table)
+            .map(|row_id| self.where_with_rowid(table, row_id)))
     }
 
     fn conditions_match(
@@ -2190,11 +2178,75 @@ impl SelectExecutor {
             .collect()
     }
 
-    fn extract_rowid_lookup(&self) -> Option<u64> {
-        let equalities = extract_literal_equalities(self.statement.where_clause.as_ref()?)?;
-        match equalities.get("rowid") {
-            Some(Value::Integer(v)) if v >= &0 => Some(*v as u64),
+    fn extract_rowid_lookup(&self, table: &Table) -> Option<u64> {
+        rowid_lookup(self.statement.where_clause.as_ref()?, table)
+    }
+
+    /// Whether `WHERE` names `table`'s hidden row id anywhere outside a subquery.
+    fn where_names_rowid(&self, table: &Table) -> bool {
+        let alias = self.single_table_alias();
+        self.statement
+            .where_clause
+            .as_ref()
+            .is_some_and(|where_clause| {
+                where_clause.conditions.iter().any(|condition| {
+                    condition.mentions_column(&|name| names_hidden_rowid(table, alias, name))
+                })
+            })
+    }
+
+    /// `WHERE`, with every reference to `table`'s hidden row id replaced by `row_id`.
+    ///
+    /// A row's values do not include its row id, so a condition naming `rowid` cannot
+    /// be evaluated against them. Every path that calls this holds the row id
+    /// separately — a row-id lookup knows the one it looked up, and a mutation's rows
+    /// are `StoredRow`s — so the reference is bound to it as a literal instead. Callers
+    /// ask `where_names_rowid` once per statement first, so a clause that never names
+    /// the row id is not copied per row.
+    fn where_with_rowid(&self, table: &Table, row_id: u64) -> Vec<Expression> {
+        let alias = self.single_table_alias();
+        let value = LiteralValue::Integer(i128::from(row_id));
+        let mut conditions = self
+            .statement
+            .where_clause
+            .as_ref()
+            .map(|where_clause| where_clause.conditions.clone())
+            .unwrap_or_default();
+        for condition in &mut conditions {
+            condition.bind_columns(&|name| names_hidden_rowid(table, alias, name), &value);
+        }
+        conditions
+    }
+
+    /// The alias of the statement's one table, when it is a single aliased table.
+    fn single_table_alias(&self) -> Option<&str> {
+        match &self.statement.from {
+            TableReference::Table(_, alias) => alias.as_deref(),
             _ => None,
+        }
+    }
+
+    /// Whether a stored row satisfies `WHERE`, its hidden row id included.
+    ///
+    /// `names_rowid` is `where_names_rowid(table)`, asked once by the caller.
+    fn stored_row_matches(
+        &self,
+        ctx: &mut ExecutionContext<'_>,
+        cache: &mut SubqueryCache,
+        sources: &[ResolvedSource],
+        table: &Table,
+        names_rowid: bool,
+        row: &StoredRow,
+    ) -> Result<bool> {
+        match &self.statement.where_clause {
+            None => Ok(true),
+            Some(_) if names_rowid => {
+                let conditions = self.where_with_rowid(table, row.row_id);
+                self.conditions_match(ctx, cache, sources, &conditions, &row.values)
+            }
+            Some(where_clause) => {
+                self.conditions_match(ctx, cache, sources, &where_clause.conditions, &row.values)
+            }
         }
     }
 
@@ -2265,7 +2317,7 @@ impl SelectExecutor {
     ) -> Result<Vec<Vec<Value>>> {
         match self.access_path {
             SelectAccessPath::RowIdLookup => {
-                let rowid = self.extract_rowid_lookup().ok_or_else(|| {
+                let rowid = self.extract_rowid_lookup(table).ok_or_else(|| {
                     HematiteError::InternalError(
                         "Planner selected rowid lookup without a matching predicate".to_string(),
                     )
@@ -2319,7 +2371,7 @@ impl SelectExecutor {
 
 impl QueryExecutor for SelectExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext) -> Result<QueryResult> {
-        validate_statement(&Statement::Select(self.statement.clone()), &ctx.catalog)?;
+        validate_select(&self.statement, &ctx.catalog)?;
         if self.table_row_counts.is_none() {
             self.table_row_counts = Some(current_table_row_counts(ctx.engine));
         }
@@ -2357,7 +2409,7 @@ impl InsertExecutor {
         let candidate_pk = primary_key_values(table, candidate_row)?;
 
         // The row id answers this; fetching and decoding the whole row to call
-        // `.is_some()` on it read a record only to drop it.
+        // `.is_some()` on it would read a record only to drop it.
         if ctx
             .engine
             .lookup_primary_key_rowid(table, &candidate_pk)?
@@ -2564,7 +2616,7 @@ impl InsertExecutor {
 
 impl QueryExecutor for InsertExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext) -> Result<QueryResult> {
-        validate_statement(&Statement::Insert(self.statement.clone()), &ctx.catalog)?;
+        validate_insert(&self.statement, &ctx.catalog)?;
 
         let table = catalog_table(ctx, &self.statement.table)?;
         let column_positions = build_insert_column_positions(&table, &self.statement.columns)?;
@@ -2720,7 +2772,7 @@ impl UpdateExecutor {
 
 impl QueryExecutor for UpdateExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext<'_>) -> Result<QueryResult> {
-        validate_statement(&Statement::Update(self.statement.clone()), &ctx.catalog)?;
+        validate_update(&self.statement, &ctx.catalog)?;
 
         let table = catalog_table(ctx, &self.statement.table)?;
         let LocatedMutationRows {
@@ -2839,9 +2891,10 @@ fn locate_rowids_for_access_path(
         SelectAccessPath::JoinScan => Err(HematiteError::ParseError(
             "Join scans are not valid for UPDATE or DELETE locators".to_string(),
         )),
-        SelectAccessPath::RowIdLookup => {
-            Ok(select_executor.extract_rowid_lookup().into_iter().collect())
-        }
+        SelectAccessPath::RowIdLookup => Ok(select_executor
+            .extract_rowid_lookup(table)
+            .into_iter()
+            .collect()),
         SelectAccessPath::PrimaryKeyLookup => {
             let Some(primary_key_values) = select_executor.extract_primary_key_lookup(table) else {
                 return Ok(Vec::new());
@@ -2862,9 +2915,9 @@ fn locate_rowids_for_access_path(
                 .lookup_secondary_index_rowids(table, index_name, &key_values)
         }
         SelectAccessPath::FullTableScan => {
-            // Row ids live in the tree keys, so this never touches a record. It used
-            // to open a cursor, which decodes every column of every row, and then
-            // read nothing but `row_id` from each.
+            // Row ids live in the tree keys, so this never touches a record. A cursor
+            // would decode every column of every row only for this to read nothing
+            // but `row_id` from each.
             let mut rowids = Vec::new();
             ctx.engine.visit_table_row_ids(table_name, |row_id| {
                 rowids.push(row_id);
@@ -2887,20 +2940,19 @@ fn locate_rows_for_access_path(
         let mut rows = Vec::new();
         let mut subquery_cache = SubqueryCache::new();
         let sources = select_executor.resolve_sources(ctx)?;
+        let names_rowid = select_executor.where_names_rowid(table);
 
         if table_cursor.first() {
             loop {
                 if let Some(row) = table_cursor.current() {
-                    let include = match &select_executor.statement.where_clause {
-                        Some(where_clause) => select_executor.conditions_match(
-                            ctx,
-                            &mut subquery_cache,
-                            &sources,
-                            &where_clause.conditions,
-                            &row.values,
-                        )?,
-                        None => true,
-                    };
+                    let include = select_executor.stored_row_matches(
+                        ctx,
+                        &mut subquery_cache,
+                        &sources,
+                        table,
+                        names_rowid,
+                        &row,
+                    )?;
 
                     if include {
                         rows.push(row.clone());
@@ -2921,19 +2973,18 @@ fn locate_rows_for_access_path(
     let mut rows = Vec::new();
     let mut subquery_cache = SubqueryCache::new();
     let sources = select_executor.resolve_sources(ctx)?;
+    let names_rowid = select_executor.where_names_rowid(table);
 
     for rowid in rowids {
         if let Some(row) = ctx.engine.lookup_row_by_rowid(table_name, rowid)? {
-            let include = match &select_executor.statement.where_clause {
-                Some(where_clause) => select_executor.conditions_match(
-                    ctx,
-                    &mut subquery_cache,
-                    &sources,
-                    &where_clause.conditions,
-                    &row.values,
-                )?,
-                None => true,
-            };
+            let include = select_executor.stored_row_matches(
+                ctx,
+                &mut subquery_cache,
+                &sources,
+                table,
+                names_rowid,
+                &row,
+            )?;
 
             if include {
                 rows.push(row);
@@ -3052,7 +3103,7 @@ fn target_rowid_from_join_row(
 
 impl QueryExecutor for DeleteExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext) -> Result<QueryResult> {
-        validate_statement(&Statement::Delete(self.statement.clone()), &ctx.catalog)?;
+        validate_delete(&self.statement, &ctx.catalog)?;
 
         let table = catalog_table(ctx, &self.statement.table)?;
         let rows_to_delete = locate_mutation_rows(
@@ -3246,7 +3297,7 @@ struct CreateConstraints {
 
 impl QueryExecutor for CreateExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext) -> Result<QueryResult> {
-        validate_statement(&Statement::Create(self.statement.clone()), &ctx.catalog)?;
+        validate_create(&self.statement, &ctx.catalog)?;
         if self.statement.if_not_exists
             && ctx
                 .catalog
@@ -3317,7 +3368,7 @@ impl DropExecutor {
 
 impl QueryExecutor for DropExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext<'_>) -> Result<QueryResult> {
-        validate_statement(&Statement::Drop(self.statement.clone()), &ctx.catalog)?;
+        validate_drop(&self.statement, &ctx.catalog)?;
         if self.statement.if_exists
             && ctx
                 .catalog
@@ -3351,7 +3402,7 @@ impl AlterExecutor {
 
 impl QueryExecutor for AlterExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext<'_>) -> Result<QueryResult> {
-        validate_statement(&Statement::Alter(self.statement.clone()), &ctx.catalog)?;
+        validate_alter(&self.statement, &ctx.catalog)?;
 
         match &self.statement.operation {
             AlterOperation::RenameTo(new_name) => {
@@ -3543,9 +3594,10 @@ impl QueryExecutor for AlterExecutor {
                         column_name
                     ))
                 })?;
-                // Streams, and stops at the first NULL. Materialising the table only
-                // to call `.any()` on it decoded every row even when the first one
-                // already answered the question.
+                // Streams rather than materialising: every row is still visited, but
+                // none is kept, and the check stops once a NULL has been seen.
+                // Materialising the table to call `.any()` on it would hold every
+                // row in memory to answer a yes-or-no question.
                 let mut has_null = false;
                 ctx.engine.visit_table_rows(&self.statement.table, |row| {
                     if !has_null && row.values.get(column_index).is_some_and(Value::is_null) {
@@ -3588,10 +3640,7 @@ impl CreateIndexExecutor {
 
 impl QueryExecutor for CreateIndexExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext<'_>) -> Result<QueryResult> {
-        validate_statement(
-            &Statement::CreateIndex(self.statement.clone()),
-            &ctx.catalog,
-        )?;
+        validate_create_index(&self.statement, &ctx.catalog)?;
         if self.statement.if_not_exists {
             if let Some(table) = ctx.catalog.get_table_by_name(&self.statement.table) {
                 if table
@@ -3987,6 +4036,56 @@ fn coerce_column_value(column: &Column, value: Value) -> Result<Value> {
     }
 }
 
+/// A table's CHECK constraints, prepared for a statement that will check many rows.
+///
+/// The catalog stores a check constraint as SQL text, so checking a row from scratch
+/// re-lexes and re-parses every constraint on the table, and rebuilds the scan
+/// executor and resolves its sources, for **each row** the statement writes. None of
+/// that can differ between two rows of one statement.
+#[derive(Debug)]
+pub struct CheckPlan {
+    /// Parallel to `Table::check_constraints`.
+    conditions: Vec<Expression>,
+    executor: SelectExecutor,
+    sources: Vec<ResolvedSource>,
+}
+
+/// Returns the statement's prepared constraints for `table`, building them on first use.
+///
+/// Handed back as an `Arc` so the caller holds no borrow of `ctx`, which it needs
+/// mutably to evaluate the conditions.
+fn check_plan_for(ctx: &mut ExecutionContext<'_>, table: &Table) -> Result<Arc<CheckPlan>> {
+    if let Some((_, plan)) = ctx
+        .check_plans
+        .iter()
+        .find(|(name, _)| name.as_str() == table.name)
+    {
+        return Ok(Arc::clone(plan));
+    }
+
+    let conditions = table
+        .check_constraints
+        .iter()
+        .map(|constraint| {
+            crate::parser::parser::parse_expression_fragment(&constraint.expression_sql)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let executor = SelectExecutor::new(
+        locator_select_statement(TableReference::Table(table.name.clone(), None), None),
+        SelectAccessPath::FullTableScan,
+    );
+    let sources = executor.resolve_sources(ctx)?;
+
+    let plan = Arc::new(CheckPlan {
+        conditions,
+        executor,
+        sources,
+    });
+    ctx.check_plans
+        .push((table.name.clone(), Arc::clone(&plan)));
+    Ok(plan)
+}
+
 fn validate_check_constraints(
     ctx: &mut ExecutionContext<'_>,
     table: &Table,
@@ -3996,21 +4095,15 @@ fn validate_check_constraints(
         return Ok(());
     }
 
-    let constraint_executor = SelectExecutor::new(
-        locator_select_statement(TableReference::Table(table.name.clone(), None), None),
-        SelectAccessPath::FullTableScan,
-    );
-    let sources = constraint_executor.resolve_sources(ctx)?;
+    let plan = check_plan_for(ctx, table)?;
     let mut subquery_cache = SubqueryCache::new();
 
-    for constraint in &table.check_constraints {
-        let condition =
-            crate::parser::parser::parse_expression_fragment(&constraint.expression_sql)?;
-        let result = constraint_executor.evaluate_boolean_expression(
+    for (constraint, condition) in table.check_constraints.iter().zip(&plan.conditions) {
+        let result = plan.executor.evaluate_boolean_expression(
             ctx,
             &mut subquery_cache,
-            &sources,
-            &condition,
+            &plan.sources,
+            condition,
             row,
         )?;
         if result == Some(false) {
@@ -4382,9 +4475,9 @@ fn child_rows_referencing_parent_key(
     parent_key: &[Value],
 ) -> Result<Vec<StoredRow>> {
     // Streams the child table rather than materialising it. This runs once per
-    // parent row being deleted or updated, so materialising here meant decoding the
-    // entire child table again for every single parent row, and then discarding all
-    // but the matches.
+    // parent row being deleted or updated, so materialising here would hold the
+    // entire child table in memory again for every single parent row, only to
+    // discard all but the matches.
     let mut matches = Vec::new();
     ctx.engine
         .visit_table_rows(&child_table.name, |child_row| {
@@ -6211,7 +6304,7 @@ impl DropIndexExecutor {
 
 impl QueryExecutor for DropIndexExecutor {
     fn execute(&mut self, ctx: &mut ExecutionContext<'_>) -> Result<QueryResult> {
-        validate_statement(&Statement::DropIndex(self.statement.clone()), &ctx.catalog)?;
+        validate_drop_index(&self.statement, &ctx.catalog)?;
         if self.statement.if_exists {
             let Some(table) = ctx.catalog.get_table_by_name(&self.statement.table) else {
                 return Ok(mutation_result(0));

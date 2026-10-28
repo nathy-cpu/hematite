@@ -228,93 +228,129 @@ mod ast_tests {
 }
 
 mod lexer_tests {
+    use std::borrow::Cow;
+
     use crate::error::Result;
     use crate::parser::lexer::*;
 
+    /// A token's kind together with its value.
+    ///
+    /// The lexer does not produce this — a `Token` is a kind and a span, and the
+    /// parser reads a value out of the span only when it needs one — but a test
+    /// asserting on a token stream wants both, and wants the *value* (`O'Brien`)
+    /// rather than the source text (`O\'Brien`).
+    #[derive(Debug, PartialEq)]
+    enum Lexed<'a> {
+        Kind(TokenKind),
+        Identifier(Cow<'a, str>),
+        StringLiteral(Cow<'a, str>),
+        NumberLiteral(&'a str),
+        BlobLiteral(Vec<u8>),
+        BooleanLiteral(bool),
+    }
+
+    fn lexed(sql: &str) -> Result<Vec<Lexed<'_>>> {
+        let mut lexer = Lexer::new(sql);
+        lexer.tokenize()?;
+        Ok(lexer
+            .get_tokens()
+            .iter()
+            .map(|token| {
+                let text = token.text(sql);
+                match token.dispatch_kind() {
+                    TokenKind::Identifier => {
+                        Lexed::Identifier(unescape_identifier(token.kind, text))
+                    }
+                    TokenKind::StringLiteral => {
+                        Lexed::StringLiteral(unescape_string_literal(token.kind, text))
+                    }
+                    TokenKind::NumberLiteral => Lexed::NumberLiteral(text),
+                    TokenKind::BlobLiteral => Lexed::BlobLiteral(decode_hex_blob(text)),
+                    TokenKind::BooleanLiteral => Lexed::BooleanLiteral(text == "TRUE"),
+                    kind => Lexed::Kind(kind),
+                }
+            })
+            .collect())
+    }
+
     #[test]
     fn test_simple_select() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT * FROM users");
-        lexer.tokenize()?;
+        let sql = "SELECT * FROM users";
 
         let expected = vec![
-            Token::Select,
-            Token::Asterisk,
-            Token::From,
-            Token::Identifier("users".into()),
+            Lexed::Kind(TokenKind::Select),
+            Lexed::Kind(TokenKind::Asterisk),
+            Lexed::Kind(TokenKind::From),
+            Lexed::Identifier("users".into()),
         ];
 
-        assert_eq!(lexer.get_tokens(), &expected);
+        assert_eq!(lexed(sql)?, expected);
         Ok(())
     }
 
     #[test]
     fn test_distinct_statement() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT DISTINCT name FROM users;");
-        lexer.tokenize()?;
+        let sql = "SELECT DISTINCT name FROM users;";
 
         let expected = vec![
-            Token::Select,
-            Token::Distinct,
-            Token::Identifier("name".into()),
-            Token::From,
-            Token::Identifier("users".into()),
-            Token::Semicolon,
+            Lexed::Kind(TokenKind::Select),
+            Lexed::Kind(TokenKind::Distinct),
+            Lexed::Identifier("name".into()),
+            Lexed::Kind(TokenKind::From),
+            Lexed::Identifier("users".into()),
+            Lexed::Kind(TokenKind::Semicolon),
         ];
 
-        assert_eq!(lexer.get_tokens(), &expected);
+        assert_eq!(lexed(sql)?, expected);
         Ok(())
     }
 
     #[test]
     fn test_backtick_identifier_and_type_alias_tokens() -> Result<()> {
-        let mut lexer = Lexer::new(
-            "CREATE TABLE `user data` (`id` INT PRIMARY KEY, `active` BOOL, `score` FLOAT, `name` VARCHAR(32));",
-        );
-        lexer.tokenize()?;
+        let sql = "CREATE TABLE `user data` (`id` INT PRIMARY KEY, `active` BOOL, `score` FLOAT, `name` VARCHAR(32));";
 
         let expected = vec![
-            Token::Create,
-            Token::Table,
-            Token::Identifier("user data".into()),
-            Token::LeftParen,
-            Token::Identifier("id".into()),
-            Token::Int,
-            Token::Primary,
-            Token::Key,
-            Token::Comma,
-            Token::Identifier("active".into()),
-            Token::Bool,
-            Token::Comma,
-            Token::Identifier("score".into()),
-            Token::Float,
-            Token::Comma,
-            Token::Identifier("name".into()),
-            Token::Varchar,
-            Token::LeftParen,
-            Token::NumberLiteral("32"),
-            Token::RightParen,
-            Token::RightParen,
-            Token::Semicolon,
+            Lexed::Kind(TokenKind::Create),
+            Lexed::Kind(TokenKind::Table),
+            Lexed::Identifier("user data".into()),
+            Lexed::Kind(TokenKind::LeftParen),
+            Lexed::Identifier("id".into()),
+            Lexed::Kind(TokenKind::Int),
+            Lexed::Kind(TokenKind::Primary),
+            Lexed::Kind(TokenKind::Key),
+            Lexed::Kind(TokenKind::Comma),
+            Lexed::Identifier("active".into()),
+            Lexed::Kind(TokenKind::Bool),
+            Lexed::Kind(TokenKind::Comma),
+            Lexed::Identifier("score".into()),
+            Lexed::Kind(TokenKind::Float),
+            Lexed::Kind(TokenKind::Comma),
+            Lexed::Identifier("name".into()),
+            Lexed::Kind(TokenKind::Varchar),
+            Lexed::Kind(TokenKind::LeftParen),
+            Lexed::NumberLiteral("32"),
+            Lexed::Kind(TokenKind::RightParen),
+            Lexed::Kind(TokenKind::RightParen),
+            Lexed::Kind(TokenKind::Semicolon),
         ];
 
-        assert_eq!(lexer.get_tokens(), &expected);
+        assert_eq!(lexed(sql)?, expected);
         Ok(())
     }
 
     #[test]
     fn test_hex_blob_literal_tokens() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT X'48656C6C6F' FROM files;");
-        lexer.tokenize()?;
+        let sql = "SELECT X'48656C6C6F' FROM files;";
 
         let expected = vec![
-            Token::Select,
-            Token::BlobLiteral(b"Hello".to_vec()),
-            Token::From,
-            Token::Identifier("files".into()),
-            Token::Semicolon,
+            Lexed::Kind(TokenKind::Select),
+            Lexed::BlobLiteral(b"Hello".to_vec()),
+            Lexed::Kind(TokenKind::From),
+            Lexed::Identifier("files".into()),
+            Lexed::Kind(TokenKind::Semicolon),
         ];
 
-        assert_eq!(lexer.get_tokens(), &expected);
+        assert_eq!(lexed(sql)?, expected);
         Ok(())
     }
 
@@ -340,467 +376,445 @@ mod lexer_tests {
 
     #[test]
     fn test_in_statement() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT id FROM users WHERE id IN (1, 2, 3);");
-        lexer.tokenize()?;
+        let sql = "SELECT id FROM users WHERE id IN (1, 2, 3);";
 
         let expected = vec![
-            Token::Select,
-            Token::Identifier("id".into()),
-            Token::From,
-            Token::Identifier("users".into()),
-            Token::Where,
-            Token::Identifier("id".into()),
-            Token::In,
-            Token::LeftParen,
-            Token::NumberLiteral("1"),
-            Token::Comma,
-            Token::NumberLiteral("2"),
-            Token::Comma,
-            Token::NumberLiteral("3"),
-            Token::RightParen,
-            Token::Semicolon,
+            Lexed::Kind(TokenKind::Select),
+            Lexed::Identifier("id".into()),
+            Lexed::Kind(TokenKind::From),
+            Lexed::Identifier("users".into()),
+            Lexed::Kind(TokenKind::Where),
+            Lexed::Identifier("id".into()),
+            Lexed::Kind(TokenKind::In),
+            Lexed::Kind(TokenKind::LeftParen),
+            Lexed::NumberLiteral("1"),
+            Lexed::Kind(TokenKind::Comma),
+            Lexed::NumberLiteral("2"),
+            Lexed::Kind(TokenKind::Comma),
+            Lexed::NumberLiteral("3"),
+            Lexed::Kind(TokenKind::RightParen),
+            Lexed::Kind(TokenKind::Semicolon),
         ];
 
-        assert_eq!(lexer.get_tokens(), &expected);
+        assert_eq!(lexed(sql)?, expected);
         Ok(())
     }
 
     #[test]
     fn test_between_statement() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT id FROM users WHERE id BETWEEN 1 AND 3;");
-        lexer.tokenize()?;
+        let sql = "SELECT id FROM users WHERE id BETWEEN 1 AND 3;";
 
         let expected = vec![
-            Token::Select,
-            Token::Identifier("id".into()),
-            Token::From,
-            Token::Identifier("users".into()),
-            Token::Where,
-            Token::Identifier("id".into()),
-            Token::Between,
-            Token::NumberLiteral("1"),
-            Token::And,
-            Token::NumberLiteral("3"),
-            Token::Semicolon,
+            Lexed::Kind(TokenKind::Select),
+            Lexed::Identifier("id".into()),
+            Lexed::Kind(TokenKind::From),
+            Lexed::Identifier("users".into()),
+            Lexed::Kind(TokenKind::Where),
+            Lexed::Identifier("id".into()),
+            Lexed::Kind(TokenKind::Between),
+            Lexed::NumberLiteral("1"),
+            Lexed::Kind(TokenKind::And),
+            Lexed::NumberLiteral("3"),
+            Lexed::Kind(TokenKind::Semicolon),
         ];
 
-        assert_eq!(lexer.get_tokens(), &expected);
+        assert_eq!(lexed(sql)?, expected);
         Ok(())
     }
 
     #[test]
     fn test_transaction_tokens() -> Result<()> {
-        let mut lexer = Lexer::new("BEGIN; COMMIT; ROLLBACK;");
-        lexer.tokenize()?;
+        let sql = "BEGIN; COMMIT; ROLLBACK;";
 
         let expected = vec![
-            Token::Begin,
-            Token::Semicolon,
-            Token::Commit,
-            Token::Semicolon,
-            Token::Rollback,
-            Token::Semicolon,
+            Lexed::Kind(TokenKind::Begin),
+            Lexed::Kind(TokenKind::Semicolon),
+            Lexed::Kind(TokenKind::Commit),
+            Lexed::Kind(TokenKind::Semicolon),
+            Lexed::Kind(TokenKind::Rollback),
+            Lexed::Kind(TokenKind::Semicolon),
         ];
 
-        assert_eq!(lexer.get_tokens(), &expected);
+        assert_eq!(lexed(sql)?, expected);
         Ok(())
     }
 
     #[test]
     fn test_select_with_where_and_and() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT id FROM users WHERE id = 1 AND id != 2");
-        lexer.tokenize()?;
+        let sql = "SELECT id FROM users WHERE id = 1 AND id != 2";
 
         let expected = vec![
-            Token::Select,
-            Token::Identifier("id".into()),
-            Token::From,
-            Token::Identifier("users".into()),
-            Token::Where,
-            Token::Identifier("id".into()),
-            Token::Equal,
-            Token::NumberLiteral("1"),
-            Token::And,
-            Token::Identifier("id".into()),
-            Token::NotEqual,
-            Token::NumberLiteral("2"),
+            Lexed::Kind(TokenKind::Select),
+            Lexed::Identifier("id".into()),
+            Lexed::Kind(TokenKind::From),
+            Lexed::Identifier("users".into()),
+            Lexed::Kind(TokenKind::Where),
+            Lexed::Identifier("id".into()),
+            Lexed::Kind(TokenKind::Equal),
+            Lexed::NumberLiteral("1"),
+            Lexed::Kind(TokenKind::And),
+            Lexed::Identifier("id".into()),
+            Lexed::Kind(TokenKind::NotEqual),
+            Lexed::NumberLiteral("2"),
         ];
 
-        assert_eq!(lexer.get_tokens(), &expected);
+        assert_eq!(lexed(sql)?, expected);
         Ok(())
     }
 
     #[test]
     fn test_limit_statement() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT id FROM users ORDER BY name DESC LIMIT 5;");
-        lexer.tokenize()?;
+        let sql = "SELECT id FROM users ORDER BY name DESC LIMIT 5;";
 
         let expected = vec![
-            Token::Select,
-            Token::Identifier("id".into()),
-            Token::From,
-            Token::Identifier("users".into()),
-            Token::Order,
-            Token::By,
-            Token::Identifier("name".into()),
-            Token::Desc,
-            Token::Limit,
-            Token::NumberLiteral("5"),
-            Token::Semicolon,
+            Lexed::Kind(TokenKind::Select),
+            Lexed::Identifier("id".into()),
+            Lexed::Kind(TokenKind::From),
+            Lexed::Identifier("users".into()),
+            Lexed::Kind(TokenKind::Order),
+            Lexed::Kind(TokenKind::By),
+            Lexed::Identifier("name".into()),
+            Lexed::Kind(TokenKind::Desc),
+            Lexed::Kind(TokenKind::Limit),
+            Lexed::NumberLiteral("5"),
+            Lexed::Kind(TokenKind::Semicolon),
         ];
 
-        assert_eq!(lexer.get_tokens(), &expected);
+        assert_eq!(lexed(sql)?, expected);
         Ok(())
     }
 
     #[test]
     fn test_offset_statement() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT id FROM users ORDER BY name DESC LIMIT 5 OFFSET 2;");
-        lexer.tokenize()?;
+        let sql = "SELECT id FROM users ORDER BY name DESC LIMIT 5 OFFSET 2;";
 
         let expected = vec![
-            Token::Select,
-            Token::Identifier("id".into()),
-            Token::From,
-            Token::Identifier("users".into()),
-            Token::Order,
-            Token::By,
-            Token::Identifier("name".into()),
-            Token::Desc,
-            Token::Limit,
-            Token::NumberLiteral("5"),
-            Token::Offset,
-            Token::NumberLiteral("2"),
-            Token::Semicolon,
+            Lexed::Kind(TokenKind::Select),
+            Lexed::Identifier("id".into()),
+            Lexed::Kind(TokenKind::From),
+            Lexed::Identifier("users".into()),
+            Lexed::Kind(TokenKind::Order),
+            Lexed::Kind(TokenKind::By),
+            Lexed::Identifier("name".into()),
+            Lexed::Kind(TokenKind::Desc),
+            Lexed::Kind(TokenKind::Limit),
+            Lexed::NumberLiteral("5"),
+            Lexed::Kind(TokenKind::Offset),
+            Lexed::NumberLiteral("2"),
+            Lexed::Kind(TokenKind::Semicolon),
         ];
 
-        assert_eq!(lexer.get_tokens(), &expected);
+        assert_eq!(lexed(sql)?, expected);
         Ok(())
     }
 
     #[test]
     fn test_count_statement() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT COUNT(*) FROM users;");
-        lexer.tokenize()?;
+        let sql = "SELECT COUNT(*) FROM users;";
 
         let expected = vec![
-            Token::Select,
-            Token::Count,
-            Token::LeftParen,
-            Token::Asterisk,
-            Token::RightParen,
-            Token::From,
-            Token::Identifier("users".into()),
-            Token::Semicolon,
+            Lexed::Kind(TokenKind::Select),
+            Lexed::Kind(TokenKind::Count),
+            Lexed::Kind(TokenKind::LeftParen),
+            Lexed::Kind(TokenKind::Asterisk),
+            Lexed::Kind(TokenKind::RightParen),
+            Lexed::Kind(TokenKind::From),
+            Lexed::Identifier("users".into()),
+            Lexed::Kind(TokenKind::Semicolon),
         ];
 
-        assert_eq!(lexer.get_tokens(), &expected);
+        assert_eq!(lexed(sql)?, expected);
         Ok(())
     }
 
     #[test]
     fn test_aggregate_statement() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT SUM(score) FROM users;");
-        lexer.tokenize()?;
+        let sql = "SELECT SUM(score) FROM users;";
 
         let expected = vec![
-            Token::Select,
-            Token::Sum,
-            Token::LeftParen,
-            Token::Identifier("score".into()),
-            Token::RightParen,
-            Token::From,
-            Token::Identifier("users".into()),
-            Token::Semicolon,
+            Lexed::Kind(TokenKind::Select),
+            Lexed::Kind(TokenKind::Sum),
+            Lexed::Kind(TokenKind::LeftParen),
+            Lexed::Identifier("score".into()),
+            Lexed::Kind(TokenKind::RightParen),
+            Lexed::Kind(TokenKind::From),
+            Lexed::Identifier("users".into()),
+            Lexed::Kind(TokenKind::Semicolon),
         ];
 
-        assert_eq!(lexer.get_tokens(), &expected);
+        assert_eq!(lexed(sql)?, expected);
         Ok(())
     }
 
     #[test]
     fn test_group_by_having_statement() -> Result<()> {
-        let mut lexer =
-            Lexer::new("SELECT name, COUNT(id) FROM users GROUP BY name HAVING name = 'Alice';");
-        lexer.tokenize()?;
+        let sql = "SELECT name, COUNT(id) FROM users GROUP BY name HAVING name = 'Alice';";
 
         let expected = vec![
-            Token::Select,
-            Token::Identifier("name".into()),
-            Token::Comma,
-            Token::Count,
-            Token::LeftParen,
-            Token::Identifier("id".into()),
-            Token::RightParen,
-            Token::From,
-            Token::Identifier("users".into()),
-            Token::Group,
-            Token::By,
-            Token::Identifier("name".into()),
-            Token::Having,
-            Token::Identifier("name".into()),
-            Token::Equal,
-            Token::StringLiteral("Alice".into()),
-            Token::Semicolon,
+            Lexed::Kind(TokenKind::Select),
+            Lexed::Identifier("name".into()),
+            Lexed::Kind(TokenKind::Comma),
+            Lexed::Kind(TokenKind::Count),
+            Lexed::Kind(TokenKind::LeftParen),
+            Lexed::Identifier("id".into()),
+            Lexed::Kind(TokenKind::RightParen),
+            Lexed::Kind(TokenKind::From),
+            Lexed::Identifier("users".into()),
+            Lexed::Kind(TokenKind::Group),
+            Lexed::Kind(TokenKind::By),
+            Lexed::Identifier("name".into()),
+            Lexed::Kind(TokenKind::Having),
+            Lexed::Identifier("name".into()),
+            Lexed::Kind(TokenKind::Equal),
+            Lexed::StringLiteral("Alice".into()),
+            Lexed::Kind(TokenKind::Semicolon),
         ];
 
-        assert_eq!(lexer.get_tokens(), &expected);
+        assert_eq!(lexed(sql)?, expected);
         Ok(())
     }
 
     #[test]
     fn test_placeholder_statement() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT * FROM users WHERE id = ?;");
-        lexer.tokenize()?;
+        let sql = "SELECT * FROM users WHERE id = ?;";
 
         let expected = vec![
-            Token::Select,
-            Token::Asterisk,
-            Token::From,
-            Token::Identifier("users".into()),
-            Token::Where,
-            Token::Identifier("id".into()),
-            Token::Equal,
-            Token::Placeholder,
-            Token::Semicolon,
+            Lexed::Kind(TokenKind::Select),
+            Lexed::Kind(TokenKind::Asterisk),
+            Lexed::Kind(TokenKind::From),
+            Lexed::Identifier("users".into()),
+            Lexed::Kind(TokenKind::Where),
+            Lexed::Identifier("id".into()),
+            Lexed::Kind(TokenKind::Equal),
+            Lexed::Kind(TokenKind::Placeholder),
+            Lexed::Kind(TokenKind::Semicolon),
         ];
 
-        assert_eq!(lexer.get_tokens(), &expected);
+        assert_eq!(lexed(sql)?, expected);
         Ok(())
     }
 
     #[test]
     fn test_order_by_statement() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT id FROM users ORDER BY name DESC, id ASC;");
-        lexer.tokenize()?;
+        let sql = "SELECT id FROM users ORDER BY name DESC, id ASC;";
 
         let expected = vec![
-            Token::Select,
-            Token::Identifier("id".into()),
-            Token::From,
-            Token::Identifier("users".into()),
-            Token::Order,
-            Token::By,
-            Token::Identifier("name".into()),
-            Token::Desc,
-            Token::Comma,
-            Token::Identifier("id".into()),
-            Token::Asc,
-            Token::Semicolon,
+            Lexed::Kind(TokenKind::Select),
+            Lexed::Identifier("id".into()),
+            Lexed::Kind(TokenKind::From),
+            Lexed::Identifier("users".into()),
+            Lexed::Kind(TokenKind::Order),
+            Lexed::Kind(TokenKind::By),
+            Lexed::Identifier("name".into()),
+            Lexed::Kind(TokenKind::Desc),
+            Lexed::Kind(TokenKind::Comma),
+            Lexed::Identifier("id".into()),
+            Lexed::Kind(TokenKind::Asc),
+            Lexed::Kind(TokenKind::Semicolon),
         ];
 
-        assert_eq!(lexer.get_tokens(), &expected);
+        assert_eq!(lexed(sql)?, expected);
         Ok(())
     }
 
     #[test]
     fn test_insert_statement() -> Result<()> {
-        let mut lexer = Lexer::new("INSERT INTO users (id, name) VALUES (1, 'John')");
-        lexer.tokenize()?;
+        let sql = "INSERT INTO users (id, name) VALUES (1, 'John')";
 
         let expected = vec![
-            Token::Insert,
-            Token::Into,
-            Token::Identifier("users".into()),
-            Token::LeftParen,
-            Token::Identifier("id".into()),
-            Token::Comma,
-            Token::Identifier("name".into()),
-            Token::RightParen,
-            Token::Values,
-            Token::LeftParen,
-            Token::NumberLiteral("1"),
-            Token::Comma,
-            Token::StringLiteral("John".into()),
-            Token::RightParen,
+            Lexed::Kind(TokenKind::Insert),
+            Lexed::Kind(TokenKind::Into),
+            Lexed::Identifier("users".into()),
+            Lexed::Kind(TokenKind::LeftParen),
+            Lexed::Identifier("id".into()),
+            Lexed::Kind(TokenKind::Comma),
+            Lexed::Identifier("name".into()),
+            Lexed::Kind(TokenKind::RightParen),
+            Lexed::Kind(TokenKind::Values),
+            Lexed::Kind(TokenKind::LeftParen),
+            Lexed::NumberLiteral("1"),
+            Lexed::Kind(TokenKind::Comma),
+            Lexed::StringLiteral("John".into()),
+            Lexed::Kind(TokenKind::RightParen),
         ];
 
-        assert_eq!(lexer.get_tokens(), &expected);
+        assert_eq!(lexed(sql)?, expected);
         Ok(())
     }
 
     #[test]
     fn test_create_and_drop_index_tokens() -> Result<()> {
-        let mut lexer = Lexer::new(
-            "CREATE INDEX idx_users_name ON users (name); DROP INDEX idx_users_name ON users;",
-        );
-        lexer.tokenize()?;
+        let sql =
+            "CREATE INDEX idx_users_name ON users (name); DROP INDEX idx_users_name ON users;";
 
         let expected = vec![
-            Token::Create,
-            Token::Index,
-            Token::Identifier("idx_users_name".into()),
-            Token::On,
-            Token::Identifier("users".into()),
-            Token::LeftParen,
-            Token::Identifier("name".into()),
-            Token::RightParen,
-            Token::Semicolon,
-            Token::Drop,
-            Token::Index,
-            Token::Identifier("idx_users_name".into()),
-            Token::On,
-            Token::Identifier("users".into()),
-            Token::Semicolon,
+            Lexed::Kind(TokenKind::Create),
+            Lexed::Kind(TokenKind::Index),
+            Lexed::Identifier("idx_users_name".into()),
+            Lexed::Kind(TokenKind::On),
+            Lexed::Identifier("users".into()),
+            Lexed::Kind(TokenKind::LeftParen),
+            Lexed::Identifier("name".into()),
+            Lexed::Kind(TokenKind::RightParen),
+            Lexed::Kind(TokenKind::Semicolon),
+            Lexed::Kind(TokenKind::Drop),
+            Lexed::Kind(TokenKind::Index),
+            Lexed::Identifier("idx_users_name".into()),
+            Lexed::Kind(TokenKind::On),
+            Lexed::Identifier("users".into()),
+            Lexed::Kind(TokenKind::Semicolon),
         ];
 
-        assert_eq!(lexer.get_tokens(), &expected);
+        assert_eq!(lexed(sql)?, expected);
         Ok(())
     }
 
     #[test]
     fn test_delete_statement() -> Result<()> {
-        let mut lexer = Lexer::new("DELETE FROM users WHERE id = 1;");
-        lexer.tokenize()?;
+        let sql = "DELETE FROM users WHERE id = 1;";
 
         let expected = vec![
-            Token::Delete,
-            Token::From,
-            Token::Identifier("users".into()),
-            Token::Where,
-            Token::Identifier("id".into()),
-            Token::Equal,
-            Token::NumberLiteral("1"),
-            Token::Semicolon,
+            Lexed::Kind(TokenKind::Delete),
+            Lexed::Kind(TokenKind::From),
+            Lexed::Identifier("users".into()),
+            Lexed::Kind(TokenKind::Where),
+            Lexed::Identifier("id".into()),
+            Lexed::Kind(TokenKind::Equal),
+            Lexed::NumberLiteral("1"),
+            Lexed::Kind(TokenKind::Semicolon),
         ];
 
-        assert_eq!(lexer.get_tokens(), &expected);
+        assert_eq!(lexed(sql)?, expected);
         Ok(())
     }
 
     #[test]
     fn test_update_statement() -> Result<()> {
-        let mut lexer = Lexer::new("UPDATE users SET name = 'John', active = TRUE WHERE id = 1;");
-        lexer.tokenize()?;
+        let sql = "UPDATE users SET name = 'John', active = TRUE WHERE id = 1;";
 
         let expected = vec![
-            Token::Update,
-            Token::Identifier("users".into()),
-            Token::Set,
-            Token::Identifier("name".into()),
-            Token::Equal,
-            Token::StringLiteral("John".into()),
-            Token::Comma,
-            Token::Identifier("active".into()),
-            Token::Equal,
-            Token::BooleanLiteral(true),
-            Token::Where,
-            Token::Identifier("id".into()),
-            Token::Equal,
-            Token::NumberLiteral("1"),
-            Token::Semicolon,
+            Lexed::Kind(TokenKind::Update),
+            Lexed::Identifier("users".into()),
+            Lexed::Kind(TokenKind::Set),
+            Lexed::Identifier("name".into()),
+            Lexed::Kind(TokenKind::Equal),
+            Lexed::StringLiteral("John".into()),
+            Lexed::Kind(TokenKind::Comma),
+            Lexed::Identifier("active".into()),
+            Lexed::Kind(TokenKind::Equal),
+            Lexed::BooleanLiteral(true),
+            Lexed::Kind(TokenKind::Where),
+            Lexed::Identifier("id".into()),
+            Lexed::Kind(TokenKind::Equal),
+            Lexed::NumberLiteral("1"),
+            Lexed::Kind(TokenKind::Semicolon),
         ];
 
-        assert_eq!(lexer.get_tokens(), &expected);
+        assert_eq!(lexed(sql)?, expected);
         Ok(())
     }
 
     #[test]
     fn test_is_null_statement() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT * FROM users WHERE name IS NOT NULL;");
-        lexer.tokenize()?;
+        let sql = "SELECT * FROM users WHERE name IS NOT NULL;";
 
         let expected = vec![
-            Token::Select,
-            Token::Asterisk,
-            Token::From,
-            Token::Identifier("users".into()),
-            Token::Where,
-            Token::Identifier("name".into()),
-            Token::Is,
-            Token::Not,
-            Token::Null,
-            Token::Semicolon,
+            Lexed::Kind(TokenKind::Select),
+            Lexed::Kind(TokenKind::Asterisk),
+            Lexed::Kind(TokenKind::From),
+            Lexed::Identifier("users".into()),
+            Lexed::Kind(TokenKind::Where),
+            Lexed::Identifier("name".into()),
+            Lexed::Kind(TokenKind::Is),
+            Lexed::Kind(TokenKind::Not),
+            Lexed::Kind(TokenKind::Null),
+            Lexed::Kind(TokenKind::Semicolon),
         ];
 
-        assert_eq!(lexer.get_tokens(), &expected);
+        assert_eq!(lexed(sql)?, expected);
         Ok(())
     }
 
     #[test]
     fn test_drop_table_statement() -> Result<()> {
-        let mut lexer = Lexer::new("DROP TABLE users;");
-        lexer.tokenize()?;
+        let sql = "DROP TABLE users;";
 
         let expected = vec![
-            Token::Drop,
-            Token::Table,
-            Token::Identifier("users".into()),
-            Token::Semicolon,
+            Lexed::Kind(TokenKind::Drop),
+            Lexed::Kind(TokenKind::Table),
+            Lexed::Identifier("users".into()),
+            Lexed::Kind(TokenKind::Semicolon),
         ];
 
-        assert_eq!(lexer.get_tokens(), &expected);
+        assert_eq!(lexed(sql)?, expected);
         Ok(())
     }
 
     #[test]
     fn test_create_table() -> Result<()> {
-        let mut lexer = Lexer::new("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)");
-        lexer.tokenize()?;
+        let sql = "CREATE TABLE users (id INT PRIMARY KEY, name TEXT)";
 
         let expected = vec![
-            Token::Create,
-            Token::Table,
-            Token::Identifier("users".into()),
-            Token::LeftParen,
-            Token::Identifier("id".into()),
-            Token::Int,
-            Token::Primary,
-            Token::Key,
-            Token::Comma,
-            Token::Identifier("name".into()),
-            Token::Text,
-            Token::RightParen,
+            Lexed::Kind(TokenKind::Create),
+            Lexed::Kind(TokenKind::Table),
+            Lexed::Identifier("users".into()),
+            Lexed::Kind(TokenKind::LeftParen),
+            Lexed::Identifier("id".into()),
+            Lexed::Kind(TokenKind::Int),
+            Lexed::Kind(TokenKind::Primary),
+            Lexed::Kind(TokenKind::Key),
+            Lexed::Kind(TokenKind::Comma),
+            Lexed::Identifier("name".into()),
+            Lexed::Kind(TokenKind::Text),
+            Lexed::Kind(TokenKind::RightParen),
         ];
 
-        assert_eq!(lexer.get_tokens(), &expected);
+        assert_eq!(lexed(sql)?, expected);
         Ok(())
     }
 
     #[test]
     fn test_unicode_identifier_and_string_literal() -> Result<()> {
-        let mut lexer = Lexer::new("SELECT navn FROM brukere WHERE navn = 'Alíce';");
-        lexer.tokenize()?;
+        let sql = "SELECT navn FROM brukere WHERE navn = 'Alíce';";
 
         let expected = vec![
-            Token::Select,
-            Token::Identifier("navn".into()),
-            Token::From,
-            Token::Identifier("brukere".into()),
-            Token::Where,
-            Token::Identifier("navn".into()),
-            Token::Equal,
-            Token::StringLiteral("Alíce".into()),
-            Token::Semicolon,
+            Lexed::Kind(TokenKind::Select),
+            Lexed::Identifier("navn".into()),
+            Lexed::Kind(TokenKind::From),
+            Lexed::Identifier("brukere".into()),
+            Lexed::Kind(TokenKind::Where),
+            Lexed::Identifier("navn".into()),
+            Lexed::Kind(TokenKind::Equal),
+            Lexed::StringLiteral("Alíce".into()),
+            Lexed::Kind(TokenKind::Semicolon),
         ];
 
-        assert_eq!(lexer.get_tokens(), &expected);
+        assert_eq!(lexed(sql)?, expected);
         Ok(())
     }
 
     #[test]
     fn test_string_literal_escaped_quotes() -> Result<()> {
-        let mut lexer = Lexer::new("INSERT INTO users (name) VALUES ('O\\'Brien'), ('D''Angelo');");
-        lexer.tokenize()?;
+        let sql = "INSERT INTO users (name) VALUES ('O\\'Brien'), ('D''Angelo');";
 
         assert_eq!(
-            lexer.get_tokens(),
-            &[
-                Token::Insert,
-                Token::Into,
-                Token::Identifier("users".into()),
-                Token::LeftParen,
-                Token::Identifier("name".into()),
-                Token::RightParen,
-                Token::Values,
-                Token::LeftParen,
-                Token::StringLiteral("O'Brien".into()),
-                Token::RightParen,
-                Token::Comma,
-                Token::LeftParen,
-                Token::StringLiteral("D'Angelo".into()),
-                Token::RightParen,
-                Token::Semicolon,
+            lexed(sql)?,
+            [
+                Lexed::Kind(TokenKind::Insert),
+                Lexed::Kind(TokenKind::Into),
+                Lexed::Identifier("users".into()),
+                Lexed::Kind(TokenKind::LeftParen),
+                Lexed::Identifier("name".into()),
+                Lexed::Kind(TokenKind::RightParen),
+                Lexed::Kind(TokenKind::Values),
+                Lexed::Kind(TokenKind::LeftParen),
+                Lexed::StringLiteral("O'Brien".into()),
+                Lexed::Kind(TokenKind::RightParen),
+                Lexed::Kind(TokenKind::Comma),
+                Lexed::Kind(TokenKind::LeftParen),
+                Lexed::StringLiteral("D'Angelo".into()),
+                Lexed::Kind(TokenKind::RightParen),
+                Lexed::Kind(TokenKind::Semicolon),
             ]
         );
         Ok(())
@@ -808,24 +822,24 @@ mod lexer_tests {
 
     #[test]
     fn test_lowercase_keywords_are_not_tokenized_as_keywords() -> Result<()> {
-        let mut lexer = Lexer::new("select * from users;");
-        lexer.tokenize()?;
+        let sql = "select * from users;";
 
         let expected = vec![
-            Token::Identifier("select".into()),
-            Token::Asterisk,
-            Token::Identifier("from".into()),
-            Token::Identifier("users".into()),
-            Token::Semicolon,
+            Lexed::Identifier("select".into()),
+            Lexed::Kind(TokenKind::Asterisk),
+            Lexed::Identifier("from".into()),
+            Lexed::Identifier("users".into()),
+            Lexed::Kind(TokenKind::Semicolon),
         ];
 
-        assert_eq!(lexer.get_tokens(), &expected);
+        assert_eq!(lexed(sql)?, expected);
         Ok(())
     }
 }
 
 mod parser_tests {
     use crate::error::Result;
+    use crate::parser::arena::Statement as ArenaStatement;
     use crate::parser::ast::*;
     use crate::parser::lexer::*;
     use crate::parser::parser::*;
@@ -2147,24 +2161,20 @@ mod parser_tests {
 
     #[test]
     fn test_parse_explain_describe_and_show_tables() -> Result<()> {
-        let mut lexer = Lexer::new("EXPLAIN SELECT * FROM users;");
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.into_tokens());
-        assert!(matches!(parser.parse()?, Statement::Explain(_)));
+        let sql = "EXPLAIN SELECT * FROM users;";
+        let mut parser = Parser::new(sql, tokenize_sql(sql)?);
+        assert!(matches!(parser.parse()?, ArenaStatement::Explain(_)));
 
-        let mut lexer = Lexer::new("DESCRIBE users;");
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.into_tokens());
-        assert!(matches!(parser.parse()?, Statement::Describe(_)));
+        let sql = "DESCRIBE users;";
+        let mut parser = Parser::new(sql, tokenize_sql(sql)?);
+        assert!(matches!(parser.parse()?, ArenaStatement::Describe(_)));
 
-        let mut lexer = Lexer::new("SHOW TABLES;");
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.into_tokens());
-        assert!(matches!(parser.parse()?, Statement::ShowTables));
+        let sql = "SHOW TABLES;";
+        let mut parser = Parser::new(sql, tokenize_sql(sql)?);
+        assert!(matches!(parser.parse()?, ArenaStatement::ShowTables));
 
-        let mut lexer = Lexer::new("SHOW VIEWS;");
-        lexer.tokenize()?;
-        let mut parser = Parser::new(lexer.into_tokens());
+        let sql = "SHOW VIEWS;";
+        let mut parser = Parser::new(sql, tokenize_sql(sql)?);
         assert!(parser.parse().is_err());
         Ok(())
     }
@@ -2253,7 +2263,7 @@ mod perf_baseline_tests {
     fn parse_statement_tokens(sql: &str) -> Result<usize> {
         let tokens = tokenize_sql(sql)?;
         let token_count = tokens.len();
-        let mut parser = Parser::new(tokens);
+        let mut parser = Parser::new(sql, tokens);
         let _ = parser.parse()?;
         Ok(token_count)
     }

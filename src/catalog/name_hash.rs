@@ -11,10 +11,10 @@
 //! column. A query can probe them as often as it likes and never add a key, so the
 //! collision chains an attacker would need to lengthen are fixed by the schema, and
 //! the attack SipHash defends against has nowhere to go. Meanwhile the probes are on
-//! the hot path: resolving one table name was 8 % of a point lookup, all of it SipHash
-//! over a handful of bytes.
+//! the hot path: under SipHash, resolving one table name measured 8 % of a point
+//! lookup, all of it hashing a handful of bytes.
 //!
-//! The replacement is the multiply-and-rotate hash rustc uses for its own interned
+//! This is the multiply-and-rotate hash rustc uses for its own interned
 //! symbols — eight bytes of the key per multiply, against SipHash's rounds per block.
 //! Unlike [`crate::storage::page_hash::PageIdHasher`] it accepts `write`, because the
 //! keys here really are strings.

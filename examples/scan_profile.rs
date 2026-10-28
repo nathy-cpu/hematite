@@ -1,10 +1,12 @@
 //! A full scan in a tight loop, for deterministic profiling under valgrind.
 //!
 //! Wall-clock benchmarking on this machine is unreliable — the same unchanged code
-//! measured 1.55 ms and 3.97 ms for `full_scan` hours apart, and two "regressions"
-//! chased during the rewrite turned out to be drift. Instruction counts and
-//! allocation counts do not drift, so they are what phase-to-phase comparisons here
-//! should be based on.
+//! measured 1.55 ms and 3.97 ms for `full_scan` hours apart, which is drift large
+//! enough to pass for a regression. Instruction counts and allocation counts do not
+//! drift, so they are what before/after comparisons here should be based on.
+//!
+//! `SCANS` sets the number of scans (default 60) and `MODE=wal` switches the journal
+//! mode. Run from the repository root: the database goes in `.scratch/`.
 //!
 //! Instructions per row:
 //!

@@ -34,6 +34,9 @@ impl Hematite {
     }
 
     /// Execute a SQL statement and return the result
+    ///
+    /// Fails on a statement that returns columns (`SELECT`, `SHOW`, ...), but only
+    /// after running it: the kind is known from the result, not the text.
     pub fn execute(&mut self, sql: &str) -> Result<StatementResult> {
         match self.connection.execute_result(sql)? {
             ExecutedStatement::Statement(result) => Ok(result),
@@ -44,6 +47,9 @@ impl Hematite {
     }
 
     /// Execute a SQL query and return the result set
+    ///
+    /// Fails on a statement that returns no columns, but only after running it, so
+    /// `query` on an `INSERT` still inserts.
     pub fn query(&mut self, sql: &str) -> Result<ResultSet> {
         match self.connection.execute_result(sql)? {
             ExecutedStatement::Query(result_set) => Ok(result_set),
@@ -134,9 +140,10 @@ impl Hematite {
     /// reads and writes, buffer-pool hits and misses, journal bytes, page-image
     /// copies.
     ///
-    /// Two readings subtracted with [`StatsSnapshot::since`] give the work a
-    /// stretch of queries cost. Unlike wall time these do not drift, which is why
-    /// the storage layer's own regression tests are written against them.
+    /// Two readings subtracted with [`crate::storage::StatsSnapshot::since`] give
+    /// the work a stretch of queries cost. Unlike wall time these do not drift,
+    /// which is why the storage layer's own regression tests are written against
+    /// them.
     pub fn storage_counters(&self) -> Result<crate::storage::StatsSnapshot> {
         self.connection.storage_counters()
     }
@@ -150,6 +157,9 @@ impl Hematite {
     }
 
     /// Execute multiple SQL statements in sequence
+    ///
+    /// Stops at the first error. Statements before it stay applied; outside an
+    /// explicit transaction each one has already committed.
     pub fn execute_batch(&mut self, sql: &str) -> Result<()> {
         self.connection.execute_batch(sql)
     }

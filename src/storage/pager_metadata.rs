@@ -1,3 +1,14 @@
+//! The pager's record, stored in the pager section of the metadata page.
+//!
+//! ```text
+//! 0..4    magic `HPM1`
+//! 4..8    version (u32 LE, `Pager::CHECKSUM_METADATA_VERSION` = 1)
+//! 8       journal mode (0 rollback, 1 WAL)
+//! 9..13   free-page count (u32 LE)
+//! 13..17  checksum-entry count (u32 LE, written as 0)
+//! 17..    free page ids, sorted, each a LEB128 varint delta from the previous
+//! ```
+
 use crate::error::{HematiteError, Result};
 use crate::storage::pager::JournalMode;
 use crate::storage::PageId;
@@ -23,8 +34,8 @@ impl PersistedPagerState {
             JournalMode::Wal => 1,
         });
         bytes.extend_from_slice(&(free_pages.len() as u32).to_le_bytes());
-        // A checksum count of zero: each page carries its own checksum in its trailer
-        // now, so there is no map here. The field stays so the layout is unchanged.
+        // A checksum count of zero: each page carries its own checksum in its
+        // trailer, so the pager has no per-page checksums to record here.
         bytes.extend_from_slice(&0u32.to_le_bytes());
 
         let mut prev = 0u32;
@@ -92,8 +103,8 @@ impl PersistedPagerState {
             prev = page_id;
         }
 
-        // Any checksum entries a previous format wrote are skipped: pages carry their
-        // own checksums now.
+        // Checksum entries, if a record carries any, are decoded and discarded: the
+        // page trailers are the checksums the pager verifies against.
         let mut prev_checksum_page = 0u32;
         for _ in 0..checksum_count {
             let delta = decode_varint_u32(contents, &mut offset)?;

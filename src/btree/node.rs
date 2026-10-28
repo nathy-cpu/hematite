@@ -30,20 +30,29 @@
 //!
 //! ### Lazy Node Decoding
 //! Creating high-level Rust structs with allocated vectors for every page read is computationally
-//! expensive and increases GC/allocation pressure.
+//! expensive and increases allocation pressure.
 //! To avoid this, Hematite implements **Lazy Node Decoding**:
 //! * **Lazy Read State**: The `BTreeNode` struct is constructed by wrapping a raw page buffer. It does *not*
 //!   parse the cells. To check if a key exists or to route an interior node, it performs a binary search directly
 //!   on the page bytes using the cell pointer array.
-//! * **Decoded Mutation State**: Only when a cell is inserted, updated, or deleted does the node transition
-//!   into a fully-materialized state. Cells are parsed into memory vectors, mutated, and then serialized back
-//!   into a packed slotted page layout.
+//! * **In-Place Mutation**: Inserts and deletes that fit, same-length value updates, internal separator
+//!   inserts and leaf rotations edit the page bytes directly through `page_format`
+//!   (`try_insert_leaf_in_place`, `try_remove_cell_in_place`, `try_update_leaf_in_place`,
+//!   `try_insert_internal_in_place`, `rotate_leaf_cell`), with no decode.
+//! * **Decoded Mutation State**: Splits, merges, interior borrows, and the fallbacks for in-place edits
+//!   that do not fit transition the node into a fully-materialized state. Cells are parsed into
+//!   `VecDeque`s, mutated, and then serialized back by `to_page` into a packed slotted page layout.
 //!
 //! ### B-Tree Node Mutations
 //! * **Cell Insertion**: Inserts a key-value cell. If the page lacks space (even after defragmentation), a **Split** is triggered.
-//! * **Node Split**: Creates a new sibling page. Half of the cells are moved to the new page, and a separator key is propagated to the parent node.
-//! * **Node Borrow / Merge**: When a deletion causes a page to drop below its minimum fill factor (underflow),
-//!   it attempts to borrow cells from a adjacent sibling. If the sibling is also near underflow, the two pages are merged.
+//! * **Node Split**: Creates a new sibling page and moves the upper cells to it, choosing the split point that
+//!   balances bytes rather than cell counts (`best_leaf_split_pos`, `best_internal_split_pos`). An append —
+//!   a key above every key on the leaf — instead puts only the new cell on the new page (`try_split_leaf_quick`),
+//!   leaving the original page as it is. The right page's first key (leaf) or the promoted middle key (interior) is
+//!   propagated to the parent as the separator.
+//! * **Node Borrow / Merge**: When a deletion leaves a page using under a quarter of its space (`is_underflow`),
+//!   the parent first borrows one cell from an adjacent sibling holding more than about `MAX_KEYS / 2` cells
+//!   (`BTreeIndex::min_keys_for`), and otherwise merges the page with a sibling when the two fit in one page.
 //!
 //! ---
 //!
@@ -63,7 +72,7 @@
 //!               |    * Zero memory allocations.        |
 //!               +-------------------+------------------+
 //!                                   |
-//!                             Cell Mutation
+//!                     Split / merge / fallback
 //!                                   v
 //!               +--------------------------------------+
 //!               |          Decoded Cell List           |
@@ -133,11 +142,11 @@ pub struct BTreeNode {
     pub is_decoded: bool,
     /// The parsed header of `raw_page`, kept so per-cell access does not re-parse it.
     ///
-    /// `cell_range_for_index` needs the header, and both `get_key_view` and
-    /// `get_value_view` call it, so parsing on demand cost two header parses per row
-    /// on a scan — enough to cancel out what removing the eager whole-page pass
-    /// saved. Every construction path already parses the header, so holding on to it
-    /// is free.
+    /// Every per-cell accessor (`get_key_view`, `get_value_view`,
+    /// `cell_range_for_index`) needs the header, so parsing on demand would cost two
+    /// header parses per row on a scan — enough to cancel out what skipping the eager
+    /// whole-page pass in `from_shared_page` saves. Every construction path already parses the
+    /// header, so holding on to it is free.
     pub(crate) header: Option<BTreePageHeader>,
 }
 
@@ -220,7 +229,7 @@ impl BTreeNode {
     /// which is a handful of entries where the cells are a couple of hundred.
     ///
     /// `is_underflow` calls this on every delete and `can_merge_with` on every
-    /// rebalance, and summing per-cell sizes made those two 21.8 % of a delete.
+    /// rebalance, and summing per-cell sizes in those two costs 21.8 % of a delete.
     ///
     /// [`Self::serialized_size_by_measuring_cells`] is the obvious slow version,
     /// kept as the reference the differential test checks this against.
@@ -520,8 +529,8 @@ impl BTreeNode {
             return Ok(&self.values[target_index].data);
         }
 
-        // Both lengths, but read once: the old path computed the cell's total size
-        // from them and then re-read them to locate the value inside it.
+        // Both lengths, read once. Going through `cell_range_for_index` would read
+        // them to size the whole cell and then again to locate the value inside it.
         let (page, header) = self.raw_page_and_header()?;
         let cell = cell_pointer_from_header(page, header, target_index)? as usize;
         let key_len = read_cell_len(page, cell)?;
@@ -690,10 +699,10 @@ impl BTreeNode {
             return Ok(false);
         }
 
-        // Binary search, not a scan. Keys on a page are sorted and `exact_key_index`
-        // has always been here; walking every key to find one was O(n) on the hottest
-        // update path there is — a same-length overwrite, which is what an UPDATE of a
-        // fixed-width column does to every row it touches.
+        // Binary search, not a scan. Keys on a page are sorted; walking every key to
+        // find one would be O(n) on the hottest update path there is — a same-length
+        // overwrite, which is what an UPDATE of a fixed-width column does to every row
+        // it touches.
         let Some(index) = self.exact_key_index(key)? else {
             return Ok(false);
         };
@@ -713,11 +722,11 @@ impl BTreeNode {
             self.values[index] = new_value.clone();
         }
         // The page has been mutated, so this node's borrowed view of it is stale. It is
-        // dropped rather than refreshed: refreshing meant `Arc::new(page.clone())`, a
-        // full 4 KiB copy plus an allocation, immediately after the byte edit this
-        // whole path exists to make cheap — and the caller then handed the same page
-        // to `write_page`, which wraps it in an `Arc` again. Two page-sized
-        // allocations for a single-cell change.
+        // dropped rather than refreshed: refreshing would mean `Arc::new(page.clone())`,
+        // a full 4 KiB copy plus an allocation, immediately after the byte edit this
+        // whole path exists to make cheap — and the caller then hands the same page to
+        // `write_page`, which wraps it in an `Arc` again. Two page-sized allocations
+        // for a single-cell change.
         //
         // Every caller writes the page and returns, so nothing reads through the node
         // afterwards. Anything that tries gets a clean error from the view accessors
@@ -786,11 +795,11 @@ impl BTreeNode {
     /// decoded form.
     ///
     /// This is what a rebalance rotation actually needs. Doing it through
-    /// `BTreeNode` decoded both leaves — a `Vec` per key and per value in each, so
-    /// four hundred allocations for two full pages — moved one element between the
-    /// two `VecDeque`s, and then re-serialised both pages from scratch. All to move
-    /// a single cell that is already sitting on the donor page in exactly the form
-    /// the receiver wants.
+    /// `BTreeNode` would decode both leaves — a `Vec` per key and per value in each,
+    /// hundreds of allocations for two full pages — move one element between the two
+    /// `VecDeque`s, and re-serialise both pages from scratch. All to move a single
+    /// cell that is already sitting on the donor page in exactly the form the
+    /// receiver wants.
     ///
     /// Returns `false` if the receiver has no room, leaving both pages untouched.
     /// The caller must still update the parent separator; `leaf_key_at` reads it
@@ -964,7 +973,8 @@ impl BTreeNode {
         let is_p1 = is_page_one(page.id);
         let old_key_count = self.key_count;
 
-        // Find insertion position (same as insert_internal: upper_bound).
+        // Insertion position: the upper bound. `insert_internal` takes the lower
+        // bound; the two differ only when `key` is already a separator here.
         let pos = self.upper_bound_index(key)?;
 
         // Determine the left-child pointer for the new cell.
@@ -1329,8 +1339,8 @@ impl BTreeNode {
     ///
     /// A merged page keeps one header and carries both nodes' pointer arrays and cell
     /// bodies, so its size is the two sizes less one header. `serialized_size_on_page`
-    /// answers for a lazy node by summing cell ranges off the page, so neither node
-    /// has to be decoded — or cloned.
+    /// answers for a lazy node from its page header and freeblock chain, so neither
+    /// node has to be decoded — or cloned.
     ///
     /// `None` when either size cannot be read, which callers treat as "do not merge".
     /// Refusing to merge is always safe; merging when it does not fit is not.
@@ -1414,8 +1424,9 @@ impl BTreeNode {
                 "Can only merge internal nodes".to_string(),
             ));
         }
-        // Eligibility is the caller's to check. Repeating it here would clone and
-        // decode both nodes a second time for no benefit.
+        // Eligibility is the caller's to check: `merge_with_left_sibling` and
+        // `merge_with_right_sibling` ask `can_merge_internal_with_separator` on the
+        // undecoded nodes before either is decoded.
         self.keys.push_back(separator_key);
         self.keys.append(&mut other.keys);
         self.children.append(&mut other.children);
@@ -1486,11 +1497,12 @@ impl BTreeNode {
     }
 }
 
-/// Exact-sizing variant of compute_cell_ranges that reads key_len/value_len
-/// from the page bytes for each cell, rather than inferring the last cell's
-/// end from PAGE_SIZE.  This prevents the last cell's range from including
-/// trailing freeblock/fragment bytes, which would mask corruption.
+/// The byte range of every cell, each sized from its own `key_len`/`value_len`,
+/// rejecting duplicate pointers and overlapping cells.
 ///
+/// Sizing from the cell rather than from the next cell's offset or the end of the
+/// usable page keeps a range from taking in trailing freeblock or fragment bytes,
+/// which would mask corruption.
 fn compute_cell_ranges_exact(
     page: &Page,
     header: &BTreePageHeader,
@@ -1550,15 +1562,17 @@ fn is_page_one(page_id: PageId) -> bool {
 
 /// Writes a fresh node header, clearing only the space the caller will not write over.
 ///
-/// [`initialize_page_bytes`] zeroes the whole 4 KiB page, and [`BTreeNode::to_page`]
-/// then overwrites the header, every cell pointer and every cell — so all but the gap
-/// between the pointer array and the first cell was zeroed for nothing. That `memset`
-/// was 3.7 % of a delete, because a full-table delete rebalances on most rows and each
-/// rebalance writes its node back.
+/// [`BTreeNode::to_page`] overwrites the header, every cell pointer and every cell, so
+/// zeroing the whole 4 KiB page first, as [`initialize_page_bytes`] does for a fresh
+/// page, would clear everything but the gap between the pointer array and the first
+/// cell for nothing. That `memset` measured 3.7 % of a delete, because a full-table
+/// delete rebalances on most rows and each rebalance writes its node back.
 ///
-/// The gap is still cleared. It is free space, and the format finds it through the
-/// header rather than by looking at the bytes, but leaving it would put the contents of
-/// deleted rows into the free space of a page that gets written to disk.
+/// The gap is cleared. It is free space, and the format finds it through the header
+/// rather than by looking at the bytes, but leaving it would put the contents of
+/// deleted rows into the free space of a page that gets written to disk. That holds
+/// for pages `to_page` rebuilds, not for every page: `page_format::remove_cell` links
+/// a freed cell body into the freeblock chain without clearing it.
 fn write_node_header_clearing_gap(
     page: &mut Page,
     kind: PageKind,
@@ -1578,9 +1592,10 @@ fn write_node_header_clearing_gap(
     };
 
     page.data[pointer_area_end..content_start].fill(0);
-    // The trailer is rewritten on the way to disk, but it was cleared here before and
-    // an in-memory page that still carried the old one would be a change nobody asked
-    // for.
+    // The pager stamps the trailer on the way to disk and ignores these bytes, so this
+    // is not for durability: it keeps a rebuilt page's in-memory image the same as a
+    // freshly zeroed one's, rather than carrying a checksum for contents it no longer
+    // holds.
     page.data[USABLE_PAGE_SIZE..].fill(0);
 
     page.data[header_offset] = kind as u8;
@@ -1637,12 +1652,13 @@ fn encode_leaf_cell(key: &BTreeKey, value: &BTreeValue) -> Vec<u8> {
 
 /// Bytes a leaf cell occupies: `[u16 key_len][u16 value_len][key][value]`.
 ///
-/// The one definition of the leaf framing. It was spelled out independently in five
-/// places — here, `encode_leaf_cell`, `to_page`'s reservation loop, `to_page`'s size
-/// check and `compute_cell_size` — and when the framing was briefly changed to
-/// varints, three of them kept writing the old widths. The mismatch surfaced as a node
-/// that passed its fit check and then failed to serialise; nothing structurally
-/// prevents the next such change from surfacing as a wrong answer instead.
+/// The one definition of a leaf cell's size. The fit checks, `to_page`'s size check
+/// and its reservation loop all measure through here, so they cannot disagree about
+/// the framing. The code that reads and writes the length fields — `encode_leaf_cell`,
+/// `to_page`, `compute_cell_size`, `leaf_cell_ranges` — spells out the `u16`
+/// widths, and must change with this. A site that misses a framing change surfaces as
+/// a node that passes its fit check and then fails to serialise, and nothing
+/// structurally prevents the next one from surfacing as a wrong answer instead.
 fn leaf_cell_size(key: &BTreeKey, value: &BTreeValue) -> usize {
     LEAF_CELL_HEADER_SIZE + key.data.len() + value.data.len()
 }
@@ -1686,9 +1702,9 @@ fn leaf_cell_ranges(cell: &[u8]) -> Result<((usize, usize), (usize, usize))> {
 ///
 /// A binary search calls this once per comparison — about eight times per page, and
 /// with two tree descents per inserted row that is 66 key reads per row. Hoisting the
-/// invariant part out of `get_key_view` measured **0.4 %**, so the compiler was
-/// already doing most of it; what it buys is that the split between per-search and
-/// per-comparison work is now visible rather than left to the optimiser.
+/// invariant part out of `get_key_view` measures **0.4 %**, so the compiler does most
+/// of it anyway; what the struct buys is that the split between per-search and
+/// per-comparison work is visible rather than left to the optimiser.
 struct LazyKeyReader<'a> {
     page: &'a Page,
     header: &'a BTreePageHeader,

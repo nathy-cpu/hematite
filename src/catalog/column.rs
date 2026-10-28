@@ -10,11 +10,11 @@ pub struct Column {
     pub id: ColumnId,
     /// Shared, not owned.
     ///
-    /// Every statement that names a source used to clone this — validation into a
-    /// `SourceBinding`, execution into a `ResolvedSource` — so a `SELECT` over a
-    /// five-column table allocated ten strings before it read a row. Under `Arc` those
-    /// clones are refcount bumps, and because nothing is derived from the set of names
-    /// there is no cache to keep in step with a schema change.
+    /// Every statement that names a source clones this — validation into a
+    /// `SourceBinding`, execution into a `ResolvedSource` — so as a `String` a `SELECT`
+    /// over a five-column table would allocate ten strings before it read a row. Under
+    /// `Arc` those clones are refcount bumps, and because nothing is derived from the
+    /// set of names there is no cache to keep in step with a schema change.
     pub name: Arc<str>,
     pub data_type: DataType,
     pub character_set: Option<String>,

@@ -2,6 +2,7 @@
 
 use crate::catalog::{CatalogEngine, Schema, Value};
 use crate::error::Result;
+use crate::query::executor::CheckPlan;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -81,8 +82,8 @@ impl QueryResult {
 /// A view over a [`QueryResult`]'s rows.
 ///
 /// Indexing and iteration hand back `&[Value]` slices of the result's own buffer.
-/// It compares equal to a `Vec<Vec<Value>>` so that an assertion written against
-/// the old shape still says what it said.
+/// It compares equal to a `Vec<Vec<Value>>`, so a test can still assert a result
+/// against a literal `vec![vec![...]]`.
 #[derive(Clone, Copy)]
 pub struct Rows<'a> {
     values: &'a [Value],
@@ -190,15 +191,44 @@ pub struct ExecutionContext<'a> {
     /// on top of whatever the planner takes.
     pub catalog: Arc<Schema>,
     pub engine: &'a mut CatalogEngine,
+    /// Each table's CHECK constraints, prepared the first time a row is checked
+    /// against them and reused for every row after.
+    ///
+    /// A context lives for one statement, and a statement cannot change a table's
+    /// constraints while it is writing rows to it, so there is nothing here to
+    /// invalidate. A list rather than a map: a statement writes one table, plus any
+    /// child tables its foreign-key actions update.
+    pub(crate) check_plans: Vec<(String, Arc<CheckPlan>)>,
+    /// Subquery ASTs already validated during this statement, by address.
+    ///
+    /// A correlated subquery is planned once per outer row; this is what lets the
+    /// planner skip validating, on every row after the first, a shape that cannot
+    /// have changed. Keyed on address like [`SubqueryCache`](crate::query::executor):
+    /// a subquery in the statement being executed does not move while it runs. One
+    /// nested inside another correlated subquery lives in a per-row copy that is
+    /// freed after the row, so its address can come back as a different subquery's.
+    /// A false hit there skips only the planner's check: `SelectExecutor::execute`
+    /// validates the statement it runs whether or not the planner did.
+    pub(crate) validated_subqueries: Vec<usize>,
 }
 
 impl<'a> ExecutionContext<'a> {
     pub fn for_read(catalog: Arc<Schema>, engine: &'a mut CatalogEngine) -> Self {
-        Self { catalog, engine }
+        Self {
+            catalog,
+            engine,
+            check_plans: Vec::new(),
+            validated_subqueries: Vec::new(),
+        }
     }
 
     pub fn for_mutation(catalog: Arc<Schema>, engine: &'a mut CatalogEngine) -> Self {
-        Self { catalog, engine }
+        Self {
+            catalog,
+            engine,
+            check_plans: Vec::new(),
+            validated_subqueries: Vec::new(),
+        }
     }
 }
 

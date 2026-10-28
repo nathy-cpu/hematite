@@ -1,6 +1,6 @@
 //! Query plan structures and access-path descriptions.
 
-use crate::parser::ast::AggregateFunction;
+use crate::parser::ast::{AggregateFunction, InsertSource, SelectItem};
 use crate::parser::ast::{
     AlterStatement, CreateIndexStatement, CreateStatement, DeleteStatement, DropIndexStatement,
     DropStatement, InsertStatement, SelectStatement, UpdateStatement,
@@ -8,16 +8,142 @@ use crate::parser::ast::{
 use crate::query::logest::LogEst;
 
 pub struct QueryPlan {
-    pub node: PlanNode,
     pub program: ExecutionProgram,
     pub estimated_cost: LogEst,
     pub select_analysis: Option<SelectAnalysis>,
 }
 
+impl QueryPlan {
+    /// The plan as `EXPLAIN` describes it.
+    ///
+    /// Derived on demand rather than stored. A `PlanNode` is a description — owned
+    /// table and column names, a `Vec<String>` of ORDER BY columns — and the only
+    /// things that read one are `EXPLAIN` and `Debug`. Storing one would cost three
+    /// allocations on every point lookup, and one description per outer row for a
+    /// correlated subquery, which is re-planned per row. Everything it needs is
+    /// already in `program` and `select_analysis`.
+    pub fn node(&self) -> PlanNode {
+        match &self.program {
+            ExecutionProgram::Select {
+                statement,
+                access_path,
+            } => PlanNode::Select(select_plan_node(
+                statement,
+                access_path,
+                self.select_analysis.as_ref(),
+            )),
+            ExecutionProgram::Insert { statement } => PlanNode::Insert(InsertPlanNode {
+                table_name: statement.table.clone(),
+                row_count: match &statement.source {
+                    InsertSource::Values(rows) => rows.len(),
+                    InsertSource::Select(_) => 1,
+                },
+            }),
+            ExecutionProgram::Update {
+                statement,
+                access_path,
+            } => PlanNode::Update(UpdatePlanNode {
+                table_name: statement.table.clone(),
+                assignment_count: statement.assignments.len(),
+                has_filter: statement.where_clause.is_some(),
+                access_path: access_path.clone(),
+            }),
+            ExecutionProgram::Delete {
+                statement,
+                access_path,
+            } => PlanNode::Delete(DeletePlanNode {
+                table_name: statement.table.clone(),
+                has_filter: statement.where_clause.is_some(),
+                access_path: access_path.clone(),
+            }),
+            ExecutionProgram::Create { statement } => PlanNode::Create(CreatePlanNode {
+                table_name: statement.table.clone(),
+                column_count: statement.columns.len(),
+            }),
+            ExecutionProgram::CreateIndex { statement } => {
+                PlanNode::CreateIndex(CreateIndexPlanNode {
+                    table_name: statement.table.clone(),
+                    index_name: statement.index_name.clone(),
+                    column_count: statement.columns.len(),
+                })
+            }
+            ExecutionProgram::Alter { statement } => PlanNode::Alter(AlterPlanNode {
+                table_name: statement.table.clone(),
+            }),
+            ExecutionProgram::Drop { statement } => PlanNode::Drop(DropPlanNode {
+                table_name: statement.table.clone(),
+            }),
+            ExecutionProgram::DropIndex { statement } => PlanNode::DropIndex(DropIndexPlanNode {
+                table_name: statement.table.clone(),
+                index_name: statement.index_name.clone(),
+            }),
+        }
+    }
+}
+
+/// Describes a planned SELECT.
+///
+/// `analysis` is absent only for a `QueryPlan` assembled by hand — `plan_select` always
+/// records one. The description then names no table, which is all such a plan knows.
+fn select_plan_node(
+    statement: &SelectStatement,
+    access_path: &SelectAccessPath,
+    analysis: Option<&SelectAnalysis>,
+) -> SelectPlanNode {
+    let projection = if statement
+        .columns
+        .iter()
+        .any(|item| matches!(item, SelectItem::Wildcard))
+    {
+        SelectProjection::Wildcard
+    } else if let Some(item) = statement.columns.first() {
+        match item {
+            SelectItem::CountAll => SelectProjection::CountAll,
+            SelectItem::Aggregate { function, column } => SelectProjection::Aggregate {
+                function: *function,
+                column: column.clone(),
+            },
+            SelectItem::Expression(_) => SelectProjection::Expressions(statement.columns.len()),
+            _ => SelectProjection::Columns(
+                statement
+                    .columns
+                    .iter()
+                    .filter_map(|item| match item {
+                        SelectItem::Column(name) => {
+                            Some(SelectStatement::column_reference_name(name).to_string())
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+            ),
+        }
+    } else {
+        SelectProjection::Columns(Vec::new())
+    };
+
+    SelectPlanNode {
+        table_name: analysis
+            .map(|analysis| analysis.table_name.clone())
+            .unwrap_or_default(),
+        source_count: analysis.map_or(0, |analysis| analysis.source_count),
+        access_path: access_path.clone(),
+        projection,
+        distinct: statement.distinct,
+        has_filter: statement.where_clause.is_some(),
+        order_by_columns: statement
+            .order_by
+            .iter()
+            .map(|item| item.column.clone())
+            .collect(),
+        limit: statement.limit,
+        offset: statement.offset,
+    }
+}
+
 impl std::fmt::Debug for QueryPlan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("QueryPlan")
-            .field("node", &self.node)
+            .field("node", &self.node())
             .field("estimated_cost", &self.estimated_cost)
             .field("select_analysis", &self.select_analysis)
             .field("program", &self.program)

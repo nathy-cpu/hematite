@@ -49,8 +49,8 @@ use super::{
 /// insert and delete and snapshots this so a failed operation can put the row
 /// counts back, and there are three such wrappers per inserted row — the table,
 /// the primary-key index, and each secondary index. Cloning the map at each one
-/// was eleven allocations a row. Only the first mutation after a snapshot copies
-/// it now, via `Arc::make_mut`.
+/// would be eleven allocations a row; behind the `Arc`, only the first mutation
+/// after a snapshot copies it, via `Arc::make_mut`.
 pub type TableMetadataMap = HashMap<Arc<str>, TableRuntimeMetadata>;
 
 #[derive(Debug, Clone)]
@@ -58,8 +58,8 @@ pub struct TableRuntimeMetadata {
     /// The same handle the map is keyed by, not a second copy of the string.
     ///
     /// Cloning the map costs one allocation for its table plus one per `String` it
-    /// owns, and it owned two per table: the key and this. `Arc<str>` borrows as
-    /// `str`, so lookups by `&str` are unchanged.
+    /// owns, and owned names would be two per table: the key and this. `Arc<str>`
+    /// borrows as `str`, so lookups by `&str` work as they would on a `String` key.
     pub name: Arc<str>,
     pub root_page_id: PageId,
     pub row_count: u64,
@@ -129,10 +129,9 @@ not available yet.",
 
     /// Default page-cache capacity (in pages) used when a caller does not specify one.
     ///
-    /// At the 4 KiB page size this is ~8 MiB, comparable to SQLite's default cache. The
-    /// previous value of 100 pages (~400 KiB) was far smaller than typical working sets and
-    /// caused the cache to thrash — hot pages were evicted and re-read from the OS on nearly
-    /// every operation. See the benchmark investigation for details.
+    /// At the 4 KiB page size this is ~8 MiB, comparable to SQLite's default cache. A
+    /// 100-page cache (~400 KiB) is far smaller than typical working sets and thrashes —
+    /// hot pages are evicted and re-read from the OS on nearly every operation.
     pub const DEFAULT_PAGE_CACHE_CAPACITY: usize = 2000;
 
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
@@ -372,8 +371,9 @@ not available yet.",
     /// time it was read.
     ///
     /// This runs at the start of every read scope, which is once per statement, and
-    /// re-read and re-parsed the whole table-metadata section each time. Between two
-    /// statements with no commit in between there is nothing new to read.
+    /// an unconditional refresh would re-read and re-parse the whole table-metadata
+    /// section each time. Between two statements with no commit in between there is
+    /// nothing new to read.
     fn refresh_runtime_metadata_if_stale(&mut self) -> Result<()> {
         if let Ok(token) = self.durable_state_token() {
             if self.metadata_state_token == Some(token) {
@@ -486,9 +486,9 @@ not available yet.",
 
     /// Borrows the tree store rather than cloning it.
     ///
-    /// This returned a clone, and it is called from roughly forty places, several of
-    /// them once per row. `ByteTreeStore` is a handle around an `Arc`, so each call
-    /// was a refcount pair for something the caller only reads through.
+    /// It is called from roughly forty places, several of them once per row.
+    /// `ByteTreeStore` is a handle around an `Arc`, so returning a clone would cost a
+    /// refcount pair per call for something the caller only reads through.
     pub(crate) fn tree_store(&self) -> &ByteTreeStore {
         &self.tree_store
     }
@@ -530,11 +530,8 @@ not available yet.",
         })
     }
 
-    /// Walks tree entries until the visitor returns `false`.
-    ///
-    /// The early exit is what lets a capped scan stop after the rows it needs
-    /// instead of walking the whole tree and discarding the tail.
-    /// Walks a tree's values, without locating each entry's key.
+    /// Walks a tree's values, without locating each entry's key, until the visitor
+    /// returns `false`.
     ///
     /// A projecting scan never reads the key, and finding it costs a second cell range
     /// and view per row.
@@ -558,6 +555,10 @@ not available yet.",
         Ok(())
     }
 
+    /// Walks tree entries until the visitor returns `false`.
+    ///
+    /// The early exit is what lets a capped scan stop after the rows it needs
+    /// instead of walking the whole tree and discarding the tail.
     pub(crate) fn visit_tree_entries_while<F>(
         &self,
         root_page_id: PageId,
@@ -737,11 +738,12 @@ not available yet.",
         table_store::read_from_table(self, table_name)
     }
 
-    /// Reads at most `max_rows` rows, stopping the scan once it has them.
-    ///
-    /// The caller is responsible for establishing that a prefix of the table is a
-    /// correct answer; see `SelectExecutor::scan_row_cap`.
     /// Reads a table decoding only the given column indices, in that order.
+    ///
+    /// Rows come back laid end to end in one `Vec`, `indices.len()` values each.
+    /// With `max_rows`, the scan stops once it has that many rows; the caller is
+    /// responsible for establishing that a prefix of the table is a correct answer
+    /// (see `SelectExecutor::scan_row_cap`).
     pub fn read_table_columns(
         &mut self,
         table_name: &str,
@@ -787,12 +789,11 @@ not available yet.",
     ///
     /// For a table whose primary key is a single integer column, the key *is* the
     /// row id and the caller does not get to choose. Otherwise the id comes from
-    /// the table's counter, as it always did.
+    /// the table's counter.
     ///
     /// Prefer this over `insert_into_table` followed by `register_primary_key_row`:
     /// that pair lets a caller store a row under a counter id and then claim a
-    /// different primary key for it, leaving a row nothing can look up. Three tests
-    /// in this repository did exactly that before the two were joined here.
+    /// different primary key for it, leaving a row nothing can look up.
     pub fn insert_table_row(&mut self, table: &Table, values: Vec<Value>) -> Result<u64> {
         match self.aliased_rowid_for_row(table, &values)? {
             Some(row_id) => {

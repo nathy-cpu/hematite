@@ -26,9 +26,9 @@ mod mod_tests {
         let trees = ByteTreeStore::new(Pager::new_in_memory(100)?);
         let root_page_id = trees.create_tree()?;
         let mut tree = trees.open_tree(root_page_id)?;
-        // Large enough values that a handful of rows overflow a page. Inserting a
-        // splits are driven by bytes, not a cell cap, so the fixture has to supply
-        // the bytes.
+        // Large enough values that a handful of rows fill a page (still inline, under
+        // `MAX_LOCAL_PAYLOAD`): splits are driven by bytes, not a cell cap, so the
+        // fixture has to supply the bytes.
         let filler = vec![0xAB; 900];
         for i in 0..20u32 {
             tree.insert(&i.to_be_bytes(), &filler)?;
@@ -188,9 +188,9 @@ mod mod_tests {
     /// Builds a tree with several full leaves of tiny entries.
     ///
     /// Everything else in this file uses large values, which is why none of it
-    /// reaches rebalancing: a leaf underflows at `MAX_KEYS / 2` cells, and a leaf
-    /// of 900-byte values fills up at a handful. Only small entries get a leaf
-    /// past two hundred cells and back down again.
+    /// reaches the borrow path: a sibling lends a cell only while it holds more than
+    /// `MAX_KEYS / 2` cells, and a leaf of 900-byte values fills up at a handful.
+    /// Only small entries get a leaf past two hundred cells.
     fn build_dense_byte_tree(entries: u32) -> Result<(ByteTreeStore, crate::storage::PageId)> {
         let trees = ByteTreeStore::new(Pager::new_in_memory(400)?);
         let root_page_id = trees.create_tree()?;
@@ -224,17 +224,11 @@ mod mod_tests {
         Ok(())
     }
 
-    /// Deleting from a middle leaf until it underflows borrows from the right.
-    ///
-    /// The counter is asserted, not just tree validity, because this path is one a
-    /// test can silently fail to reach: before this test existed, the entire suite
-    /// ran it zero times while a 5 000-row `DELETE` ran it 1 672 times, so a
-    /// rewrite of it would have shipped with 745 tests green.
     /// The cheap node-size derivation agrees with measuring every cell.
     ///
     /// `serialized_size_on_page` reads the answer off the page header and the
-    /// freeblock chain instead of summing cell sizes, which took `is_underflow`
-    /// and `can_merge_with` from 21.8 % of a delete to a handful of loads. The
+    /// freeblock chain instead of summing cell sizes, which would cost `is_underflow`
+    /// and `can_merge_with` 21.8 % of a delete rather than a handful of loads. The
     /// identity it relies on — cells occupy the content area minus whatever is
     /// free inside it — holds only if freeblocks and fragments are accounted for
     /// exactly, so this checks it against the slow version on pages that have
@@ -293,6 +287,12 @@ mod mod_tests {
         Ok(())
     }
 
+    /// Deleting from a middle leaf until it underflows borrows from the right.
+    ///
+    /// The counter is asserted, not just tree validity, because this path is one a
+    /// test can silently fail to reach: the large-value fixtures never get there, while
+    /// a 5 000-row `DELETE` runs it 1 672 times, so a broken rewrite of it could ship
+    /// with every other test green.
     #[test]
     fn deleting_from_a_middle_leaf_borrows_a_cell_from_its_right_sibling() -> Result<()> {
         let entries = 900u32;
@@ -460,14 +460,12 @@ mod mod_tests {
 
     #[test]
     fn reading_a_spilled_value_visits_each_overflow_page_once() -> Result<()> {
-        // Replaces a test that asserted an overflow page-id memo was hit. The memo
-        // existed because the read walked the chain twice; now it walks once and the
-        // memo is gone, so the property worth pinning is the page count itself.
+        // The read walks the chain once, so the property worth pinning is the page
+        // count itself.
         //
-        // The cache has to be cold for that count to mean anything. An earlier
-        // version of this test reused the store that had just written the value, so
-        // every page was still resident, the backend was never touched, and the
-        // assertion held for any implementation.
+        // The cache has to be cold for that count to mean anything. Reusing the store
+        // that had just written the value would leave every page resident, the backend
+        // untouched, and the assertion true for any implementation.
         let path = tmp_db();
         let large_value = vec![0x51; crate::storage::PAGE_SIZE * 2];
         let root_page_id = {
@@ -489,9 +487,9 @@ mod mod_tests {
         let work = trees.storage_stats()?.since(&before);
 
         // Two overflow pages carry the payload that does not fit in the cell, and a
-        // single pass reads each once. The bound is 3 rather than 5 deliberately: the
-        // two-pass read this replaced would fault all four, so a looser bound would
-        // let the regression back in unnoticed.
+        // single pass reads each once. The bound is 3 rather than 5 deliberately: a
+        // two-pass read would fault all four, so a looser bound would let one in
+        // unnoticed.
         assert!(
             work.page_reads > 0,
             "cache was not cold, so this measures nothing"
@@ -1895,8 +1893,8 @@ mod value_store_tests {
         assert!(StoredValueLayout::decode(&headless).is_err());
     }
 
-    /// The borrowed decode has to agree with the owning one, since scans now take
-    /// the borrowed path and everything else still takes the owning one.
+    /// The borrowed decode has to agree with the owning one, since scans take the
+    /// borrowed path and everything else takes the owning one.
     #[test]
     fn test_borrowed_decode_agrees_with_owned() -> crate::error::Result<()> {
         let inline = StoredValueLayout::new_inline(b"hello world")?.encode()?;
@@ -1938,7 +1936,7 @@ mod value_store_tests {
         );
 
         assert!(inline_payload(&[]).is_err());
-        // An inline value is now just a tag plus its bytes, so the smallest valid one
+        // An inline value is just a tag plus its bytes, so the smallest valid one
         // is a single tag byte carrying an empty payload -- which is exactly what a
         // secondary-index entry stores.
         assert_eq!(inline_payload(&[0u8])?, Some(b"".as_slice()));
@@ -2103,9 +2101,9 @@ mod tree_tests {
 
     /// `to_page` must leave the same bytes whatever the page held before.
     ///
-    /// It stopped zeroing the whole page and now clears only the gap between the cell
-    /// pointers and the first cell, on the argument that everything else is written
-    /// over. This is that argument, checked: write the same node onto a page full of
+    /// It clears only the gap between the cell pointers and the first cell rather than
+    /// the whole page, on the argument that everything else is written over. This is
+    /// that argument, checked: write the same node onto a page full of
     /// `0xAA` and onto a fresh one, and the results have to be identical — byte for
     /// byte, including the free space, so no part of a deleted row survives in it.
     #[test]
@@ -2230,8 +2228,8 @@ mod tree_tests {
         BTreeNode::to_page(&node, &mut page)?;
 
         // Point the second cell at the first. The corruption goes into the page's
-        // pointer array rather than a cached copy of it: `BTreeNode` no longer keeps
-        // one, and writing the bytes is what real corruption looks like anyway.
+        // pointer array rather than a cached copy of it: `BTreeNode` keeps none, and
+        // writing the bytes is what real corruption looks like anyway.
         // A leaf header is 8 bytes, so pointer `i` lives at `8 + i * 2`.
         let first_pointer = [page.data[8], page.data[9]];
         page.data[10..12].copy_from_slice(&first_pointer);
@@ -2331,7 +2329,7 @@ mod tree_tests {
         BTreeNode::to_page(&node, &mut page)?;
 
         // An interior header is 12 bytes, so cell pointer `i` lives at `12 + i * 2`.
-        // Read straight from the page: `BTreeNode` no longer caches the pointer array.
+        // Read straight from the page: `BTreeNode` does not cache the pointer array.
         let second_offset = u16::from_be_bytes([page.data[14], page.data[15]]) as usize;
         page.data[second_offset..second_offset + 4].copy_from_slice(&1u32.to_be_bytes());
 
@@ -2355,8 +2353,8 @@ mod tree_tests {
     /// growing with the root's cell count. Cheap-looking checks on per-row paths are
     /// not cheap.
     ///
-    /// The narrowing is real and worth stating: duplicate pointers now make a key
-    /// look absent rather than raise. Detection on the access path covers cells that
+    /// The narrowing is real and worth stating: on the access path, duplicate pointers
+    /// make a key look absent rather than raise. Detection on the access path covers cells that
     /// fail to parse, not cells that parse but disagree with their neighbours.
     #[test]
     fn test_byte_tree_duplicate_cell_pointers_are_caught_by_integrity_check() -> Result<()> {
@@ -2645,12 +2643,10 @@ mod tree_tests {
 /// merging must fit.
 ///
 /// What it catches, checked by deliberately breaking the formula: dropping a node's
-/// contribution, miscounting cells, using the wrong capacity. What it does *not*
-/// catch is the single-header term. `MAX_KEYS` caps a node at 99 cells, so the
-/// page-fit boundary is only reachable with cells of roughly a hundred bytes, and at
-/// that granularity an eight-byte header can never flip the answer. The term is
-/// correct and stays for clarity, but it is unobservable in any reachable
-/// configuration and this test should not be read as covering it.
+/// contribution, miscounting cells, using the wrong capacity. The single-header term
+/// is within reach of the sweep too, by arithmetic: four 500-byte cells a side merge
+/// to 4 088 bytes, which fits the 4 092-byte usable page only because the merged node
+/// keeps one header rather than two.
 mod merge_fit_tests {
     use crate::btree::node::BTreeNode;
     use crate::btree::{BTreeKey, BTreeValue, NodeType};
@@ -2680,8 +2676,8 @@ mod merge_fit_tests {
     fn the_predicate_agrees_with_performing_the_merge() {
         let mut checked_both_answers = (false, false);
 
-        // Sweeps across the page-fit boundary: with 99 cells maximum, two nodes of
-        // ~20 cells at ~200 bytes each land either side of 4 KiB.
+        // Sweeps across the page-fit boundary, well under `MAX_KEYS`: two nodes of
+        // ~20 cells at ~100 bytes each land either side of 4 KiB.
         for count in [1usize, 4, 16, 18, 20, 22, 40, 90] {
             for value_len in [1usize, 16, 64, 96, 100, 104, 200, 500] {
                 let left = leaf_with(2, count, value_len);
@@ -2728,21 +2724,21 @@ mod merge_fit_tests {
     }
 }
 
-/// Guards the exchange B3a made: whole-page structural validation stopped running on
-/// every page load, and in return the read accessors stopped swallowing decode
-/// errors. If `key_view`/`value_view` ever go back to `.ok()`, corruption becomes
-/// silent absence again and nothing else is watching for it.
+/// Guards a trade the read path depends on: whole-page structural validation does not
+/// run on every page load, and in exchange the read accessors propagate decode errors
+/// rather than swallowing them. If `key_view`/`value_view` ever flatten errors with
+/// `.ok()`, corruption becomes silent absence and nothing else is watching for it.
 mod cell_access_error_tests {
     use crate::btree::bytes::ByteTreeStore;
     use crate::error::{HematiteError, Result};
     use crate::storage::Pager;
 
     /// A cell whose declared length runs off the end of the page must raise when a
-    /// cursor reads it — not read as "no entry", which is what `.ok()` turned it into
-    /// and what the eager whole-page pass existed to compensate for.
+    /// cursor reads it — not read as "no entry", which is what `.ok()` would turn it
+    /// into and what an eager whole-page pass would be needed to compensate for.
     ///
-    /// Checked against a deliberate revert: restoring `.ok()` on `value_view` alone
-    /// still fails this test, but restoring it on `key_view` alone does not, because
+    /// Checked by deliberately breaking it: `.ok()` on `value_view` alone fails this
+    /// test, but `.ok()` on `key_view` alone does not, because
     /// an oversized key length puts the *value* out of bounds too and `value_view`
     /// reaches it first. So this guards the pair, not each accessor independently.
     #[test]
@@ -2866,10 +2862,10 @@ mod space_budget_probe {
 }
 
 /// The cell framing is stated by `leaf_cell_size`/`internal_cell_size`, written by the
-/// encoders, reserved by `to_page` and read back by `compute_cell_size`. Those were
-/// five independent copies of the same arithmetic; a change to the framing updated
-/// some and not others, and the mismatch surfaced only as a node that passed its fit
-/// check and then failed to serialise. These pin the agreement directly.
+/// encoders, reserved by `to_page` and read back by `compute_cell_size`: several
+/// copies of the same widths. A change to the framing that reaches some and not others
+/// surfaces only as a node that passes its fit check and then fails to serialise.
+/// These pin the agreement directly.
 mod cell_framing_agreement_tests {
     use crate::btree::node::BTreeNode;
     use crate::btree::page_format::{compute_cell_size, BTreePageHeader};
@@ -2952,8 +2948,9 @@ mod page_trailer_reservation_tests {
     use crate::storage::{Pager, PAGE_SIZE, PAGE_TRAILER_SIZE, USABLE_PAGE_SIZE};
 
     /// Pack a tree until pages split repeatedly, then check every page it owns has an
-    /// untouched trailer. The trailer is zero here because nothing writes it yet;
-    /// what matters is that B-tree content stopped short of it.
+    /// untouched trailer. The trailer is zero here because the pager stamps its
+    /// checksum on the way to disk, never into `page.data`; what matters is that
+    /// B-tree content stops short of it.
     #[test]
     fn btree_content_never_reaches_the_trailer() -> crate::error::Result<()> {
         let trees = ByteTreeStore::new(Pager::new_in_memory(200)?);

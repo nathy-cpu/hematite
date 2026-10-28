@@ -65,8 +65,8 @@ impl Pager {
     /// on to be checked and applied, and that is the path where another writer's
     /// commit has to be handled anyway.
     ///
-    /// Verifying every one of these reads cost an xxHash64 over 4 KiB — 11 % of a
-    /// point-lookup workload, on a page that had not changed.
+    /// Verifying every one of these reads would cost an xxHash64 over 4 KiB — it
+    /// measured 11 % of a point-lookup workload, on a page that had not changed.
     fn persisted_state_page_matches_cache(&mut self) -> Result<bool> {
         self.file_manager.sync_with_disk()?;
         if STORAGE_METADATA_PAGE_ID >= self.file_manager.next_page_id() {
@@ -320,6 +320,9 @@ impl Pager {
         Ok(())
     }
 
+    /// Writes the persisted-state page (journal mode and free list) straight to the
+    /// file and syncs it, for the two paths that change that state outside a
+    /// transaction: a journal-mode switch and a checkpoint.
     pub(super) fn persist_checksums(&mut self) -> Result<()> {
         let page = self.encoded_persisted_state_page()?;
         self.file_manager.write_page(&page)?;
@@ -385,11 +388,11 @@ impl Pager {
         // The pre-image: the page as it stands *before* this write, which is why this
         // runs ahead of `cache.put`. In WAL mode the newest version may be a WAL frame
         // rather than the file, so go through the WAL-aware path when the cache misses.
-        // Shared, not copied. The copies that this function genuinely owes are the
-        // ones below -- one per savepoint that still needs a pre-image, plus one for
-        // the journal -- and cloning the cached page here added a fourth 4 KiB memcpy
-        // of bytes nobody was going to mutate. A savepoint is taken per row, so that
-        // clone alone was 79 MB of memcpy over a 20 000-row insert.
+        // Shared, not copied. The only copy this function owes is the journal's,
+        // below; savepoints take a handle to this same page. Cloning the cached page
+        // here would add a 4 KiB memcpy of bytes nobody is going to mutate, and a
+        // savepoint is taken per row: that clone alone measured 79 MB of memcpy over
+        // a 20 000-row insert.
         let cached = self.cache_read()?.peek_shared(page_id);
         let page: Arc<Page> = match cached {
             Some(page) => page,
@@ -433,10 +436,10 @@ impl Pager {
         // Appended first, then handed over, so the record is written once and moved
         // rather than copied for each of the two.
         //
-        // This also puts the two in a safer order. The file is sized from this
-        // vector's length by `sync_rollback_journal_from_transaction`, so a failed
-        // append now leaves the vector short and the partial record gets truncated
-        // away; pushing first would have claimed a record the file does not hold.
+        // This is also the safer order. The file is sized from this vector's length
+        // by `sync_rollback_journal_from_transaction`, so a failed append leaves the
+        // vector short and the partial record gets truncated away; pushing first
+        // would claim a record the file does not hold.
         let Some(transaction) = self.active_rollback_transaction_mut() else {
             return Ok(());
         };
@@ -493,7 +496,7 @@ impl Pager {
         // header's count to describe the file exactly, and rejects a journal with
         // records beyond it as truncated. Recovery and the tests read the journal
         // mid-transaction, so it has to be decodable at every point. It is one
-        // positional write now rather than a seek, four bytes, and a seek back.
+        // positional write rather than a seek, four bytes, and a seek back.
         write_journal_record_count(file, self.journal_record_count)?;
         Ok(())
     }
@@ -528,13 +531,12 @@ impl Pager {
 
     /// Records what every page this commit touches must contain once it has landed.
     ///
-    /// Checksums are computed from the cached pages rather than read out of
-    /// `page_checksums`. That map deliberately has no entry for the storage metadata
-    /// page, and skipping that page here would be a durability hole: it is written
-    /// last and carries the free list, so a commit whose data pages landed but whose
-    /// metadata page did not would be judged complete, pairing new data with stale
-    /// bookkeeping. Recomputing costs one hash per dirty page against a commit that
-    /// is already writing every one of them.
+    /// Every dirty page is listed, the storage metadata page included, with a
+    /// checksum computed from its cached contents. Leaving that page out would be a
+    /// durability hole: it is written last and carries the free list, so a commit
+    /// whose data pages landed but whose metadata page did not would be judged
+    /// complete, pairing new data with stale bookkeeping. Computing them costs one
+    /// hash per dirty page against a commit that is already writing every one.
     pub(super) fn declare_rollback_commit_intent(&mut self) -> Result<()> {
         let dirty_ids = self.cache_read()?.dirty_page_ids();
         let mut intents = Vec::with_capacity(dirty_ids.len());
@@ -589,8 +591,8 @@ impl Pager {
     /// Retires the journal without giving up the file or the handle.
     ///
     /// The end of a transaction, which is the hot path: one `ftruncate` where
-    /// deleting the file cost an `unlink` here and an `openat` plus a truncating
-    /// `open` at the next `BEGIN`.
+    /// deleting the file would cost an `unlink` here and an `openat` plus a
+    /// truncating `open` at the next `BEGIN`.
     pub(super) fn retire_journal_file(&mut self) -> Result<()> {
         self.journal_record_count = 0;
         self.journal_header_len = 0;
@@ -648,7 +650,10 @@ impl Pager {
             return Ok(());
         }
 
-        let journal = RollbackJournal::decode(&bytes)?;
+        // A process that died mid-transaction may have left the journal's body ahead
+        // of or behind its header; see `decode_after_crash` for why the intact prefix
+        // is exactly what recovery needs.
+        let journal = RollbackJournal::decode_after_crash(&bytes)?;
         match journal.state {
             JournalState::Active => {
                 if self.has_live_writer()? {
@@ -673,7 +678,7 @@ impl Pager {
 
     /// Whether the database already holds everything the commit intended to write.
     ///
-    /// This is the oracle that replaced the durable commit marker. A journal with no
+    /// This is the oracle that stands in for a durable commit marker. A journal with no
     /// intent never got as far as declaring one, so it is by definition unfinished.
     ///
     /// Any page that cannot be read — beyond the file's end, say, because the commit
@@ -705,8 +710,8 @@ impl Pager {
         }
 
         // Taken, not cloned. Cloning the transaction to read three fields off it
-        // copied every 4 KiB pre-image in the undo log, plus the savepoints and page
-        // sets, to build a journal that is used once and dropped. The transaction is
+        // would copy every 4 KiB pre-image in the undo log, plus the savepoints and
+        // page sets, to build a journal that is used once and dropped. The transaction is
         // being rolled back, so it has no use for them either.
         let (original_file_len, original_free_pages, page_records) = {
             let transaction = self.active_rollback_transaction_mut().ok_or_else(|| {

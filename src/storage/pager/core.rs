@@ -7,9 +7,9 @@ use crate::storage::page_hash::PageSet;
 use std::sync::Arc;
 
 /// Recycle a finished transaction into the scratch slots, freeing any data that is
-/// only needed for rollback (dirty-page images, page-record copies, savepoint
-/// snapshots) while keeping the bare allocations (Vec capacity, HashMap bucket
-/// arrays) alive for reuse on the next `begin_transaction`.
+/// only needed for rollback (page-record copies, savepoints and the pre-images they
+/// hold) while keeping the bare allocations (Vec capacity, `PageSet` bucket arrays)
+/// alive for reuse on the next `begin_transaction`.
 fn stash_transaction(
     rollback_scratch: &mut Option<RollbackTransaction>,
     wal_scratch: &mut Option<WalTransaction>,
@@ -17,9 +17,10 @@ fn stash_transaction(
 ) {
     match txn {
         Some(PagerTransaction::Rollback(mut r)) => {
-            // savepoints carry dirty-page images (4 KB each) and checksum snapshots;
-            // page_records carry original page data for the rollback journal.
-            // Both must be dropped here — they are only valid for rollback.
+            // Savepoints hold handles to page pre-images and a file-manager
+            // snapshot; page_records hold the journal's 4 KiB pre-image copies.
+            // Both must be dropped here: they are only valid for rollback, and a
+            // held handle would keep its page's buffer out of the pool.
             r.savepoints.clear();
             r.page_records.clear();
             // Clear stale scalar caches; they will be refilled by begin_transaction.

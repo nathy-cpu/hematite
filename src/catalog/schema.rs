@@ -49,8 +49,9 @@ impl Schema {
         let table_id = TableId::new(self.next_table_id);
         self.next_table_id += 1;
 
-        // For now, we'll use a placeholder root page ID
-        // This will be assigned when the table is actually created in storage
+        // Root page 0 means "no tree yet" — `Catalog::get_table_root_page` reads it as
+        // `None` — until `set_table_root_page` assigns one. A caller that already has
+        // its roots uses `create_table_with_roots`.
         let root_page_id = 0u32;
 
         let table = Table::new(table_id, name.clone(), columns, root_page_id)?;
@@ -109,9 +110,9 @@ impl Schema {
     /// The same table as a shared handle.
     ///
     /// For callers that need it to outlive the borrow on the schema. Cloning the
-    /// `Table` to escape that borrow copied every column — name, character set,
-    /// collation and default — per statement, which a `SELECT` did on its way to
-    /// reading one row.
+    /// `Table` to escape that borrow would copy every column — name, character set,
+    /// collation and default — per statement, and a `SELECT` needs to escape it on
+    /// its way to reading one row; cloning the `Arc` is a refcount bump.
     pub(crate) fn shared_table_by_name(&self, name: &str) -> Option<&Arc<Table>> {
         self.table_names
             .get(name)

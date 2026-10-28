@@ -16,8 +16,9 @@
 //! - `compact_trailing_pages` removes free ids that form a suffix at the file high-water mark,
 //!   allowing the file to shrink without moving live pages.
 //!
-//! Persistence format is versioned so the pager can reject freelist metadata that belongs to an
-//! incompatible storage format.
+//! This type is in-memory only. The list is persisted by `pager_metadata`, delta-encoded inside
+//! the pager's versioned `HPM1` record; `deserialize_metadata_lines` parses a text form that
+//! only tests use.
 
 #[cfg(test)]
 use crate::error::Result;
@@ -31,8 +32,8 @@ pub struct FreeList {
     ///
     /// Keyed with [`PageMap`] rather than the default hasher: a savepoint holds a
     /// shared handle to the free list and answers `page_is_live_at_savepoint` from
-    /// this map on every page the write path captures, which put SipHash over four
-    /// bytes at 1.9 % of a delete.
+    /// this map on every page the write path captures. Under SipHash, hashing those
+    /// four bytes measured 1.9 % of a delete.
     positions: PageMap<usize>,
 }
 

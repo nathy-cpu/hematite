@@ -6,8 +6,9 @@
 //! per-commit costs.
 //!
 //! Wall time is only half the story here. Before criterion starts, `main` prints a
-//! disk-space report — bytes on disk per row, for a fixed fixture. That number is a
-//! headline metric of the storage rewrite and criterion has no way to express it.
+//! disk-space report — bytes on disk per row, for a fixed fixture. File size is a
+//! first-class metric for an embedded database and criterion has no way to express
+//! it.
 //!
 //! Sizes are tunable so the suite can be run quickly during development:
 //!   HEMATITE_BENCH_ROWS=5000 cargo bench --bench storage_workloads
@@ -40,7 +41,8 @@ fn open(db: &TempDb, mode: JournalMode) -> Hematite {
 }
 
 /// The fixture every space measurement is taken against: a narrow table of small
-/// integers, which is where fixed-width record tags cost the most.
+/// integers, which is where per-value overhead is the largest share of a row and
+/// so where the record format's variable-width serial types matter most.
 fn create_narrow(h: &mut Hematite) {
     h.execute("CREATE TABLE t (id INT PRIMARY KEY, a INT, b INT, c INT, d INT);")
         .expect("create table");
@@ -234,8 +236,9 @@ fn point_lookup(c: &mut Criterion) {
     group.finish();
 }
 
-/// Full ordered scan. This is the path that currently materializes the whole table
-/// into a `Vec<StoredRow>` before the first row is returned.
+/// Full scan of two of five columns. A plain projection like this takes the
+/// direct-projection path (`SelectExecutor::try_direct_projection`), which decodes
+/// only the named columns into one flat buffer.
 fn full_scan(c: &mut Criterion) {
     let n = rows();
     let mut group = c.benchmark_group("full_scan");
@@ -258,8 +261,9 @@ fn full_scan(c: &mut Criterion) {
     group.finish();
 }
 
-/// A narrow range and a LIMIT. Both should cost a seek plus a few rows; today both
-/// pay for the whole table.
+/// A narrow range and a LIMIT. The LIMIT stops the scan after 100 rows
+/// (`scan_row_cap`). The range has no seek to use — there is no range access path,
+/// so it filters a full scan — and pays for the whole table.
 fn range_and_limit(c: &mut Criterion) {
     let n = rows();
     let lo = n / 2;
@@ -328,8 +332,9 @@ fn large_row(c: &mut Criterion) {
     group.finish();
 }
 
-/// Delete-heavy churn, ending in an integrity check so the benchmark also proves
-/// the tree survived it.
+/// Delete-heavy churn: one `DELETE` removing about 4/7 of the rows. The fixture is
+/// rebuilt for every iteration (`BatchSize::PerIteration`), so only the delete is
+/// timed.
 fn delete_heavy(c: &mut Criterion) {
     let n = (rows() / 4).max(500);
     let mut group = c.benchmark_group("delete_heavy");
@@ -356,8 +361,9 @@ fn delete_heavy(c: &mut Criterion) {
     group.finish();
 }
 
-/// Secondary-index maintenance and lookup: the index-key encoding and the
-/// index-store round trip.
+/// Lookup through a secondary index: the index-key encoding and the index-store
+/// round trip. Index maintenance is not timed — the index is built once, before
+/// the measured loop.
 fn secondary_index(c: &mut Criterion) {
     let n = rows();
     let mut group = c.benchmark_group("secondary_index");
@@ -410,8 +416,8 @@ criterion_group!(
 );
 
 /// Hand-written in place of `criterion_main!` so the disk-space report runs first.
-/// Criterion only reports time; bytes-on-disk is a first-class metric of this
-/// rewrite and has to be printed separately.
+/// Criterion only reports time; bytes-on-disk is a first-class metric here and has
+/// to be printed separately.
 fn main() {
     if std::env::args().any(|a| a == "--test") {
         // `cargo test` runs benches in test mode; skip the expensive report.

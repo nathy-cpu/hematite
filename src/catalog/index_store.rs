@@ -132,8 +132,8 @@ pub(crate) fn register_primary_key_row(
         // What is worth checking is that the row went in under the id its key
         // says it should have. A caller that allocated a row id from the counter
         // and then registered a different primary key would leave a row nothing
-        // can find, and that is exactly what the low-level engine API does if it
-        // is used the pre-alias way.
+        // can find, and that is exactly what the low-level engine API allows:
+        // `insert_into_table` followed by `register_primary_key_row`.
         if row.row_id != expected_row_id {
             return Err(HematiteError::StorageError(format!(
                 "Row in table '{}' is stored under row id {} but its primary key is \
@@ -222,8 +222,8 @@ pub(crate) fn register_secondary_index_row(
         if index.unique && tree_has_secondary_key(&tree, &key_values)? {
             return Err(unique_index_storage_error(&index.name, &table.name));
         }
-        // No payload: the row id is already the key's trailing eight bytes, so
-        // storing it again would be a second copy of the same number.
+        // No payload: the row id is already the key's suffix, so storing it again
+        // would be a second copy of the same number.
         tree.insert_with_mutation(
             &IndexKeyCodec::encode_secondary_key(&key_values, row.row_id)?,
             &[],
@@ -494,10 +494,10 @@ fn validate_secondary_indexes(
 
 /// Pulls a row's primary-key columns out and normalises them in one pass.
 ///
-/// Taking the key values first and normalising them after built two `Vec<Value>`
-/// per row, and cloned each value twice: once out of the row, once into the
-/// normalised copy. Every index registration and deletion did it, so it was four
-/// allocations a row before the key was even encoded.
+/// Taking the key values first and normalising them after would build two
+/// `Vec<Value>` per row and clone each value twice: once out of the row, once into
+/// the normalised copy. Every index registration and deletion takes this path, so
+/// that would be four allocations a row before the key is even encoded.
 fn normalized_primary_key_values(table: &Table, row_values: &[Value]) -> Result<Vec<Value>> {
     table
         .primary_key_columns

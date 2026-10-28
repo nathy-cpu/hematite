@@ -43,7 +43,7 @@ pub(crate) enum CursorState {
     Valid,
     /// Does not point to a valid entry (empty tree, past end, before first).
     Invalid,
-    /// Tree was modified; cursor must be restored from saved key before use.
+    /// Position saved by `save_position`; must be restored from the saved key before use.
     RequireSeek,
 }
 
@@ -62,7 +62,8 @@ pub struct BTreeCursor {
     root_page_id: PageId,
 
     /// True when the cursor is known to be at the rightmost entry in the tree.
-    /// Enables fast-path for append-pattern seeks (Change 4: AtLast flag).
+    /// Lets `seek` to a key at or past the current one search the current leaf
+    /// instead of descending from the root, which is the append pattern.
     at_last: bool,
 }
 

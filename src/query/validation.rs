@@ -1,3 +1,15 @@
+//! Semantic checks of a parsed statement against the schema.
+//!
+//! The parser knows only names; this decides whether they mean anything. Tables and
+//! columns must exist, an unqualified column must resolve to exactly one source,
+//! aggregates, `GROUP BY` and `HAVING` must sit where SQL allows them, and DDL must
+//! not name a table that already exists or one that does not. It does not check
+//! operand types: values are compared and coerced when the executor evaluates them.
+//!
+//! `validate_statement` is the planner's entry point. Each executor also calls the
+//! `validate_*` for its own statement kind before it runs, so a statement is checked
+//! against the schema it actually executes against.
+
 use crate::catalog::{Schema, Table};
 use crate::error::{HematiteError, Result};
 use crate::parser::ast::*;
@@ -10,7 +22,7 @@ struct SourceBinding {
     alias: Option<String>,
     /// Shared with the schema rather than copied out of it. Validation builds one of
     /// these per source per statement and throws it away, and cloning a name per column
-    /// to do that was the largest single allocator cost in a point lookup.
+    /// to do that would be the largest single allocator cost in a point lookup.
     columns: Vec<Arc<str>>,
     has_hidden_rowid: bool,
 }
@@ -57,7 +69,7 @@ pub(crate) fn validate_column_reference(
     validate_column_reference_with_outer(name, &local_bindings, &[])
 }
 
-fn validate_select(select: &SelectStatement, catalog: &Schema) -> Result<()> {
+pub(crate) fn validate_select(select: &SelectStatement, catalog: &Schema) -> Result<()> {
     validate_select_with_outer_bindings(select, catalog, &[])
 }
 
@@ -206,7 +218,7 @@ fn validate_select_with_outer_bindings(
     Ok(())
 }
 
-fn validate_insert(insert: &InsertStatement, catalog: &Schema) -> Result<()> {
+pub(crate) fn validate_insert(insert: &InsertStatement, catalog: &Schema) -> Result<()> {
     let table = catalog.get_table_by_name(&insert.table).ok_or_else(|| {
         HematiteError::ParseError(format!("Table '{}' does not exist", insert.table))
     })?;
@@ -291,7 +303,7 @@ fn validate_insert(insert: &InsertStatement, catalog: &Schema) -> Result<()> {
     Ok(())
 }
 
-fn validate_update(update: &UpdateStatement, catalog: &Schema) -> Result<()> {
+pub(crate) fn validate_update(update: &UpdateStatement, catalog: &Schema) -> Result<()> {
     let table = catalog.get_table_by_name(&update.table).ok_or_else(|| {
         HematiteError::ParseError(format!("Table '{}' does not exist", update.table))
     })?;
@@ -335,7 +347,7 @@ fn validate_update(update: &UpdateStatement, catalog: &Schema) -> Result<()> {
     Ok(())
 }
 
-fn validate_create(create: &CreateStatement, catalog: &Schema) -> Result<()> {
+pub(crate) fn validate_create(create: &CreateStatement, catalog: &Schema) -> Result<()> {
     if catalog.get_table_by_name(&create.table).is_some() {
         if create.if_not_exists {
             return Ok(());
@@ -421,7 +433,7 @@ fn validate_create(create: &CreateStatement, catalog: &Schema) -> Result<()> {
     Ok(())
 }
 
-fn validate_delete(delete: &DeleteStatement, catalog: &Schema) -> Result<()> {
+pub(crate) fn validate_delete(delete: &DeleteStatement, catalog: &Schema) -> Result<()> {
     let _table = require_table(catalog, &delete.table)?;
     validate_mutation_target_binding(
         &delete.table,
@@ -484,7 +496,7 @@ fn validate_mutation_target_binding(
     }
 }
 
-fn validate_drop(drop: &DropStatement, catalog: &Schema) -> Result<()> {
+pub(crate) fn validate_drop(drop: &DropStatement, catalog: &Schema) -> Result<()> {
     if drop.if_exists && catalog.get_table_by_name(&drop.table).is_none() {
         return Ok(());
     }
@@ -492,7 +504,7 @@ fn validate_drop(drop: &DropStatement, catalog: &Schema) -> Result<()> {
     Ok(())
 }
 
-fn validate_alter(alter: &AlterStatement, catalog: &Schema) -> Result<()> {
+pub(crate) fn validate_alter(alter: &AlterStatement, catalog: &Schema) -> Result<()> {
     match &alter.operation {
         AlterOperation::RenameTo(new_name) => {
             require_table(catalog, &alter.table)?;
@@ -729,7 +741,10 @@ fn validate_add_constraint(
     Ok(())
 }
 
-fn validate_create_index(create_index: &CreateIndexStatement, catalog: &Schema) -> Result<()> {
+pub(crate) fn validate_create_index(
+    create_index: &CreateIndexStatement,
+    catalog: &Schema,
+) -> Result<()> {
     let table = require_table(catalog, &create_index.table)?;
 
     if create_index.columns.is_empty() {
@@ -765,7 +780,7 @@ fn validate_create_index(create_index: &CreateIndexStatement, catalog: &Schema) 
     Ok(())
 }
 
-fn validate_drop_index(drop_index: &DropIndexStatement, catalog: &Schema) -> Result<()> {
+pub(crate) fn validate_drop_index(drop_index: &DropIndexStatement, catalog: &Schema) -> Result<()> {
     if drop_index.if_exists && catalog.get_table_by_name(&drop_index.table).is_none() {
         return Ok(());
     }

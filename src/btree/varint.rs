@@ -1,9 +1,11 @@
-//! Variable-length integers for the v4 on-disk format.
+//! Variable-length integers for the on-disk record format.
 //!
-//! Cell headers, record headers and serial type codes are all overwhelmingly small
-//! numbers stored in fixed-width fields today: a row of ten small integers spends
-//! four bytes on each one, and every B-tree cell spends four bytes on two `u16`
-//! lengths. Encoding them by magnitude is where most of the disk-space win lives.
+//! Record headers, serial type codes and the values stored against primary-key index
+//! entries are overwhelmingly small numbers: in a fixed-width field a row of ten small
+//! integers would spend four bytes on each, where encoding by magnitude spends one.
+//! `catalog::record_codec` and `catalog::index_key_codec` encode through here. B-tree
+//! cell framing does not: a leaf cell keeps two fixed `u16` lengths (see
+//! `node::leaf_cell_size`).
 //!
 //! # Format
 //!
@@ -35,12 +37,11 @@
 //!
 //! # The eight-byte read
 //!
-//! [`read`] loads eight bytes unconditionally when they are available, which is why
-//! v4 pages leave [`crate::storage::PAGE_SIZE`] minus `USABLE_PAGE_SIZE` bytes of
-//! readable slack at the end of every page: a varint starting in the last few bytes
-//! of the content area still has eight readable bytes after it. Buffers without
-//! that slack — a standalone record buffer, say — take [`read`]'s tail path, which
-//! copies into a staging array first. Both paths decode identically.
+//! [`read`] loads eight bytes unconditionally when the buffer has eight readable bytes
+//! from `offset`, so most varints decode from a single load. One that starts within
+//! eight bytes of the end of its buffer — the last fields of a record, or a short
+//! record — takes the tail path instead, which copies into a staging array first. Both
+//! paths decode identically.
 
 /// Largest value representable in the eight-byte form; anything larger takes nine.
 const MAX_PACKED: u64 = (1u64 << 56) - 1;

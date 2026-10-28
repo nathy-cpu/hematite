@@ -10,7 +10,8 @@
 //! The implementation is B+ tree-like:
 //! - leaf pages store the actual key/value pairs;
 //! - internal pages store separator keys and child page ids;
-//! - separator keys are the minimum keys of right subtrees.
+//! - a separator key is a lower bound on its right subtree: that subtree's minimum key when the
+//!   separator is written, and still a valid bound after deletes, which do not refresh separators.
 
 use crate::btree::cursor::BTreeCursor;
 use crate::btree::node::BTreeNode;
@@ -398,8 +399,7 @@ impl BTreeIndex {
     }
 
     pub fn cursor(&self) -> Result<BTreeCursor> {
-        // Pass RwLock-backed storage through explicitly using Arc::clone to match the
-        // updated cursor signature that accepts `Arc<RwLock<Pager>>`.
+        // The cursor holds its own `Arc` on the pager, so it does not borrow `self`.
         BTreeCursor::new(Arc::clone(&self.storage), self.root_page_id)
     }
 
@@ -429,7 +429,7 @@ impl BTreeIndex {
         }
 
         // Undecoded. Descent needs one key comparison per level and one child
-        // pointer, both of which read off the page; decoding materialised every
+        // pointer, both of which read off the page; decoding would materialise every
         // separator on every interior node on the path, on every delete, for a
         // rebalance that usually does not happen.
         let mut node = BTreeNode::from_shared_page(shared)?;
@@ -470,7 +470,7 @@ impl BTreeIndex {
     pub(crate) fn check_root_underflow(&mut self, pager: &mut Pager) -> Result<Option<PageId>> {
         let shared = pager.read_page_shared(self.root_page_id)?;
         // "No separators left, but still has a child" is a cell count and a page
-        // kind, both in the header. Decoding to ask it materialised the whole root.
+        // kind, both in the header. Decoding to ask it would materialise the whole root.
         let node = BTreeNode::from_shared_page(shared)?;
 
         if node.key_count == 0 && node.node_type == NodeType::Internal {
@@ -501,7 +501,7 @@ impl BTreeIndex {
 
     fn is_child_underflow(&mut self, pager: &mut Pager, child_page_id: PageId) -> Result<bool> {
         // No `_decoded`. Underflow is decided by `serialized_size_on_page`, which
-        // sums cell byte ranges straight off the page; decoding first materialised
+        // reads the page header and freeblock chain; decoding first would materialise
         // every key and value into owned `Vec`s to answer a question about a byte
         // count, on every rebalance check of every delete.
         let shared = pager.read_page_shared(child_page_id)?;
@@ -566,7 +566,7 @@ impl BTreeIndex {
         // The cell count comes from the page header, so the usual answer -- the
         // sibling has nothing to spare -- costs no decode at all. Decoding a node
         // allocates a `Vec` per key and per value, so asking this question the
-        // expensive way was 457 allocations per deleted row.
+        // expensive way costs 457 allocations per deleted row.
         let min_keys = Self::min_keys_for(left_sibling.node_type);
         if left_sibling.key_count <= min_keys {
             return Ok(false);
@@ -758,10 +758,10 @@ impl BTreeIndex {
         let left_sibling_id = parent.children[child_index - 1];
         let child_id = parent.children[child_index];
 
-        // Undecoded: `can_merge_with` answers from the page headers and cell
-        // pointers, and `merge_leaf`/`merge_internal` decode for themselves once the
-        // merge is actually going ahead. Decoding here allocated a `Vec` per key and
-        // per value in both nodes, most often to conclude they do not fit.
+        // Undecoded: `can_merge_with` answers from the page headers and freeblock
+        // chains, and `merge_leaf`/`merge_internal` decode for themselves once the
+        // merge is actually going ahead. Decoding here would allocate a `Vec` per key
+        // and per value in both nodes, most often to conclude they do not fit.
         let left_page = pager.read_page_shared(left_sibling_id)?;
         let mut left_sibling = BTreeNode::from_shared_page(left_page)?;
 

@@ -60,10 +60,11 @@
 //! # What it costs
 //!
 //! Ten small integers: header is 1 byte of `header_len` plus 10 one-byte serial
-//! types, bodies are 1 byte each — 21 bytes, against 58 before.
+//! types, bodies are 1 byte each — 21 bytes, against 58 at a fixed width.
 
-// `RecordRef`'s borrowed accessors are exercised by tests but have no production
-// caller until the streaming cursors land and the executor stops materialising rows.
+// `RecordRef`'s borrowed accessors (`field`, `iter`, `ValueRef`) are exercised by
+// tests but have no production caller: every production read goes through `decode`
+// or a `ProjectionPlan`, both of which hand back owned `Value`s.
 #![allow(dead_code)]
 
 use crate::btree::varint;
@@ -530,8 +531,8 @@ impl<'a> RecordRef<'a> {
         }
     }
 
-    /// Takes `self` by value because [`RecordRef`] is `Copy` and only two words
-    /// wide, so a reference would cost more than the copy.
+    /// Takes `self` by value because [`RecordRef`] is `Copy` — three borrowed
+    /// slices — and its callers are done with it once the values are out.
     ///
     /// Also returns where the bodies ended, so a caller validating that a record
     /// consumes its buffer exactly does not need a second pass over the header.
@@ -559,8 +560,10 @@ impl<'a> RecordRef<'a> {
     /// [`value_at`](Self::value_at) followed by [`ValueRef::to_value`] matches on the
     /// serial type twice and builds a borrowed value in between that is destructured
     /// immediately. A projecting scan wants the owned value and nothing else, so this
-    /// does the one match the other two share — worth its own arm list because decode
-    /// is the largest single cost in a scanned row.
+    /// does the one match the other two share, in
+    /// [`value_from_body`](Self::value_from_body), which the planned scan calls
+    /// directly — worth its own arm list because decode is the largest single cost in
+    /// a scanned row.
     ///
     /// The two must agree, which `an_owned_read_matches_a_borrowed_one` checks over
     /// every variant. A missing arm is a compile error either way; what that test is
@@ -692,19 +695,14 @@ impl<'a> Iterator for RecordIter<'a> {
     }
 }
 
-/// Decodes a whole record into owned values.
-///
-/// Stricter than [`RecordRef`]: the body must end exactly where the serial types
-/// say it does. A caller decoding a whole record hands over exactly one record's
-/// bytes, so anything left over is corruption — most likely a cell whose length
-/// disagrees with its contents.
 /// Where each projected field sits in a record, reused across rows of one shape.
 ///
 /// A scan decodes thousands of records whose serial-type headers are identical byte
-/// for byte — same columns, same widths — and re-derived every body offset for each
-/// one. Classifying those codes and walking the header was the larger half of what a
-/// scanned row spent on decode. This keeps the layout the last row produced and reuses
-/// it while the header still matches.
+/// for byte — same columns, same widths. Re-deriving every body offset for each one
+/// would repeat the same work per row: classifying those codes and walking the header
+/// is the larger half of what a scanned row spends on decode without a plan. This
+/// keeps the layout the last row produced and reuses it while the header still
+/// matches.
 ///
 /// Reuse is gated on a comparison of the serial types, not on an assumption about the
 /// table. A row shaped differently from its neighbours — a `NULL` where they hold an
@@ -728,7 +726,7 @@ pub(crate) struct ProjectionPlan {
     header: Vec<u8>,
     /// One entry per wanted index, in projection order.
     fields: Vec<(Serial, std::ops::Range<usize>)>,
-    /// Whether `types` describes anything. A record of no fields has an empty header,
+    /// Whether `header` and `fields` describe anything. A record of no fields has an empty header,
     /// which is a legitimate layout rather than "nothing cached yet".
     primed: bool,
 }
@@ -821,8 +819,8 @@ impl ProjectionPlan {
 
 /// Decodes only `indices`, in the order given.
 ///
-/// A scan that selects two of five columns still decoded all five and then threw
-/// three away — decode is a quarter of a scan's instructions. Field bodies are only
+/// A scan that selects two of five columns has no use for the other three, and
+/// decode is a quarter of a scan's instructions. Field bodies are only
 /// reachable by walking the serial-type header, but that walk is cheap (one byte per
 /// small field) and it is the *bodies* that cost: allocating a `String`, copying a
 /// blob. This walks the header once, records where each wanted field lives, and
@@ -853,8 +851,8 @@ pub(crate) fn decode_fields_into(
 /// Appends the projected fields to `out`, in the plan's order.
 ///
 /// The scan path, which lays every row into one buffer rather than giving each its
-/// own vector. A row's own vector was the single allocation a scanned row made, and
-/// `malloc` and `free` for it were 24 % of a full scan's instructions.
+/// own vector. A vector per row would be the single allocation a scanned row makes,
+/// and `malloc` and `free` for it measured 24 % of a full scan's instructions.
 pub(crate) fn decode_fields_into_planned(
     bytes: &[u8],
     plan: &mut ProjectionPlan,
@@ -876,7 +874,7 @@ pub(crate) fn decode_fields_into_planned(
         }
     };
 
-    // Pushed, rather than written into slots reserved with `Null`: `Value` is forty
+    // Pushed, rather than written into slots reserved with `Null`: `Value` is 32
     // bytes and has a destructor, so pre-filling would write every field twice and run
     // drop glue on each placeholder it overwrote.
     let base = out.len();
@@ -895,6 +893,12 @@ pub(crate) fn decode_fields_into_planned(
     Ok(())
 }
 
+/// Decodes a whole record into owned values.
+///
+/// Stricter than [`RecordRef`]: the body must end exactly where the serial types
+/// say it does. A caller decoding a whole record hands over exactly one record's
+/// bytes, so anything left over is corruption — most likely a cell whose length
+/// disagrees with its contents.
 pub(crate) fn decode(bytes: &[u8]) -> Result<Vec<Value>> {
     let record = RecordRef::new(bytes)?;
     let (values, body_end) = record.to_values_and_body_end()?;
@@ -1148,8 +1152,8 @@ mod tests {
         assert_eq!(encoded.len(), 21);
     }
 
-    /// The shape most application tables have. The old encoding spent 57 bytes on
-    /// this before the B-tree cell and value wrapper were added on top.
+    /// The shape most application tables have. A fixed-width encoding spends 57
+    /// bytes on it before the B-tree cell is added on top; this spends 36.
     #[test]
     fn a_typical_mixed_row_is_compact() {
         let values = vec![
@@ -1428,7 +1432,10 @@ mod tests {
             let _ = decode(&bytes);
         }
 
-        /// The new encoding must never be larger than the old fixed-width one.
+        /// `RowCodec::encode_values` must add nothing on top of the record encoding.
+        ///
+        /// It delegates to [`encode`], so this holds the facade to the codec rather
+        /// than comparing two encodings.
         #[test]
         fn never_larger_than_the_old_format(
             values in proptest::collection::vec(arbitrary_value(), 0..20)

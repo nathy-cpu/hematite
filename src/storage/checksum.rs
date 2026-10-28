@@ -1,10 +1,11 @@
 //! The one checksum in the engine.
 //!
 //! Every durable structure — page trailers, rollback-journal records, WAL frames,
-//! the database header — is verified with the same function. Before this module
-//! there were four separate byte-at-a-time FNV-1a loops plus a fifth checksum built
-//! on `DefaultHasher`, whose output is explicitly not stable across Rust releases,
-//! so a header written by one toolchain could fail verification under another.
+//! the database header — is verified with the same function, so there is one
+//! implementation to get right and one set of reference vectors pinning it. It is
+//! not built on `DefaultHasher`, whose output is explicitly not stable across Rust
+//! releases: a header written by one toolchain could fail verification under
+//! another.
 //!
 //! The algorithm is XXH64. Compared with the alternatives considered:
 //!
@@ -24,9 +25,9 @@
 //! wire format to interoperate with, so CRC's bounded-burst guarantee buys nothing
 //! that matters here.
 //!
-//! The `checksum_kind` byte in the database header records which function produced
-//! a file's checksums, so adopting hardware CRC32C later is a one-byte format bump
-//! rather than a rewrite.
+//! No on-disk field names the checksum function; the format versions (`HMTD`,
+//! `HMD1`, `HPM1`, `HTJ1`, `HTW1`, all version 1) imply it. Adopting hardware CRC32C
+//! would therefore be a format-version bump.
 
 const PRIME64_1: u64 = 0x9E37_79B1_85EB_CA87;
 const PRIME64_2: u64 = 0xC2B2_AE3D_27D4_EB4F;
@@ -72,9 +73,9 @@ fn avalanche(mut acc: u64) -> u64 {
 /// The seed is how callers separate contexts that would otherwise hash identical
 /// bytes to identical values: a page checksum seeds with the page id, so a page
 /// image relocated to a different id fails verification instead of silently
-/// validating; a WAL frame seeds with the previous frame's checksum, which chains
-/// the frames so a torn tail is detected structurally rather than one frame at a
-/// time.
+/// validating; a WAL frame or journal record seeds with a hash of its own header
+/// fields, so the checksum covers them without copying them next to the 4 KiB
+/// payload.
 pub fn hash64(seed: u64, bytes: &[u8]) -> u64 {
     let len = bytes.len();
     let mut offset = 0usize;
@@ -145,6 +146,33 @@ pub fn hash64(seed: u64, bytes: &[u8]) -> u64 {
 #[inline]
 pub fn hash32(seed: u64, bytes: &[u8]) -> u32 {
     (hash64(seed, bytes) >> 32) as u32
+}
+
+/// A value that differs between one call and the next, to tell one generation of an
+/// on-disk structure from a leftover of the one before it.
+///
+/// WAL salts and journal checksum seeds both use it. A structure whose old contents
+/// may survive in a reused or unsynced-truncated file can only reject them if the
+/// current generation checks against something the old one did not have; a fixed
+/// constant makes that check pass for both.
+///
+/// `RandomState` is seeded by the OS per process, and mixing in the wall clock
+/// separates generations created within one process. Neither is a cryptographic
+/// source and neither needs to be: the requirement is that two generations differ,
+/// not that an adversary cannot guess them.
+pub(crate) fn fresh_nonce() -> u64 {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let mut hasher = RandomState::new().build_hasher();
+    hasher.write_u64(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos() as u64)
+            .unwrap_or(0),
+    );
+    hasher.finish()
 }
 
 #[cfg(test)]

@@ -502,13 +502,14 @@ mod tests {
         let mut page = Page::new(crate::storage::DB_HEADER_PAGE_ID);
         page.data[0..4].copy_from_slice(&DatabaseHeader::MAGIC);
 
-        // Write an older on-disk version on purpose.
+        // Write a version other than the current one on purpose.
         let unsupported_version = DatabaseHeader::CURRENT_VERSION - 1;
         page.data[4..8].copy_from_slice(&unsupported_version.to_le_bytes());
         page.data[8..12].copy_from_slice(&42u32.to_le_bytes()); // schema root page id
         page.data[12..16].copy_from_slice(&1u32.to_le_bytes()); // next table id
 
-        // Checksum must match the bytes above so version mismatch is what fails.
+        // `deserialize` checks the version before the checksum, so the version
+        // mismatch is what fails whatever these four bytes hold.
         let mut hasher = DefaultHasher::new();
         DatabaseHeader::MAGIC.hash(&mut hasher);
         unsupported_version.hash(&mut hasher);
@@ -1227,7 +1228,7 @@ mod tests {
     }
 }
 
-// Tests for the new SQLite-style catalog implementation
+// Tests for `Catalog`: schema persistence and table lifecycle through the schema B-tree.
 #[cfg(test)]
 mod catalog_new_tests {
     use crate::catalog::catalog::Catalog;

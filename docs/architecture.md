@@ -13,94 +13,96 @@ Hematite is structured into distinct layers. Dependencies flow strictly from top
 ```mermaid
 flowchart TD
     Client["Client Interface<br><code>src/sql/interface.rs</code>"] --> SQLConn["SQL Connection<br><code>src/sql/connection.rs</code>"]
-    SQLConn --> Parser["SQL Parser<br><code>src/parser/parser.rs</code>"]
-    Parser --> Planner["Query Planner & Optimizer<br><code>src/query/planner.rs, optimizer.rs</code>"]
-    Planner --> Executor["Volcano-Style Executor<br><code>src/query/executor.rs</code>"]
-    Executor --> Catalog["Relational Catalog<br><code>src/catalog/catalog.rs</code>"]
-    Catalog --> BTree["Clustered B+ Trees<br><code>src/btree/mod.rs</code>"]
-    BTree --> Pager["Stateful Page Cache<br><code>src/storage/pager.rs</code>"]
-    Pager --> Durability["Durability & Journaling<br><code>src/storage/wal.rs, journal.rs</code>"]
+    SQLConn --> Parser["SQL Parser<br><code>src/parser/</code>"]
+    Parser --> Planner["Validation, Optimizer & Planner<br><code>src/query/validation.rs, optimizer.rs, rewrite.rs, planner.rs</code>"]
+    Planner --> Executor["Materialising Executor<br><code>src/query/executor.rs</code>"]
+    Executor --> Catalog["Relational Catalog<br><code>src/catalog/</code>"]
+    Catalog --> BTree["B+ Trees<br><code>src/btree/</code>"]
+    BTree --> Pager["Pager & Page Cache<br><code>src/storage/pager.rs</code>"]
+    Pager --> Durability["Durability & Journaling<br><code>src/storage/journal.rs, wal.rs</code>"]
 ```
 
 ### Layer Responsibilities
 
-1. **Client Interface (`sql::interface`)**: Exposes the user-facing API (`Hematite` struct).
-2. **SQL Connection (`sql::connection`)**: Manages session state, coordinates autocommit and explicit transaction states, savepoint stacks, and statement dispatch.
-3. **SQL Parser (`parser`)**: Lexes raw text into tokens and parses them using a strict, hand-written recursive-descent parser to construct a logical AST.
-4. **Query Planner & Optimizer (`query::planner`, `query::optimizer`)**: Resolves schema bindings, validates expressions, executes constant folding, logical simplifications, and translates the logical AST into a physical execution program.
-5. **Query Executor (`query::executor`)**: Formulates Volcano-style iterator pipelines. Operators pull data lazily via a `next()` pattern, abstracting table/index scans, filtering, aggregation, and sorting.
-6. **Relational Catalog (`catalog`)**: Translates relational schema elements (tables, columns, types) into low-level B-Tree key-value pairs. Represents types via `Value` and serializes records into packed binary arrays.
-7. **B+ Trees (`btree`)**: Implements internal routing nodes and leaf data nodes. Manages node splitting, merging, keys binary search, and lazy node decoding.
-8. **Pager (`storage::pager`)**: Manages the LRU in-memory page cache, handles page allocation/freelists, and tracks dirty frames.
-9. **Journaling (`storage::wal` & `storage::journal`)**: Coordinates writes to ensure crash safety. Implements either page-undo Rollback journaling or frame-redo Write-Ahead Logging.
+1. **Client Interface (`sql::interface`, `sql::result`)**: Exposes the user-facing API: `Hematite`, `ResultSet`, `Row` and `FromRow`. `Transaction` and `PreparedStatement` live beside the connection they borrow.
+2. **SQL Connection (`sql::connection`)**: Manages session state: autocommit, explicit transactions, the savepoint stack, and statement dispatch. Transaction control (`BEGIN`, `COMMIT`, `ROLLBACK`, savepoints) and introspection (`EXPLAIN`, `SHOW`, `DESCRIBE`) are handled here; everything else goes through the query pipeline.
+3. **SQL Parser (`parser`)**: Lexes text into span tokens and parses them with a hand-written recursive-descent parser into a flat arena (`parser::arena::Ast`). The query layer still reads the owned tree in `parser::ast`, which `parser::bridge` materialises from the arena after every parse.
+4. **Validation, Optimizer & Planner (`query`)**: `QueryPlanner::plan` validates the statement against the schema (`validation`), folds constants (`optimizer`), normalises structure (`rewrite`), and chooses an access path per source with a `LogEst` cost (`planner`). The result is a `QueryPlan` wrapping an `ExecutionProgram`.
+5. **Query Executor (`query::executor`)**: Interprets the planned statement. Execution materialises rather than pipelines: each step of a `SELECT` — read, filter, sort, group, project, limit — takes a `Vec` of rows and produces the next. Joins are nested loops. Writes check constraints and foreign keys and maintain indexes.
+6. **Relational Catalog (`catalog`)**: Owns the schema and maps tables and indexes onto B-trees. Rows are stored as self-describing records with a variable-width serial-type header (`record_codec`); index keys use a separate order-preserving encoding (`index_key_codec`).
+7. **B+ Trees (`btree`)**: Slotted-page interior and leaf nodes over opaque byte keys and values. Most inserts, updates and deletes edit a page in place; splits, merges and borrows decode it. Values larger than 1001 bytes spill into overflow chains, and `compaction` relocates pages for auto-vacuum.
+8. **Pager (`storage::pager`)**: The page cache, page allocation and the free list, dirty-page tracking, savepoints, page-trailer checksums, and in-process locking.
+9. **Journaling (`storage::journal` & `storage::wal`)**: Crash safety, by either an undo (rollback) journal or a redo write-ahead log.
 
 ---
 
 ## 2. Query Lifecycle Dataflow
 
-When a client connection executes a query, the request travels down the engine pipeline. Below is the lifecycle of a `SELECT` query utilizing a secondary index lookup:
+Below is the lifecycle of a `SELECT` that can use a secondary index:
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor Client as Client Connection<br>"SELECT name FROM users WHERE age = 30;"
-    participant Parser as Parser / AST<br>[Tokens]
-    participant Planner as Planner & Optimizer<br>[Logical Plan]
-    participant Executor as Executor / Cursor<br>[SelectExecutor]
-    participant BTree as B-Tree / Pager<br>[BTreePage]
+    participant Parser as Parser<br>[Ast → Statement]
+    participant Planner as Planner<br>[QueryPlan]
+    participant Executor as Executor<br>[SelectExecutor]
+    participant Catalog as Catalog / B-Tree / Pager
 
-    Client->>Parser: Parse()
-    Parser->>Planner: Plan & Optimize()
-    Planner->>Executor: Execute()
-    Executor->>BTree: Open Cursor
-    Note over BTree: Read physical page 2 (Leaf)
-    BTree-->>Executor: Row bytes (Lazy Node)
-    Note over Executor: Decode record
-    Note over Executor: Filter by age = 30
-    Note over Executor: Project column "name"
-    Executor-->>Client: [Rows Output]
+    Client->>Parser: parse_sql_statement()
+    Parser->>Planner: QueryPlanner::plan()
+    Planner->>Executor: build_executor()
+    Executor->>Catalog: lookup_rows_by_secondary_index()
+    Note over Catalog: Descend the index tree for age = 30,<br>then fetch each row by row id
+    Catalog-->>Executor: Vec of decoded rows
+    Note over Executor: Apply WHERE, project "name"
+    Executor-->>Client: QueryResult
 ```
 
-1. **Parse Phase**: Raw query text is tokenized and verified against Hematite's strict SQL grammar rules. Keywords are checked for mandatory uppercase casing. A `Statement::Select` AST is returned.
-2. **Planning & Optimization**: The query is validated against active catalog schemas (checking that the table `users` and columns `name` and `age` exist). The query optimizer performs constant folding and simplifies expression paths. A physical `ExecutionProgram` is chosen.
-3. **Execution**: The executor builds a Volcano iterator chain. An index scan cursor searches the secondary index tree for `age = 30`. It extracts matching `rowid` keys, then performs a point-lookup on the main clustered table to retrieve the complete rows.
-4. **Data Retrieval**: Cursors query the B-Tree module, which asks the Pager for the required page numbers. The Pager reads them from the file (or cache) and serves them as byte blocks.
-5. **Project & Emit**: The executor extracts and formats the requested `name` value, converting it into a user-facing `QueryResult` container.
+1. **Parse**: The text is tokenized and parsed. Keywords must be uppercase; a lowercase one is rejected with a "must be capitalized" error. The result is a `Statement::Select`.
+2. **Plan**: The statement is validated against the schema (the table `users` and the columns `name` and `age` must exist), constants are folded, and the planner sees an equality on an indexed column and chooses `SecondaryIndexLookup`.
+3. **Execute**: `SelectExecutor` asks the catalog for the rows matching `age = 30`. The catalog descends the index B-tree to collect matching row ids, then looks each row up in the table B-tree and decodes its record.
+4. **Read pages**: Each tree descent asks the pager for pages, which come from the page cache or are read from the file and have their trailer checksum verified.
+5. **Project & Emit**: The executor applies the full `WHERE`, projects `name`, and returns a `QueryResult`, which `Hematite::query` hands back as a `ResultSet`.
 
 ---
 
-## 3. Concurrency Model: SWMR in WAL Mode
+## 3. Concurrency Model
 
-Hematite supports two distinct transactional execution engines: **Rollback Journaling** and **Write-Ahead Logging (WAL)**.
+Hematite is single-writer / multiple-reader **within one process**. Two processes opening the same database is not supported. Handles on the same database coordinate through a process-wide registry keyed by the file's path (`storage/pager/locking.rs`): a mutex and condition variable, so a blocked writer wakes as soon as the lock frees, and gives up after five seconds.
+
+Hematite supports two journal modes: **Rollback Journaling** (the default) and **Write-Ahead Logging (WAL)**.
 
 ### Rollback Journal Mode
 
-In rollback mode, modifications are executed directly in-place on the main database file. Before any page is modified, its original content is copied to a rollback journal file (`.jrnl`).
+Modifications are written in place to the main database file. Before a page is first modified, its original content is copied to the rollback journal (`<db>.journal`).
 
-* **Concurrency Lockout**: Readers and writers cannot proceed concurrently. A transaction holds a writer lock on the catalog, preventing any concurrent reader threads from accessing the database to avoid seeing partial or dirty state.
-* **Rollback & Recovery**: If a transaction aborts or the engine crashes mid-flight, the recovery coordinator replays the rollback journal, copying the original pages back into the main database file.
+* **Locking**: Readers and the writer share one lock, because a reader of a file being written in place would see half a transaction.
+* **Commit**: The journal is fsynced, then the dirty pages are written to the database and it is fsynced — two fsyncs per commit. The journal is then emptied, not deleted.
+* **Rollback & Recovery**: `ROLLBACK` restores the journalled pages. At open, an active journal is checked against the commit intents it records: if every page already holds its post-commit contents, the commit landed and the journal is discarded; otherwise the original pages are copied back.
 
-### WAL Mode (Single-Writer, Multiple-Reader)
+### WAL Mode
 
-In WAL mode, updates are not written in-place to the database. Instead, all modified pages are appended as redone frames to a separate Write-Ahead Log file (`.wal`).
+Updates are not written in place. A commit appends its modified pages as frames to the write-ahead log (`<db>.wal`) and fsyncs the WAL — one fsync per commit, and the database file is not touched.
 
-* **Reader Isolation**: Readers do not access the WAL file directly for writes. They open a transaction snapshot aligned with the current end of the WAL file. When reading page `N`, the pager checks its in-memory index of WAL frames. If page `N` has been written in the current transaction scope, it is read from the WAL file. Otherwise, it is fetched from the main database file.
-* **Writer Flow**: Writers append new page frames to the end of the WAL. They do not block readers, as readers still see their historical snapshot of the main file and pre-committed WAL positions.
-* **Checkpointing**: Periodically, the WAL changes are flushed back into the main database file in page-number order (checkpointing), shrinking the WAL.
+* **Reader Isolation**: Readers take no lock. A reader registers the commit it is reading at; when it needs page `N`, the pager uses the newest frame for `N` at or before that commit, or the main database file if the WAL has none.
+* **Writer Flow**: The writer has its own lock and appends frames to the end of the WAL; it never blocks readers.
+* **Commit boundary**: A commit's frames share a commit sequence and end with a frame for page 1. A run without one is an incomplete commit and is ignored on load.
+* **Checkpointing**: Once the WAL holds 1000 frames (or on `checkpoint_wal`, or on switching back to rollback mode), every page the WAL overrides is written to the database, the database is fsynced, and the WAL is deleted.
 
 #### Comparison: Hematite vs. SQLite Concurrency
 
 | Feature | SQLite Concurrency | Hematite Concurrency |
 | --- | --- | --- |
-| **Locking Mechanism** | OS-level file locks (Shared, Reserved, Pending, Exclusive) | In-memory catalog mutex locking (`Arc<Mutex<Catalog>>`) |
-| **Concurrency Limit** | Multiple reader processes, single writer process | Multiple in-process reader threads, single writer thread |
-| **Commit Boundary** | Handled through physical file locks and WAL header updates | Handled via catalog transactions and frame-based checksum boundaries |
+| **Locking Mechanism** | OS-level file locks (Shared, Reserved, Pending, Exclusive) | In-memory locks in a process-wide registry, keyed by database path |
+| **Concurrency Limit** | Multiple reader processes, single writer process | Multiple readers, single writer, all within one process |
+| **Commit Boundary** | WAL frame with a non-zero database size | Group of frames sharing a commit sequence and ending with page 1 |
 
 ---
 
 ## 4. File and Physical Page Layout
 
-Unlike standard SQLite, which merges the main database header and the first table root page payload directly into Page 1, Hematite enforces a strict separation between database headers, transaction metadata, and allocatable data B-trees.
+Unlike SQLite, which places the database header and the schema root together on its first page, Hematite separates the database header, transaction metadata, and allocatable B-tree pages.
 
 ### Physical Layout of a Hematite Database File
 
@@ -109,20 +111,20 @@ Unlike standard SQLite, which merges the main database header and the first tabl
 | 100 bytes reserved | Magic `HMD1` | Slotted Pages |
 
 * **Page 0 (`DB_HEADER_PAGE_ID`)**: The first 100 bytes are reserved. A 20-byte database header is written at the start, containing: magic code `HMTD` (4 bytes), format version `1` (4 bytes), schema B-tree root page ID (4 bytes), next table ID (4 bytes), and header checksum (4 bytes). All header integers are little-endian. The remaining 80 bytes are zero padding. Page size is a compile-time constant (`4096`), not stored in the header.
-* **Page 1 (`STORAGE_METADATA_PAGE_ID`)**: A dedicated metadata container starting with the container magic `HMD1`. It stores pager state (journal mode, free pages) and catalog runtime metadata (table row counts, next rowid).
-* **Page 2 and onwards (`FIRST_ALLOCATABLE_PAGE_ID`)**: Usable physical pages. These are allocated for clustered table B-trees, secondary index B-trees, or overflow page chains.
+* **Page 1 (`STORAGE_METADATA_PAGE_ID`)**: A metadata container starting with the magic `HMD1`. It holds the pager's section (journal mode and free page list) and the catalog's (per-table root page, row count, and next row id).
+* **Page 2 and onwards (`FIRST_ALLOCATABLE_PAGE_ID`)**: Allocated for the schema tree, table B-trees, index B-trees, and overflow page chains.
 * **Every page's last 4 bytes** (`PAGE_TRAILER_SIZE`) belong to the pager, which stamps a checksum of that page's own contents there. Nothing above the pager writes into them, so a page has 4092 usable bytes. A checksum stored on the page it describes has no ceiling on how many pages it can cover.
+
+`docs/storage-format-spec.md` gives every byte layout.
 
 ---
 
 ## 5. ACID Guarantees
 
-Hematite guarantees standard transactional properties (ACID) to ensure database integrity:
-
-* **Atomicity**: Transactions are fully atomic. In Rollback mode, the entire journal must be successfully flushed to disk before any in-place write. If a failure occurs, the journal is replayed to wipe out partial changes. In WAL mode, a transaction commits only when its final frame group commit-boundary is written with valid checksums. Partial transactions are ignored.
-* **Consistency**: DB constraints are verified before a transaction commits. B-Tree leaf and internal node order invariants are checked recursively at validation checkpoints, preventing structure corruption.
-* **Isolation**: Supports `SERIALIZABLE` isolation within a single session. Session updates acquire exclusive write-locks, protecting reader threads from dirty reads, non-repeatable reads, or phantom reads.
-* **Durability**: Modified pages are guaranteed to survive system crashes. Disk synchronization (`fsync` or equivalent) is invoked during key transactional boundaries: before main-file modification (in rollback mode), or upon writing commit-boundaries to the WAL file.
+* **Atomicity**: In rollback mode, a page's original image is in the journal before the page is overwritten, and the journal is fsynced before any commit writes reach the database; a crash mid-commit is rolled back at open unless the commit intents show it landed. In WAL mode, a commit counts only once its closing page-1 frame is in the log; a partial commit is ignored.
+* **Consistency**: `CHECK`, `NOT NULL`, uniqueness and foreign-key constraints are checked on every row a statement writes, before the row is written.
+* **Isolation**: Writers are serialized by the write lock. In rollback mode readers wait for the writer, so they never see a partial transaction; in WAL mode each reader sees the database as of the commit it started at.
+* **Durability**: A commit returns after its fsyncs: two in rollback mode (journal, then database), one in WAL mode (the WAL). The database file is fsynced again at each checkpoint.
 
 ---
 

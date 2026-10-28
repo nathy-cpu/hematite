@@ -2,7 +2,8 @@
 //!
 //! `FileManager` is intentionally dumber than `Pager`. It knows how to read and write page-sized
 //! byte regions, track high-water allocation, and reuse freed page ids, but it does not know
-//! about transactions, checksums, or tree structure.
+//! about transactions or tree structure. The one checksum it owns is the page trailer: it
+//! stamps it on every write and verifies it on every read whose contents are used.
 //!
 //! Addressing model:
 //!
@@ -168,16 +169,14 @@ impl FileManager {
 
     pub fn read_page(&self, page_id: PageId) -> Result<Page> {
         // Unzeroed: `read_exact_at` fills the whole buffer or returns an error, so
-        // the zeros were overwritten without ever being read. Zeroing a 4 KiB page
-        // is about 4 100 instructions, and it happened on every page read.
+        // the zeros would be overwritten without ever being read. Zeroing a 4 KiB
+        // page is about 4 100 instructions, on every page read.
         self.read_page_with_buf(
             page_id,
             crate::storage::types::page_pool::take_for_overwrite(),
         )
     }
 
-    /// Read a page from disk into a caller-supplied buffer, reusing its allocation.
-    /// The buffer must have a capacity of at least `PAGE_SIZE`; it will be resized.
     /// Whether a page read back matches the checksum in its trailer.
     ///
     /// A page that has never been written carries a zero trailer, which is what a
@@ -215,6 +214,9 @@ impl FileManager {
         })
     }
 
+    /// Reads a page into a caller-supplied buffer, reusing its allocation, and
+    /// verifies its trailer. The buffer is resized to `PAGE_SIZE`, so its contents
+    /// on entry do not matter.
     pub(crate) fn read_page_with_buf(&self, page_id: PageId, mut data: Vec<u8>) -> Result<Page> {
         let offset = Self::page_offset(page_id)?;
         PagerStats::bump(&self.stats.page_reads);
@@ -254,7 +256,7 @@ impl FileManager {
     /// Writes a page from bytes that are not already inside a [`Page`].
     ///
     /// Journal replay holds its pre-images as plain byte vectors, and building a
-    /// `Page` around each one to call [`Self::write_page`] copied all 4 KiB for
+    /// `Page` around each one to call [`Self::write_page`] would copy all 4 KiB for
     /// nothing.
     pub(crate) fn write_page_data(&mut self, page_id: PageId, data: &[u8]) -> Result<()> {
         if data.len() < USABLE_PAGE_SIZE {
@@ -510,9 +512,9 @@ impl FileManager {
 
     /// Writes at an absolute offset without moving a shared file position.
     ///
-    /// Reads already used positional I/O; writes went through `seek` + `write_all`,
-    /// which cost an extra syscall per page and made every write path depend on a
-    /// mutable cursor that nothing else was allowed to disturb.
+    /// Positional like the reads. `seek` + `write_all` would cost an extra syscall
+    /// per page and make every write path depend on a mutable cursor that nothing
+    /// else may disturb.
     fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<()> {
         #[cfg(test)]
         if let Some(remaining_writes) = self.fail_on_write_countdown.as_mut() {

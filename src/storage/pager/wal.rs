@@ -71,10 +71,10 @@ impl Pager {
 
     /// Checkpoints once the WAL has grown past [`WAL_AUTOCHECKPOINT_FRAMES`].
     ///
-    /// Without this the WAL never shrinks. Nothing called `checkpoint_wal` unless the
-    /// embedding application did, so a long-running writer grew the file without
-    /// bound — and every reader whose snapshot went stale re-read and re-decoded the
-    /// whole thing to rebuild its page index.
+    /// Without this the WAL never shrinks. Nothing else calls `checkpoint_wal` unless
+    /// the embedding application does, so a long-running writer would grow the file
+    /// without bound — and every reader whose snapshot went stale would re-read and
+    /// re-decode the whole thing to rebuild its page index.
     ///
     /// The commit is already durable by the time this runs, so its result is not the
     /// commit's to report — returning an error here would fail a transaction that
@@ -178,6 +178,8 @@ impl Pager {
         self.wal_frame_count = Some(0);
         self.cache_mut()?.reset();
         self.remove_wal_file()?;
-        self.persist_checksums()
+        self.persist_checksums()?;
+        crate::storage::stats::PagerStats::bump(&self.stats.checkpoints);
+        Ok(())
     }
 }

@@ -84,13 +84,9 @@ impl RowCodec {
     /// below every non-negative one, a wider magnitude sorts below a narrower one
     /// among negatives, and the body settles ties within a width in both cases.
     ///
-    /// Compactness survives it: a small id is still two bytes, and a small
-    /// negative id is now two bytes as well, where reinterpreting it as a large
-    /// `u64` made it nine.
-    ///
-    /// The tag range does not overlap the 1..=8 length prefix this format used
-    /// before, so a file written by an older build is rejected on the first key
-    /// rather than silently misread.
+    /// Compactness survives it: a small id is two bytes, and a small negative id
+    /// is two bytes as well, where reinterpreting it as a large `u64` would make
+    /// it nine.
     pub fn encode_row_id_key(row_id: u64) -> Vec<u8> {
         let signed = row_id as i64;
         // The magnitude that has to fit: the id itself when non-negative, and its
@@ -200,7 +196,7 @@ impl IndexKeyCodec {
 
     /// Splits a secondary-index key into its value prefix and trailing row id.
     ///
-    /// Borrows the prefix — secondary entries carry no payload at all now, so this
+    /// Borrows the prefix — secondary entries carry no payload at all, so this
     /// is the only way to recover the row id, and it runs on every entry of a scan.
     pub fn split_secondary_key(key: &[u8]) -> Result<(&[u8], u64)> {
         index_key_codec::split_secondary_key(key)
@@ -251,7 +247,7 @@ mod tests {
 
         for row_id in test_cases {
             let encoded = RowCodec::encode_row_id_key(row_id);
-            // The leading byte is a tag now, not a plain length: it carries the
+            // The leading byte is a tag, not a plain length: it carries the
             // width in its distance from 0x80 and the sign in its direction.
             let width = encoded.len() - 1;
             let expected_tag = if (row_id as i64) < 0 {
@@ -328,10 +324,9 @@ mod tests {
         assert_eq!(decoded.values, row.values);
     }
 
-    /// The old row format carried a four-byte little-endian length prefix, and
-    /// `decode_values` re-framed its input to add one when it was missing. The new
-    /// format has no such prefix — the cell already knows how long its payload is —
-    /// so decoding is a straight parse of exactly the bytes handed over.
+    /// A record carries no length prefix of its own — the cell already knows how
+    /// long its payload is — so decoding is a straight parse of exactly the bytes
+    /// handed over, and nothing re-frames them.
     #[test]
     fn decoding_does_not_reframe_its_input() {
         let values = vec![Value::Integer(1), Value::Text("two".to_string())];
@@ -410,8 +405,8 @@ mod tests {
         assert_eq!(RowCodec::encode_row_id_key(-3i64 as u64).len(), 2);
     }
 
-    /// The tag range does not overlap the plain 1..=8 length prefix this format
-    /// used before, so an older file is rejected rather than misread.
+    /// A plain length byte is not a row-id key. The tags sit at `0x78..=0x88`,
+    /// clear of `1..=8`, so a length-prefixed key is rejected rather than misread.
     #[test]
     fn a_pre_tag_rowid_key_is_rejected() {
         for width in 1u8..=8 {

@@ -9,61 +9,70 @@
 //! ## 1. Core Database Connection Concepts
 //!
 //! ### The Connection Session
-//! A connection encapsulates the state of a single database client session. It holds a reference to the
-//! `Catalog` registry, tracks active transactional states, manages savepoint lists, and serializes query
-//! executions, preventing multi-threaded race conditions within a single connection session.
+//! A connection is one client session. It owns its `Catalog` (behind an `Arc<Mutex<_>>`), the entry
+//! snapshot of the explicit transaction it has open, if any, and that transaction's savepoint stack.
+//! Every statement method takes `&mut self`, so one connection runs one statement at a time.
 //!
 //! ### Autocommit vs. Explicit Transactions
-//! By default, database connections run in **Autocommit Mode**. Every SQL DML or DDL statement (e.g. `INSERT`
-//! or `CREATE TABLE`) is wrapped in an implicit transaction:
-//! * If the statement executes successfully, the transaction is committed to disk immediately.
-//! * If the statement fails (due to constraint violations, type mismatch, or syntax error), the transaction
-//!   is automatically rolled back.
+//! By default a connection runs in **Autocommit Mode**. Every statement that writes (e.g. `INSERT` or
+//! `CREATE TABLE`) is wrapped in an implicit transaction (`ImplicitMutation`); reads take a read scope
+//! and no transaction:
+//! * If the statement executes successfully, the transaction is committed immediately.
+//! * If execution or the commit fails (constraint violation, type mismatch, I/O), the transaction is
+//!   rolled back and the catalog restored to its entry snapshot. A syntax error fails in the parser,
+//!   before any transaction is opened.
 //!
-//! When the user executes `BEGIN` or `START TRANSACTION`:
-//! 1. Autocommit mode is disabled.
-//! 2. An explicit transaction is opened.
-//! 3. Subsequent statements execute within this transaction's scope.
-//! 4. The changes become durable only when `COMMIT` is called. If `ROLLBACK` is called or a session error occurs,
-//!    all changes are discarded.
+//! When the user executes `BEGIN` (or calls `begin_transaction`):
+//! 1. An explicit transaction is opened and its entry snapshot taken.
+//! 2. Subsequent statements execute within it; none opens an implicit transaction of its own.
+//! 3. The changes become durable only on `COMMIT`. `ROLLBACK`, a failed `COMMIT`, or dropping a
+//!    [`Transaction`] without committing discards them. A statement that fails inside the transaction
+//!    does not end it.
 //!
 //! ### Savepoint Rollback Stack
-//! A **Savepoint** is a sub-transaction checkpoint. It allows a client to roll back a portion of a transaction
-//! to a specific named state without aborting the entire transaction. The connection coordinates savepoints by
-//! maintaining a stack of named catalog and storage snapshots. Executing `ROLLBACK TO SAVEPOINT name` pops the
-//! transaction stack back to that saved state, reverting B-Tree mutations and schema updates made since the
-//! savepoint was established.
+//! A **Savepoint** is a named checkpoint inside an explicit transaction. The connection keeps a stack
+//! of `(name, CatalogSnapshot)` pairs; each snapshot holds the schema and the storage engine's state.
+//! `ROLLBACK TO SAVEPOINT name` restores that snapshot, reverting B-tree mutations and schema changes
+//! made since, and keeps the savepoint itself on the stack so it can be rolled back to again.
 //!
 //! ---
 //!
 //! ## 2. SQL Statement Processing Pipeline
 //!
+//! Transaction control, `EXPLAIN`, `DESCRIBE`, the `SHOW` statements and `SELECT ... INTO` are
+//! dispatched by `execute_statement` before this pipeline; everything else goes through it.
+//!
 //! ```text
 //!                      Raw SQL Query Text
 //!                              |
-//!                       Connection::execute()
+//!            Connection::execute() / ScriptIter::next()
 //!                              v
 //!                      +-------+-------+
-//!                      |   SQL Parser  | <---+ Builds the logical AST
+//!                      |   SQL Parser  | <---+ Arena `Ast`, then an owned `Statement`
 //!                      +-------+-------+
-//!                              | AST
+//!                              | Statement
+//!                              v
+//!                      +-------+-------+
+//!                      |   Normalize   | <---+ SELECT-list aliases substituted into WHERE
+//!                      +-------+-------+
+//!                              | Statement
 //!                              v
 //!                      +-------+-------+
 //!                      |   Optimizer   | <---+ Constant folding & logical folds
-//!                      +-------+-------+
-//!                              | Optimized AST
+//!                      +-------+-------+       (run by `QueryPlanner::plan`)
+//!                              | Optimized Statement
 //!                              v
 //!                      +-------+-------+
 //!                      |    Planner    | <---+ Resolves bindings against Schema
 //!                      +-------+-------+
-//!                              | Physical Plan
+//!                              | Plan, then `into_executor()`
 //!                              v
 //!                      +-------+-------+
-//!                      |   Executor    | <---+ Volcano-style streaming evaluation
+//!                      |   Executor    | <---+ Runs against the catalog engine
 //!                      +-------+-------+
-//!                              | Results
+//!                              | QueryResult
 //!                              v
-//!                      QueryResult / Rowset
+//!               ExecutedStatement (ResultSet or StatementResult)
 //! ```
 //!
 //! ---
@@ -71,38 +80,38 @@
 //! ## 3. Transaction State Transitions
 //!
 //! ```text
-//!                      +-----------------------+
-//!                      |    1. Autocommit      |
-//!                      |  (Implicit Tx per Stmt) |
-//!                      +----------+------------+
-//!                                 |
-//!                         BEGIN / START TX
-//!                                 |
-//!                                 v
-//!                      +----------+------------+
-//!                      |  2. Explicit Active   | <---+ SAVEPOINT name (adds to stack)
-//!                      +----+------------+-----+
-//!                           |            |
-//!                         COMMIT      ROLLBACK or ROLLBACK TO SAVEPOINT
-//!                           |            |
-//!                           v            v
-//!                       Commit Tx    Rollback Tx / Revert Stack
-//!                           \            /
-//!                            \          /
-//!                             v        v
-//!                         Back to Autocommit
+//!                      +-------------------------+
+//!                      |     1. Autocommit       |
+//!                      | (Implicit Tx per write) |
+//!                      +-----------+-------------+
+//!                                  |
+//!                                BEGIN
+//!                                  |
+//!                                  v
+//!                      +-----------+-------------+ <---+ SAVEPOINT name (push)
+//!                      |   2. Explicit Active    | <---+ ROLLBACK TO name (restore, stay active)
+//!                      +----+--------------+-----+ <---+ RELEASE name (pop to and including it)
+//!                           |              |
+//!                         COMMIT        ROLLBACK, or a `Transaction`
+//!                           |           dropped uncommitted
+//!                           v              v
+//!                       Commit Tx      Rollback Tx
+//!                           \              /
+//!                            v            v
+//!                          Back to Autocommit
 //! ```
 //!
 //! ---
 //!
 //! ## 4. Connection Invariants
 //!
-//! 1. **Autocommit Isolation**: If an error occurs during an autocommit statement, the connection must ensure
-//!    the pager transaction is aborted immediately, preventing partial writes from leaking.
-//! 2. **Savepoint Stack LIFO**: Savepoint stacks must follow Last-In, First-Out (LIFO) behavior. Releasing or
-//!    rolling back to a savepoint implicitly releases all savepoints created after it.
-//! 3. **Concurrency Thread Safety**: The connection session coordinates transaction states sequentially.
-//!    Multiple threads must not mutate connection transaction boundaries concurrently without proper external locking.
+//! 1. **Autocommit Isolation**: If an error occurs during an autocommit statement, the pager transaction
+//!    is rolled back and the catalog restored before the error is returned, so partial writes never leak.
+//! 2. **Savepoint Stack**: Savepoints nest. Rolling back to one discards every savepoint created after it
+//!    and keeps the target; releasing one removes it and every savepoint created after it, whose changes
+//!    stay in the transaction.
+//! 3. **One Statement at a Time**: Transaction boundaries are coordinated sequentially through `&mut self`.
+//!    Sharing a connection across threads needs external locking.
 //!
 
 use crate::error::{HematiteError, Result};
@@ -113,7 +122,7 @@ use crate::parser::ast::{
 use crate::parser::{parse_sql_statement, SqlTypeName};
 use crate::query::lowering::raise_literal_value;
 use crate::query::metadata as query_metadata;
-use crate::query::validation::{source_column_names, validate_statement};
+use crate::query::validation::{source_column_names, validate_select};
 use crate::query::{
     Catalog, ExecutionContext, JournalMode, QueryCatalogSnapshot, QueryExecutor, QueryPlanner,
     QueryResult, Schema, Value,
@@ -906,7 +915,7 @@ impl Connection {
             vec![
                 vec![
                     Value::Text("node".to_string()),
-                    Value::Text(format!("{:?}", plan.node)),
+                    Value::Text(format!("{:?}", plan.node())),
                 ],
                 vec![
                     Value::Text("estimated_cost".to_string()),
@@ -953,7 +962,7 @@ impl Connection {
                 Statement::Select(select) => select,
                 _ => unreachable!("normalized SELECT INTO query should remain a select"),
             };
-        validate_statement(&Statement::Select(normalized_query), &schema)?;
+        validate_select(&normalized_query, &schema)?;
 
         let query_result =
             self.execute_read_statement(Statement::Select(statement.query.clone()))?;
@@ -1303,7 +1312,10 @@ impl Connection {
             .ok_or_else(|| {
                 HematiteError::ParseError(format!("Savepoint '{}' does not exist", name))
             })?;
-        transaction.savepoints.remove(position);
+        // Savepoints nest, so a later one lives inside this one and is released with it.
+        // Keeping it would leave a savepoint that `ROLLBACK TO` could still restore,
+        // undoing work the caller has just merged into the enclosing scope.
+        transaction.savepoints.truncate(position);
         Ok(())
     }
 }

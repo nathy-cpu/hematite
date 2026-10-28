@@ -128,7 +128,8 @@ fn main() {
             h.execute("DELETE FROM t;").expect("delete");
         }
         // The syscall workload: one row per transaction, so per-commit costs are not
-        // amortised over a batch. `ROWS` here should be small — 200 is plenty.
+        // amortised over a batch. `REPS` is the number of commits; `ROWS` only sizes
+        // the fixture underneath them, and can be small — 200 is plenty.
         "append_txns" => {
             for id in rows..rows + reps.max(1) {
                 h.execute(&format!(

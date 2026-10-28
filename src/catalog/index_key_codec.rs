@@ -19,20 +19,20 @@
 //! Rust variant a number came from, and it uses that freedom to put all integers
 //! into a single order.
 //!
-//! # Three ordering bugs this fixed
+//! # Three orders the obvious encoding gets wrong
 //!
-//! - **Text and blob lengths.** The old encoding prefixes bytes with a
-//!   *little-endian* `u32` length. Comparing `"b"` against `"ab"` compares `01` and
-//!   `02` first, so `"b"` sorts before `"ab"`. Every text index was ordered by
-//!   length-low-byte first. Replaced by escape-and-terminate, which is also two
-//!   bytes shorter.
-//! - **Integer variants.** The old encoding gave `Integer`, `BigInt`, `UInteger` and
-//!   `UBigInt` four different tag bytes, so in a column holding a mix, every `i32`
-//!   sorted before every `i64` regardless of magnitude. Now there are two integer
-//!   tags — negative and non-negative — covering `i64::MIN..=u64::MAX` in one order.
-//! - **Decimals.** The old encoding emitted scale before digits, so `1.5` (scale 1)
-//!   sorted after `2` (scale 0). Now decimals are normalised to a
-//!   sign/exponent/mantissa form that compares correctly.
+//! - **Text and blob lengths.** A length prefix in front of the bytes makes the
+//!   length the first thing compared: with a little-endian `u32` length, `"b"`
+//!   (`01`) sorts before `"ab"` (`02`), so a text index would be ordered by
+//!   length-low-byte first. Escape-and-terminate compares the bytes themselves, and
+//!   is also two bytes shorter than a four-byte prefix.
+//! - **Integer variants.** A tag byte per Rust variant (`Integer`, `BigInt`,
+//!   `UInteger`, `UBigInt`) would sort every `i32` before every `i64` regardless of
+//!   magnitude in a column holding a mix. There are two integer tags instead —
+//!   negative and non-negative — covering `i64::MIN..=u64::MAX` in one order.
+//! - **Decimals.** Emitting scale before digits sorts `1.5` (scale 1) after `2`
+//!   (scale 0). Decimals are normalised to a sign/exponent/mantissa form that
+//!   compares correctly.
 //!
 //! # Tags
 //!
@@ -281,12 +281,11 @@ pub(crate) fn encode_key_into(out: &mut Vec<u8>, values: &[Value]) {
 
 /// A secondary-index key: the indexed values, then the row id.
 ///
-/// The row id makes otherwise-equal keys unique, and it is recoverable from the key
-/// itself — so unlike the old format, the entry's *value* stays empty rather than
-/// storing a second copy of the same eight bytes.
-/// Appends the row id that makes an index entry unique and orders duplicates.
+/// The row id makes otherwise-equal keys unique and orders duplicates, and it is
+/// recoverable from the key itself — so the entry's *value* stays empty rather than
+/// storing a second copy of it.
 ///
-/// Encoded as `[len][big-endian magnitude][len]`, not a fixed eight bytes. Both the
+/// The row id is encoded as `[len][big-endian magnitude][len]`, not a fixed eight bytes. Both the
 /// ordering and the parsing constrain the shape:
 ///
 /// * The tree compares whole keys as bytes. Two entries only reach their row ids when
@@ -312,8 +311,8 @@ pub(crate) fn encode_secondary_key(values: &[Value], row_id: u64) -> Vec<u8> {
 
 /// Splits a secondary-index key into its value prefix and trailing row id.
 ///
-/// Borrows rather than copying; the old signature returned an owned `Vec` for the
-/// prefix, which every caller then dropped.
+/// The prefix is borrowed from `key`: callers only compare it or drop it, so an
+/// owned copy would be an allocation per entry for nothing.
 pub(crate) fn split_secondary_key(key: &[u8]) -> Result<(&[u8], u64)> {
     let Some(&len) = key.last() else {
         return Err(corrupt("Index entry is missing rowid bytes"));
@@ -333,7 +332,7 @@ pub(crate) fn split_secondary_key(key: &[u8]) -> Result<(&[u8], u64)> {
 
 /// A primary-key index entry's payload: the row id as a varint.
 ///
-/// Was a fixed eight bytes; small row ids now cost one or two.
+/// Small row ids cost one or two bytes, against eight for a fixed-width `u64`.
 pub(crate) fn encode_row_id_value(row_id: u64) -> Vec<u8> {
     let mut out = Vec::with_capacity(varint::len_of(row_id));
     varint::write_to_vec(&mut out, row_id);
@@ -429,8 +428,8 @@ mod tests {
 
     #[test]
     fn integer_variants_share_one_order() {
-        // The old encoding tagged each Rust variant separately, so every i32 sorted
-        // below every i64 no matter the magnitude.
+        // A tag per Rust variant would sort every i32 below every i64 no matter
+        // the magnitude.
         assert_ordered(&[
             Value::BigInt(i64::MIN),
             Value::Integer(i32::MIN),
@@ -489,7 +488,7 @@ mod tests {
 
     #[test]
     fn decimals_order_by_magnitude_not_scale() {
-        // The old encoding put scale before the digits, so 1.5 sorted after 2.
+        // Scale before the digits would sort 1.5 after 2.
         let ordered = [
             "-1000", "-2", "-1.5", "-1", "-0.5", "-0.001", "0", "0.001", "0.5", "1", "1.5", "2",
             "10", "1000",
@@ -601,7 +600,7 @@ mod tests {
             let encoded = encode_row_id_value(row_id);
             assert_eq!(decode_row_id_value(&encoded).expect("decode"), row_id);
         }
-        // The old format spent eight bytes on every row id.
+        // A fixed-width row id would spend eight bytes on every one.
         assert_eq!(encode_row_id_value(1).len(), 1);
         assert_eq!(encode_row_id_value(70_000).len(), 3);
         assert!(decode_row_id_value(&[]).is_err());

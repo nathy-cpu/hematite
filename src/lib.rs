@@ -26,8 +26,13 @@
 //! - [`Hematite`] is the high-level library facade.
 //! - [`Connection`] is the lower-level SQL connection boundary.
 //! - [`PreparedStatement`] supports repeated execution with parameters.
-//! - [`Transaction`] wraps explicit transactions.
-//! - [`ResultSet`], [`Row`], and [`StatementResult`] are the primary result types.
+//! - [`Transaction`] wraps an explicit transaction and rolls it back if dropped
+//!   uncommitted.
+//! - [`ResultSet`], [`Row`], and [`StatementResult`] are the primary result types;
+//!   [`ExecutedStatement`] is either one, as returned by script iteration.
+//! - [`FromRow`] and [`FromValue`] map rows and values onto Rust types.
+//! - [`script_is_complete`] tells a REPL whether its buffer ends on a statement
+//!   boundary.
 //!
 //! # Project Layout
 //!
@@ -38,7 +43,8 @@
 //! ```
 //!
 //! - `sql`: user-facing API, script stepping, transactions, CLI-facing behavior
-//! - `parser`: lexer, AST, and syntax validation
+//! - `parser`: lexer, recursive-descent parser into an arena AST, and the owned
+//!   `Statement` tree the rest of the engine consumes
 //! - `query`: planning, execution, coercion, metadata shaping
 //! - `catalog`: schema, row typing, metadata persistence, logical encoding
 //! - `btree`: generic key/value tree over byte payloads

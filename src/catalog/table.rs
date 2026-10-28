@@ -624,7 +624,7 @@ impl Table {
         buffer.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
         buffer.extend_from_slice(name_bytes);
 
-        // Root page ID (4 bytes)
+        // Table and primary-key index root page IDs (4 bytes each)
         buffer.extend_from_slice(&self.root_page_id.to_le_bytes());
         buffer.extend_from_slice(&self.primary_key_index_root_page_id.to_le_bytes());
 

@@ -1,5 +1,13 @@
+//! On-disk constants shared by the storage and B-tree layers.
+//!
+//! `PageKind` is the first byte of a page and says how to read the rest. The B-tree
+//! writes only `InteriorTable` and `LeafTable`, for index trees as well as table
+//! trees, since it stores opaque bytes and does not need to know which it is; the
+//! other kinds are recognised so that reading one is an error that names it.
+
 use crate::error::{HematiteError, Result};
 
+/// Bytes reserved at the start of page 0 for the database header.
 pub(crate) const DATABASE_HEADER_SIZE: usize = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
